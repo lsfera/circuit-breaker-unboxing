@@ -1,0 +1,6 @@
+{
+    "recommendations": [
+        "anthropic.claude-code",
+        "firsttris.vscode-jest-runner"
+    ]
+}

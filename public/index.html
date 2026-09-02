@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Egress circuit breakers</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ground:#eaedf0; --panel:#fff; --ink:#14181d; --muted:#63707e; --rule:#ccd3da;
+  --closed:#1f6f4a; --degraded:#a96410; --open:#a62b25; --half:#3e51a8;
+  --sans:"IBM Plex Sans",system-ui,sans-serif; --mono:"IBM Plex Mono",ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font:400 15px/1.55 var(--sans)}
+header{display:flex;align-items:baseline;gap:1.25rem;flex-wrap:wrap;
+  padding:1.4rem 1.75rem;border-bottom:1px solid var(--rule)}
+h1{font:600 19px/1.2 var(--sans);margin:0;letter-spacing:-.01em}
+.meta{font:400 13px/1 var(--mono);color:var(--muted)}
+main{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(320px,1fr);
+  gap:1.25rem;padding:1.25rem 1.75rem 2.5rem;align-items:start}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+
+.api{background:var(--panel);border:1px solid var(--rule);padding:1.1rem 1.25rem 1.25rem;
+  margin-bottom:1rem;border-left:5px solid var(--rule)}
+.api[data-state=CLOSED]{border-left-color:var(--closed)}
+.api[data-state=DEGRADED]{border-left-color:var(--degraded)}
+.api[data-state=OPEN]{border-left-color:var(--open)}
+.api[data-state=HALF_OPEN]{border-left-color:var(--half)}
+.api.flash{animation:flash .7s ease-out}
+@keyframes flash{from{background:#fdf6e6}to{background:var(--panel)}}
+@media(prefers-reduced-motion:reduce){.api.flash{animation:none}}
+
+.top{display:flex;justify-content:space-between;align-items:baseline;gap:1rem}
+.name{font:500 15px/1 var(--mono)}
+.state{font:600 26px/1.1 var(--sans);letter-spacing:-.02em;margin:.35rem 0 .1rem}
+.api[data-state=CLOSED] .state{color:var(--closed)}
+.api[data-state=DEGRADED] .state{color:var(--degraded)}
+.api[data-state=OPEN] .state{color:var(--open)}
+.api[data-state=HALF_OPEN] .state{color:var(--half)}
+.why{font:400 13px/1.4 var(--mono);color:var(--muted)}
+
+.strip{display:flex;gap:4px;margin:.85rem 0 .3rem}
+.rep{flex:1;height:26px;border:1px solid rgba(0,0,0,.14);position:relative}
+.rep[data-vote=OK]{background:#cfe6d9}
+.rep[data-vote=DEGRADED]{background:#f2e0bf}
+.rep[data-vote=DOWN]{background:#eec9c6}
+.striplabel{display:flex;justify-content:space-between;
+  font:400 12px/1 var(--mono);color:var(--muted)}
+.diverged{color:var(--degraded)}
+
+.ctl{display:flex;align-items:center;gap:.75rem;margin-top:.95rem;
+  padding-top:.85rem;border-top:1px solid var(--rule)}
+.ctl label{font:400 13px/1 var(--sans);color:var(--muted);white-space:nowrap}
+input[type=range]{flex:1;accent-color:var(--open)}
+.rate{font:500 13px/1 var(--mono);min-width:3.2em;text-align:right}
+button{font:400 13px/1 var(--sans);background:var(--panel);color:var(--ink);
+  border:1px solid var(--rule);padding:.4rem .7rem;cursor:pointer}
+button:hover{border-color:var(--muted)}
+:focus-visible{outline:2px solid var(--half);outline-offset:2px}
+
+aside{background:var(--panel);border:1px solid var(--rule);position:sticky;top:1.25rem}
+.asidehead{padding:.9rem 1.1rem;border-bottom:1px solid var(--rule);
+  display:flex;justify-content:space-between;align-items:baseline}
+.asidehead h2{font:600 14px/1 var(--sans);margin:0}
+.integrity{font:400 12px/1.5 var(--mono);color:var(--muted);
+  padding:.7rem 1.1rem;border-bottom:1px solid var(--rule)}
+.integrity b{font-weight:500;color:var(--ink)}
+.bad{color:var(--open)}
+.tape{list-style:none;margin:0;padding:0;max-height:62vh;overflow:auto}
+.tape li{padding:.65rem 1.1rem;border-bottom:1px solid #eef1f4;
+  font:400 12px/1.5 var(--mono)}
+.tape li:last-child{border-bottom:none}
+.t-time{color:var(--muted)}
+.t-api{font-weight:500}
+.t-move{display:block;margin-top:.15rem}
+.snap{color:var(--muted)}
+.empty{padding:1.5rem 1.1rem;color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Egress circuit breakers</h1>
+  <span class="meta" id="meta">connecting…</span>
+</header>
+
+<main>
+  <section id="apis" aria-live="polite"></section>
+
+  <aside>
+    <div class="asidehead">
+      <h2>Published events</h2>
+      <span class="meta" id="evcount">0</span>
+    </div>
+    <div class="integrity" id="integrity">Waiting for the first delivery.</div>
+    <ul class="tape" id="tape"></ul>
+  </aside>
+</main>
+
+<script>
+const STATES = ["CLOSED","DEGRADED","OPEN","HALF_OPEN"];
+const apisEl = document.getElementById("apis");
+const tapeEl = document.getElementById("tape");
+const panels = new Map();
+const lastState = new Map();
+let dragging = null;
+let evCount = 0;
+
+function panelFor(apiId){
+  let p = panels.get(apiId);
+  if (p) return p;
+
+  const el = document.createElement("article");
+  el.className = "api";
+  el.innerHTML = `
+    <div class="top">
+      <span class="name"></span>
+      <span class="meta seq"></span>
+    </div>
+    <div class="state"></div>
+    <div class="why"></div>
+    <div class="strip" role="img"></div>
+    <div class="striplabel">
+      <span class="repsum"></span>
+      <span class="health"></span>
+    </div>
+    <div class="ctl">
+      <label>Upstream failure rate</label>
+      <input type="range" min="0" max="100" step="5" value="0">
+      <span class="rate">0%</span>
+      <button type="button">Restore</button>
+    </div>`;
+
+  el.querySelector(".name").textContent = apiId;
+  const slider = el.querySelector("input");
+  const rate = el.querySelector(".rate");
+  slider.setAttribute("aria-label", `Upstream failure rate for ${apiId}`);
+
+  const push = v => {
+    rate.textContent = v + "%";
+    fetch("/api/failure", {
+      method: "POST",
+      headers: {"content-type":"application/json"},
+      body: JSON.stringify({ apiId, rate: v/100 })
+    });
+  };
+  slider.addEventListener("pointerdown", () => dragging = apiId);
+  slider.addEventListener("pointerup", () => dragging = null);
+  slider.addEventListener("input", e => push(Number(e.target.value)));
+  el.querySelector("button").addEventListener("click", () => {
+    slider.value = 0; push(0);
+  });
+
+  apisEl.appendChild(el);
+  p = { el, slider, rate };
+  panels.set(apiId, p);
+  return p;
+}
+
+function renderState(msg){
+  const rates = new Map((msg.specs||[]).map(s => [s.apiId, s.failureRate]));
+
+  for (const api of msg.apis){
+    const p = panelFor(api.apiId);
+    const prev = lastState.get(api.apiId);
+    if (prev && prev !== api.state){
+      p.el.classList.remove("flash");
+      void p.el.offsetWidth;
+      p.el.classList.add("flash");
+    }
+    lastState.set(api.apiId, api.state);
+
+    p.el.dataset.state = api.state;
+    p.el.querySelector(".state").textContent = api.state.replace("_"," ");
+    p.el.querySelector(".seq").textContent = "seq " + api.sequence;
+    p.el.querySelector(".why").textContent = api.reason.toLowerCase().replace(/_/g," ");
+
+    const strip = p.el.querySelector(".strip");
+    strip.setAttribute("aria-label",
+      `${api.replicas.length} replicas: ${api.votes.OK} ok, ${api.votes.DEGRADED} degraded, ${api.votes.DOWN} down`);
+    strip.innerHTML = api.replicas.map(r =>
+      `<span class="rep" data-vote="${r.vote}" title="${r.replicaId}: ${r.healthy}/${r.total} endpoints healthy"></span>`
+    ).join("");
+
+    const distinct = new Set(api.replicas.map(r => r.vote)).size;
+    const sum = p.el.querySelector(".repsum");
+    sum.textContent = distinct > 1
+      ? `${api.replicas.length} replicas disagree`
+      : `${api.replicas.length} replicas agree`;
+    sum.className = distinct > 1 ? "diverged" : "";
+
+    p.el.querySelector(".health").textContent =
+      `${api.healthyEndpoints}/${api.totalEndpoints} endpoints`;
+
+    const r = rates.get(api.apiId);
+    if (r !== undefined && dragging !== api.apiId){
+      p.slider.value = Math.round(r*100);
+      p.rate.textContent = Math.round(r*100) + "%";
+    }
+  }
+
+  document.getElementById("meta").textContent =
+    `${msg.apis.length} apis · ${msg.apis[0]?.reportingReplicas ?? 0} replicas · ${msg.deadLetters} dead-lettered`;
+
+  const s = msg.subscriber;
+  const bad = s.gaps > 0 || s.duplicates > 0;
+  document.getElementById("integrity").innerHTML = s.count === 0
+    ? "Waiting for the first delivery."
+    : `Subscriber received <b>${s.count}</b> (${s.snapshots} snapshots) · `
+      + `<span class="${bad?"bad":""}"><b>${s.gaps}</b> sequence gaps, `
+      + `<b>${s.duplicates}</b> duplicates</span>`;
+}
+
+function renderEvent(e){
+  evCount++;
+  document.getElementById("evcount").textContent = evCount;
+  const li = document.createElement("li");
+  const t = new Date(e.time).toLocaleTimeString("en-GB");
+  const d = e.data;
+  const snap = e.type.endsWith("snapshot");
+  li.innerHTML = `<span class="t-time">${t}</span> <span class="t-api">${d.apiId}</span>`
+    + `<span class="t-move ${snap?"snap":""}">`
+    + (snap
+        ? `snapshot · ${d.state} · ${d.healthyEndpoints}/${d.totalEndpoints}`
+        : `${d.previousState ?? "—"} → <b>${d.state}</b> · ${d.reason.toLowerCase().replace(/_/g," ")}`)
+    + `</span>`;
+  tapeEl.prepend(li);
+  while (tapeEl.children.length > 60) tapeEl.lastChild.remove();
+}
+
+const es = new EventSource("/api/stream");
+es.addEventListener("state", e => renderState(JSON.parse(e.data)));
+es.addEventListener("cloudevent", e => renderEvent(JSON.parse(e.data)));
+es.onerror = () => document.getElementById("meta").textContent = "disconnected — is the server running?";
+</script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+global:
+  scrape_interval: 2s # fast enough that a demo incident shows up within a tick or two
+
+scrape_configs:
+  # The aggregator's own registry: per-API circuit state, transitions, webhook
+  # delivery, and the subscriber's delivery-integrity counters. Same endpoint
+  # regardless of --source=sim or --source=envoy.
+  - job_name: aggregator
+    static_configs:
+      - targets: ["aggregator:8088"]
+        labels: { deployment: "docker-compose" }
+      # Reaches `pnpm start` running on the host (the sim-fleet demo) so the
+      # same Prometheus/Grafana stack works for both demo modes. Harmless if
+      # nothing is listening there.
+      - targets: ["host.docker.internal:8088"]
+        labels: { deployment: "host" }
+
+  # Envoy's own admin stats, in its native Prometheus format — the per-replica
+  # ground truth the aggregator is reconciling. Useful side-by-side with the
+  # aggregator's fleet-wide view to see the disagreement the console visualizes.
+  - job_name: envoy
+    metrics_path: /stats/prometheus
+    static_configs:
+      - targets: ["envoy-00:9901", "envoy-01:9901", "envoy-02:9901"]

@@ -1,0 +1,106 @@
+# Three Envoy replicas against shared upstreams. The replicas each run their own
+# outlier detection and will legitimately disagree — that divergence is the
+# thing the aggregator exists to resolve.
+services:
+  flaky-upstream:
+    image: node:22-alpine
+    working_dir: /app
+    volumes: ["$HOST_WORKSPACE_FOLDER/flaky-upstream.mjs:/app/flaky-upstream.mjs:ro"]
+    command: node flaky-upstream.mjs
+    ports: ["8080:8080", "8081:8081", "8082:8082"]
+
+  # envoy-01/02 merge in everything from envoy-00 via the &envoy/<<: anchor —
+  # same image, config and command — and only override the admin port mapping,
+  # so all three run identically and stay in sync by construction.
+  envoy-00: &envoy
+    image: envoyproxy/envoy:v1.31-latest
+    volumes: ["$HOST_WORKSPACE_FOLDER/envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro"]
+    # List (exec) form, so these are argv straight to the envoy binary — no
+    # shell involved, so none of the sh -c/YAML-folding pitfalls below apply.
+    command: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "egress"]
+    depends_on: [flaky-upstream]
+    ports: ["19001:9901"]
+  envoy-01:
+    <<: *envoy
+    ports: ["19002:9901"]
+  envoy-02:
+    <<: *envoy
+    ports: ["19003:9901"]
+
+  aggregator:
+    image: node:22-alpine
+    working_dir: /app
+    # Writable now: unlike the pre-Effect version this has dependencies to install.
+    volumes: ["$HOST_WORKSPACE_FOLDER:/app"]
+    # Installs deps, then runs main.ts against the three real Envoy admin ports
+    # (not the sim fleet — --source=envoy is what makes this stack's outlier
+    # detection real instead of simulated).
+    #
+    # Keep node's args after "src/main.ts" on this one line. With YAML `>`
+    # folding, only lines indented the SAME as the first content line
+    # ("sh -c ...") get their newline folded to a space; lines indented
+    # further keep a literal newline. Splitting --source=envoy /
+    # --envoy=... onto their own (more-indented) lines silently turned them
+    # into separate shell commands that never reached node's argv — the
+    # aggregator ran in sim mode with no error, so nothing looked wrong until
+    # a demo run against real Envoy never tripped the circuit.
+    command: >
+      sh -c "corepack enable && pnpm install --frozen-lockfile &&
+             node --experimental-strip-types src/main.ts --source=envoy --envoy=http://envoy-00:9901,http://envoy-01:9901,http://envoy-02:9901"
+    depends_on: [envoy-00, envoy-01, envoy-02]
+    ports: ["8088:8088"]
+
+  # Without this, /__fail changes nothing: outlier detection only reacts to
+  # requests it actually sees. Part of the default `docker compose up`, not
+  # optional — same role flaky-upstream itself plays.
+  traffic:
+    image: node:22-alpine
+    working_dir: /app
+    volumes: ["$HOST_WORKSPACE_FOLDER/traffic-generator.mjs:/app/traffic-generator.mjs:ro"]
+    command: node traffic-generator.mjs
+    environment:
+      ENVOY_REPLICAS: http://envoy-00:10000,http://envoy-01:10000,http://envoy-02:10000
+    depends_on: [envoy-00, envoy-01, envoy-02]
+
+  # Runs demo/driver.ts against this stack, end to end: `docker compose
+  # --profile demo run --rm demo` (or `-- shipping-rates` for a different API).
+  # Not part of plain `docker compose up` — this is a one-shot, not a daemon.
+  demo:
+    image: node:22-alpine
+    working_dir: /app
+    volumes: ["$HOST_WORKSPACE_FOLDER:/app"]
+    # Installs deps, then runs the driver (see the module comment in
+    # demo/driver.ts for what it does). No extra node args here, but if any
+    # get added, keep them on this same line — see the aggregator command
+    # above for why a more-indented continuation line breaks silently.
+    command: >
+      sh -c "corepack enable && pnpm install --frozen-lockfile &&
+             node --experimental-strip-types demo/driver.ts"
+    environment:
+      AGGREGATOR: http://aggregator:8088
+      FAILURE_MODE: envoy
+      FLAKY_UPSTREAM: http://flaky-upstream
+    depends_on: [aggregator, traffic]
+    profiles: [demo]
+
+  # Scrapes the aggregator's /metrics (same registry the console reads from)
+  # plus each Envoy's native /stats/prometheus. See monitoring/prometheus.yml.
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes: ["$HOST_WORKSPACE_FOLDER/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    # Lets Prometheus also reach `pnpm start` running on the host, so the same
+    # stack works for the sim-fleet demo, not just this docker-compose one.
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Editor"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - $HOST_WORKSPACE_FOLDER/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - $HOST_WORKSPACE_FOLDER/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus]
+    ports: ["3000:3000"]

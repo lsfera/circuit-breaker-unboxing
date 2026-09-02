@@ -1,0 +1,276 @@
+{
+  "title": "Egress circuit breaker",
+  "uid": "egress-circuit-breaker",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "2s",
+  "time": { "from": "now-10m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "state-timeline",
+      "title": "Published state per API",
+      "description": "What subscribers see: one gapless line per API, coloured by the currently published breaker state. This is the console's replica strip already resolved to a single fleet-wide answer.",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "egress_circuit_state",
+          "legendFormat": "{{apiId}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "CLOSED", "color": "green" },
+                "1": { "text": "DEGRADED", "color": "yellow" },
+                "2": { "text": "OPEN", "color": "red" },
+                "3": { "text": "HALF_OPEN", "color": "blue" }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": { "mergeValues": true, "showValue": "always" }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Healthy / total endpoints",
+      "description": "Fleet-averaged. Watch payments-provider's healthy line collapse to 0 while total stays put as you drag the failure rate up.",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "egress_circuit_healthy_endpoints",
+          "legendFormat": "{{apiId}} healthy",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "egress_circuit_total_endpoints",
+          "legendFormat": "{{apiId}} total",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "lineWidth": 2 } }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Reporting replicas",
+      "description": "Replicas whose last report is within replicaTimeoutMs. A drop here (not just to 0 healthy) is what quorum is computed against.",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "egress_circuit_reporting_replicas",
+          "legendFormat": "{{apiId}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "lineWidth": 2 } }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Published transitions",
+      "description": "One point per state_changed event, by reason. Should be a handful per incident, not a storm — that's dwellMs/minStateMs debouncing working.",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (apiId, state, reason) (increase(egress_circuit_transitions_total[$__interval]))",
+          "legendFormat": "{{apiId}} -> {{state}} ({{reason}})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 60 } }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Webhook delivery",
+      "description": "delivered = the sink got a 2xx within its retry budget. failed = an attempt (including retries) that didn't. dead_lettered = retries exhausted; see the console's dead-letter count.",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (apiId) (rate(egress_webhook_delivered_total[1m]))",
+          "legendFormat": "{{apiId}} delivered/s",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (apiId) (rate(egress_webhook_failed_total[1m]))",
+          "legendFormat": "{{apiId}} failed/s",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (apiId) (rate(egress_webhook_dead_lettered_total[1m]))",
+          "legendFormat": "{{apiId}} dead-lettered/s",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Webhook delivery latency (p95)",
+      "description": "le!=\"Infinity\" works around an effect@4.0.0-rc.112 bug: PrometheusMetrics.format() emits both a mislabeled le=\"Infinity\" bucket (boundary.toString() on the histogram's own terminal Infinity boundary) and the spec-required le=\"+Inf\" bucket for the same cumulative count. The duplicate infinite bucket breaks histogram_quantile's interpolation, which returns the raw top boundary (4294967296, i.e. \"49.7 days\") instead of a real latency. Drop this filter once upstream fixes the formatter.",
+      "gridPos": { "x": 0, "y": 24, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(egress_webhook_delivery_duration_ms_bucket{le!=\"Infinity\"}[1m])))",
+          "legendFormat": "p95 delivery ms",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Fleet poll duration (p95)",
+      "description": "Time to poll and parse every replica's /stats once per tick. Rises here, not in delivery latency, points at ingestion. le!=\"Infinity\" works around an effect@4.0.0-rc.112 formatter bug — see the note on the delivery latency panel.",
+      "gridPos": { "x": 12, "y": 24, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(egress_fleet_poll_duration_ms_bucket{le!=\"Infinity\"}[1m])))",
+          "legendFormat": "p95 poll ms",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Delivery contract: gaps",
+      "description": "Sequence gaps observed at the subscriber. Should stay 0 through an entire incident — this is the right-hand panel on the console, as a number.",
+      "gridPos": { "x": 0, "y": 32, "w": 6, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(egress_subscriber_gaps_total)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "Delivery contract: duplicates",
+      "description": "Non-snapshot events delivered with a repeated sequence. Snapshots legitimately repeat the sequence and are excluded.",
+      "gridPos": { "x": 6, "y": 32, "w": 6, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(egress_subscriber_duplicates_total)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Dead letters",
+      "gridPos": { "x": 12, "y": 32, "w": 6, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(egress_webhook_dead_lettered_total)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Events received (subscriber)",
+      "gridPos": { "x": 18, "y": 32, "w": 6, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(egress_subscriber_events_received_total)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Envoy, per replica: healthy hosts (raw)",
+      "description": "Direct from each Envoy's own admin stats, unaggregated — the disagreement the aggregator exists to resolve. Compare against the fleet-averaged line above: this one legitimately jumps around per replica during a partial failure; the published state does not.",
+      "gridPos": { "x": 0, "y": 38, "w": 24, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "envoy_cluster_membership_healthy",
+          "legendFormat": "{{instance}} / {{envoy_cluster_name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "lineWidth": 2 } }, "overrides": [] }
+    }
+  ]
+}

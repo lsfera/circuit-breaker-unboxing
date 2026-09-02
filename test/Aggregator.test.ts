@@ -1,0 +1,246 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { Duration, Effect, Layer, Ref } from "effect";
+import { TestClock } from "effect/testing";
+import { Aggregator, AggregatorLayer } from "../src/Aggregator.ts";
+import { EventBus, EventBusLayer, EventSink } from "../src/Events.ts";
+import { FleetSource, SimFleetLayer, parseStats } from "../src/FleetSource.ts";
+import { Config, defaultConfig, State } from "../src/domain/Model.ts";
+import type { CircuitEvent } from "../src/domain/Model.ts";
+
+/**
+ * The whole pipeline under TestClock: no sleeps, no flakiness, and a simulated
+ * minute costs microseconds. In the pre-Effect version this same coverage was a
+ * shell script full of `sleep 6`.
+ */
+
+const SPECS = [
+  { apiId: "payments", endpoints: 6, rps: 900, failureRate: 0 },
+  { apiId: "tax-calc", endpoints: 3, rps: 120, failureRate: 0 },
+];
+
+const CFG = { ...defaultConfig, dwellMs: 500, minStateMs: 500, openMs: 1000 };
+
+// TestClock starts at the epoch, which would make a genuine "we published
+// 1970" bug indistinguishable from normal test time. Start at a realistic
+// instant so epoch leakage is unambiguous.
+const START = Date.parse("2026-09-02T12:00:00.000Z");
+
+/**
+ * TestClock starts at the epoch. Anchoring it to a realistic instant keeps
+ * published timestamps meaningful and lets us assert that nothing leaks 1970.
+ */
+const T0 = Date.parse("2026-09-02T12:00:00.000Z");
+
+/** A sink that records everything it was handed, so we can assert on delivery. */
+const RecordingSink = (into: Ref.Ref<ReadonlyArray<CircuitEvent>>) =>
+  Layer.succeed(EventSink, {
+    name: "recording",
+    deliver: (event) => Ref.update(into, (xs) => [...xs, event]),
+    deadLetters: Effect.succeed([]),
+  });
+
+const harness = (delivered: Ref.Ref<ReadonlyArray<CircuitEvent>>) =>
+  AggregatorLayer.pipe(
+    // provideMerge, not provide: the tests drive FleetSource and read EventBus
+    // directly, so those services stay in the output context.
+    Layer.provideMerge(
+      Layer.mergeAll(
+        SimFleetLayer(SPECS, 5),
+        EventBusLayer,
+        RecordingSink(delivered),
+      ),
+    ),
+    Layer.provideMerge(TestClock.layer()),
+  );
+
+const run = <A>(
+  body: (delivered: Ref.Ref<ReadonlyArray<CircuitEvent>>) => Effect.Effect<
+    A,
+    never,
+    Aggregator | FleetSource | EventBus | TestClock.TestClock
+  >,
+) =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const delivered = yield* Ref.make<ReadonlyArray<CircuitEvent>>([]);
+      return yield* TestClock.setTime(T0).pipe(
+        Effect.andThen(body(delivered)),
+      ).pipe(
+        Effect.provide(harness(delivered)),
+        Effect.provideService(Config, CFG),
+      );
+    }),
+  );
+
+/** Advance simulated time by running the tick loop N times. */
+const ticks = (n: number) =>
+  Effect.gen(function* () {
+    const agg = yield* Aggregator;
+    for (let i = 0; i < n; i++) {
+      yield* agg.tick;
+      yield* TestClock.adjust(Duration.millis(CFG.tickMs));
+    }
+  });
+
+test("healthy fleet publishes no transitions", async () => {
+  const state = await run(() =>
+    Effect.gen(function* () {
+      yield* ticks(40);
+      const agg = yield* Aggregator;
+      return yield* agg.stateOf("payments");
+    }),
+  );
+  assert.equal(state, State.CLOSED);
+});
+
+test("total outage opens, restoration closes, delivered in order", async () => {
+  const result = await run((delivered) =>
+    Effect.gen(function* () {
+      const fleet = yield* FleetSource;
+      const agg = yield* Aggregator;
+
+      yield* ticks(8);
+      yield* fleet.setFailureRate("payments", 1);
+      yield* ticks(60);
+      const opened = yield* agg.stateOf("payments");
+
+      yield* fleet.setFailureRate("payments", 0);
+      yield* ticks(200);
+      const closed = yield* agg.stateOf("payments");
+
+      const events = yield* Ref.get(delivered);
+      const other = yield* agg.stateOf("tax-calc");
+      return { opened, closed, events, other };
+    }),
+  );
+
+  assert.equal(result.opened, State.OPEN);
+  assert.equal(result.closed, State.CLOSED);
+  assert.equal(result.other, State.CLOSED, "other APIs are unaffected");
+
+  const transitions = result.events.filter(
+    (e) => e.type === "egress.circuit.state_changed" && e.data.apiId === "payments",
+  );
+  assert.ok(transitions.length >= 2);
+
+  // The delivery contract: per-API sequences are gapless and strictly rising.
+  const seqs = transitions.map((e) => e.data.sequence);
+  assert.deepEqual(
+    seqs,
+    seqs.map((_, i) => i + 1),
+    "sequence numbers must be gapless",
+  );
+  assert.equal(transitions[0]?.data.state, State.OPEN);
+  assert.equal(transitions.at(-1)?.data.state, State.CLOSED);
+});
+
+test("every published event is a valid CloudEvent carrying full state", async () => {
+  const events = await run((delivered) =>
+    Effect.gen(function* () {
+      const fleet = yield* FleetSource;
+      yield* fleet.setFailureRate("payments", 1);
+      yield* ticks(40);
+      return yield* Ref.get(delivered);
+    }),
+  );
+
+  assert.ok(events.length > 0);
+  for (const e of events) {
+    assert.equal(e.specversion, "1.0");
+    assert.equal(e.subject, `api://${e.data.apiId}`);
+    assert.equal(e.datacontenttype, "application/json");
+    assert.ok(Date.parse(e.time) > 0);
+    // Full state, not a delta — a subscriber can sync from any single event.
+    assert.equal(typeof e.data.healthyEndpoints, "number");
+    assert.equal(typeof e.data.totalEndpoints, "number");
+    assert.equal(typeof e.data.reportingReplicas, "number");
+    // Must be a real instant, never the epoch: a breaker that has not yet
+    // changed still has to report when its current condition began.
+    assert.ok(Number.isFinite(Date.parse(e.data.observedSince)));
+    assert.notEqual(e.data.observedSince, "1970-01-01T00:00:00.000Z");
+  }
+});
+
+test("snapshots republish current state for late subscribers", async () => {
+  const events = await run((delivered) =>
+    Effect.gen(function* () {
+      // snapshotMs is 15s; 400 ticks at 250ms is 100s of simulated time.
+      yield* ticks(400);
+      return yield* Ref.get(delivered);
+    }),
+  );
+  const snaps = events.filter((e) => e.type === "egress.circuit.snapshot");
+  assert.ok(snaps.length >= 4, `expected periodic snapshots, got ${snaps.length}`);
+  // Snapshots deliberately repeat the current sequence — only transitions
+  // carry the gapless guarantee.
+  assert.ok(snaps.every((s) => s.data.sequence === 0));
+});
+
+test("the bus fans events out to subscribers", async () => {
+  const seen = await run(() =>
+    Effect.gen(function* () {
+      const bus = yield* EventBus;
+      const fleet = yield* FleetSource;
+      yield* fleet.setFailureRate("payments", 1);
+      yield* ticks(40);
+      return yield* bus.recent;
+    }),
+  );
+  assert.ok(seen.some((e) => e.data.state === State.OPEN));
+});
+
+// ---------------------------------------------------------------------------
+// Envoy stats parsing — the one production path the simulator never exercises.
+// ---------------------------------------------------------------------------
+
+const STATS = {
+  stats: [
+    { name: "cluster.payments-provider.membership_healthy", value: 2 },
+    { name: "cluster.payments-provider.membership_total", value: 6 },
+    { name: "cluster.payments-provider.outlier_detection.ejections_active", value: 4 },
+    { name: "cluster.payments-provider.upstream_rq_pending_overflow", value: 17 },
+    { name: "cluster.payments-provider.upstream_cx_overflow", value: 3 },
+    { name: "cluster.payments-provider.upstream_rq_retry_overflow", value: 1 },
+    { name: "cluster.tax-calc.membership_healthy", value: 3 },
+    { name: "cluster.tax-calc.membership_total", value: 3 },
+    // Noise Envoy really emits, which must not be mistaken for a cluster stat.
+    { name: "cluster.payments-provider.upstream_rq_2xx", value: 91234 },
+    { name: "cluster_manager.active_clusters", value: 3 },
+    { name: "http.egress.downstream_rq_total", value: 5000 },
+    { name: "listener.0.0.0.0_10000.downstream_cx_total", value: 12 },
+  ],
+};
+
+test("parses envoy admin stats, summing the three overflow counters", () => {
+  const reports = parseStats("envoy-00", STATS, 1000, () => true);
+  assert.equal(reports.length, 2, "one report per cluster, noise excluded");
+
+  const pay = reports.find((r) => r.apiId === "payments-provider");
+  assert.ok(pay);
+  assert.equal(pay.healthy, 2);
+  assert.equal(pay.total, 6);
+  assert.equal(pay.ejectionsActive, 4);
+  assert.equal(pay.overflowTotal, 21);
+  assert.equal(pay.observedAt, 1000);
+});
+
+test("cluster filter drops clusters that are not tracked APIs", () => {
+  const reports = parseStats("envoy-00", STATS, 1000, (c) => c === "tax-calc");
+  assert.deepEqual(
+    reports.map((r) => r.apiId),
+    ["tax-calc"],
+  );
+});
+
+test("missing stats default to zero rather than NaN", () => {
+  const reports = parseStats(
+    "envoy-00",
+    { stats: [{ name: "cluster.x.membership_total", value: 4 }] },
+    1000,
+    () => true,
+  );
+  assert.equal(reports[0]?.healthy, 0);
+  assert.equal(reports[0]?.overflowTotal, 0);
+  assert.equal(reports[0]?.total, 4);
+});
