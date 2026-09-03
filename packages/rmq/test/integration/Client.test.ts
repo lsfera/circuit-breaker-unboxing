@@ -1,9 +1,10 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { Effect } from "effect";
+import { Effect, Exit, Scope } from "effect";
 import { GenericContainer, Wait } from "testcontainers";
 import type { StartedTestContainer } from "testcontainers";
-import { Rmq, RmqLive } from "../../src/Client.ts";
+import { makeRmq, Rmq, RmqLive } from "../../src/Client.ts";
+import type { Consumer } from "../../src/Client.ts";
 
 /**
  * Regression coverage for the one thing about this client that is actively
@@ -68,7 +69,7 @@ test("concurrent publisher creation routes each message to its own binding", asy
       for (const api of apis) {
         const q = yield* rmq.declareQueue(`pub.${api}`);
         yield* rmq.bind(`key.${api}`, exchange, q);
-        yield* rmq.consume(`pub.${api}`, (body) => received[api]!.push(body));
+        yield* rmq.consume(`pub.${api}`, (body) => void received[api]!.push(body));
       }
 
       // The case that silently misroutes without the client's semaphore.
@@ -102,7 +103,7 @@ test("concurrent consumer creation binds each consumer to its own queue", async 
 
       // The case that silently cross-wires without the client's semaphore.
       yield* Effect.all(
-        queues.map((q) => rmq.consume(q, (body) => received[q]!.push(body))),
+        queues.map((q) => rmq.consume(q, (body) => void received[q]!.push(body))),
         { concurrency: "unbounded" },
       );
 
@@ -132,7 +133,7 @@ test("x-single-active-consumer elects one consumer and promotes another when it 
 
       const consumers: Record<string, Awaited<ReturnType<typeof Effect.runPromise>>> = {};
       for (const id of ["a", "b", "c"]) {
-        consumers[id] = yield* rmq.consume(queue, (body) => received.push({ id, body }));
+        consumers[id] = yield* rmq.consume(queue, (body) => void received.push({ id, body }));
       }
 
       const pub = yield* rmq.publisherToQueue(queue);
@@ -170,7 +171,7 @@ test("closing a consumer stops delivery without closing the connection", async (
       yield* rmq.declareQueue(queue);
       const pub = yield* rmq.publisherToQueue(queue);
 
-      const consumer = yield* rmq.consume(queue, (body) => received.push(body));
+      const consumer = yield* rmq.consume(queue, (body) => void received.push(body));
       for (let i = 0; i < 3; i++) yield* rmq.send(pub, `before-${i}`);
       yield* Effect.promise(() => new Promise((r) => setTimeout(r, 800)));
       assert.equal(received.length, 3, "consumer receives while open");
@@ -182,9 +183,97 @@ test("closing a consumer stops delivery without closing the connection", async (
       assert.equal(received.length, 3, "nothing is delivered while cancelled");
 
       // And this is what recovery does — on the same, still-open connection.
-      yield* rmq.consume(queue, (body) => received.push(body));
+      yield* rmq.consume(queue, (body) => void received.push(body));
       yield* Effect.promise(() => new Promise((r) => setTimeout(r, 800)));
       assert.equal(received.length, 6, "the queued messages arrive once consuming resumes");
     }),
+  );
+});
+
+/**
+ * The second silent failure mode, and the reason @egress/rmq-consumer's
+ * daemon runs its work consumers on a connection separate from its
+ * control-plane one.
+ *
+ * Closing a consumer that still has deliveries in flight strands them, and
+ * enough strandings stall *every* link on that connection — including
+ * consumers on unrelated queues that were never touched. The daemon's
+ * HALF_OPEN probe is exactly this shape: open onto a deep backlog, take one
+ * message, close.
+ *
+ * Both halves are asserted together on purpose. The first pins the hazard as
+ * a live property of the pinned client, so that if a future version fixes it
+ * this test fails and tells us the workaround can go. The second pins that
+ * the workaround actually works — a connection per probe survives the same
+ * loop that kills the shared one.
+ */
+const CYCLES = 12;
+const BACKLOG = 4000;
+
+test("closing a consumer with deliveries in flight stalls the whole connection", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const probeCycles = (isolated: boolean) =>
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      const tag = isolated ? "iso" : "shared";
+      const work = `strand.work.${tag}`;
+      const canary = `strand.canary.${tag}`;
+      yield* rmq.declareQueue(work);
+      yield* rmq.declareQueue(canary);
+      const workPub = yield* rmq.publisherToQueue(work);
+      const canaryPub = yield* rmq.publisherToQueue(canary);
+
+      // Stands in for the daemon's control-plane subscription: never closed,
+      // never touched, on a queue the probe knows nothing about.
+      let canaryCount = 0;
+      yield* rmq.consume(canary, () => void canaryCount++);
+      for (let i = 0; i < BACKLOG; i++) yield* rmq.send(workPub, `w-${i}`);
+
+      for (let cycle = 1; cycle <= CYCLES; cycle++) {
+        const scope = isolated ? yield* Scope.make() : null;
+        const conn =
+          scope === null
+            ? rmq
+            : yield* Effect.provideService(makeRmq({ host, port }), Scope.Scope, scope);
+
+        // Exactly daemon.ts's ordering, and for its reason: the consumer is
+        // closed inline (that is what stops delivery at the first message),
+        // and the connection — when there is a separate one — is retired
+        // afterwards, outside the handler. Tearing a connection down from
+        // inside a message callback throws `transfer after detach`.
+        let self: Consumer | null = null;
+        let taken = false;
+        const consumer = yield* conn.consume(work, () => {
+          if (taken || self === null) return;
+          taken = true;
+          Effect.runFork(conn.closeConsumer(self));
+        });
+        self = consumer;
+        yield* Effect.promise(() => new Promise((r) => setTimeout(r, 600)));
+        if (scope !== null) yield* Scope.close(scope, Exit.void);
+
+        const before = canaryCount;
+        yield* rmq.send(canaryPub, `ping-${cycle}`);
+        yield* Effect.promise(() => new Promise((r) => setTimeout(r, 600)));
+        if (canaryCount === before) return cycle; // the connection went deaf
+      }
+      return null;
+    });
+
+  const wedgedAt = await run(probeCycles(false));
+  assert.notEqual(
+    wedgedAt,
+    null,
+    `expected the shared connection to stall within ${CYCLES} probe cycles; ` +
+      "if this now survives, the client may have fixed it and the daemon's " +
+      "two-connection split can be revisited",
+  );
+
+  const isolatedWedgedAt = await run(probeCycles(true));
+  assert.equal(
+    isolatedWedgedAt,
+    null,
+    `a connection per probe stalled at cycle ${isolatedWedgedAt}, which is what the daemon relies on not happening`,
   );
 });

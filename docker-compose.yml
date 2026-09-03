@@ -12,6 +12,21 @@ networks:
     name: devcontainer
     external: true
 
+# Shared by every rmq-daemon-* below. Anchored separately from the service
+# anchor because YAML's `<<:` replaces a key wholesale rather than merging
+# into it — a daemon that redeclared `environment:` to set its own
+# DAEMON_INDEX would otherwise drop every other variable. Merging at the map
+# level instead keeps the differing value to one line per daemon.
+x-daemon-env: &daemon-env
+  RMQ: rabbitmq:5672
+  API_ID: payments-provider
+  FLEET_SIZE: "5"
+  # One address, no replica names, no admin ports — a daemon is a client of
+  # the egress listener and knows nothing about Envoy's topology, exactly
+  # like infra/traffic-generator.mjs.
+  EGRESS_ADDR: http://envoy:10000
+  API_PATH: /payments
+
 services:
   flaky-upstream:
     image: node:22-alpine
@@ -56,6 +71,25 @@ services:
     image: redis:7-alpine
     networks: [default, devcontainer]
 
+  # The control plane and the work queue both live here. 4.x specifically:
+  # this repo speaks AMQP 1.0 natively (see docs/rmq-control-plane.md), which
+  # is RabbitMQ 4's own protocol rather than a plugin over 0-9-1. Management
+  # UI on http://localhost:15672 (guest/guest) is how you watch
+  # payments-provider.work's depth climb during an outage and drain on the
+  # ramp back — the single most legible view of what this fleet does.
+  rabbitmq:
+    image: rabbitmq:4.0-management-alpine
+    ports: ["5672:5672", "15672:15672"]
+    # Everything downstream gates on this rather than on container start:
+    # a daemon that connects before the broker is listening just dies, and
+    # `depends_on` alone does not wait for readiness.
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [default, devcontainer]
+
   # Two real instances against the shared Redis lease, not one — this is
   # what makes HA a demonstrated property of the stack instead of a design
   # only exercised in tests. `egress_aggregator_is_leader` on whichever one
@@ -82,10 +116,19 @@ services:
     # into separate shell commands that never reached node's argv — the
     # aggregator ran in sim mode with no error, so nothing looked wrong until
     # a demo run against real Envoy never tripped the circuit.
+    # --rmq mounts AmqpControlPlaneSink *alongside* the webhook sink, so the
+    # SSE/subscriber demo is untouched and the daemon fleet below also gets
+    # every event on circuit.control. Only the leader publishes, so the two
+    # instances never double-deliver.
     command: >
       sh -c "corepack enable && pnpm install --frozen-lockfile &&
-             node --experimental-strip-types packages/aggregator/src/main.ts --source=envoy --envoy=http://envoy-00:9901,http://envoy-01:9901,http://envoy-02:9901 --ha=redis --redis=redis://redis:6379 --instance-id=aggregator-1"
-    depends_on: [envoy-00, envoy-01, envoy-02, redis]
+             node --experimental-strip-types packages/aggregator/src/main.ts --source=envoy --envoy=http://envoy-00:9901,http://envoy-01:9901,http://envoy-02:9901 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-1"
+    depends_on:
+      envoy-00: {condition: service_started}
+      envoy-01: {condition: service_started}
+      envoy-02: {condition: service_started}
+      redis: {condition: service_started}
+      rabbitmq: {condition: service_healthy}
     ports: ["8088:8088"]
     networks: [default, devcontainer]
 
@@ -93,8 +136,76 @@ services:
     <<: *aggregator
     command: >
       sh -c "corepack enable && pnpm install --frozen-lockfile &&
-             node --experimental-strip-types packages/aggregator/src/main.ts --source=envoy --envoy=http://envoy-00:9901,http://envoy-01:9901,http://envoy-02:9901 --ha=redis --redis=redis://redis:6379 --instance-id=aggregator-2"
+             node --experimental-strip-types packages/aggregator/src/main.ts --source=envoy --envoy=http://envoy-00:9901,http://envoy-01:9901,http://envoy-02:9901 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-2"
     ports: ["8089:8088"]
+
+  # The scenario from docs/rmq-control-plane.md, running for real: a producer
+  # flooding payments-provider.work, and five competing consumers draining it
+  # through the egress listener, one third-party call per message.
+  #
+  # Five separate containers, not one process simulating five daemons. That
+  # matters twice over: DaemonPolicy's active-count decision is only
+  # meaningful if the daemons are independently killable, and the HALF_OPEN
+  # prober election is x-single-active-consumer contended by five real
+  # connections rather than five fibers sharing one.
+  rmq-producer: &rmq-node
+    image: node:22-alpine
+    working_dir: /app
+    volumes: ["$HOST_WORKSPACE_FOLDER:/app"]
+    # The retry loop is not paranoia: six containers here plus the two
+    # aggregators all run `pnpm install` against the same bind-mounted
+    # node_modules at once, and pnpm's store lock makes the losers fail
+    # rather than queue. Retrying is the whole fix — the second attempt finds
+    # the work already done and returns immediately.
+    command: >
+      sh -c "corepack enable && until pnpm install --frozen-lockfile; do sleep 3; done &&
+             node --experimental-strip-types packages/rmq-consumer/src/main.ts producer"
+    environment:
+      RMQ: rabbitmq:5672
+      API_ID: payments-provider
+      RATE_PER_SECOND: "200"
+    depends_on:
+      rabbitmq: {condition: service_healthy}
+    networks: [default, devcontainer]
+
+  rmq-daemon-0: &rmq-daemon
+    <<: *rmq-node
+    command: >
+      sh -c "corepack enable && until pnpm install --frozen-lockfile; do sleep 3; done &&
+             node --experimental-strip-types packages/rmq-consumer/src/main.ts daemon"
+    environment:
+      <<: *daemon-env
+      DAEMON_INDEX: "0"
+      # Names the daemon's own control queue. Fixed rather than random so a
+      # restarted daemon reuses its queue instead of orphaning the old one.
+      INSTANCE_ID: daemon-0
+    depends_on:
+      rabbitmq: {condition: service_healthy}
+      envoy-00: {condition: service_started}
+  rmq-daemon-1:
+    <<: *rmq-daemon
+    environment:
+      <<: *daemon-env
+      DAEMON_INDEX: "1"
+      INSTANCE_ID: daemon-1
+  rmq-daemon-2:
+    <<: *rmq-daemon
+    environment:
+      <<: *daemon-env
+      DAEMON_INDEX: "2"
+      INSTANCE_ID: daemon-2
+  rmq-daemon-3:
+    <<: *rmq-daemon
+    environment:
+      <<: *daemon-env
+      DAEMON_INDEX: "3"
+      INSTANCE_ID: daemon-3
+  rmq-daemon-4:
+    <<: *rmq-daemon
+    environment:
+      <<: *daemon-env
+      DAEMON_INDEX: "4"
+      INSTANCE_ID: daemon-4
 
   # Without this, /__fail changes nothing: outlier detection only reacts to
   # requests it actually sees. Part of the default `docker compose up`, not

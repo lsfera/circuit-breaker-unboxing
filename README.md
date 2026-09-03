@@ -414,6 +414,35 @@ reacts to what the upstream actually returns — but everything downstream
 path. There is also a fully containerized version that needs nothing on the
 host but Docker: `docker compose --profile demo run --rm demo`.
 
+### The RabbitMQ daemon fleet
+
+`docker compose up` also brings up the scenario in
+[docs/rmq-control-plane.md](docs/rmq-control-plane.md): a `rabbitmq` broker,
+one `rmq-producer` publishing 200 messages/second onto
+`payments-provider.work`, and five `rmq-daemon-*` containers draining it —
+one third-party call per message, through the same egress listener, with no
+knowledge of Envoy's topology. The aggregator publishes every transition to
+the `circuit.control` exchange (`--rmq=rabbitmq:5672`), and each daemon
+decides *for itself* whether to keep consuming, from its own index and the
+agreed state alone.
+
+Five separate containers rather than one process simulating five, for the
+same reason there are three real Envoy replicas: the daemons have to be
+independently killable, and the `HALF_OPEN` prober is elected by RabbitMQ's
+`x-single-active-consumer` across real connections.
+
+```bash
+# watch the fleet react — target=<k>/5 is the agreed active count
+docker compose logs -f rmq-daemon-0 rmq-daemon-3
+
+# take the upstream down; the queue depth is the story
+curl -X POST localhost:8080/__fail -d '{"rate":1.0}'
+open http://localhost:15672        # guest / guest
+
+# kill whichever daemon the broker elected as prober, mid-incident
+docker kill workspace-rmq-daemon-1-1
+```
+
 `infra/envoy/envoy.yaml` carries the config discussed:
 
 - **One cluster per API.** Every stat, outlier event and access-log record is
@@ -559,6 +588,18 @@ packages/
   subscriber/                @egress/subscriber — depends on @egress/domain
     src/subscriber.ts        standalone consumer; decodes with the producer's Schema
 
+  rmq/                       @egress/rmq — Effect wrapper over AMQP 1.0 (RabbitMQ 4 native)
+    src/Client.ts            the Rmq service; two silent client bugs guarded here
+    src/ControlPlane.ts      circuit.control naming, shared by publisher and consumers
+    test/integration/        5 tests against a real broker, opt-in (`pnpm run test:rmq`)
+
+  rmq-consumer/              @egress/rmq-consumer — the competing-consumer daemon fleet
+    src/DaemonPolicy.ts      pure: (prior, circuit state, fleet size) -> target active count
+    src/daemon.ts            one daemon, one process; two connections, SAC prober election
+    src/producer.ts          floods the work queue; never backs off, on purpose
+    src/main.ts              role dispatch — `daemon` or `producer`
+    test/DaemonPolicy.test.ts  9 tests, pure — no runtime, no broker
+
   demo/                      @egress/demo — no dependency on the others, speaks only HTTP
     src/driver.ts            drives the demo script over HTTP, narrates transitions
 
@@ -567,6 +608,7 @@ infra/
   traffic-generator.mjs      keeps requests flowing through Envoy so /__fail means something
   monitoring/                Prometheus scrape config + provisioned Grafana dashboard
 
+docs/rmq-control-plane.md    the RabbitMQ scenario: design, live run, and what it exposed
 docker-compose.yml           wires infra/ and the packages/ entrypoints together
 ```
 
@@ -577,7 +619,7 @@ Cross-package imports go through `@egress/domain`'s `package.json#exports`
 change in one package, felt through a real dependency edge, not a shared
 folder. There is still no build step: every package runs straight off its
 `src/*.ts` via `--experimental-strip-types`, and `tsc --noEmit` at the root
-typechecks all four projects in one pass (`packages/*/src` and
+typechecks every package in one pass (`packages/*/src` and
 `packages/*/test` in `tsconfig.json`'s `include`). The root scripts
 (`pnpm start`, `pnpm run demo`, `pnpm run subscribe`) call `node` on each
 package's entrypoint directly rather than going through `pnpm --filter`:
@@ -594,7 +636,7 @@ tested exhaustively with plain `assert`.
 
 ## What the build surfaced
 
-Six things worth knowing, all of them found by running the thing:
+Eight things worth knowing, all of them found by running the thing:
 
 - **A reason code cannot be derived from averaged endpoint counts.** With four of
   five replicas seeing zero healthy hosts, the mean rounds to 1, so "all
@@ -619,6 +661,27 @@ Six things worth knowing, all of them found by running the thing:
   the exact split-brain window fencing tokens exist to close. The fix is
   checking against the one shared lease-token counter, not a per-key value —
   see [High availability](#high-availability).
+- **A healthy-looking process can be a deaf one.** A daemon in the RabbitMQ
+  fleet stopped reacting to circuit events entirely — container up, CPU at
+  0.01%, sockets and file descriptors identical to a healthy peer, and 64
+  undelivered messages behind a consumer the broker still considered
+  registered. Closing a consumer while the broker has deliveries in flight
+  strands them, and enough strandings stall *every* link on that connection.
+  Two fixes came out of it: the daemon now keeps its control plane on a
+  connection that never closes a link, and it logs a heartbeat independent
+  of the event stream — because until then every log line it produced was
+  emitted while handling an event, so "gone deaf" and "nothing happened"
+  looked identical. See
+  [docs/rmq-control-plane.md](docs/rmq-control-plane.md).
+- **Backpressure is about *when you ack*, not how much you buffer.** The
+  first daemon accepted each message on arrival and fired its third-party
+  call afterwards, so draining a 50k backlog meant tens of thousands of
+  concurrent requests from one process — the herd the fleet policy exists to
+  prevent, self-inflicted. Capping concurrency and dropping the excess was
+  worse (32,000 messages shed in one drain). Deferring the AMQP accept until
+  the call settles is what actually works: credit stops refilling, the
+  broker stops pushing, and the backlog stays in the queue where it is
+  visible.
 - **A documented sandbox limitation turned out to be a misconfigured
   environment variable.** "Docker cannot bind-mount the project directory
   here" had been true every time it was checked — until `HOST_WORKSPACE_FOLDER`

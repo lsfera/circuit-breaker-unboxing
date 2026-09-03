@@ -1,4 +1,4 @@
-import { Context, Data, Effect, Layer, Semaphore } from "effect";
+import { Context, Data, Effect, Layer, Scope, Semaphore } from "effect";
 import { createEnvironment } from "rabbitmq-amqp-js-client";
 import type { Connection, Consumer, Publisher } from "rabbitmq-amqp-js-client";
 
@@ -55,6 +55,22 @@ export type RmqQueue = unknown;
  * SAC probe-trigger consumer and a trigger publisher. The cost is nil at
  * this repo's volumes, and correctness here is not the place to trade for
  * throughput.
+ *
+ * ## Why a connection is not always process-lifetime
+ *
+ * The second thing this client does silently: closing a consumer while the
+ * broker still has deliveries in flight for it strands those deliveries, and
+ * enough of them stall the whole *connection* — every link on it, not just
+ * the one that was closed. Measured against a real broker: opening a
+ * consumer on a 4000-message queue, taking one message and closing (the
+ * HALF_OPEN probe, exactly) kills an unrelated long-lived consumer on the
+ * same connection after seven cycles, with no error anywhere. The same loop
+ * with each probe on its own throwaway connection ran clean.
+ *
+ * So `makeRmq` is exported alongside `RmqLive`: anything that closes
+ * consumers with a backlog behind them gets a connection it can afford to
+ * destroy, and the connection carrying the control plane only ever opens
+ * links. See docs/rmq-control-plane.md.
  */
 
 export class RmqError extends Data.TaggedError("RmqError")<{
@@ -64,34 +80,59 @@ export class RmqError extends Data.TaggedError("RmqError")<{
 
 export type QueueArgs = Record<string, unknown>;
 
-export class Rmq extends Context.Service<
-  Rmq,
-  {
-    /** durable: false, exclusive: false — every queue this repo declares is a demo fixture, not durable state. */
-    readonly declareQueue: (name: string, args?: QueueArgs) => Effect.Effect<RmqQueue, RmqError>;
-    readonly declareTopicExchange: (name: string) => Effect.Effect<RmqExchange, RmqError>;
-    readonly bind: (
-      routingKey: string,
-      source: RmqExchange,
-      destination: RmqQueue,
-    ) => Effect.Effect<void, RmqError>;
-    readonly consume: (
-      queue: string,
-      onMessage: (body: string) => void,
-    ) => Effect.Effect<Consumer, RmqError>;
-    /** One publisher per fixed (exchange, routingKey) or (queue) target — see Client.ts's module doc for why this is a publisher-per-target library, not per-message addressing. */
-    readonly publisherToExchange: (
-      exchange: string,
-      routingKey: string,
-    ) => Effect.Effect<Publisher, RmqError>;
-    readonly publisherToQueue: (queue: string) => Effect.Effect<Publisher, RmqError>;
-    readonly send: (pub: Publisher, body: string) => Effect.Effect<void, RmqError>;
-    readonly closeConsumer: (c: Consumer) => Effect.Effect<void>;
-  }
->()("Rmq") {}
+export interface RmqService {
+  /** durable: false, exclusive: false — every queue this repo declares is a demo fixture, not durable state. */
+  readonly declareQueue: (name: string, args?: QueueArgs) => Effect.Effect<RmqQueue, RmqError>;
+  readonly declareTopicExchange: (name: string) => Effect.Effect<RmqExchange, RmqError>;
+  readonly bind: (
+    routingKey: string,
+    source: RmqExchange,
+    destination: RmqQueue,
+  ) => Effect.Effect<void, RmqError>;
+  /**
+   * The message is accepted only once `onMessage` settles. Returning a
+   * promise is therefore the flow-control lever this client otherwise
+   * doesn't give you: AMQP 1.0 credit is replenished on settlement, so a
+   * handler that waits for its own work keeps the broker from pushing more
+   * than the consumer can absorb. A synchronous handler accepts immediately
+   * and gets no backpressure at all.
+   */
+  readonly consume: (
+    queue: string,
+    onMessage: (body: string) => void | Promise<void>,
+  ) => Effect.Effect<Consumer, RmqError>;
+  /** One publisher per fixed (exchange, routingKey) or (queue) target — see Client.ts's module doc for why this is a publisher-per-target library, not per-message addressing. */
+  readonly publisherToExchange: (
+    exchange: string,
+    routingKey: string,
+  ) => Effect.Effect<Publisher, RmqError>;
+  readonly publisherToQueue: (queue: string) => Effect.Effect<Publisher, RmqError>;
+  readonly send: (pub: Publisher, body: string) => Effect.Effect<void, RmqError>;
+  readonly closeConsumer: (c: Consumer) => Effect.Effect<void>;
+}
+
+export class Rmq extends Context.Service<Rmq, RmqService>()("Rmq") {}
 
 const wrap = <A>(operation: string, promise: () => Promise<A>) =>
   Effect.tryPromise({ try: promise, catch: (cause) => new RmqError({ operation, cause }) });
+
+/**
+ * Accepting a delivery whose link has since closed throws `Receiver link is
+ * closed`, and with a deferred accept that is not an edge case — it is what
+ * happens every time a consumer is retired while calls are still in flight,
+ * which is exactly what `OPEN` does to @egress/rmq-consumer's daemons. The
+ * settlement is genuinely moot at that point (the broker requeues an
+ * unsettled delivery when the link goes), so swallowing it is correct rather
+ * than merely convenient. Thrown from inside a socket callback, it would
+ * otherwise take the process down.
+ */
+const settle = (ctx: { accept: () => void }) => {
+  try {
+    ctx.accept();
+  } catch {
+    // link already gone; the delivery goes back to the queue
+  }
+};
 
 export type RmqConnectOptions = {
   readonly host: string;
@@ -100,11 +141,21 @@ export type RmqConnectOptions = {
   readonly password?: string;
 };
 
-/** One real AMQP 1.0 connection per layer instance, closed when the layer's scope ends. */
-export const RmqLive = (opts: RmqConnectOptions) =>
-  Layer.effect(
-    Rmq,
-    Effect.gen(function* () {
+/**
+ * One real AMQP 1.0 connection, released when the surrounding scope closes.
+ *
+ * Exposed separately from `RmqLive` because a connection is not always a
+ * process-lifetime thing here: `@egress/rmq-consumer`'s daemon deliberately
+ * runs its *work* consumers on a second, disposable connection it opens and
+ * closes as the circuit moves, precisely so that churn can never damage the
+ * control-plane connection. See `closing a consumer with deliveries in
+ * flight` in docs/rmq-control-plane.md for why that separation is load
+ * bearing rather than tidiness.
+ */
+export const makeRmq = (
+  opts: RmqConnectOptions,
+): Effect.Effect<RmqService, RmqError, Scope.Scope> =>
+  Effect.gen(function* () {
       const env = createEnvironment({
         host: opts.host,
         port: opts.port,
@@ -152,8 +203,16 @@ export const RmqLive = (opts: RmqConnectOptions) =>
             const consumer = await connection.createConsumer({
               queue: { name: queue },
               messageHandler: (ctx, message) => {
-                onMessage(String(message.body));
-                ctx.accept();
+                const done = onMessage(String(message.body));
+                if (done === undefined) return settle(ctx);
+                // Accepted either way. Rejecting a message because the call
+                // behind it failed would requeue it straight back into an
+                // outage, which is the thundering herd the whole design is
+                // about — see docs/rmq-control-plane.md.
+                void done.then(
+                  () => settle(ctx),
+                  () => settle(ctx),
+                );
               },
             });
             consumer.start();
@@ -168,5 +227,7 @@ export const RmqLive = (opts: RmqConnectOptions) =>
         send: (pub, body) => guarded("send", () => pub.publish({ body } as never)).pipe(Effect.asVoid),
         closeConsumer: (c) => Effect.sync(() => c.close()),
       };
-    }),
-  );
+    });
+
+/** The process-lifetime connection: one per layer instance, closed with the layer's scope. */
+export const RmqLive = (opts: RmqConnectOptions) => Layer.effect(Rmq, makeRmq(opts));
