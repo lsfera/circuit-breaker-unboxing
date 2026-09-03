@@ -1,0 +1,61 @@
+# The repo's claim is that things are verified rather than reasoned about, so
+# the checks that back that claim have to run on their own, on every push.
+#
+# Two jobs, split by what they need rather than by speed: `check` needs
+# nothing but Node and is the gate; `integration` needs a Docker daemon,
+# because both suites below start real containers through Testcontainers.
+# They are opt-in locally (`pnpm run test:redis`, `pnpm run test:rmq`) for
+# exactly that reason — which makes them the tests most likely to rot
+# unnoticed, and therefore the ones most worth running here.
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: typecheck + unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # Version comes from package.json#packageManager, same as `corepack
+      # enable` uses in docker-compose.yml — one source of truth for which
+      # pnpm builds this workspace.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          # The floor from package.json#engines, not "latest": type stripping
+          # is what makes this repo build-step-free, and it landed in 22.6.
+          node-version: '22'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # `tsc --noEmit` is load-bearing here rather than cosmetic — with no
+      # build step it is the only thing that ever type-checks the source, and
+      # Effect's guarantees are type-level.
+      - run: pnpm run check
+
+  integration:
+    name: real Redis + real RabbitMQ
+    runs-on: ubuntu-latest
+    needs: check
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Leader election and fencing, executed by Redis's own Lua rather than
+      # by the in-memory stand-in.
+      - run: pnpm run test:redis
+      # The five AMQP 1.0 properties this repo depends on, including the two
+      # silent client bugs @egress/rmq works around. The stranding test
+      # deliberately asserts the bug still reproduces, so a client release
+      # that fixes it turns this job red and tells us the workaround can go.
+      - run: pnpm run test:rmq

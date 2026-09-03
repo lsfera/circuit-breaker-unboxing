@@ -15,12 +15,12 @@ import type { RedisLike } from "../../src/Coordination.ts";
 /**
  * Everything in Coordination.test.ts runs against the in-memory layer and is
  * fast, deterministic, and requires nothing external — that is what
- * `pnpm test` runs by default. This file is the other half of the honesty
- * the README describes: `RedisCoordinationLayer`'s Lua scripts were
- * "reasoned from Redis's documented command semantics, not run against a
- * live Redis." This runs them against a real Redis, in a throwaway
- * Testcontainers-managed container, proving the exact same fencing property
- * directly rather than trusting the reasoning.
+ * `pnpm test` runs by default. This file is the other half:
+ * `RedisCoordinationLayer`'s Lua scripts started out reasoned from Redis's
+ * documented command semantics rather than run, and this executes them
+ * against a real Redis in a throwaway Testcontainers-managed container,
+ * proving the exact same fencing property by Redis's own Lua execution
+ * instead of trusting the reasoning.
  *
  * Opt-in (`pnpm run test:redis`), not part of `pnpm test`/`pnpm run check`:
  * it needs Docker, uses real wall-clock sleeps instead of TestClock (Redis's

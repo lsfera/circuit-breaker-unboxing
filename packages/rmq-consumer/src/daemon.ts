@@ -1,16 +1,19 @@
-import { Effect, Exit, Option, Ref, Scope, Semaphore } from "effect";
+import { Effect, Exit, Metric, Option, Ref, Scope, Semaphore } from "effect";
 import { makeRmq, Rmq } from "@egress/rmq/Client.ts";
 import {
   CONTROL_EXCHANGE,
   controlQueueFor,
+  deadLetterQueueFor,
   decodeCircuitEvent,
   probeTriggerQueueFor,
   routingKeyFor,
+  workQueueArgs,
   workQueueFor,
 } from "@egress/rmq/ControlPlane.ts";
-import { State } from "@egress/domain/Model.ts";
+import { State, STATE_CODE } from "@egress/domain/Model.ts";
 import { activeIndices, initial, step } from "./DaemonPolicy.ts";
-import type { Consumer, RmqConnectOptions } from "@egress/rmq/Client.ts";
+import * as Telemetry from "./Telemetry.ts";
+import type { Consumer, RmqConnectOptions, Settlement } from "@egress/rmq/Client.ts";
 import type { DaemonPolicyState } from "./DaemonPolicy.ts";
 
 /**
@@ -77,11 +80,24 @@ import type { DaemonPolicyState } from "./DaemonPolicy.ts";
  * precisely the herd the fleet-level policy is scaling daemons down to
  * avoid.
  *
- * A failed call still accepts. Rejecting would requeue the message straight
- * back into the outage, and the same argument applies — so this is
- * at-most-once with respect to failures, which a real deployment would
- * revisit (dead-letter, or a bounded redelivery budget) but which is right
- * for a demo about what the *fleet* does when a third party degrades.
+ * ## What happens to work that fails
+ *
+ * A failed call rejects its message, and the work queue is declared with a
+ * dead-letter exchange, so it lands on `<apiId>.work.dead` where it can be
+ * counted, inspected and replayed. That is the whole point: this repo proves
+ * a delivery contract for control events, and it would be a strange kind of
+ * rigour to prove that while silently dropping the payload work — which is
+ * what accepting a failed message did.
+ *
+ * There is deliberately no retry. The client's `requeue` sends
+ * `modified{delivery_failed: false}`, and RabbitMQ only increments AMQP
+ * 1.0's `delivery-count` for a delivery marked *failed* — so a released
+ * message comes back indistinguishable from a new one, forever, and a
+ * redelivery budget that survives the message moving to another daemon
+ * cannot be expressed. Verified against a real broker, and pinned by
+ * `@egress/rmq`'s integration tests so that a client release which fixes it
+ * turns the test red. One attempt then dead-letter is the honest policy
+ * given that, not a shortcut around it.
  */
 
 export type DaemonConfig = {
@@ -112,6 +128,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
     const label = `${cfg.apiId}/daemon-${cfg.index}`;
 
     const workQueue = workQueueFor(cfg.apiId);
+    const deadQueue = deadLetterQueueFor(cfg.apiId);
     const probeQueue = probeTriggerQueueFor(cfg.apiId);
     const controlQueue = controlQueueFor(cfg.apiId, cfg.instanceId);
 
@@ -119,7 +136,11 @@ export const runDaemon = (cfg: DaemonConfig) =>
     // declares of the same arguments, so N daemons racing to start is fine —
     // whoever gets there first wins and the rest are no-ops.
     const exchange = yield* control.declareTopicExchange(CONTROL_EXCHANGE);
-    yield* control.declareQueue(workQueue);
+    // The dead-letter queue is declared before the queue that points at it,
+    // so a rejection during the first seconds of the fleet's life has
+    // somewhere to land rather than being discarded by the broker.
+    yield* control.declareQueue(deadQueue);
+    yield* control.declareQueue(workQueue, workQueueArgs(cfg.apiId));
     yield* control.declareQueue(probeQueue, { "x-single-active-consumer": true });
     const controlQ = yield* control.declareQueue(controlQueue);
     yield* control.bind(routingKeyFor(cfg.apiId), exchange, controlQ);
@@ -136,6 +157,19 @@ export const runDaemon = (cfg: DaemonConfig) =>
     let queued = 0;
     let ok = 0;
     let failed = 0;
+    let probed = 0;
+
+    /**
+     * The delivery contract, observed from this side of the broker.
+     *
+     * `-1` until the first state_changed arrives: a daemon that starts
+     * mid-incident legitimately joins the sequence part-way through, and
+     * calling that a gap would make the metric lie on every restart.
+     */
+    let lastSequence = -1;
+    let gaps = 0;
+    let duplicates = 0;
+    const eventsByType = new Map<string, number>();
 
     /**
      * A plain concurrency gate, and the reason it can *wait* rather than
@@ -167,19 +201,26 @@ export const runDaemon = (cfg: DaemonConfig) =>
      * Deliberately plain async: it is awaited by the AMQP message handler,
      * and wrapping it in Effect would buy nothing here.
      */
-    const callEgress = async () => {
+    const callEgress = async (): Promise<Settlement> => {
       await acquire();
       try {
         const res = await fetch(`${cfg.egressAddr}${cfg.apiPath}`, {
           signal: AbortSignal.timeout(2000),
         });
-        if (res.ok) ok++;
-        else failed++;
+        if (res.ok) {
+          ok++;
+          return "accept";
+        }
+        failed++;
+        return "discard";
       } catch {
         // Connection refused / timeout once the cluster is fully ejected is
         // the expected shape of an outage, not an error to report here — the
         // aggregator is what judges the API's health, from Envoy's own view.
+        // The message still goes to the dead-letter queue rather than being
+        // accepted, so the work is recoverable even though the call is lost.
         failed++;
+        return "discard";
       } finally {
         release();
       }
@@ -262,6 +303,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
         });
         self = consumer;
 
+        probed++;
         yield* Ref.set(probeScope, scope);
         yield* Effect.log(`${label}: elected prober, taking one message`);
       }),
@@ -279,7 +321,8 @@ export const runDaemon = (cfg: DaemonConfig) =>
       const active = (yield* Ref.get(workScope)) !== null;
       return (
         `${state} target=${targetActive}/${cfg.fleetSize} self=${active ? "ACTIVE" : "idle"} ` +
-        `calls ok=${ok} failed=${failed} inFlight=${inFlight} queued=${queued}`
+        `calls ok=${ok} failed=${failed} inFlight=${inFlight} queued=${queued} ` +
+        `control=${[...eventsByType.values()].reduce((a, b) => a + b, 0)} gaps=${gaps} dup=${duplicates}`
       );
     });
 
@@ -303,8 +346,23 @@ export const runDaemon = (cfg: DaemonConfig) =>
         Effect.runFork(Effect.logWarning(`${label}: undecodable control message, dropped`));
         return;
       }
-      const { data } = decoded.value;
+      const { data, type } = decoded.value;
       if (data.apiId !== cfg.apiId) return; // belt and braces; the binding already filters
+      eventsByType.set(type, (eventsByType.get(type) ?? 0) + 1);
+
+      // Snapshots deliberately repeat the current sequence, so only
+      // state_changed carries the gapless guarantee — the same rule
+      // @egress/aggregator's own Integrity tracker applies to the webhook
+      // stream. Checking it here proves it a second time, over a different
+      // transport, from a process the publisher does not control.
+      if (type === "egress.circuit.state_changed") {
+        if (lastSequence >= 0) {
+          if (data.sequence <= lastSequence) duplicates++;
+          else if (data.sequence > lastSequence + 1) gaps++;
+        }
+        lastSequence = Math.max(lastSequence, data.sequence);
+      }
+
       Effect.runFork(
         applyEvent(data.state, data.sequence, data.reason).pipe(
           Effect.catchCause((cause) => Effect.logError(`${label}: applying event failed`, cause)),
@@ -344,10 +402,123 @@ export const runDaemon = (cfg: DaemonConfig) =>
         `egress=${cfg.egressAddr}${cfg.apiPath} work=${workQueue} control=${controlQueue}`,
     );
 
+    /**
+     * Metrics are published from here rather than from each call site: the
+     * message path is a plain async function running a few hundred times a
+     * second, and forking a fiber per metric write would be the most
+     * expensive thing in it. Counters go up by the delta since the last
+     * flush, which is precisely what a Prometheus counter is; gauges are
+     * just set.
+     */
+    const attrs = { apiId: cfg.apiId };
+    let flushed = { ok: 0, failed: 0, probed: 0, gaps: 0, duplicates: 0 };
+    let flushedEvents = new Map<string, number>();
+
+    const flush = Effect.gen(function* () {
+      const state = yield* Ref.get(circuit);
+      const { targetActive } = yield* Ref.get(policy);
+      const active = (yield* Ref.get(workScope)) !== null;
+
+      yield* Effect.all(
+        [
+          Metric.update(Metric.withAttributes(Telemetry.circuitState, attrs), STATE_CODE[state]),
+          Metric.update(Metric.withAttributes(Telemetry.targetActive, attrs), targetActive),
+          Metric.update(Metric.withAttributes(Telemetry.fleetSize, attrs), cfg.fleetSize),
+          Metric.update(Metric.withAttributes(Telemetry.selfActive, attrs), active ? 1 : 0),
+          Metric.update(Metric.withAttributes(Telemetry.inFlight, attrs), inFlight),
+          Metric.update(Metric.withAttributes(Telemetry.queued, attrs), queued),
+        ],
+        { discard: true },
+      );
+
+      const delta = {
+        ok: ok - flushed.ok,
+        failed: failed - flushed.failed,
+        probed: probed - flushed.probed,
+        gaps: gaps - flushed.gaps,
+        duplicates: duplicates - flushed.duplicates,
+      };
+      flushed = { ok, failed, probed, gaps, duplicates };
+
+      if (delta.ok > 0) {
+        yield* Metric.update(
+          Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "ok" }),
+          delta.ok,
+        );
+      }
+      if (delta.failed > 0) {
+        // Published together because the gap between them is informative.
+        // Every failed call rejects its message, but a rejection whose link
+        // has already gone (OPEN tearing down the work connection with calls
+        // still in flight) is swallowed by the client's guarded settle, and
+        // the broker requeues that delivery instead of dead-lettering it —
+        // so dead_lettered trailing calls{failed} slightly is work that was
+        // retried rather than work that was lost. The two diverging by a
+        // *lot* would mean something else, which is why both are here.
+        yield* Effect.all(
+          [
+            Metric.update(
+              Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "failed" }),
+              delta.failed,
+            ),
+            Metric.update(Metric.withAttributes(Telemetry.deadLettered, attrs), delta.failed),
+          ],
+          { discard: true },
+        );
+      }
+      if (delta.probed > 0) {
+        yield* Metric.update(Metric.withAttributes(Telemetry.probes, attrs), delta.probed);
+      }
+      if (delta.gaps > 0) {
+        yield* Metric.update(Metric.withAttributes(Telemetry.controlGaps, attrs), delta.gaps);
+      }
+      if (delta.duplicates > 0) {
+        yield* Metric.update(
+          Metric.withAttributes(Telemetry.controlDuplicates, attrs),
+          delta.duplicates,
+        );
+      }
+      for (const [type, count] of eventsByType) {
+        const seen = count - (flushedEvents.get(type) ?? 0);
+        if (seen > 0) {
+          yield* Metric.update(
+            Metric.withAttributes(Telemetry.controlEvents, { ...attrs, type }),
+            seen,
+          );
+        }
+      }
+      flushedEvents = new Map(eventsByType);
+    });
+
+    /**
+     * Zero every counter once at startup so its series exists before
+     * anything has happened to it. Without this the dashboard's
+     * delivery-contract tiles read "No data" until the first gap — and a
+     * tile whose entire job is to sit at zero through an incident is worse
+     * than useless if zero is indistinguishable from broken.
+     */
+    yield* Effect.all(
+      [
+        Metric.update(Metric.withAttributes(Telemetry.controlGaps, attrs), 0),
+        Metric.update(Metric.withAttributes(Telemetry.controlDuplicates, attrs), 0),
+        Metric.update(Metric.withAttributes(Telemetry.deadLettered, attrs), 0),
+        Metric.update(Metric.withAttributes(Telemetry.probes, attrs), 0),
+        Metric.update(Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "ok" }), 0),
+        Metric.update(Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "failed" }), 0),
+      ],
+      { discard: true },
+    );
+
+    yield* Effect.forkScoped(
+      Effect.forever(Effect.sleep("1 second").pipe(Effect.andThen(flush))),
+    );
+
     // A heartbeat independent of the control plane. Without it a daemon that
     // has gone deaf is indistinguishable from one whose circuit simply has
     // not moved — which is precisely how the stranded-delivery bug above hid
-    // for as long as it did.
+    // for as long as it did. The metrics above are the same observation made
+    // scrapeable; this stays because a log line is what you actually have
+    // when you are looking at one container.
     yield* Effect.forever(
       Effect.sleep("15 seconds").pipe(
         Effect.andThen(describe),

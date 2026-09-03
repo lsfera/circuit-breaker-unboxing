@@ -5,6 +5,7 @@
   "engines": {
     "node": ">=22.6"
   },
+  "packageManager": "pnpm@11.23.0",
   "scripts": {
     "start": "node --experimental-strip-types packages/aggregator/src/main.ts",
     "test": "node --experimental-strip-types --test 'packages/*/test/*.test.ts'",

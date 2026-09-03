@@ -236,6 +236,7 @@ export const snapshot = (self: BreakerState): ApiSnapshot => ({
       vote: s.vote,
       healthy: s.report.healthy,
       total: s.report.total,
+      ejectionsActive: s.report.ejectionsActive,
     }))
     .sort((a, b) => a.replicaId.localeCompare(b.replicaId)),
 });

@@ -1,10 +1,11 @@
 import { Effect, Metric, Ref, Schedule, Stream } from "effect";
-import { HttpRouter, HttpServerResponse } from "effect/unstable/http";
+import { HttpMiddleware, HttpRouter, HttpServerResponse } from "effect/unstable/http";
 import { PrometheusMetrics } from "effect/unstable/observability";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Aggregator } from "./Aggregator.ts";
+import { HaSettings } from "./Coordination.ts";
 import { EventBus, EventSink } from "./Events.ts";
 import { FleetSource } from "./FleetSource.ts";
 import * as Telemetry from "./Telemetry.ts";
@@ -69,16 +70,49 @@ export const HttpLive = HttpRouter.use((router) =>
     const bus = yield* EventBus;
     const fleet = yield* FleetSource;
     const sink = yield* EventSink;
+    const ha = yield* HaSettings;
     const integrity = yield* Ref.make(emptyIntegrity);
+
+    // Register every per-API counter at zero before anything has happened to
+    // it. An `effect` counter has no series until its first update, so
+    // without this the dashboard's delivery-contract tiles read "No data"
+    // rather than 0 — and a tile whose whole job is to sit at zero through
+    // an incident is worse than useless when zero looks like broken.
+    yield* fleet.specs.pipe(
+      Effect.flatMap((specs) =>
+        Effect.forEach(
+          specs,
+          ({ apiId }) =>
+            Effect.all(
+              [
+                Metric.update(Metric.withAttributes(Telemetry.subscriberReceived, { apiId }), 0),
+                Metric.update(Metric.withAttributes(Telemetry.subscriberGaps, { apiId }), 0),
+                Metric.update(Metric.withAttributes(Telemetry.subscriberDuplicates, { apiId }), 0),
+                Metric.update(Metric.withAttributes(Telemetry.webhookDelivered, { apiId }), 0),
+                Metric.update(Metric.withAttributes(Telemetry.webhookFailed, { apiId }), 0),
+                Metric.update(Metric.withAttributes(Telemetry.webhookDeadLettered, { apiId }), 0),
+              ],
+              { discard: true },
+            ),
+          { discard: true },
+        ),
+      ),
+    );
 
     const stateFrame = Effect.gen(function* () {
       const apis = yield* agg.snapshots;
       const specs = yield* fleet.specs;
       const dead = yield* sink.deadLetters;
       const i = yield* Ref.get(integrity);
+      // A standby polls nothing, so it has no APIs to show. Without saying
+      // so, its console is an empty page that looks exactly like a broken
+      // one — which is a bad thing to be looking at during a failover demo,
+      // when the empty page is the correct behaviour.
+      const isLeader = yield* agg.isLeader;
       return {
         apis,
         specs,
+        leader: { isLeader, instanceId: ha.instanceId },
         deadLetters: dead.length,
         subscriber: {
           count: i.received,
@@ -128,6 +162,8 @@ export const HttpLive = HttpRouter.use((router) =>
     // nothing here is scraped or pushed separately. Point Prometheus (or the
     // docker-compose monitoring stack) at this path in either sim or real-Envoy
     // mode; it works identically since it reads the registry, not the fleet.
+    // Logging disabled for this route alone: Prometheus scrapes every 2s, so
+    // an access log line per scrape buries every log that says something.
     yield* router.add(
       "GET",
       "/metrics",
@@ -137,6 +173,7 @@ export const HttpLive = HttpRouter.use((router) =>
             contentType: "text/plain; version=0.0.4; charset=utf-8",
           }),
         ),
+        HttpMiddleware.withLoggerDisabled,
       ),
     );
 

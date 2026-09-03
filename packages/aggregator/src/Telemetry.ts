@@ -1,5 +1,4 @@
 import { Metric } from "effect";
-import type { State } from "@egress/domain/Model.ts";
 
 /**
  * All metrics the demo emits, in one place. Every metric is plain `effect`
@@ -12,13 +11,13 @@ import type { State } from "@egress/domain/Model.ts";
  * known until the fleet reports it.
  */
 
-/** 0=CLOSED 1=DEGRADED 2=OPEN 3=HALF_OPEN — a stepped line per API in Grafana. */
-export const STATE_CODE: Record<State, number> = {
-  CLOSED: 0,
-  DEGRADED: 1,
-  OPEN: 2,
-  HALF_OPEN: 3,
-};
+/**
+ * 0=CLOSED 1=DEGRADED 2=OPEN 3=HALF_OPEN — a stepped line per API in
+ * Grafana. Re-exported rather than defined here: @egress/rmq-consumer's
+ * daemons publish their own view of the same state, and the two lines are
+ * only comparable if they share one encoding.
+ */
+export { STATE_CODE } from "@egress/domain/Model.ts";
 
 export const circuitState = Metric.gauge("egress_circuit_state", {
   description:
@@ -34,6 +33,16 @@ export const circuitTotalEndpoints = Metric.gauge(
   "egress_circuit_total_endpoints",
   { description: "Total endpoint count per API." },
 );
+
+/**
+ * Fleet-wide sum of `outlier_detection.ejections_active`, the one Envoy
+ * signal that says "a host was ejected" as opposed to "membership changed".
+ * Not an input to the breaker — see ApiSnapshot's note — but the first thing
+ * worth looking at when a DEGRADED is unexplained.
+ */
+export const circuitEjectionsActive = Metric.gauge("egress_circuit_ejections_active", {
+  description: "Ejected hosts summed across every reporting replica, per API.",
+});
 
 export const circuitReportingReplicas = Metric.gauge(
   "egress_circuit_reporting_replicas",

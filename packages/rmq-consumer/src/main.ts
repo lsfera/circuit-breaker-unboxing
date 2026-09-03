@@ -1,5 +1,8 @@
 import { Effect, Layer } from "effect";
-import { NodeRuntime } from "@effect/platform-node";
+import { HttpMiddleware, HttpRouter, HttpServerResponse } from "effect/unstable/http";
+import { PrometheusMetrics } from "effect/unstable/observability";
+import { NodeHttpServer, NodeRuntime } from "@effect/platform-node";
+import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { RmqLive } from "@egress/rmq/Client.ts";
 import { runDaemon } from "./daemon.ts";
@@ -16,6 +19,12 @@ import { runProducer } from "./producer.ts";
  * rmq-daemon-* / rmq-producer services in docker-compose.yml. DAEMON_INDEX
  * is the one value that differs between the otherwise identical daemon
  * containers.
+ *
+ * Either role also serves `/metrics` on METRICS_PORT, read from the same
+ * in-process `effect` Metric registry @egress/aggregator uses, and scraped
+ * by the same Prometheus. That is what puts the fleet's behaviour on the
+ * same dashboard as the circuit it is reacting to, instead of in a second
+ * tool on a second screen.
  */
 
 const role = process.argv[2] ?? "daemon";
@@ -74,4 +83,44 @@ process.on("uncaughtException", (error) => {
   throw error;
 });
 
-NodeRuntime.runMain(Effect.scoped(Effect.provide(program, RmqLive(connect))));
+const METRICS_PORT = Number(env("METRICS_PORT", "9464"));
+
+/**
+ * Identical to @egress/aggregator's `/metrics` route, deliberately: one
+ * registry, one exposition format, nothing extra to keep in sync.
+ *
+ * The logger is disabled for it, and that matters more here than it looks.
+ * Prometheus scrapes every 2s, and a daemon's log is the thing you actually
+ * read when one of them misbehaves — an access log line per scrape would
+ * bury the heartbeat that exists precisely so a deaf daemon is visible.
+ */
+const MetricsRoute = HttpRouter.use((router) =>
+  router.add(
+    "GET",
+    "/metrics",
+    PrometheusMetrics.format().pipe(
+      Effect.map((body) =>
+        HttpServerResponse.text(body, {
+          contentType: "text/plain; version=0.0.4; charset=utf-8",
+        }),
+      ),
+      HttpMiddleware.withLoggerDisabled,
+    ),
+  ),
+);
+
+/**
+ * The role runs as a scoped fiber for the lifetime of the server, the same
+ * shape the aggregator's tick loop uses: interruption is structural, and
+ * failing setup (a broker that never comes up, a queue redeclared with
+ * different arguments) is a defect rather than something to recover from —
+ * hence `orDie`, and hence the container restarting rather than sitting
+ * there half-wired.
+ */
+const RoleDaemon = Layer.effectDiscard(Effect.forkScoped(Effect.orDie(program)));
+
+const MainLayer = HttpRouter.serve(
+  Layer.provideMerge(RoleDaemon, MetricsRoute).pipe(Layer.provide(RmqLive(connect))),
+).pipe(Layer.provide(NodeHttpServer.layer(createServer, { port: METRICS_PORT })));
+
+NodeRuntime.runMain(Layer.launch(MainLayer));

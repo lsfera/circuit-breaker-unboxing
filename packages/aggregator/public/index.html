@@ -181,7 +181,7 @@ function renderState(msg){
     strip.setAttribute("aria-label",
       `${api.replicas.length} replicas: ${api.votes.OK} ok, ${api.votes.DEGRADED} degraded, ${api.votes.DOWN} down`);
     strip.innerHTML = api.replicas.map(r =>
-      `<span class="rep" data-vote="${r.vote}" title="${r.replicaId}: ${r.healthy}/${r.total} endpoints healthy"></span>`
+      `<span class="rep" data-vote="${r.vote}" title="${r.replicaId}: ${r.healthy}/${r.total} endpoints healthy, ${r.ejectionsActive ?? 0} ejected"></span>`
     ).join("");
 
     const distinct = new Set(api.replicas.map(r => r.vote)).size;
@@ -201,8 +201,13 @@ function renderState(msg){
     }
   }
 
-  document.getElementById("meta").textContent =
-    `${msg.apis.length} apis · ${msg.apis[0]?.reportingReplicas ?? 0} replicas · ${msg.deadLetters} dead-lettered`;
+  // A standby has nothing to show, and saying so is the difference between
+  // "correct" and "broken" for anyone looking at the second instance.
+  const lead = msg.leader || {};
+  document.getElementById("meta").textContent = lead.isLeader === false
+    ? `${lead.instanceId} · STANDBY — another instance holds the lease; it publishes, this one waits`
+    : `${lead.instanceId ? lead.instanceId + " · LEADER · " : ""}`
+      + `${msg.apis.length} apis · ${msg.apis[0]?.reportingReplicas ?? 0} replicas · ${msg.deadLetters} dead-lettered`;
 
   const s = msg.subscriber;
   const bad = s.gaps > 0 || s.duplicates > 0;

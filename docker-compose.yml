@@ -26,6 +26,11 @@ x-daemon-env: &daemon-env
   # like infra/traffic-generator.mjs.
   EGRESS_ADDR: http://envoy:10000
   API_PATH: /payments
+  # Each daemon serves the same /metrics route the aggregator does, from the
+  # same in-process effect registry. Not published to the host: Prometheus
+  # scrapes them by service name on this network (infra/monitoring/
+  # prometheus.yml), so five identical port numbers never collide.
+  METRICS_PORT: "9464"
 
 services:
   flaky-upstream:
@@ -79,7 +84,11 @@ services:
   # ramp back — the single most legible view of what this fleet does.
   rabbitmq:
     image: rabbitmq:4.0-management-alpine
-    ports: ["5672:5672", "15672:15672"]
+    # 15692 is rabbitmq_prometheus, enabled by default in the management
+    # image — the per-queue depth on the Grafana dashboard comes from there,
+    # so the queue filling and draining is visible in the same place as the
+    # circuit that caused it, not only in the management UI.
+    ports: ["5672:5672", "15672:15672", "15692:15692"]
     # Everything downstream gates on this rather than on container start:
     # a daemon that connects before the broker is listening just dies, and
     # `depends_on` alone does not wait for readiness.
@@ -164,6 +173,7 @@ services:
       RMQ: rabbitmq:5672
       API_ID: payments-provider
       RATE_PER_SECOND: "200"
+      METRICS_PORT: "9464"
     depends_on:
       rabbitmq: {condition: service_healthy}
     networks: [default, devcontainer]

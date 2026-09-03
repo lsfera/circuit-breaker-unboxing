@@ -80,6 +80,34 @@ export class RmqError extends Data.TaggedError("RmqError")<{
 
 export type QueueArgs = Record<string, unknown>;
 
+/**
+ * What a handler asks the broker to do with the delivery it was given.
+ *
+ * - `accept` — done with it, drop it from the queue (the default; a handler
+ *   that returns nothing gets this).
+ * - `requeue` — released, back onto the queue for another consumer or
+ *   another attempt. Nothing about it is delayed, so an unbounded requeue on
+ *   a failing dependency is a hot loop; bound it.
+ * - `discard` — rejected. On a queue declared with `x-dead-letter-exchange`
+ *   that routes the message to the dead-letter queue; on one without, it is
+ *   simply dropped. This is how a failure becomes visible and drainable
+ *   instead of silent.
+ */
+export type Settlement = "accept" | "requeue" | "discard";
+
+/**
+ * What the broker knows about this particular delivery.
+ *
+ * `deliveryCount` is AMQP 1.0's header field of the same name, as RabbitMQ
+ * reports it — 0 on a first delivery. It is the only thing that makes a
+ * redelivery budget possible across *different* consumers: an in-process
+ * attempt counter is lost the moment the message goes back to the queue and
+ * is picked up by another daemon.
+ */
+export type DeliveryInfo = {
+  readonly deliveryCount: number;
+};
+
 export interface RmqService {
   /** durable: false, exclusive: false — every queue this repo declares is a demo fixture, not durable state. */
   readonly declareQueue: (name: string, args?: QueueArgs) => Effect.Effect<RmqQueue, RmqError>;
@@ -90,16 +118,25 @@ export interface RmqService {
     destination: RmqQueue,
   ) => Effect.Effect<void, RmqError>;
   /**
-   * The message is accepted only once `onMessage` settles. Returning a
+   * The message is settled only once `onMessage` settles. Returning a
    * promise is therefore the flow-control lever this client otherwise
    * doesn't give you: AMQP 1.0 credit is replenished on settlement, so a
    * handler that waits for its own work keeps the broker from pushing more
-   * than the consumer can absorb. A synchronous handler accepts immediately
+   * than the consumer can absorb. A synchronous handler settles immediately
    * and gets no backpressure at all.
+   *
+   * The resolved value chooses the outcome; returning nothing (or nothing at
+   * all, synchronously) accepts, which is what every handler that cannot
+   * fail wants. A handler that *rejects* also accepts — the alternative is
+   * an unbounded redelivery loop driven by a bug, which is worse than a lost
+   * message and much harder to see.
    */
   readonly consume: (
     queue: string,
-    onMessage: (body: string) => void | Promise<void>,
+    onMessage: (
+      body: string,
+      delivery: DeliveryInfo,
+    ) => void | Promise<void | Settlement>,
   ) => Effect.Effect<Consumer, RmqError>;
   /** One publisher per fixed (exchange, routingKey) or (queue) target — see Client.ts's module doc for why this is a publisher-per-target library, not per-message addressing. */
   readonly publisherToExchange: (
@@ -126,9 +163,17 @@ const wrap = <A>(operation: string, promise: () => Promise<A>) =>
  * than merely convenient. Thrown from inside a socket callback, it would
  * otherwise take the process down.
  */
-const settle = (ctx: { accept: () => void }) => {
+type DeliveryContext = {
+  accept: () => void;
+  discard: (annotations?: unknown) => void;
+  requeue: (annotations?: unknown) => void;
+};
+
+const settle = (ctx: DeliveryContext, outcome: Settlement) => {
   try {
-    ctx.accept();
+    if (outcome === "discard") ctx.discard();
+    else if (outcome === "requeue") ctx.requeue();
+    else ctx.accept();
   } catch {
     // link already gone; the delivery goes back to the queue
   }
@@ -203,15 +248,16 @@ export const makeRmq = (
             const consumer = await connection.createConsumer({
               queue: { name: queue },
               messageHandler: (ctx, message) => {
-                const done = onMessage(String(message.body));
-                if (done === undefined) return settle(ctx);
-                // Accepted either way. Rejecting a message because the call
-                // behind it failed would requeue it straight back into an
-                // outage, which is the thundering herd the whole design is
-                // about — see docs/rmq-control-plane.md.
+                const delivery: DeliveryInfo = {
+                  deliveryCount: Number(
+                    (message as { delivery_count?: number }).delivery_count ?? 0,
+                  ),
+                };
+                const done = onMessage(String(message.body), delivery);
+                if (done === undefined) return settle(ctx as DeliveryContext, "accept");
                 void done.then(
-                  () => settle(ctx),
-                  () => settle(ctx),
+                  (outcome) => settle(ctx as DeliveryContext, outcome ?? "accept"),
+                  () => settle(ctx as DeliveryContext, "accept"),
                 );
               },
             });

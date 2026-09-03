@@ -246,3 +246,106 @@ test("failover resumes sequence and previousState from the checkpoint, not from 
     "previousState must reflect the checkpointed state, not a cold start",
   );
 });
+
+/**
+ * The case the test above does not reach: an instance that led, *lost* the
+ * lease, and is later promoted again — with its own breakers still warm in
+ * memory from the first stint.
+ *
+ * Rehydration only fires for APIs the instance has no breaker for, so a warm
+ * registry sails straight past it and resumes from whatever sequence this
+ * instance last used itself — while whoever led in between has already
+ * published past that number. Two different payloads under one sequence,
+ * which is precisely the break `/api/subscriber` exists to detect. Losing
+ * the lease therefore has to drop the registry, so that a re-promotion is
+ * indistinguishable from the cold start the test above covers.
+ *
+ * The instance that leads in between is modelled by its effect on the shared
+ * coordinator rather than as a second Aggregator: it takes the lease (which
+ * is what demotes A) and moves the API on by five transitions. Whether it is
+ * a whole instance is beside the point here — the failover test above
+ * already covers that — and what matters is what A does when it comes back.
+ */
+test("a re-promoted instance resumes from the checkpoint, not its own stale sequence", async () => {
+  const { firstStint, secondStint, handoffSequence } = await Effect.runPromise(
+    Effect.provide(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(T0);
+        const coordination = yield* makeInMemoryCoordination;
+        const delivered = yield* Ref.make<ReadonlyArray<CircuitEvent>>([]);
+        const marker = yield* Ref.make(0);
+        const handoff = yield* Ref.make(0);
+
+        yield* Effect.gen(function* () {
+          const fleet = yield* FleetSource;
+          yield* ticks(8);
+          yield* fleet.setFailureRate("payments", 1);
+          yield* ticks(60); // A drives CLOSED -> ... -> OPEN and publishes it
+
+          const soFar = yield* Ref.get(delivered);
+          const last = soFar.filter((e) => e.type === "egress.circuit.state_changed").at(-1);
+          assert.ok(last, "A must publish during its first stint");
+          yield* Ref.set(marker, soFar.length);
+
+          // Someone else leads. A's lease lapses first, so this is a genuine
+          // handoff with a strictly higher token.
+          yield* TestClock.adjust(Duration.millis(2000));
+          const token = yield* coordination.leaderElection.tryAcquireOrRenew("B", 1000);
+          assert.ok(Option.isSome(token), "the other instance must be able to acquire");
+          const advanced = last.data.sequence + 5;
+          yield* Ref.set(handoff, advanced);
+          yield* coordination.checkpointStore.save("payments", token.value, {
+            state: "CLOSED",
+            reason: "PROBE_SUCCEEDED",
+            sequence: advanced,
+            changedAt: yield* Effect.clockWith((c) => c.currentTimeMillis),
+            openBackoffMs: CFG.openMs,
+          });
+
+          // A ticks again. Its first ticks find B's lease still live — that
+          // is where it learns it was demoted — and once that lease lapses
+          // it takes over. Its own fleet is still failing, so it has a real
+          // transition to publish as soon as it does.
+          yield* ticks(80);
+        }).pipe(
+          Effect.provide(instanceLayer("A", coordination, delivered)),
+          Effect.provideService(Config, CFG),
+        );
+
+        const all = yield* Ref.get(delivered);
+        const split = yield* Ref.get(marker);
+        return {
+          firstStint: all.slice(0, split),
+          secondStint: all.slice(split),
+          handoffSequence: yield* Ref.get(handoff),
+        };
+      }),
+      TestClock.layer(),
+    ),
+  );
+
+  const changes = (xs: ReadonlyArray<CircuitEvent>) =>
+    xs.filter((e) => e.type === "egress.circuit.state_changed");
+
+  const before = changes(firstStint);
+  const after = changes(secondStint);
+  assert.ok(before.length > 0, "A must publish during its first stint");
+  assert.ok(after.length > 0, "A must publish again once it is re-promoted");
+
+  assert.equal(
+    after[0]!.data.sequence,
+    handoffSequence + 1,
+    `a re-promoted instance must continue from the checkpoint (${handoffSequence}), ` +
+      `not from its own stale in-memory sequence (${before.at(-1)!.data.sequence}); ` +
+      `got ${after.map((e) => e.data.sequence).join(",")}`,
+  );
+  assert.equal(
+    after[0]!.data.previousState,
+    "CLOSED",
+    "previousState must come from the checkpoint the other leader left behind",
+  );
+  assert.ok(
+    after.every((e) => e.data.sequence > handoffSequence),
+    "no event after re-promotion may reuse a sequence the other leader already published",
+  );
+});

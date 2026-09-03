@@ -277,3 +277,77 @@ test("closing a consumer with deliveries in flight stalls the whole connection",
     `a connection per probe stalled at cycle ${isolatedWedgedAt}, which is what the daemon relies on not happening`,
   );
 });
+
+/**
+ * The third thing this client settles quietly, and the reason
+ * @egress/rmq-consumer's daemons dead-letter a failed call rather than
+ * retrying it.
+ *
+ * `discard()` sends `modified{delivery_failed: true, undeliverable_here:
+ * true}`, which RabbitMQ routes to the queue's `x-dead-letter-exchange` —
+ * that half works, and it is what turns a failed third-party call from a
+ * silently dropped message into one you can count and replay.
+ *
+ * `requeue()` sends `modified{delivery_failed: false}`, and RabbitMQ only
+ * increments AMQP 1.0's `delivery-count` for a delivery marked *failed*. So
+ * a released message comes back looking brand new, forever. The client
+ * exposes no outcome in between — there is no "this attempt failed, let
+ * someone else try" — so a redelivery budget that survives the message
+ * moving to another daemon is not implementable here, and one attempt then
+ * dead-letter is the honest policy rather than a lazy one.
+ *
+ * Same shape of finding as link credit, and pinned for the same reason: if
+ * a future client release exposes `modified{delivery_failed: true}`, the
+ * second half of this test fails and tells us a real budget became possible.
+ */
+test("a rejected delivery dead-letters, and a released one is never counted as an attempt", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const work = "dl.work";
+  const dead = "dl.work.dead";
+
+  const { deadLettered, counts } = await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(dead);
+      yield* rmq.declareQueue(work, {
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": dead,
+      });
+
+      const deadLettered: string[] = [];
+      yield* rmq.consume(dead, (body) => void deadLettered.push(body));
+
+      // Released a fixed number of times, then rejected. `seen` is an
+      // in-process counter precisely because the broker-side one is what is
+      // under test — and it is also the only thing stopping this from
+      // looping forever if delivery_count never moves, which is the finding.
+      const counts: number[] = [];
+      let seen = 0;
+      yield* rmq.consume(work, (_body, delivery) => {
+        counts.push(delivery.deliveryCount);
+        seen += 1;
+        return Promise.resolve(seen >= 3 ? "discard" : "requeue");
+      });
+
+      const pub = yield* rmq.publisherToQueue(work);
+      yield* rmq.send(pub, "needs-retrying");
+      yield* Effect.promise(() => new Promise((r) => setTimeout(r, 2500)));
+      return { deadLettered, counts };
+    }),
+  );
+
+  assert.deepEqual(
+    deadLettered,
+    ["needs-retrying"],
+    "a discarded message must arrive on the dead-letter queue, not vanish",
+  );
+  assert.ok(counts.length >= 3, `the message should have been redelivered, saw ${counts.length}`);
+  assert.deepEqual(
+    counts.slice(0, 3),
+    [0, 0, 0],
+    "released deliveries are not counted as attempts by this client — if this " +
+      "now increments, the client can express modified{delivery_failed: true} " +
+      "and a real cross-consumer redelivery budget has become possible",
+  );
+});

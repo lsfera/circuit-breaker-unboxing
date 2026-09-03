@@ -1,6 +1,7 @@
-import { Duration, Effect, Schedule } from "effect";
+import { Duration, Effect, Metric, Schedule } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
-import { workQueueFor } from "@egress/rmq/ControlPlane.ts";
+import { deadLetterQueueFor, workQueueArgs, workQueueFor } from "@egress/rmq/ControlPlane.ts";
+import * as Telemetry from "./Telemetry.ts";
 
 /**
  * The "high throughput of requests" half of the scenario: a steady stream of
@@ -24,7 +25,11 @@ export const runProducer = (cfg: ProducerConfig) =>
   Effect.gen(function* () {
     const rmq = yield* Rmq;
     const queue = workQueueFor(cfg.apiId);
-    yield* rmq.declareQueue(queue);
+    // Same arguments the daemons declare, because whichever container starts
+    // first is what actually creates the queue and a mismatched redeclare is
+    // a hard error, not a merge.
+    yield* rmq.declareQueue(deadLetterQueueFor(cfg.apiId));
+    yield* rmq.declareQueue(queue, workQueueArgs(cfg.apiId));
     const publisher = yield* rmq.publisherToQueue(queue);
 
     // One batch per 100ms rather than one timer per message: at a few hundred
@@ -39,6 +44,13 @@ export const runProducer = (cfg: ProducerConfig) =>
       for (let i = 0; i < perTick; i++) {
         yield* rmq.send(publisher, JSON.stringify({ apiId: cfg.apiId, n: sent++ }));
       }
+      // Scraped alongside the daemons' call counters: arrival rate against
+      // completion rate is the queue's depth, expressed as two lines that
+      // separate during an outage and converge again on the ramp back.
+      yield* Metric.update(
+        Metric.withAttributes(Telemetry.published, { apiId: cfg.apiId }),
+        perTick,
+      );
       if (sent % (cfg.ratePerSecond * 10) < perTick) {
         yield* Effect.log(`${cfg.apiId}/producer: ${sent} messages published`);
       }

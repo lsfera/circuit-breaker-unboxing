@@ -336,6 +336,65 @@ A narrowly filtered `uncaughtException` handler in `rmq-consumer`'s
 `main.ts` remains as a backstop for the first of these, and only for it;
 every other uncaught exception is still fatal on purpose.
 
+### There is no way to say "this attempt failed, try again"
+
+The work queue is declared with `x-dead-letter-exchange`, and a daemon whose
+third-party call fails rejects the message rather than accepting it, so the
+work lands on `<apiId>.work.dead` instead of disappearing. That much is
+ordinary. What is not ordinary is why there is no retry in front of it.
+
+The client offers three outcomes, and the middle one is missing:
+
+| Outcome | What it sends | What RabbitMQ does |
+|---|---|---|
+| `accept()` | `accepted` | removes the message |
+| `requeue()` | `modified{delivery_failed: false}` | requeues it, **delivery-count unchanged** |
+| `discard()` | `modified{delivery_failed: true, undeliverable_here: true}` | dead-letters it |
+
+AMQP 1.0's `delivery-count` is the only attempt counter that survives a
+message moving between consumers — an in-process counter is lost the moment
+the message goes back on the queue and another daemon picks it up. RabbitMQ
+increments it only for a delivery marked *failed*, and `requeue()` is
+hard-coded to mark it not-failed. There is no `modified{delivery_failed:
+true, undeliverable_here: false}` on the public surface, so "failed, let
+someone else try, and remember that this was attempt two" cannot be
+expressed at all.
+
+Measured rather than read off the spec: releasing the same message three
+times returned `delivery_count: 0` every time. `Client.test.ts` pins both
+halves — the dead-letter arriving, and the count not moving — so a client
+release that exposes the missing outcome turns that test red and says a real
+redelivery budget has become possible.
+
+Given that, one attempt then dead-letter is the honest policy rather than a
+shortcut past one. An unbounded requeue against a dead upstream is a hot
+loop with no counter to stop it, which is strictly worse than a queue full
+of messages you can look at.
+
+### The fleet is on the dashboard now, because that bug was an observability bug
+
+Every daemon serves `/metrics` on `METRICS_PORT` from the same in-process
+`effect` registry the aggregator uses, and Prometheus scrapes all five plus
+RabbitMQ's own exporter (`rabbitmq_prometheus`, enabled by default in the
+management image, on 15692 — per-queue depth lives behind
+`/metrics/detailed`, since the plain endpoint aggregates every queue into
+one number).
+
+The panel that matters is `max(egress_daemon_target_active)` against
+`sum(egress_daemon_self_active)`. Every daemon derives the same target from
+the same events, so those two lines track each other — and when they stop
+tracking, some daemon has stopped hearing the control plane while still
+looking perfectly healthy. That is exactly the failure described above,
+which took a session to find by hand and is now a glance.
+
+Two of these metrics are the delivery contract rather than fleet mechanics.
+`egress_daemon_control_gaps_total` and `_duplicates_total` apply the same
+per-API sequence rule `/api/subscriber` applies to the webhook stream —
+snapshots repeat and are exempt, `state_changed` must be gapless — but on
+the AMQP transport, from five processes the publisher does not control. A
+non-zero duplicate count is what a leader resuming from a stale in-memory
+sequence looks like from the outside.
+
 ## Verified end to end
 
 `docker compose up` runs the whole thing: `rabbitmq`, `rmq-producer` at
@@ -383,6 +442,41 @@ seq=221 (PROBE_SUCCEEDED)     CLOSED    target=5/5 self=ACTIVE ok=11305 failed=3
 Every bug described above was found by this run, not by reading the client's
 source.
 
+### The same run, once the fleet had metrics
+
+Repeated after `/metrics`, dead-lettering and the Prometheus/Grafana wiring
+went in — same injection, read from Prometheus rather than from logs:
+
+| | mid-outage | after recovery |
+|---|---|---|
+| `egress_circuit_state` | 2 (`OPEN`) | 0 (`CLOSED`) |
+| `max(egress_daemon_target_active)` | 0 | 5 |
+| `sum(egress_daemon_self_active)` | 0 | 5 |
+| `payments-provider.work` depth | 3,007 | 0 |
+| `payments-provider.work.dead` depth | 413 | 413 |
+| `sum(egress_daemon_dead_lettered_total)` | 429 | 430 |
+| gaps + duplicates, AMQP side | 0 | 0 |
+| `sum(egress_circuit_ejections_active)` | 9 | 0 |
+
+Two things in that table are worth more than the rest.
+
+The dead-letter queue holding 413 messages after recovery is the whole
+argument for this change: that work used to be accepted and gone. It is now
+sitting somewhere you can look at it.
+
+And `dead_lettered` (430) exceeding the dead-letter queue's depth (413) is
+not a discrepancy, it is the guarded settle doing its job. When `OPEN` tears
+down the work connection with calls still in flight, the rejection lands on
+a link that has already gone; `Client.ts` swallows that, and the broker
+requeues the delivery rather than dead-lettering it. Those messages were
+retried and succeeded. The counter says "this many calls failed"; the queue
+says "this much work is still unfinished", and they are different questions.
+
+The recovery in this run went `target=0 → 1 → 4 → 5` again, through
+`PROBE_FAILED → OPEN → HALF_OPEN → PROBE_SUCCEEDED`, with one snapshot
+repeating `seq=9` in the middle — correctly not counted as a duplicate,
+which is the rule the AMQP-side contract check exists to apply.
+
 ## What's still missing
 
 - **The ramp-back schedule advances per event, not per unit of time.** A
@@ -398,11 +492,6 @@ source.
   survivors. The `DEGRADED → target = ceil(fleet/2)` path is covered by
   `DaemonPolicy.test.ts` but has not been watched happen against real
   daemons.
-- **A failed call still accepts its message.** Settlement now waits for the
-  call, but it accepts on failure as well as success, so a message lost to
-  an outage is gone. Rejecting would requeue it straight back into the
-  outage; a real deployment wants a dead-letter queue or a bounded
-  redelivery budget instead, and neither is built.
 - **The DEGRADED-as-credit-reduction idea is abandoned, on purpose, not
   worked around.** Checked the actual public surface rather than assumed it:
   `Consumer` exposes exactly `start()`/`close()`/`id`/`replyTo` — no method

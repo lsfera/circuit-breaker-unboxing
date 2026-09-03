@@ -23,6 +23,23 @@ export const Vote = { OK: "OK", DEGRADED: "DEGRADED", DOWN: "DOWN" } as const;
 export type Vote = (typeof Vote)[keyof typeof Vote];
 
 /**
+ * State as a number, for the one place a state has to be graphed rather than
+ * read: a Prometheus gauge, drawn as a stepped line per API.
+ *
+ * It lives in the domain because both sides of the system publish it now —
+ * the aggregator's view of what it decided, and each daemon's view of what
+ * it was told. Two encodings would make those two lines silently
+ * incomparable on the same dashboard, which is the whole reason to plot them
+ * together.
+ */
+export const STATE_CODE: Record<State, number> = {
+  CLOSED: 0,
+  DEGRADED: 1,
+  OPEN: 2,
+  HALF_OPEN: 3,
+};
+
+/**
  * One replica's local view of one API. Maps 1:1 onto Envoy cluster stats, so
  * the simulated and real sources are interchangeable:
  *
@@ -52,12 +69,23 @@ export type ApiSnapshot = {
   readonly votes: Record<Vote, number>;
   readonly observedSince: number;
   readonly changedAt: number;
-  /** Per-replica detail — console only, never published. */
+  /** Per-replica detail — console and metrics only, never published. */
   readonly replicas: ReadonlyArray<{
     readonly replicaId: string;
     readonly vote: Vote;
     readonly healthy: number;
     readonly total: number;
+    /**
+     * Carried through rather than folded into the vote. Envoy keeps ejected
+     * hosts in `membership_total` and drops them from `membership_healthy`,
+     * so `healthy < total` and `ejectionsActive > 0` say the same thing
+     * about a *reachable* replica — but they stop agreeing the moment a host
+     * leaves membership for some other reason (an EDS update, a shrinking
+     * upstream), and telling those two apart is exactly what someone
+     * debugging a surprise DEGRADED needs. It is surfaced, not consulted:
+     * the breaker's vote stays derived from membership alone.
+     */
+    readonly ejectionsActive: number;
   }>;
 };
 

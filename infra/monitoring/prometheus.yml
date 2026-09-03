@@ -25,3 +25,37 @@ scrape_configs:
     metrics_path: /stats/prometheus
     static_configs:
       - targets: ["envoy-00:9901", "envoy-01:9901", "envoy-02:9901"]
+
+  # RabbitMQ's own exporter. `rabbitmq_prometheus` ships enabled in the
+  # management image on 15692, so this costs one line and no new container.
+  #
+  # Two jobs rather than one because the plain endpoint is aggregated: every
+  # queue metric on it is a cluster-wide sum with no `queue` label, which is
+  # exactly useless for watching one queue's depth climb through an outage.
+  # Per-queue series live behind /metrics/detailed, opted into by family.
+  - job_name: rabbitmq
+    static_configs:
+      - targets: ["rabbitmq:15692"]
+
+  - job_name: rabbitmq-queues
+    metrics_path: /metrics/detailed
+    params:
+      family: [queue_coarse_metrics, queue_consumer_count]
+    static_configs:
+      - targets: ["rabbitmq:15692"]
+
+  # The daemon fleet — the other half of the system, and until now the half
+  # with no metrics at all. Each daemon serves the same `/metrics` route the
+  # aggregator does, from the same in-process `effect` registry, so
+  # `egress_daemon_*` and `egress_circuit_*` land on one dashboard and can be
+  # read against each other. Prometheus's own `instance` label is what tells
+  # the five daemons apart; nothing in the app has to know its own hostname.
+  - job_name: rmq-fleet
+    static_configs:
+      - targets:
+          - "rmq-daemon-0:9464"
+          - "rmq-daemon-1:9464"
+          - "rmq-daemon-2:9464"
+          - "rmq-daemon-3:9464"
+          - "rmq-daemon-4:9464"
+          - "rmq-producer:9464"

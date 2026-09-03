@@ -77,6 +77,32 @@ export const AggregatorLayer = Layer.effect(
       token: null,
     });
 
+    /**
+     * Stop leading, and drop every breaker held in memory.
+     *
+     * The second half is not housekeeping — it is what keeps the sequence
+     * guarantee intact across a demotion. Whoever leads next resumes from
+     * the checkpoint and advances `sequence` past whatever is in memory
+     * here; the rehydrate-on-acquire path in `tick` only fires for APIs
+     * this instance has no breaker for, so a *warm* registry would let a
+     * re-promoted instance silently resume from its own stale sequence and
+     * republish numbers the other leader already used. Discarding it makes
+     * re-promotion identical to a cold start, which is the path that is
+     * actually exercised by a test.
+     *
+     * Losing the per-replica history costs nothing: it repopulates from the
+     * next few polls, exactly as it does on a fresh start — see
+     * Checkpoint's doc comment for why that is the whole point of keeping
+     * checkpoints this small.
+     */
+    const demote = Effect.all(
+      [
+        Ref.set(leadership, { isLeader: false, token: null }),
+        Ref.set(registry, { breakers: new Map(), lastSnapshotAt: new Map() }),
+      ],
+      { discard: true },
+    );
+
     const tick: Effect.Effect<ReadonlyArray<CircuitEvent>> = Effect.gen(
       function* () {
         const tokenOpt = yield* leader.tryAcquireOrRenew(ha.instanceId, ha.leaseTtlMs);
@@ -85,7 +111,7 @@ export const AggregatorLayer = Layer.effect(
         if (Option.isNone(tokenOpt)) {
           // Standby: do not poll, do not step, do not publish. The only
           // thing a non-leader instance does is keep trying to acquire.
-          yield* Ref.set(leadership, { isLeader: false, token: null });
+          yield* demote;
           return [];
         }
         const token = tokenOpt.value;
@@ -174,7 +200,10 @@ export const AggregatorLayer = Layer.effect(
               ),
             );
             if (fenced) {
-              yield* Ref.set(leadership, { isLeader: false, token: null });
+              // Same demotion as losing the lease outright, registry drop
+              // included — being fenced *is* how this instance finds out
+              // someone else has already moved the sequence on.
+              yield* demote;
               yield* Metric.update(Telemetry.isLeader, 0);
               yield* Metric.update(
                 Metric.withAttributes(Telemetry.fencingConflicts, { apiId: e.data.apiId }),
@@ -217,6 +246,12 @@ export const AggregatorLayer = Layer.effect(
                         apiId: snap.apiId,
                       }),
                       snap.reportingReplicas,
+                    ),
+                    Metric.update(
+                      Metric.withAttributes(Telemetry.circuitEjectionsActive, {
+                        apiId: snap.apiId,
+                      }),
+                      snap.replicas.reduce((n, r) => n + r.ejectionsActive, 0),
                     ),
                     Metric.update(
                       Metric.withAttributes(Telemetry.circuitSequence, { apiId: snap.apiId }),

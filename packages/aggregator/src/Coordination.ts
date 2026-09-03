@@ -13,9 +13,15 @@ import type { Reason, State } from "@egress/domain/Model.ts";
  * that always wins the lease," not a special case). The `RedisLike` port
  * makes an actual multi-process deployment possible: hand a real Redis
  * client to `RedisCoordinationLayer` and the Lua scripts below give the same
- * fencing guarantee across processes. That wiring is not exercised in this
- * repo — same honesty as the rest of the Envoy/Docker stack: reasoned from
- * Redis's documented command semantics, not run against a live Redis here.
+ * fencing guarantee across processes.
+ *
+ * Both paths are run, not just reasoned about. `Coordination.test.ts` drives
+ * two instances against the in-memory layer; `test/integration/
+ * RedisCoordination.test.ts` drives the same properties against a real Redis
+ * container; and `docker compose up` deploys it — two aggregator containers,
+ * `--ha=redis`, one shared `redis` service. The README's "High availability"
+ * section is the single place that tracks what has actually been observed;
+ * this comment deliberately does not restate it.
  */
 
 export type LeaseToken = number;
@@ -171,11 +177,12 @@ export const InMemoryCoordinationLayer: Layer.Layer<LeaderElection | CheckpointS
   );
 
 // ---------------------------------------------------------------------------
-// Redis-backed port — not wired by main.ts, not exercised against a live
-// Redis in this sandbox. `RedisLike` is deliberately the smallest surface
-// any real client (ioredis, node-redis) already satisfies with a one-line
-// adapter, so adding a real dependency is an integration choice for whoever
-// deploys this, not something this repo needs to pin.
+// Redis-backed port, wired by main.ts under `--ha=redis`.
+//
+// `RedisLike` is deliberately the smallest surface any real client (ioredis,
+// node-redis) satisfies with a one-line adapter — one `eval` method. main.ts
+// happens to pin ioredis for the demo deployment, but nothing in this module
+// knows that, so swapping the client is an adapter change and not a rewrite.
 // ---------------------------------------------------------------------------
 
 export type RedisLike = {

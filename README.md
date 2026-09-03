@@ -1,6 +1,6 @@
 # Per-API egress circuit breaker events
 
-A working prototype of the design we discussed: Envoy enforces circuit breaking
+Envoy enforces circuit breaking
 per replica, and a control-plane aggregator turns the fleet's disagreement into
 **one coherent, gapless event stream per API** for downstream subscribers.
 
@@ -12,7 +12,7 @@ type-level.
 ```bash
 pnpm install
 pnpm start           # simulated 5-replica fleet
-pnpm run check       # typecheck + 25 tests
+pnpm run check       # typecheck + 34 tests
 pnpm run test:redis  # optional — needs Docker: HA coordination against a real Redis
 ```
 
@@ -201,6 +201,41 @@ problems:
 6. **Check the right-hand panel** throughout: sequence gaps and duplicates both
    stay at zero. That is the delivery contract holding.
 
+```mermaid
+flowchart LR
+  classDef ok fill:#e2f5e8,stroke:#2e9e52,stroke-width:2px,color:#123423;
+  classDef deg fill:#fbedd6,stroke:#c07f16,stroke-width:2px,color:#3a2c12;
+  classDef down fill:#fbe2dd,stroke:#c9432f,stroke-width:2px,color:#3a1c17;
+  classDef gate fill:#eaeef6,stroke:#5b6478,stroke-width:1.5px,color:#161d2b;
+  classDef out fill:#dcf3f1,stroke:#0c8b86,stroke-width:3px,color:#04302e,font-weight:bold;
+
+  subgraph LIFECYCLE["published state — one event per real transition, ~20s end to end"]
+    direction LR
+    c0["① CLOSED<br/>5 replicas agree"]:::ok
+    d1["DEGRADED<br/>seq=1 · OUTLIER_EJECTION"]:::deg
+    o2["OPEN<br/>seq=2 · ALL_ENDPOINTS_EJECTED"]:::down
+    h3["HALF_OPEN<br/>seq=3 · OPEN_TIMEOUT_ELAPSED"]:::gate
+    o4["OPEN<br/>seq=4 · PROBE_FAILED<br/>backoff 4s → 8s"]:::down
+    h5["HALF_OPEN<br/>seq=5"]:::gate
+    c6["CLOSED<br/>seq=6 · PROBE_SUCCEEDED"]:::ok
+
+    c0 -->|"② failure 45% — replicas diverge<br/>quorum 60%, held for dwellMs"| d1
+    d1 -->|"③ failure 100%<br/>every replica ejects every host"| o2
+    o2 -->|"④ openMs elapses"| h3
+    h3 -->|"upstream still dead"| o4
+    o4 -->|"⑤ Restore — active health<br/>checks un-eject hosts"| h5
+    h5 -->|"probeSuccesses healthy observations"| c6
+  end
+
+  panel(["⑥ subscriber's view<br/>received=14 · gaps=0 · duplicates=0"]):::out
+  LIFECYCLE -.->|"every state_changed, checked outside the process"| panel
+```
+
+Six published events for an incident that produced tens of thousands of
+per-request rejections and five replicas' worth of disagreement. The two
+passes through `HALF_OPEN` are the same code path — only the backoff differs,
+which is what keeps step ④ from hammering a dead upstream.
+
 Run `pnpm run subscribe` in a second terminal for a consumer's view of the same
 stream.
 
@@ -254,6 +289,7 @@ endpoint is live on the same port in both modes (`--source=sim` or
 | `egress_circuit_state` | Published state per API, 0=CLOSED…3=HALF_OPEN — a stepped line, not an inference from logs |
 | `egress_circuit_healthy_endpoints` / `_total_endpoints` | Fleet-averaged endpoint counts per API |
 | `egress_circuit_reporting_replicas` | Replicas still within `replicaTimeoutMs` — what quorum is computed against |
+| `egress_circuit_ejections_active` | Ejected hosts summed across replicas — the one signal that separates "outlier detection ejected a host" from "membership changed" |
 | `egress_circuit_transitions_total` | Published `state_changed` events, by API/state/reason |
 | `egress_circuit_snapshots_total` | Periodic full-state republishes, by API |
 | `egress_fleet_poll_duration_ms` | Time to poll and parse every replica once per tick |
@@ -262,6 +298,20 @@ endpoint is live on the same port in both modes (`--source=sim` or
 | `egress_webhook_delivered_total` / `_failed_total` / `_dead_lettered_total` | Sink outcomes, by API |
 | `egress_webhook_delivery_duration_ms` | Successful-delivery latency, including retries |
 | `egress_subscriber_events_received_total` / `_gaps_total` / `_duplicates_total` | The delivery contract, read from outside the process — same numbers the console's right-hand panel shows, as counters |
+
+And from the daemon fleet — the same in-process `effect` registry, served on
+`METRICS_PORT` by every daemon and by the producer:
+
+| Metric | What it shows |
+|---|---|
+| `egress_daemon_circuit_state` | The state each daemon *received*, against `egress_circuit_state`, the state the aggregator *published*. They should be indistinguishable |
+| `egress_daemon_target_active` / `_self_active` / `_fleet_size` | The agreed active count, and whether this particular daemon is one of them |
+| `egress_daemon_calls_total` | Third-party calls through the egress listener, by outcome |
+| `egress_daemon_in_flight` / `_queued` | Concurrency against the per-daemon ceiling, and deliveries parked behind it — unsettled, which is where backpressure becomes the broker's problem |
+| `egress_daemon_dead_lettered_total` | Work rejected onto `<apiId>.work.dead` because its call failed |
+| `egress_daemon_control_events_total` / `_gaps_total` / `_duplicates_total` | The same per-API sequence contract, checked on the AMQP transport by five processes the publisher does not control |
+| `egress_daemon_probes_total` | `HALF_OPEN` probes this daemon was elected by the broker to run |
+| `egress_producer_published_total` | Arrival rate, against the fleet's completion rate — the difference is the queue |
 
 ### Watching it live
 
@@ -278,6 +328,16 @@ an aggregator-leadership timeline (one line per instance — see
 — scraped directly from each Envoy's own `/stats/prometheus` — the raw
 per-replica healthy-host count, so you can see the disagreement the console's
 replica strip visualizes, in a second tool, at the same time.
+
+A **RabbitMQ daemon fleet** row sits underneath it, so the reaction is on the
+same screen as the cause: work-queue and dead-letter depth (from RabbitMQ's
+own `rabbitmq_prometheus`, enabled by default in the management image on
+15692), arrival rate against completion rate, each daemon's own view of the
+circuit state, and the AMQP-side delivery-contract tiles. The panel worth
+knowing is **agreed target vs actually pulling** — every daemon derives the
+same target from the same events, so those two lines track each other, and
+when they stop tracking, a daemon has gone deaf while still looking healthy.
+Finding that by hand once is what put the panel there.
 
 This works for *either* demo mode: [infra/monitoring/prometheus.yml](infra/monitoring/prometheus.yml)
 scrapes both `aggregator:8088` (the `docker compose up` / real-Envoy path) and
@@ -431,6 +491,17 @@ same reason there are three real Envoy replicas: the daemons have to be
 independently killable, and the `HALF_OPEN` prober is elected by RabbitMQ's
 `x-single-active-consumer` across real connections.
 
+Work whose third-party call fails is **rejected onto `<apiId>.work.dead`**,
+not accepted. There is deliberately no retry in front of that: the client's
+`requeue` sends `modified{delivery_failed: false}`, and RabbitMQ only
+increments AMQP 1.0's `delivery-count` for a delivery marked *failed* — so a
+released message comes back looking brand new, forever, and a redelivery
+budget that survives the message moving to another daemon cannot be
+expressed at all. Measured, not assumed, and pinned by a test that will fail
+if a client release fixes it. One attempt then dead-letter is what is honest
+given that; the failures are at least countable and replayable instead of
+gone.
+
 ```bash
 # watch the fleet react — target=<k>/5 is the agreed active count
 docker compose logs -f rmq-daemon-0 rmq-daemon-3
@@ -441,6 +512,9 @@ open http://localhost:15672        # guest / guest
 
 # kill whichever daemon the broker elected as prober, mid-incident
 docker kill workspace-rmq-daemon-1-1
+
+# every daemon serves the same /metrics route the aggregator does
+docker compose exec prometheus wget -qO- http://rmq-daemon-0:9464/metrics
 ```
 
 `infra/envoy/envoy.yaml` carries the config discussed:
@@ -582,7 +656,7 @@ packages/
     src/main.ts              layer composition, NodeRuntime.runMain
     public/index.html        operator console (unchanged — plain HTML/CSS/JS)
     test/Aggregator.test.ts    8 tests under TestClock — full pipeline, zero sleeps
-    test/Coordination.test.ts  5 tests — fencing primitives, plus a real two-instance failover
+    test/Coordination.test.ts  6 tests — fencing primitives, a real two-instance failover, and a re-promotion
     test/integration/          Redis-backed HA, opt-in (`pnpm run test:redis`) — needs Docker
 
   subscriber/                @egress/subscriber — depends on @egress/domain
@@ -591,13 +665,14 @@ packages/
   rmq/                       @egress/rmq — Effect wrapper over AMQP 1.0 (RabbitMQ 4 native)
     src/Client.ts            the Rmq service; two silent client bugs guarded here
     src/ControlPlane.ts      circuit.control naming, shared by publisher and consumers
-    test/integration/        5 tests against a real broker, opt-in (`pnpm run test:rmq`)
+    test/integration/        6 tests against a real broker, opt-in (`pnpm run test:rmq`)
 
   rmq-consumer/              @egress/rmq-consumer — the competing-consumer daemon fleet
     src/DaemonPolicy.ts      pure: (prior, circuit state, fleet size) -> target active count
     src/daemon.ts            one daemon, one process; two connections, SAC prober election
     src/producer.ts          floods the work queue; never backs off, on purpose
-    src/main.ts              role dispatch — `daemon` or `producer`
+    src/Telemetry.ts         every metric the fleet emits, in one place
+    src/main.ts              role dispatch — `daemon` or `producer` — plus /metrics
     test/DaemonPolicy.test.ts  9 tests, pure — no runtime, no broker
 
   demo/                      @egress/demo — no dependency on the others, speaks only HTTP
@@ -610,6 +685,10 @@ infra/
 
 docs/rmq-control-plane.md    the RabbitMQ scenario: design, live run, and what it exposed
 docker-compose.yml           wires infra/ and the packages/ entrypoints together
+.github/workflows/ci.yml     `pnpm run check` on every push, and both Docker-backed
+                             suites (`test:redis`, `test:rmq`) in a second job — they
+                             are opt-in locally, which makes them the ones most likely
+                             to rot unnoticed
 ```
 
 Cross-package imports go through `@egress/domain`'s `package.json#exports`
@@ -636,7 +715,7 @@ tested exhaustively with plain `assert`.
 
 ## What the build surfaced
 
-Eight things worth knowing, all of them found by running the thing:
+Ten things worth knowing, all of them found by running the thing:
 
 - **A reason code cannot be derived from averaged endpoint counts.** With four of
   five replicas seeing zero healthy hosts, the mean rounds to 1, so "all
@@ -694,6 +773,29 @@ Eight things worth knowing, all of them found by running the thing:
   travels further than this one variable: re-verify an environment
   assumption before designing around it, especially one written down as
   fact by an earlier pass over the same repo.
+- **A demoted leader that comes back is not a cold start, and that broke the
+  one guarantee this repo is about.** Rehydrating `sequence` from the Redis
+  checkpoint only ever fired for APIs an instance had never seen — which is
+  right on a fresh takeover and wrong on a *re*-takeover, because the
+  instance still holds its own breakers in memory from last time while
+  whoever led in between has already published past them. The result is two
+  different payloads under one sequence number: exactly the break
+  `/api/subscriber` exists to detect, invisible to every test because both
+  failover tests used a freshly built instance. Losing the lease now drops
+  the registry, so re-promotion takes the rehydrate path that was already
+  tested, and `Coordination.test.ts` keeps one instance alive across a full
+  demotion to pin it.
+- **There is no way to tell this AMQP client "this attempt failed, try
+  again".** `requeue()` sends `modified{delivery_failed: false}` and
+  `discard()` sends `modified{delivery_failed: true, undeliverable_here:
+  true}` — nothing in between. RabbitMQ increments AMQP 1.0's
+  `delivery-count` only for a delivery marked failed, so releasing the same
+  message three times returns `delivery_count: 0` three times, and a
+  redelivery budget that outlives the message moving to another consumer
+  cannot be built. Same shape as the link-credit finding: the lever is
+  genuinely absent rather than merely undocumented, so the daemons
+  dead-letter on the first failure and a test pins the behaviour in case a
+  client release changes it.
 
 ## What Effect actually bought here
 
@@ -802,7 +904,11 @@ integration:
 
 1. `Coordination.test.ts` runs two independent "instances" against one
    shared in-memory coordinator in a single process — a real failover
-   without a second machine.
+   without a second machine, plus the harder case: an instance that led,
+   *lost* the lease, and is promoted again with its own breakers still warm.
+   That one must resume from the checkpoint rather than from what it
+   remembers, and it is kept alive across the whole demotion precisely so a
+   fresh build cannot hide the bug.
 2. `test/integration/RedisCoordination.test.ts` (`pnpm run test:redis`,
    opt-in — needs Docker) spins up a real `redis:7-alpine` container via
    Testcontainers and proves the same properties, including the exact

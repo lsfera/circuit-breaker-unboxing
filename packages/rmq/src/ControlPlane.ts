@@ -23,6 +23,33 @@ export const probeTriggerQueueFor = (apiId: string): string => `${apiId}.probe-t
 /** The primary competing-consumer work queue daemons drain. */
 export const workQueueFor = (apiId: string): string => `${apiId}.work`;
 
+/**
+ * Where work that could not be completed ends up.
+ *
+ * The event side of this repo proves a delivery contract end to end; the
+ * work side used to accept every message whether or not the call behind it
+ * succeeded, which quietly threw the failures away. A dead-letter queue is
+ * what makes the two halves comparable: a failed call is now a message you
+ * can count, look at in the management UI, and replay, instead of an
+ * increment in a counter nobody can act on.
+ */
+export const deadLetterQueueFor = (apiId: string): string => `${apiId}.work.dead`;
+
+/**
+ * Declared identically by every process that touches the work queue —
+ * producer and daemons alike — because RabbitMQ rejects a redeclare whose
+ * arguments differ from the existing queue's, and there is no ordering
+ * between those containers at startup.
+ *
+ * Routing through the default exchange (`""`) with the dead-letter queue's
+ * own name as the routing key is the plainest form of this: no extra
+ * exchange to declare, no binding to keep in step.
+ */
+export const workQueueArgs = (apiId: string): Record<string, unknown> => ({
+  "x-dead-letter-exchange": "",
+  "x-dead-letter-routing-key": deadLetterQueueFor(apiId),
+});
+
 export const encodeCircuitEvent = (event: CircuitEvent): string => JSON.stringify(event);
 
 const decode = Schema.decodeUnknownOption(CircuitEvent);

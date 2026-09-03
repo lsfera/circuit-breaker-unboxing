@@ -92,9 +92,21 @@ const asRedisLike = (redis: Redis): RedisLike => ({
     redis.eval(script, keys.length, ...keys, ...evalArgs) as Promise<string | number | null>,
 });
 
+/**
+ * The connection is acquired inside the layer's scope rather than built at
+ * module load, so it is closed when the application shuts down instead of
+ * being left to the process exiting. Everything else in this repo that owns
+ * a socket does the same (see @egress/rmq's `makeRmq`); a client constructed
+ * at import time is the one place that quietly did not.
+ */
 const CoordinationLayer =
   args.get("ha") === "redis"
-    ? RedisCoordinationLayer(asRedisLike(new Redis(args.get("redis") ?? "redis://127.0.0.1:6379")))
+    ? Layer.unwrap(
+        Effect.acquireRelease(
+          Effect.sync(() => new Redis(args.get("redis") ?? "redis://127.0.0.1:6379")),
+          (redis) => Effect.promise(() => redis.quit().then(() => {}, () => {})),
+        ).pipe(Effect.map((redis) => RedisCoordinationLayer(asRedisLike(redis)))),
+      )
     : InMemoryCoordinationLayer;
 
 const HaLayer = Layer.mergeAll(
