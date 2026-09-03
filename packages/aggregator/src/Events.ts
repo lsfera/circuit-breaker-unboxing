@@ -94,6 +94,13 @@ export class EventSink extends Context.Service<
   }
 >()("EventSink") {}
 
+/** The shape every sink builds — split out from the Layer wrapper so main.ts can compose several before mounting the one EventSink tag. */
+export type SinkImpl = {
+  readonly name: string;
+  readonly deliver: (event: CircuitEvent) => Effect.Effect<void>;
+  readonly deadLetters: Effect.Effect<ReadonlyArray<DeliveryFailed>>;
+};
+
 /**
  * Stand-in for the real middleware hop. In production this is a produce() to
  * Kafka or NATS keyed by apiId; HTTP keeps the demo broker-free.
@@ -102,10 +109,8 @@ export class EventSink extends Context.Service<
  * a loop with a counter, a sleep and a try/catch. Here the policy is a value —
  * exponential backoff, capped attempts — and it composes.
  */
-export const WebhookSinkLayer = (url: string) =>
-  Layer.effect(
-    EventSink,
-    Effect.gen(function* () {
+export const makeWebhookSink = (url: string): Effect.Effect<SinkImpl> =>
+  Effect.gen(function* () {
       const dead = yield* Ref.make<ReadonlyArray<DeliveryFailed>>([]);
 
       const post = (event: CircuitEvent) =>
@@ -184,8 +189,22 @@ export const WebhookSinkLayer = (url: string) =>
       };
 
       return { name: "webhook", deliver, deadLetters: Ref.get(dead) };
-    }),
-  );
+  });
+
+export const WebhookSinkLayer = (url: string) => Layer.effect(EventSink, makeWebhookSink(url));
+
+/**
+ * Fans one event out to every given sink and forks each delivery
+ * independently, so a slow or unreachable one (e.g. RabbitMQ down while the
+ * webhook is fine) never delays the others. Dead letters from all sinks are
+ * pooled — a subscriber checking the delivery contract does not need to
+ * know how many sinks are mounted.
+ */
+export const combineSinks = (sinks: ReadonlyArray<SinkImpl>): SinkImpl => ({
+  name: sinks.map((s) => s.name).join("+"),
+  deliver: (event) => Effect.all(sinks.map((s) => s.deliver(event)), { discard: true }),
+  deadLetters: Effect.all(sinks.map((s) => s.deadLetters)).pipe(Effect.map((xs) => xs.flat())),
+});
 
 /** Used by tests and by --no-webhook runs. */
 export const NoopSinkLayer = Layer.succeed(EventSink, {

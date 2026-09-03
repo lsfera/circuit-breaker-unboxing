@@ -4,9 +4,11 @@ import { NodeHttpServer, NodeRuntime } from "@effect/platform-node";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
+import { Rmq, RmqLive } from "@egress/rmq/Client.ts";
 import { Aggregator, AggregatorLayer } from "./Aggregator.ts";
+import { makeAmqpControlPlaneSink } from "./AmqpControlPlaneSink.ts";
 import { HaSettings, InMemoryCoordinationLayer, RedisCoordinationLayer } from "./Coordination.ts";
-import { EventBusLayer, NoopSinkLayer, WebhookSinkLayer } from "./Events.ts";
+import { combineSinks, EventBusLayer, EventSink, makeWebhookSink, NoopSinkLayer } from "./Events.ts";
 import { EnvoyFleetLayer, SimFleetLayer } from "./FleetSource.ts";
 import { HttpLive } from "./Http.ts";
 import { Config, defaultConfig } from "@egress/domain/Model.ts";
@@ -42,9 +44,36 @@ const FleetLayer =
         APIS,
       );
 
-const SinkLayer = args.has("no-webhook")
-  ? NoopSinkLayer
-  : WebhookSinkLayer(`http://127.0.0.1:${PORT}/subscriber/webhook`);
+/**
+ * `--rmq=<host>:<port>` mounts AmqpControlPlaneSink alongside (not instead
+ * of) the webhook sink, so the existing subscriber/delivery-integrity demo
+ * keeps working unchanged while the RabbitMQ daemon fleet in
+ * @egress/rmq-consumer also gets circuit.control events. `--no-webhook`
+ * still drops the webhook side if only the RMQ path is wanted.
+ */
+const rmqAddr = args.get("rmq");
+const webhookEnabled = !args.has("no-webhook");
+const webhookUrl = `http://127.0.0.1:${PORT}/subscriber/webhook`;
+
+// Self-contained regardless of branch: when --rmq is set, this Layer
+// provides its own Rmq dependency internally (Layer.provide, scoped to just
+// this sink) rather than threading Rmq through the outer AppLayer graph, so
+// the two branches below have the same RIn = never shape either way.
+const SinkLayer = rmqAddr
+  ? (() => {
+      const [host, port] = rmqAddr.split(":");
+      return Layer.effect(
+        EventSink,
+        Effect.gen(function* () {
+          const impls = webhookEnabled ? [yield* makeWebhookSink(webhookUrl)] : [];
+          impls.push(yield* makeAmqpControlPlaneSink);
+          return impls.length === 1 ? impls[0]! : combineSinks(impls);
+        }),
+      ).pipe(Layer.provide(RmqLive({ host: host ?? "127.0.0.1", port: Number(port ?? 5672) })));
+    })()
+  : webhookEnabled
+    ? Layer.effect(EventSink, makeWebhookSink(webhookUrl))
+    : NoopSinkLayer;
 
 /**
  * Solo by default: one instance that always wins its own lease. That is not
@@ -102,6 +131,7 @@ const AggregatorDaemon = Layer.effectDiscard(
       `egress circuit breaker console  source=${MODE}` +
         (MODE === "sim" ? ` replicas=${REPLICAS}` : "") +
         `  instance=${instanceId}  ha=${args.get("ha") ?? "memory"}` +
+        (rmqAddr ? `  rmq=${rmqAddr}` : "") +
         `  http://localhost:${PORT}`,
     );
   }),

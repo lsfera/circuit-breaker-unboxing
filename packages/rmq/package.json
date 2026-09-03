@@ -1,0 +1,15 @@
+{
+  "name": "@egress/rmq",
+  "private": true,
+  "type": "module",
+  "description": "Effect wrapper over rabbitmq-amqp-js-client (AMQP 1.0, RabbitMQ 4.x native) plus the circuit.control exchange helpers — shared by @egress/aggregator's AmqpControlPlaneSink and @egress/rmq-consumer's daemon fleet.",
+  "exports": {
+    "./Client.ts": "./src/Client.ts",
+    "./ControlPlane.ts": "./src/ControlPlane.ts"
+  },
+  "dependencies": {
+    "@egress/domain": "workspace:*",
+    "effect": "catalog:",
+    "rabbitmq-amqp-js-client": "^1.0.0"
+  }
+}
