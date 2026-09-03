@@ -1,0 +1,14 @@
+{
+  "name": "@egress/rmq-consumer",
+  "private": true,
+  "type": "module",
+  "description": "The RabbitMQ competing-consumer daemon fleet from docs/rmq-control-plane.md: a producer flooding a work queue, and daemons that scale their own active count in reaction to this repo's circuit breaker events, delivered over the circuit.control exchange.",
+  "scripts": {
+    "test": "node --experimental-strip-types --test 'test/*.test.ts'"
+  },
+  "dependencies": {
+    "@egress/domain": "workspace:*",
+    "@egress/rmq": "workspace:*",
+    "effect": "catalog:"
+  }
+}

@@ -76,6 +76,18 @@ importers:
         specifier: ^1.0.0
         version: 1.0.0
 
+  packages/rmq-consumer:
+    dependencies:
+      '@egress/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@egress/rmq':
+        specifier: workspace:*
+        version: link:../rmq
+      effect:
+        specifier: 'catalog:'
+        version: 4.0.0-rc.112
+
   packages/subscriber:
     dependencies:
       '@effect/platform-node':
