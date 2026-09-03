@@ -1,4 +1,4 @@
-import { Duration, Effect, Layer, Ref, Schedule, Semaphore } from "effect";
+import { Duration, Effect, Layer, Ref, Schedule } from "effect";
 import { Rmq, RmqError } from "@egress/rmq/Client.ts";
 import { CONTROL_EXCHANGE, encodeCircuitEvent, routingKeyFor } from "@egress/rmq/ControlPlane.ts";
 import { DeliveryFailed } from "@egress/domain/Model.ts";
@@ -20,16 +20,11 @@ import type { Publisher } from "@egress/rmq/Client.ts";
  * (see Client.ts's module doc), so a publisher per apiId is the natural
  * shape, not a workaround.
  *
- * Every RMQ operation here runs under one semaphore permit, serializing them
- * on the shared connection. This is not defensive boilerplate: verified live
- * that `rabbitmq-amqp-js-client` mis-routes messages when
- * `createPublisher` is called concurrently for different targets on one
- * connection — e.g. three events firing on the aggregator's first tick, one
- * per apiId, each independently forked, all landed on the *first* publisher
- * created, silently. The library has no documented guarantee about
- * concurrent link creation either way, so `send` is serialized too rather
- * than assuming only `createPublisher` is affected. See
- * `docs/rmq-control-plane.md` for the reproduction.
+ * Concurrency safety is the client's job, not this sink's: `@egress/rmq`
+ * serializes every operation on the connection it owns, because creating
+ * links concurrently silently misroutes in this library (see Client.ts's
+ * module doc for both reproductions). This sink is free to fork a delivery
+ * per event without thinking about it.
  */
 export const makeAmqpControlPlaneSink: Effect.Effect<SinkImpl, RmqError, Rmq> = Effect.gen(
   function* () {
@@ -38,7 +33,6 @@ export const makeAmqpControlPlaneSink: Effect.Effect<SinkImpl, RmqError, Rmq> = 
 
     const dead = yield* Ref.make<ReadonlyArray<DeliveryFailed>>([]);
     const publishers = yield* Ref.make(new Map<string, Publisher>());
-    const gate = yield* Semaphore.make(1);
 
     const publisherFor = (apiId: string) =>
       Ref.get(publishers).pipe(
@@ -52,18 +46,13 @@ export const makeAmqpControlPlaneSink: Effect.Effect<SinkImpl, RmqError, Rmq> = 
       );
 
     const publish = (event: CircuitEvent) =>
-      gate
-        .withPermit(
-          publisherFor(event.data.apiId).pipe(
-            Effect.flatMap((pub) => rmq.send(pub, encodeCircuitEvent(event))),
-          ),
-        )
-        .pipe(
-          Effect.mapError(
-            (e: RmqError) =>
-              new DeliveryFailed({ sink: "amqp", apiId: event.data.apiId, cause: String(e.cause) }),
-          ),
-        );
+      publisherFor(event.data.apiId).pipe(
+        Effect.flatMap((pub) => rmq.send(pub, encodeCircuitEvent(event))),
+        Effect.mapError(
+          (e: RmqError) =>
+            new DeliveryFailed({ sink: "amqp", apiId: event.data.apiId, cause: String(e.cause) }),
+        ),
+      );
 
     const deliver = (event: CircuitEvent) => {
       const apiId = event.data.apiId;

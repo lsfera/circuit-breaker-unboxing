@@ -146,45 +146,29 @@ that a library like `amqplib` speaks. Its own README describes it as an
 early-stage project, which turned out to matter (see the gap below), so it
 was verified directly rather than trusted from its docs.
 
-Two claims carried real risk: that `x-single-active-consumer` behaves as
-documented, and that closing a consumer truly stops delivery without
-touching the connection. Both were checked against a real
-`rabbitmq:4.0-management-alpine` container — three registered consumers on
-one SAC queue, closing the active one outright, and close/recreate on a
-normal queue — wrapped as an Effect service (`Context.Service` +
-`Layer.effect` + `Data.TaggedError`, the same shape as this repo's
-`FleetSource.ts`/`Coordination.ts`) rather than bare `async`/`await`, so the
-connection lifecycle is `Effect.acquireRelease`-safe the same way the rest
-of this codebase is:
+Everything this design leans on is pinned by
+`packages/rmq/test/integration/Client.test.ts` — run it with
+`pnpm run test:rmq` (opt-in, needs Docker; not part of `pnpm test`). It
+drives the real `@egress/rmq` service against a real
+`rabbitmq:4.0-management-alpine` container via Testcontainers, and covers
+four things:
 
 ```
-=== Verification 1: x-single-active-consumer ===
-SAC round 1 — receivers: daemon-A, messages: 5/5
-PASS: exactly one consumer (daemon-A) received all 5 messages
---- closing daemon-A's consumer (this is what a dead daemon looks like) ---
-SAC round 2 — receivers: daemon-B, messages: 5/5
-PASS: RabbitMQ promoted a different consumer (daemon-B) automatically
-
-=== Verification 2: consumer close/recreate (cancel/resume) ===
-received before cancel: 3 (expect 3)
---- consumer.close() — this is what OPEN does ---
-received while cancelled: 3 (expect still 3)
---- creating a new consumer on the same queue — this is what recovery does ---
-received after resume: 6 (expect 6)
-PASS: cancel/resume confirmed
+✔ concurrent publisher creation routes each message to its own binding
+✔ concurrent consumer creation binds each consumer to its own queue
+✔ x-single-active-consumer elects one consumer and promotes another when it closes
+✔ closing a consumer stops delivery without closing the connection
 ```
 
-That confirms the two RabbitMQ-native primitives the `OPEN`/`HALF_OPEN`
-mechanism leans on, against the real broker this design would actually run
-on. (One caveat in the interest of not overclaiming: this was a single clean
-run against a freshly started broker — a second run reused a broker still
-holding state from the first and hit a protocol error, which looks like
-leftover queue/consumer state from not tearing down between runs rather than
-a finding about the design; it wasn't chased further, so treat this as one
-verified run, not "stable across repeated runs" the way the Redis HA
-verification elsewhere in this repo is.)
+The last two are the primitives the `OPEN`/`HALF_OPEN` mechanism is built
+on: SAC really does elect exactly one of several registered consumers and
+promote a different one when the active one closes (no election code of our
+own), and closing a consumer really does stop delivery while leaving the
+connection — and so the control-plane subscription — up. The first two pin
+the concurrency bug described below, and were confirmed to fail with the
+fix removed.
 
-### A real concurrency bug, caught by running the actual sink
+### Concurrent link creation is broken in this client — and silently
 
 `AmqpControlPlaneSink` publishes each API to its own `circuit.<apiId>`
 routing key via a dedicated `Publisher` per apiId, created lazily on first
@@ -198,23 +182,31 @@ publisher's queue. A minimal repro nailed it down —
 `Promise.all([conn.createPublisher(a), conn.createPublisher(b), conn.createPublisher(c)])`
 on one connection, then one `publish` per handle, and all three messages
 landed on `a`'s queue. Sequential creation (`await` each one before starting
-the next) never showed the problem; only concurrent creation did. This
-looks like a race in how `rabbitmq-amqp-js-client` (or the `rhea` engine
-underneath) opens sender links on a shared connection — plausible for an
-early-stage client, and exactly the kind of thing that doesn't show up
-reading the source, only running it under the actual load shape (multiple
-APIs reporting on the same tick) that the real aggregator produces.
+the next) never showed the problem; only concurrent creation did.
 
-**Fix**: every RMQ operation in `AmqpControlPlaneSink` — publisher lookup,
-creation, and the send itself — now runs under one `Semaphore.withPermit`,
-serializing all of it on the connection. Given this repo's publish volume
-(a handful of events per incident, not per request), the cost is zero;
-re-run against a fresh broker with three queues bound one per apiId, and
-each received only its own events, including the same three-at-once startup
-burst that surfaced the bug. The daemon fleet, when built, inherits the same
-constraint: never create publishers or consumers concurrently on one
-connection without serializing through something like this until upstream
-confirms otherwise.
+Consumers turned out to be affected the same way, and worse: three
+`createConsumer` calls in flight at once, on three different queues, left
+all three consumers receiving the *first* queue's messages. So this is not
+a publisher quirk — it is a race in link setup on a shared connection,
+plausible for an early-stage client, and the kind of thing that only shows
+up under the load shape a real system produces (every API reporting on one
+tick; a daemon fleet starting N consumers at once). Both failure modes are
+**silent** — no error, just plausible-looking traffic going to the wrong
+place.
+
+**Fix**: the guard lives in `@egress/rmq`'s `Client.ts`, not at any call
+site — one semaphore permit owned by the connection, serializing every
+operation that touches it. Callers get a connection that is safe to share
+across concurrent fibers by construction; that is what makes it viable for
+the daemon fleet to run N consumers over one connection instead of N
+connections. At this repo's volumes the serialization costs nothing.
+
+`packages/rmq/test/integration/Client.test.ts` (`pnpm run test:rmq`,
+opt-in, needs Docker) pins both failure modes against a real broker, along
+with SAC election/promotion and cancel/resume. The two concurrency tests
+were confirmed to *fail* with the semaphore temporarily removed and pass
+with it restored — a regression test that passes either way would not be
+worth having.
 
 ## What's still missing
 

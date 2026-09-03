@@ -7,9 +7,15 @@
     "./Client.ts": "./src/Client.ts",
     "./ControlPlane.ts": "./src/ControlPlane.ts"
   },
+  "scripts": {
+    "test:rmq": "node --experimental-strip-types --test 'test/integration/*.test.ts'"
+  },
   "dependencies": {
     "@egress/domain": "workspace:*",
     "effect": "catalog:",
     "rabbitmq-amqp-js-client": "^1.0.0"
+  },
+  "devDependencies": {
+    "testcontainers": "^12.1.0"
   }
 }

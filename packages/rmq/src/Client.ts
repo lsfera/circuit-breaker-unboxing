@@ -1,4 +1,4 @@
-import { Context, Data, Effect, Layer } from "effect";
+import { Context, Data, Effect, Layer, Semaphore } from "effect";
 import { createEnvironment } from "rabbitmq-amqp-js-client";
 import type { Connection, Consumer, Publisher } from "rabbitmq-amqp-js-client";
 
@@ -25,6 +25,32 @@ export type RmqQueue = unknown;
  * fixed exchange+routingKey publisher landing on the correctly topic-bound
  * queue) was verified against a real RabbitMQ 4.x container before being
  * written here — see docs/rmq-control-plane.md.
+ *
+ * ## Why every operation is serialized
+ *
+ * Opening links concurrently on one connection is broken in this client,
+ * verified two ways against a real broker:
+ *
+ * - Three `createPublisher` calls in flight at once, each for a different
+ *   (exchange, routingKey): every message published afterwards landed on
+ *   the *first* publisher's queue.
+ * - Three `createConsumer` calls in flight at once, each for a different
+ *   queue: all three consumers received the *first* queue's messages.
+ *
+ * Sequential creation is correct in both cases; only concurrency breaks it,
+ * which points at a race in link setup on the shared connection rather than
+ * anything about addresses or routing. That is easy to hit by accident —
+ * the aggregator's very first tick reports on every API at once, and a
+ * daemon fleet starts N consumers at once — and it fails *silently*, with
+ * plausible-looking traffic going to the wrong place.
+ *
+ * So the guard lives here, in the one place that owns the connection,
+ * rather than at each call site: a single permit serializing every
+ * operation that touches it. Callers get a connection that is safe to share
+ * across concurrent fibers by construction, which is what lets the daemon
+ * fleet run N consumers over one connection at all. The cost is nil at this
+ * repo's volumes (a handful of control-plane events per incident), and
+ * correctness here is not the place to trade for throughput.
  */
 
 export class RmqError extends Data.TaggedError("RmqError")<{
@@ -87,9 +113,16 @@ export const RmqLive = (opts: RmqConnectOptions) =>
       );
       const management = connection.management();
 
+      // The one permit guarding this connection. See the module doc above:
+      // concurrent link creation on a shared connection silently misroutes
+      // in this client, for consumers as well as publishers.
+      const gate = yield* Semaphore.make(1);
+      const guarded = <A>(operation: string, promise: () => Promise<A>) =>
+        gate.withPermit(wrap(operation, promise));
+
       return {
         declareQueue: (name, args = {}) =>
-          wrap("declareQueue", () =>
+          guarded("declareQueue", () =>
             management.declareQueue(name, {
               exclusive: false,
               durable: false,
@@ -103,13 +136,15 @@ export const RmqLive = (opts: RmqConnectOptions) =>
             } as never),
           ),
         declareTopicExchange: (name) =>
-          wrap("declareExchange", () => management.declareExchange(name, { type: "topic", durable: false })),
+          guarded("declareExchange", () =>
+            management.declareExchange(name, { type: "topic", durable: false }),
+          ),
         bind: (routingKey, source, destination) =>
-          wrap("bind", () => management.bind(routingKey, { source, destination } as never)).pipe(
+          guarded("bind", () => management.bind(routingKey, { source, destination } as never)).pipe(
             Effect.asVoid,
           ),
         consume: (queue, onMessage) =>
-          wrap("consume", async () => {
+          guarded("consume", async () => {
             const consumer = await connection.createConsumer({
               queue: { name: queue },
               messageHandler: (ctx, message) => {
@@ -121,12 +156,12 @@ export const RmqLive = (opts: RmqConnectOptions) =>
             return consumer;
           }),
         publisherToExchange: (exchange, routingKey) =>
-          wrap("publisherToExchange", () =>
+          guarded("publisherToExchange", () =>
             connection.createPublisher({ exchange: { name: exchange, routingKey } }),
           ),
         publisherToQueue: (queue) =>
-          wrap("publisherToQueue", () => connection.createPublisher({ queue: { name: queue } })),
-        send: (pub, body) => wrap("send", () => pub.publish({ body } as never)).pipe(Effect.asVoid),
+          guarded("publisherToQueue", () => connection.createPublisher({ queue: { name: queue } })),
+        send: (pub, body) => guarded("send", () => pub.publish({ body } as never)).pipe(Effect.asVoid),
         closeConsumer: (c) => Effect.sync(() => c.close()),
       };
     }),

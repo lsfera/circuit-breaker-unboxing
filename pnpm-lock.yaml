@@ -75,6 +75,10 @@ importers:
       rabbitmq-amqp-js-client:
         specifier: ^1.0.0
         version: 1.0.0
+    devDependencies:
+      testcontainers:
+        specifier: ^12.1.0
+        version: 12.1.0
 
   packages/rmq-consumer:
     dependencies:

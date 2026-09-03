@@ -9,6 +9,7 @@
     "start": "node --experimental-strip-types packages/aggregator/src/main.ts",
     "test": "node --experimental-strip-types --test 'packages/*/test/*.test.ts'",
     "test:redis": "pnpm --filter @egress/aggregator test:redis",
+    "test:rmq": "pnpm --filter @egress/rmq test:rmq",
     "typecheck": "tsc --noEmit",
     "check": "pnpm run typecheck && pnpm run test",
     "subscribe": "node --experimental-strip-types packages/subscriber/src/subscriber.ts",
