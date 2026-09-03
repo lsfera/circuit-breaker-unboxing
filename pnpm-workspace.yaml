@@ -6,4 +6,7 @@ catalog:
   "@effect/platform-node": 4.0.0-rc.112
 
 allowBuilds:
+  cpu-features: true
   msgpackr-extract: true
+  protobufjs: true
+  ssh2: true

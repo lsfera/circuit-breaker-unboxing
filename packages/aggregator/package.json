@@ -5,11 +5,16 @@
   "description": "Fleet-wide tick loop over @egress/domain's pure state machine, event bus/sink, HTTP routes, SSE, and /metrics.",
   "scripts": {
     "start": "node --experimental-strip-types src/main.ts",
-    "test": "node --experimental-strip-types --test 'test/*.test.ts'"
+    "test": "node --experimental-strip-types --test 'test/*.test.ts'",
+    "test:redis": "node --experimental-strip-types --test 'test/integration/*.test.ts'"
   },
   "dependencies": {
+    "@effect/platform-node": "catalog:",
     "@egress/domain": "workspace:*",
-    "effect": "catalog:",
-    "@effect/platform-node": "catalog:"
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "ioredis": "^5.4.1",
+    "testcontainers": "^12.1.0"
   }
 }

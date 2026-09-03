@@ -11,8 +11,9 @@ type-level.
 
 ```bash
 pnpm install
-pnpm start         # simulated 5-replica fleet
-pnpm run check     # typecheck + 20 tests
+pnpm start           # simulated 5-replica fleet
+pnpm run check       # typecheck + 25 tests
+pnpm run test:redis  # optional — needs Docker: HA coordination against a real Redis
 ```
 
 Then open <http://localhost:8088>.
@@ -361,14 +362,15 @@ belongs in the aggregator, off the request path.
   swap it for the push-based `envoy.service.metrics.v3.MetricsService` sink,
   which also tags each report with the replica's node ID — it produces the same
   `ReplicaReport`, so nothing downstream changes.
-- **Aggregator state is in memory, but leader election is real.** See
-  [High availability](#high-availability) — the mechanism that stops two
-  aggregators from publishing conflicting sequences is implemented and
-  tested, not deferred. What's still a prototype is the backend: the shipped
-  layer is in-process (correct for one instance, and for tests that run two
-  instances in one process), while a real multi-machine deployment needs the
-  Redis-backed port wired to an actual client — see that section for why
-  the port, not the wiring, is the part worth shipping from here.
+- **Aggregator state is in memory, but leader election is real — including
+  against a real Redis.** See [High availability](#high-availability): the
+  mechanism that stops two aggregators from publishing conflicting sequences
+  is implemented and tested, and the Redis-backed port is proven against an
+  actual `redis:7-alpine` container, not just reasoned about. What's still a
+  prototype is `main.ts`'s wiring: it defaults to the in-process layer
+  (correct for one instance), and no deployment here actually runs N
+  aggregator processes against a shared Redis — that integration, not the
+  coordination logic itself, is the remaining gap.
 - **Enforcement is observational here.** The aggregator publishes but does not
   push config — see [the fork this defers](#the-fork-this-defers).
 - **The Envoy and monitoring stacks are unrun.** Docker in this sandbox cannot
@@ -417,6 +419,7 @@ packages/
     public/index.html        operator console (unchanged — plain HTML/CSS/JS)
     test/Aggregator.test.ts    8 tests under TestClock — full pipeline, zero sleeps
     test/Coordination.test.ts  5 tests — fencing primitives, plus a real two-instance failover
+    test/integration/          Redis-backed HA, opt-in (`pnpm run test:redis`) — needs Docker
 
   subscriber/                @egress/subscriber — depends on @egress/domain
     src/subscriber.ts        standalone consumer; decodes with the producer's Schema
@@ -438,11 +441,16 @@ Cross-package imports go through `@egress/domain`'s `package.json#exports`
 `pnpm install` resolves to a symlink — so a change to the state machine is a
 change in one package, felt through a real dependency edge, not a shared
 folder. There is still no build step: every package runs straight off its
-`src/*.ts` via `--experimental-strip-types`, `tsc --noEmit` at the root
+`src/*.ts` via `--experimental-strip-types`, and `tsc --noEmit` at the root
 typechecks all four projects in one pass (`packages/*/src` and
-`packages/*/test` in `tsconfig.json`'s `include`), and the root scripts
-(`pnpm start`, `pnpm run demo`, `pnpm run subscribe`) are thin
-`pnpm --filter @egress/<pkg> <script>` delegations.
+`packages/*/test` in `tsconfig.json`'s `include`). The root scripts
+(`pnpm start`, `pnpm run demo`, `pnpm run subscribe`) call `node` on each
+package's entrypoint directly rather than going through `pnpm --filter`:
+this pnpm version does not strip a trailing `--` the way npm does, so
+`pnpm --filter @egress/demo start -- shipping-rates` would hand the driver
+the literal string `"--"` as its API id instead of `"shipping-rates"` —
+direct invocation is what makes `pnpm run demo shipping-rates` (no `--`)
+actually work.
 
 `Breaker.step` is a total function of `(state, now, config)`. Everything hard to
 reason about — concurrency, scheduling, delivery, retries — lives in the Effect
@@ -571,18 +579,30 @@ closes the window for every API at once, the instant a handoff happens —
 `Coordination.test.ts`'s "a stale token is rejected even for an API no one
 has checkpointed yet" test is that exact bug, pinned down.
 
-What ships here is the in-memory implementation — correct for a single
-process (which is what `main.ts` wires by default: solo mode is just "one
-instance that always wins its own lease," not a special case), and what lets
-a test run two independent "instances" against one shared coordinator in a
-single process to exercise a real failover without a second machine. A real
-multi-machine deployment needs `RedisCoordinationLayer`, which is written
-against a deliberately minimal `RedisLike` port (one `eval` method) so that
-any real client — `ioredis`, `node-redis` — plugs in with a one-line
-adapter, rather than pinning a dependency this repo does not otherwise need.
-Same honesty as the rest of the Envoy/Docker stack: the Lua scripts are
-reasoned from Redis's documented command semantics for `GET`/`SET`/`INCR`
-and single-threaded script execution, not run against a live Redis here.
+What `main.ts` wires by default is the in-memory implementation — correct
+for a single process (solo mode is just "one instance that always wins its
+own lease," not a special case), and what lets `Coordination.test.ts` run
+two independent "instances" against one shared coordinator in a single
+process to exercise a real failover without a second machine. A real
+multi-machine deployment needs `RedisCoordinationLayer`, written against a
+deliberately minimal `RedisLike` port (one `eval` method) so that any real
+client — `ioredis`, `node-redis` — plugs in with a one-line adapter, rather
+than pinning a dependency the default path does not need.
+
+Unlike the Envoy/Docker stack, this part *is* run end to end, not just
+reasoned about: `test/integration/RedisCoordination.test.ts`
+(`pnpm run test:redis`, opt-in — needs Docker, not part of `pnpm test`) spins
+up a real `redis:7-alpine` container via Testcontainers and runs the same
+properties against it, including the exact fencing bug above — "a stale
+token is rejected even for an API no one has checkpointed yet" is proven by
+Redis's own Lua execution here, not by re-reading the script. It uses real
+wall-clock sleeps rather than `TestClock`, since Redis's own key expiry runs
+on real time that simulated time cannot drive, and skips cleanly (does not
+fail) when Docker is unavailable — the skip has to be checked from inside
+each test body, not as a static option on `test(...)`, because Docker
+availability is only known after `before()` has run, which happens after
+registration; getting that ordering wrong was caught the same way as the
+fencing bug, by watching the "no Docker" path fail instead of skip.
 
 ## The fork this defers
 
