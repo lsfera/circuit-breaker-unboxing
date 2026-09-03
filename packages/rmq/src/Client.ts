@@ -46,11 +46,15 @@ export type RmqQueue = unknown;
  *
  * So the guard lives here, in the one place that owns the connection,
  * rather than at each call site: a single permit serializing every
- * operation that touches it. Callers get a connection that is safe to share
- * across concurrent fibers by construction, which is what lets the daemon
- * fleet run N consumers over one connection at all. The cost is nil at this
- * repo's volumes (a handful of control-plane events per incident), and
- * correctness here is not the place to trade for throughput.
+ * operation that touches it. Note this is not about sharing one connection
+ * between separate daemons — each daemon is its own process with its own
+ * connection, as it would be in production. It is about a *single* process
+ * opening several links on its own connection concurrently, which is
+ * ordinary: the aggregator creates a publisher per API on the same tick,
+ * and one daemon opens a work-queue consumer, a control-plane consumer, a
+ * SAC probe-trigger consumer and a trigger publisher. The cost is nil at
+ * this repo's volumes, and correctness here is not the place to trade for
+ * throughput.
  */
 
 export class RmqError extends Data.TaggedError("RmqError")<{

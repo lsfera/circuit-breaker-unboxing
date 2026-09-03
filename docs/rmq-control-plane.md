@@ -196,10 +196,13 @@ place.
 
 **Fix**: the guard lives in `@egress/rmq`'s `Client.ts`, not at any call
 site — one semaphore permit owned by the connection, serializing every
-operation that touches it. Callers get a connection that is safe to share
-across concurrent fibers by construction; that is what makes it viable for
-the daemon fleet to run N consumers over one connection instead of N
-connections. At this repo's volumes the serialization costs nothing.
+operation that touches it. This is not about sharing a connection between
+daemons: each daemon is its own process with its own connection, as in
+production. It is about one process opening several links on its own
+connection at once, which is ordinary — the aggregator creates a publisher
+per API on the same tick, and a single daemon opens a work-queue consumer,
+a control-plane consumer, a SAC probe-trigger consumer and a trigger
+publisher. At this repo's volumes the serialization costs nothing.
 
 `packages/rmq/test/integration/Client.test.ts` (`pnpm run test:rmq`,
 opt-in, needs Docker) pins both failure modes against a real broker, along
