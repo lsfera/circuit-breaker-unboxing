@@ -6,7 +6,7 @@ import { Aggregator, AggregatorLayer } from "./Aggregator.ts";
 import { EventBusLayer, NoopSinkLayer, WebhookSinkLayer } from "./Events.ts";
 import { EnvoyFleetLayer, SimFleetLayer } from "./FleetSource.ts";
 import { HttpLive } from "./Http.ts";
-import { Config, defaultConfig } from "./domain/Model.ts";
+import { Config, defaultConfig } from "@egress/domain/Model.ts";
 import type { ApiSpec } from "./FleetSource.ts";
 
 const args = new Map<string, string>();

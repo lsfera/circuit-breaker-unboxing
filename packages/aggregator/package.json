@@ -1,0 +1,15 @@
+{
+  "name": "@egress/aggregator",
+  "private": true,
+  "type": "module",
+  "description": "Fleet-wide tick loop over @egress/domain's pure state machine, event bus/sink, HTTP routes, SSE, and /metrics.",
+  "scripts": {
+    "start": "node --experimental-strip-types src/main.ts",
+    "test": "node --experimental-strip-types --test 'test/*.test.ts'"
+  },
+  "dependencies": {
+    "@egress/domain": "workspace:*",
+    "effect": "catalog:",
+    "@effect/platform-node": "catalog:"
+  }
+}

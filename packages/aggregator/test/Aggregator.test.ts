@@ -5,8 +5,8 @@ import { TestClock } from "effect/testing";
 import { Aggregator, AggregatorLayer } from "../src/Aggregator.ts";
 import { EventBus, EventBusLayer, EventSink } from "../src/Events.ts";
 import { FleetSource, SimFleetLayer, parseStats } from "../src/FleetSource.ts";
-import { Config, defaultConfig, State } from "../src/domain/Model.ts";
-import type { CircuitEvent } from "../src/domain/Model.ts";
+import { Config, defaultConfig, State } from "@egress/domain/Model.ts";
+import type { CircuitEvent } from "@egress/domain/Model.ts";
 
 /**
  * The whole pipeline under TestClock: no sleeps, no flakiness, and a simulated

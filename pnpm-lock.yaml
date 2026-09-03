@@ -4,16 +4,18 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+catalogs:
+  default:
+    '@effect/platform-node':
+      specifier: 4.0.0-rc.112
+      version: 4.0.0-rc.112
+    effect:
+      specifier: 4.0.0-rc.112
+      version: 4.0.0-rc.112
+
 importers:
 
   .:
-    dependencies:
-      '@effect/platform-node':
-        specifier: 4.0.0-rc.112
-        version: 4.0.0-rc.112(effect@4.0.0-rc.112)(redis@6.2.1(@opentelemetry/api@1.9.1))
-      effect:
-        specifier: 4.0.0-rc.112
-        version: 4.0.0-rc.112
     devDependencies:
       '@types/node':
         specifier: ^22.0.0
@@ -21,6 +23,45 @@ importers:
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
+
+  packages/aggregator:
+    dependencies:
+      '@effect/platform-node':
+        specifier: 'catalog:'
+        version: 4.0.0-rc.112(effect@4.0.0-rc.112)(redis@6.2.1(@opentelemetry/api@1.9.1))
+      '@egress/domain':
+        specifier: workspace:*
+        version: link:../domain
+      effect:
+        specifier: 'catalog:'
+        version: 4.0.0-rc.112
+
+  packages/demo:
+    dependencies:
+      '@effect/platform-node':
+        specifier: 'catalog:'
+        version: 4.0.0-rc.112(effect@4.0.0-rc.112)(redis@6.2.1(@opentelemetry/api@1.9.1))
+      effect:
+        specifier: 'catalog:'
+        version: 4.0.0-rc.112
+
+  packages/domain:
+    dependencies:
+      effect:
+        specifier: 'catalog:'
+        version: 4.0.0-rc.112
+
+  packages/subscriber:
+    dependencies:
+      '@effect/platform-node':
+        specifier: 'catalog:'
+        version: 4.0.0-rc.112(effect@4.0.0-rc.112)(redis@6.2.1(@opentelemetry/api@1.9.1))
+      '@egress/domain':
+        specifier: workspace:*
+        version: link:../domain
+      effect:
+        specifier: 'catalog:'
+        version: 4.0.0-rc.112
 
 packages:
 
@@ -109,9 +150,6 @@ packages:
 
   '@types/node@22.20.1':
     resolution: {integrity: sha512-EANqOCF9QFyra+4pfxUcX9STKJpCLjMbObVzljIJomAWSnuSIEAvyzEU53GaajbXJEgdh0iEcPL+DGvpUd4k1Q==}
-
-  '@types/node@24.13.3':
-    resolution: {integrity: sha512-Dh8vAsV36ig5wa9OX4pXvMc9D3Veibfw2wix0CUwYODLD8nkj9UsLjASr49nPg+2eKzxhBV+v7L8pXvT4e639Q==}
 
   '@types/ws@8.18.1':
     resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
@@ -282,9 +320,6 @@ packages:
   undici-types@6.21.0:
     resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
 
-  undici-types@7.18.2:
-    resolution: {integrity: sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w==}
-
   undici@8.10.0:
     resolution: {integrity: sha512-HvltHd7avK13QIw/oLe4qoOLyoVSoafqJ2jYOrtMRBkbYT31eiBQ8O0ehRKZiEZCMEyLFQNIADpgCWC5fALvYQ==}
     engines: {node: '>=22.19.0'}
@@ -370,13 +405,9 @@ snapshots:
     dependencies:
       undici-types: 6.21.0
 
-  '@types/node@24.13.3':
-    dependencies:
-      undici-types: 7.18.2
-
   '@types/ws@8.18.1':
     dependencies:
-      '@types/node': 24.13.3
+      '@types/node': 22.20.1
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     optional: true
@@ -512,8 +543,6 @@ snapshots:
       '@typescript/typescript-win32-x64': 7.0.2
 
   undici-types@6.21.0: {}
-
-  undici-types@7.18.2: {}
 
   undici@8.10.0: {}
 

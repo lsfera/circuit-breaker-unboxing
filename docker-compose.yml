@@ -5,7 +5,7 @@ services:
   flaky-upstream:
     image: node:22-alpine
     working_dir: /app
-    volumes: ["$HOST_WORKSPACE_FOLDER/flaky-upstream.mjs:/app/flaky-upstream.mjs:ro"]
+    volumes: ["$HOST_WORKSPACE_FOLDER/infra/flaky-upstream.mjs:/app/flaky-upstream.mjs:ro"]
     command: node flaky-upstream.mjs
     ports: ["8080:8080", "8081:8081", "8082:8082"]
 
@@ -14,7 +14,7 @@ services:
   # so all three run identically and stay in sync by construction.
   envoy-00: &envoy
     image: envoyproxy/envoy:v1.31-latest
-    volumes: ["$HOST_WORKSPACE_FOLDER/envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro"]
+    volumes: ["$HOST_WORKSPACE_FOLDER/infra/envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro"]
     # List (exec) form, so these are argv straight to the envoy binary — no
     # shell involved, so none of the sh -c/YAML-folding pitfalls below apply.
     command: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "egress"]
@@ -46,7 +46,7 @@ services:
     # a demo run against real Envoy never tripped the circuit.
     command: >
       sh -c "corepack enable && pnpm install --frozen-lockfile &&
-             node --experimental-strip-types src/main.ts --source=envoy --envoy=http://envoy-00:9901,http://envoy-01:9901,http://envoy-02:9901"
+             node --experimental-strip-types packages/aggregator/src/main.ts --source=envoy --envoy=http://envoy-00:9901,http://envoy-01:9901,http://envoy-02:9901"
     depends_on: [envoy-00, envoy-01, envoy-02]
     ports: ["8088:8088"]
 
@@ -56,7 +56,7 @@ services:
   traffic:
     image: node:22-alpine
     working_dir: /app
-    volumes: ["$HOST_WORKSPACE_FOLDER/traffic-generator.mjs:/app/traffic-generator.mjs:ro"]
+    volumes: ["$HOST_WORKSPACE_FOLDER/infra/traffic-generator.mjs:/app/traffic-generator.mjs:ro"]
     command: node traffic-generator.mjs
     environment:
       ENVOY_REPLICAS: http://envoy-00:10000,http://envoy-01:10000,http://envoy-02:10000
@@ -75,7 +75,7 @@ services:
     # above for why a more-indented continuation line breaks silently.
     command: >
       sh -c "corepack enable && pnpm install --frozen-lockfile &&
-             node --experimental-strip-types demo/driver.ts"
+             node --experimental-strip-types packages/demo/src/driver.ts"
     environment:
       AGGREGATOR: http://aggregator:8088
       FAILURE_MODE: envoy
@@ -87,7 +87,7 @@ services:
   # plus each Envoy's native /stats/prometheus. See monitoring/prometheus.yml.
   prometheus:
     image: prom/prometheus:v2.55.1
-    volumes: ["$HOST_WORKSPACE_FOLDER/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    volumes: ["$HOST_WORKSPACE_FOLDER/infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
     # Lets Prometheus also reach `pnpm start` running on the host, so the same
     # stack works for the sim-fleet demo, not just this docker-compose one.
     extra_hosts: ["host.docker.internal:host-gateway"]
@@ -100,7 +100,7 @@ services:
       GF_AUTH_ANONYMOUS_ORG_ROLE: "Editor"
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
     volumes:
-      - $HOST_WORKSPACE_FOLDER/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
-      - $HOST_WORKSPACE_FOLDER/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - $HOST_WORKSPACE_FOLDER/infra/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - $HOST_WORKSPACE_FOLDER/infra/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on: [prometheus]
     ports: ["3000:3000"]

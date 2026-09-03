@@ -1,10 +1,10 @@
 import { Context, Duration, Effect, Layer, Metric, Ref, Schedule } from "effect";
-import * as Breaker from "./domain/Breaker.ts";
-import { Config } from "./domain/Model.ts";
+import * as Breaker from "@egress/domain/Breaker.ts";
+import { Config } from "@egress/domain/Model.ts";
 import { EventBus, EventSink, snapshotEvent, stateChanged } from "./Events.ts";
 import { FleetSource } from "./FleetSource.ts";
 import * as Telemetry from "./Telemetry.ts";
-import type { ApiSnapshot, CircuitEvent, State } from "./domain/Model.ts";
+import type { ApiSnapshot, CircuitEvent, State } from "@egress/domain/Model.ts";
 
 type Registry = {
   readonly breakers: ReadonlyMap<string, Breaker.BreakerState>;

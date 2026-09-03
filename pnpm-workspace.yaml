@@ -1,2 +1,9 @@
+packages:
+  - "packages/*"
+
+catalog:
+  effect: 4.0.0-rc.112
+  "@effect/platform-node": 4.0.0-rc.112
+
 allowBuilds:
   msgpackr-extract: true

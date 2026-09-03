@@ -6,17 +6,13 @@
     "node": ">=22.6"
   },
   "scripts": {
-    "start": "node --experimental-strip-types src/main.ts",
-    "test": "node --experimental-strip-types --test 'test/*.test.ts'",
+    "start": "node --experimental-strip-types packages/aggregator/src/main.ts",
+    "test": "node --experimental-strip-types --test 'packages/*/test/*.test.ts'",
     "typecheck": "tsc --noEmit",
-    "check": "pnpm run typecheck && pnpm test",
-    "subscribe": "node --experimental-strip-types subscriber/subscriber.ts",
-    "demo": "node --experimental-strip-types demo/driver.ts",
-    "demo:envoy": "AGGREGATOR=http://127.0.0.1:8088 FAILURE_MODE=envoy FLAKY_UPSTREAM=http://127.0.0.1 node --experimental-strip-types demo/driver.ts"
-  },
-  "dependencies": {
-    "effect": "4.0.0-rc.112",
-    "@effect/platform-node": "4.0.0-rc.112"
+    "check": "pnpm run typecheck && pnpm run test",
+    "subscribe": "node --experimental-strip-types packages/subscriber/src/subscriber.ts",
+    "demo": "node --experimental-strip-types packages/demo/src/driver.ts",
+    "demo:envoy": "AGGREGATOR=http://127.0.0.1:8088 FAILURE_MODE=envoy FLAKY_UPSTREAM=http://127.0.0.1 node --experimental-strip-types packages/demo/src/driver.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

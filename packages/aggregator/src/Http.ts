@@ -8,7 +8,7 @@ import { Aggregator } from "./Aggregator.ts";
 import { EventBus, EventSink } from "./Events.ts";
 import { FleetSource } from "./FleetSource.ts";
 import * as Telemetry from "./Telemetry.ts";
-import type { CircuitEvent } from "./domain/Model.ts";
+import type { CircuitEvent } from "@egress/domain/Model.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 

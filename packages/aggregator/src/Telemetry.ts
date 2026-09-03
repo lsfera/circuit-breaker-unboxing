@@ -1,5 +1,5 @@
 import { Metric } from "effect";
-import type { State } from "./domain/Model.ts";
+import type { State } from "@egress/domain/Model.ts";
 
 /**
  * All metrics the demo emits, in one place. Every metric is plain `effect`

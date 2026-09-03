@@ -1,7 +1,7 @@
 import { Effect, Option, Ref, Schema, Stream } from "effect";
 import { NodeRuntime } from "@effect/platform-node";
-import { CircuitEvent, State } from "../src/domain/Model.ts";
-import type { State as StateType } from "../src/domain/Model.ts";
+import { CircuitEvent, State } from "@egress/domain/Model.ts";
+import type { State as StateType } from "@egress/domain/Model.ts";
 
 /**
  * A downstream consumer, written the way a real one should be.

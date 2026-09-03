@@ -9,9 +9,9 @@ import {
   Schedule,
   Stream,
 } from "effect";
-import { DeliveryFailed } from "./domain/Model.ts";
+import { DeliveryFailed } from "@egress/domain/Model.ts";
 import * as Telemetry from "./Telemetry.ts";
-import type { ApiSnapshot, CircuitEvent, State } from "./domain/Model.ts";
+import type { ApiSnapshot, CircuitEvent, State } from "@egress/domain/Model.ts";
 
 export const SOURCE = "egress-proxy/control-plane";
 

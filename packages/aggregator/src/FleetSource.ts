@@ -1,6 +1,6 @@
 import { Context, Effect, Layer, Ref } from "effect";
-import { StatsUnavailable } from "./domain/Model.ts";
-import type { ReplicaReport } from "./domain/Model.ts";
+import { StatsUnavailable } from "@egress/domain/Model.ts";
+import type { ReplicaReport } from "@egress/domain/Model.ts";
 
 export type ApiSpec = {
   readonly apiId: string;

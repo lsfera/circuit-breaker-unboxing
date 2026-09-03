@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import * as Breaker from "../src/domain/Breaker.ts";
-import { defaultConfig, Reason, State } from "../src/domain/Model.ts";
-import type { AggregatorConfig, ReplicaReport } from "../src/domain/Model.ts";
+import * as Breaker from "../src/Breaker.ts";
+import { defaultConfig, Reason, State } from "../src/Model.ts";
+import type { AggregatorConfig, ReplicaReport } from "../src/Model.ts";
 
 /**
  * The state machine is pure, so these tests need no Effect runtime, no clock

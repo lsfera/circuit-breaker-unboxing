@@ -81,7 +81,7 @@ problems:
   knobs let ejection ramp in gradually rather than flipping on at 100%.
 - **`retry_budget`** — caps concurrent retries as a fraction of active requests.
   Without it, outlier ejection plus retries amplifies load onto whatever hosts
-  are left. Not in `envoy/envoy.yaml`, which uses the older `max_retries`
+  are left. Not in `infra/envoy/envoy.yaml`, which uses the older `max_retries`
   threshold; a budget is the better shape at real fleet size.
 - **`adaptive_concurrency` filter** — infers a concurrency limit from observed
   latency (a gradient controller against a periodically recalculated minimum
@@ -134,7 +134,7 @@ pnpm run demo                    # payments-provider, against localhost:8088
 pnpm run demo -- shipping-rates  # a different API
 ```
 
-`demo/driver.ts` drives exactly the six steps above through the same
+`packages/demo/src/driver.ts` drives exactly the six steps above through the same
 `/api/failure` route the console's slider calls, and narrates every published
 transition as `/api/events` reports it — so a demo is one command in a second
 terminal, and the console (or the [Grafana dashboard](#metrics--monitoring)) is
@@ -165,7 +165,7 @@ failing loudly if a gap or duplicate shows up — the automated form of step 6.
 
 ## Metrics & monitoring
 
-Every metric is plain `effect` `Metric` (`src/Telemetry.ts`) — the aggregator's
+Every metric is plain `effect` `Metric` (`packages/aggregator/src/Telemetry.ts`) — the aggregator's
 tick loop, the webhook sink, and the subscriber route all update the same
 in-process registry, and `GET /metrics` formats it as Prometheus text. That
 endpoint is live on the same port in both modes (`--source=sim` or
@@ -198,7 +198,7 @@ and — scraped directly from each Envoy's own `/stats/prometheus` — the raw
 per-replica healthy-host count, so you can see the disagreement the console's
 replica strip visualizes, in a second tool, at the same time.
 
-This works for *either* demo mode: [monitoring/prometheus.yml](monitoring/prometheus.yml)
+This works for *either* demo mode: [infra/monitoring/prometheus.yml](infra/monitoring/prometheus.yml)
 scrapes both `aggregator:8088` (the `docker compose up` / real-Envoy path) and
 `host.docker.internal:8088` (a `pnpm start` sim fleet running on the host), so
 you can run just `docker compose up prometheus grafana` alongside `pnpm start`
@@ -283,7 +283,7 @@ docker compose up
 ```
 
 Three Envoy replicas share the upstreams, so they diverge on their own.
-`traffic-generator.mjs` runs as part of this stack for a reason worth being
+`infra/traffic-generator.mjs` runs as part of this stack for a reason worth being
 explicit about: outlier detection only reacts to requests it actually sees, so
 without traffic flowing through the egress listener, setting a failure rate on
 `flaky-upstream` changes nothing at all. The generator sends a steady trickle
@@ -310,7 +310,7 @@ reacts to what the upstream actually returns — but everything downstream
 path. There is also a fully containerized version that needs nothing on the
 host but Docker: `docker compose --profile demo run --rm demo`.
 
-`envoy/envoy.yaml` carries the config discussed:
+`infra/envoy/envoy.yaml` carries the config discussed:
 
 - **One cluster per API.** Every stat, outlier event and access-log record is
   keyed by cluster name, so cluster identity *is* API identity. Traffic through
@@ -345,7 +345,7 @@ belongs in the aggregator, off the request path.
 
 ## What is a prototype, not production
 
-- **Ingestion is polling.** `src/FleetSource.ts` polls each replica's admin
+- **Ingestion is polling.** `packages/aggregator/src/FleetSource.ts` polls each replica's admin
   `/stats`. It needs no proto codegen, which is why it is here. In production
   swap it for the push-based `envoy.service.metrics.v3.MetricsService` sink,
   which also tags each report with the replica's node ID — it produces the same
@@ -356,17 +356,18 @@ belongs in the aggregator, off the request path.
 - **Enforcement is observational here.** The aggregator publishes but does not
   push config — see [the fork this defers](#the-fork-this-defers).
 - **The Envoy and monitoring stacks are unrun.** Docker in this sandbox cannot
-  bind-mount the project directory, so `envoy.yaml`, `docker-compose.yml`, and
-  `monitoring/` are validated with `docker compose config` and reasoned from
-  the docs, not executed end-to-end. `parseStats` is a pure exported function
-  tested against realistic admin output, including the noise stats that must
-  not be mistaken for clusters. The `/metrics` endpoint and every metric in
+  bind-mount the project directory, so `infra/envoy/envoy.yaml`,
+  `docker-compose.yml`, and `infra/monitoring/` are validated with
+  `docker compose config` and reasoned from the docs, not executed end-to-end.
+  `parseStats` is a pure exported function tested against realistic admin
+  output, including the noise stats that must not be mistaken for clusters.
+  The `/metrics` endpoint and every metric in
   [Metrics & monitoring](#metrics--monitoring) *are* verified — they run in the
   same Node process the tests do, no Docker required. Same split for the demo
   driver: its envoy-mode failure injection and the Node side of
-  `traffic-generator.mjs` are verified directly (against a plain HTTP stand-in
-  for Envoy, since none is running here); only the real Envoy routing and
-  outlier detection reacting to it is not.
+  `infra/traffic-generator.mjs` are verified directly (against a plain HTTP
+  stand-in for Envoy, since none is running here); only the real Envoy routing
+  and outlier detection reacting to it is not.
 - **HTTPS egress needs TLS interception** for any of the L7 signals to exist. If
   you proxy via `CONNECT` you get L4 only, `consecutive_5xx` is dead, and the
   breaker degrades to connection-level detection. Decide this early: it drives
@@ -374,26 +375,52 @@ belongs in the aggregator, off the request path.
 
 ## Layout
 
-The split is deliberate: **the decision logic is pure, the shell is Effect.**
+A pnpm workspace, one package per component. The split is deliberate: **the
+decision logic is pure, the shell is Effect, and each has its own boundary
+you can `pnpm --filter` independently.**
 
 ```
-src/domain/Model.ts    vocabulary, Schema for the published event, error types
-src/domain/Breaker.ts  the state machine — pure functions, no Effect, no clock
-src/Aggregator.ts      service: tick loop over the pure machine, on a Schedule
-src/Events.ts          EventBus (PubSub) + EventSink (webhook, declarative retry)
-src/FleetSource.ts     service with two layers: simulated fleet, real Envoy
-src/Http.ts            routes, SSE as a merged Stream, delivery-integrity tracking, /metrics
-src/Telemetry.ts       every Metric the app emits, in one place
-src/main.ts            layer composition, NodeRuntime.runMain
-public/index.html      operator console (unchanged — plain HTML/CSS/JS)
-subscriber/            standalone consumer; decodes with the producer's Schema
-demo/driver.ts         drives the demo script over HTTP, narrates transitions
-test/Breaker.test.ts   12 tests, pure — no runtime, no clock, no mocks
-test/Aggregator.test.ts 8 tests under TestClock — full pipeline, zero sleeps
-envoy/envoy.yaml       egress config: per-API clusters, outlier detection
-traffic-generator.mjs  keeps requests flowing through Envoy so /__fail means something
-monitoring/            Prometheus scrape config + provisioned Grafana dashboard
+packages/
+  domain/                    @egress/domain — pure, no Effect, no clock, no I/O
+    src/Model.ts             vocabulary, Schema for the published event, error types
+    src/Breaker.ts           the state machine — pure functions, total on (state, reports, now)
+    test/Breaker.test.ts     12 tests, pure — no runtime, no clock, no mocks
+
+  aggregator/                @egress/aggregator — depends on @egress/domain
+    src/Aggregator.ts        service: tick loop over the pure machine, on a Schedule
+    src/Events.ts            EventBus (PubSub) + EventSink (webhook, declarative retry)
+    src/FleetSource.ts       service with two layers: simulated fleet, real Envoy
+    src/Http.ts              routes, SSE as a merged Stream, delivery-integrity tracking, /metrics
+    src/Telemetry.ts         every Metric the app emits, in one place
+    src/main.ts              layer composition, NodeRuntime.runMain
+    public/index.html        operator console (unchanged — plain HTML/CSS/JS)
+    test/Aggregator.test.ts  8 tests under TestClock — full pipeline, zero sleeps
+
+  subscriber/                @egress/subscriber — depends on @egress/domain
+    src/subscriber.ts        standalone consumer; decodes with the producer's Schema
+
+  demo/                      @egress/demo — no dependency on the others, speaks only HTTP
+    src/driver.ts            drives the demo script over HTTP, narrates transitions
+
+infra/
+  envoy/envoy.yaml           egress config: per-API clusters, outlier detection
+  traffic-generator.mjs      keeps requests flowing through Envoy so /__fail means something
+  monitoring/                Prometheus scrape config + provisioned Grafana dashboard
+
+docker-compose.yml           wires infra/ and the packages/ entrypoints together
 ```
+
+Cross-package imports go through `@egress/domain`'s `package.json#exports`
+(`@egress/domain/Model.ts`, `@egress/domain/Breaker.ts`) rather than relative
+`../../` paths, and `workspace:*` in each consumer's `package.json` is what
+`pnpm install` resolves to a symlink — so a change to the state machine is a
+change in one package, felt through a real dependency edge, not a shared
+folder. There is still no build step: every package runs straight off its
+`src/*.ts` via `--experimental-strip-types`, `tsc --noEmit` at the root
+typechecks all four projects in one pass (`packages/*/src` and
+`packages/*/test` in `tsconfig.json`'s `include`), and the root scripts
+(`pnpm start`, `pnpm run demo`, `pnpm run subscribe`) are thin
+`pnpm --filter @egress/<pkg> <script>` delegations.
 
 `Breaker.step` is a total function of `(state, now, config)`. Everything hard to
 reason about — concurrency, scheduling, delivery, retries — lives in the Effect
@@ -467,7 +494,7 @@ strip-types compatibility rather than leaving it to discipline.
 
 ## Tuning
 
-`defaultConfig` in `src/domain/Model.ts`, exposed as a `Context.Reference` so
+`defaultConfig` in `packages/domain/src/Model.ts`, exposed as a `Context.Reference` so
 it has a default but any test can override it for one call with
 `Effect.provideService(Config, ...)`. Values are set for a live demo, not
 production — `openMs` in particular is 4s so recovery is watchable.
