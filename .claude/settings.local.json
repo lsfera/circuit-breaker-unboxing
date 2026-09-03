@@ -1,0 +1,12 @@
+{
+  "enabledMcpjsonServers": [
+    "shadcn",
+    "memory",
+    "github",
+    "docker",
+    "better-auth"
+  ],
+  "disabledMcpjsonServers": [
+    "exa"
+  ]
+}
