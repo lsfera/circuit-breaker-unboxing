@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { Duration, Effect, Layer, Ref } from "effect";
 import { TestClock } from "effect/testing";
 import { Aggregator, AggregatorLayer } from "../src/Aggregator.ts";
+import { InMemoryCoordinationLayer } from "../src/Coordination.ts";
 import { EventBus, EventBusLayer, EventSink } from "../src/Events.ts";
 import { FleetSource, SimFleetLayer, parseStats } from "../src/FleetSource.ts";
 import { Config, defaultConfig, State } from "@egress/domain/Model.ts";
@@ -49,6 +50,10 @@ const harness = (delivered: Ref.Ref<ReadonlyArray<CircuitEvent>>) =>
         SimFleetLayer(SPECS, 5),
         EventBusLayer,
         RecordingSink(delivered),
+        // Solo HA: this instance always wins its own lease, same as a single
+        // real process would. Dedicated failover/fencing tests below build
+        // their own two-instance harness instead of this one.
+        InMemoryCoordinationLayer,
       ),
     ),
     Layer.provideMerge(TestClock.layer()),

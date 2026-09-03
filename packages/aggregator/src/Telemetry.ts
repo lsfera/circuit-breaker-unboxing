@@ -57,6 +57,19 @@ export const fleetPollDuration = Metric.timer("egress_fleet_poll_duration_ms", {
   description: "Time to poll and parse every replica once per tick.",
 });
 
+export const isLeader = Metric.gauge("egress_aggregator_is_leader", {
+  description:
+    "1 if this aggregator instance currently holds the publishing lease, 0 otherwise.",
+});
+
+export const fencingConflicts = Metric.counter(
+  "egress_aggregator_fencing_conflicts_total",
+  {
+    description:
+      "Checkpoint writes rejected because a newer lease holder already took over, by API.",
+  },
+);
+
 export const webhookDelivered = Metric.counter(
   "egress_webhook_delivered_total",
   { description: "Events the sink delivered successfully, by API." },

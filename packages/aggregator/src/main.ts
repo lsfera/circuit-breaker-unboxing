@@ -2,7 +2,9 @@ import { Effect, Layer } from "effect";
 import { HttpRouter } from "effect/unstable/http";
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node";
 import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import { Aggregator, AggregatorLayer } from "./Aggregator.ts";
+import { HaSettings, InMemoryCoordinationLayer } from "./Coordination.ts";
 import { EventBusLayer, NoopSinkLayer, WebhookSinkLayer } from "./Events.ts";
 import { EnvoyFleetLayer, SimFleetLayer } from "./FleetSource.ts";
 import { HttpLive } from "./Http.ts";
@@ -43,6 +45,24 @@ const SinkLayer = args.has("no-webhook")
   : WebhookSinkLayer(`http://127.0.0.1:${PORT}/subscriber/webhook`);
 
 /**
+ * Solo by default: one instance that always wins its own lease. That is not
+ * a special case of the HA machinery, it is what running it produces when
+ * there is only one instance — the same InMemoryCoordinationLayer a test
+ * uses to exercise real failover between two instances in one process. A
+ * real multi-instance deployment swaps this for
+ * `RedisCoordinationLayer(client)` from Coordination.ts; that wiring is not
+ * exercised here, only the logic it plugs into.
+ */
+const instanceId = args.get("instance-id") ?? randomUUID();
+const HaLayer = Layer.mergeAll(
+  InMemoryCoordinationLayer,
+  Layer.succeed(HaSettings, {
+    instanceId,
+    leaseTtlMs: Number(args.get("lease-ttl-ms") ?? 5000),
+  }),
+);
+
+/**
  * The dependency graph, declared once. Layer.provideMerge keeps FleetSource,
  * EventBus and EventSink in the output context because the HTTP routes read
  * them directly.
@@ -50,7 +70,7 @@ const SinkLayer = args.has("no-webhook")
 const AppLayer = HttpLive.pipe(
   Layer.provideMerge(AggregatorLayer),
   Layer.provideMerge(
-    Layer.mergeAll(FleetLayer, EventBusLayer, SinkLayer),
+    Layer.mergeAll(FleetLayer, EventBusLayer, SinkLayer, HaLayer),
   ),
   Layer.provide(Layer.succeed(Config, defaultConfig)),
 );
@@ -67,6 +87,7 @@ const AggregatorDaemon = Layer.effectDiscard(
     yield* Effect.log(
       `egress circuit breaker console  source=${MODE}` +
         (MODE === "sim" ? ` replicas=${REPLICAS}` : "") +
+        `  instance=${instanceId}` +
         `  http://localhost:${PORT}`,
     );
   }),

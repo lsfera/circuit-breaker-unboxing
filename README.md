@@ -180,6 +180,8 @@ endpoint is live on the same port in both modes (`--source=sim` or
 | `egress_circuit_transitions_total` | Published `state_changed` events, by API/state/reason |
 | `egress_circuit_snapshots_total` | Periodic full-state republishes, by API |
 | `egress_fleet_poll_duration_ms` | Time to poll and parse every replica once per tick |
+| `egress_aggregator_is_leader` | 1 if this instance currently holds the publishing lease, 0 otherwise — see [High availability](#high-availability) |
+| `egress_aggregator_fencing_conflicts_total` | Checkpoint writes rejected because a newer lease holder already took over, by API |
 | `egress_webhook_delivered_total` / `_failed_total` / `_dead_lettered_total` | Sink outcomes, by API |
 | `egress_webhook_delivery_duration_ms` | Successful-delivery latency, including retries |
 | `egress_subscriber_events_received_total` / `_gaps_total` / `_duplicates_total` | The delivery contract, read from outside the process — same numbers the console's right-hand panel shows, as counters |
@@ -359,9 +361,14 @@ belongs in the aggregator, off the request path.
   swap it for the push-based `envoy.service.metrics.v3.MetricsService` sink,
   which also tags each report with the replica's node ID — it produces the same
   `ReplicaReport`, so nothing downstream changes.
-- **Aggregator state is in memory.** A `Ref`, not a database. Real deployments
-  need it replicated or leader-elected, or two aggregators will publish
-  conflicting sequences for the same API.
+- **Aggregator state is in memory, but leader election is real.** See
+  [High availability](#high-availability) — the mechanism that stops two
+  aggregators from publishing conflicting sequences is implemented and
+  tested, not deferred. What's still a prototype is the backend: the shipped
+  layer is in-process (correct for one instance, and for tests that run two
+  instances in one process), while a real multi-machine deployment needs the
+  Redis-backed port wired to an actual client — see that section for why
+  the port, not the wiring, is the part worth shipping from here.
 - **Enforcement is observational here.** The aggregator publishes but does not
   push config — see [the fork this defers](#the-fork-this-defers).
 - **The Envoy and monitoring stacks are unrun.** Docker in this sandbox cannot
@@ -401,13 +408,15 @@ packages/
 
   aggregator/                @egress/aggregator — depends on @egress/domain
     src/Aggregator.ts        service: tick loop over the pure machine, on a Schedule
+    src/Coordination.ts      leader election + fencing-token checkpoints — see High availability
     src/Events.ts            EventBus (PubSub) + EventSink (webhook, declarative retry)
     src/FleetSource.ts       service with two layers: simulated fleet, real Envoy
     src/Http.ts              routes, SSE as a merged Stream, delivery-integrity tracking, /metrics
     src/Telemetry.ts         every Metric the app emits, in one place
     src/main.ts              layer composition, NodeRuntime.runMain
     public/index.html        operator console (unchanged — plain HTML/CSS/JS)
-    test/Aggregator.test.ts  8 tests under TestClock — full pipeline, zero sleeps
+    test/Aggregator.test.ts    8 tests under TestClock — full pipeline, zero sleeps
+    test/Coordination.test.ts  5 tests — fencing primitives, plus a real two-instance failover
 
   subscriber/                @egress/subscriber — depends on @egress/domain
     src/subscriber.ts        standalone consumer; decodes with the producer's Schema
@@ -442,7 +451,7 @@ tested exhaustively with plain `assert`.
 
 ## What the build surfaced
 
-Four things worth knowing, all of them found by running the thing:
+Five things worth knowing, all of them found by running the thing:
 
 - **A reason code cannot be derived from averaged endpoint counts.** With four of
   five replicas seeing zero healthy hosts, the mean rounds to 1, so "all
@@ -460,6 +469,13 @@ Four things worth knowing, all of them found by running the thing:
   harmlessly.
 - **`event_log_path` lives under `cluster_manager.outlier_detection`,** not on
   the cluster. Easy to get wrong from memory.
+- **Fencing per-key is not fencing.** The first version of `CheckpointStore`
+  rejected a stale write only if a *newer* write had already landed for that
+  same API. That is not a fencing guarantee — it just means a stale leader
+  wins by default on any API the new leader has not gotten to yet, which is
+  the exact split-brain window fencing tokens exist to close. The fix is
+  checking against the one shared lease-token counter, not a per-key value —
+  see [High availability](#high-availability).
 
 ## What Effect actually bought here
 
@@ -525,6 +541,49 @@ production — `openMs` in particular is 4s so recovery is watchable.
 generates an event storm, and every subscriber ends up debouncing it themselves
 — badly, and differently from each other.
 
+## High availability
+
+One aggregator publishing means one process is a single point of failure.
+Two aggregators publishing independently is worse: nothing stops them from
+handing out conflicting sequence numbers for the same API, which is exactly
+the contract this whole design exists to protect. `Coordination.ts` closes
+that gap with two primitives, both required together:
+
+- **`LeaderElection`** — exactly one instance may publish at a time. Each
+  tick calls `tryAcquireOrRenew(instanceId, ttl)`; a non-leader does not
+  poll, does not step the state machine, and does not publish — it only
+  keeps trying to acquire. Every genuine handoff (not a renewal) produces a
+  **fencing token** that strictly increases.
+- **`CheckpointStore`** — whichever instance takes over next must resume
+  `sequence` and `openBackoffMs` from where the last one left off, not from
+  `Breaker.initial`. A newly-leading instance rehydrates each API it hasn't
+  seen yet from its last checkpoint before its first tick runs.
+
+The subtlety worth calling out, because it is easy to get wrong: fencing has
+to be checked against the *same shared counter* `LeaderElection` issues
+from, not a per-API "last write wins" value. An earlier version of this
+fenced each API's checkpoint independently — which is wrong, because it only
+stops a stale writer *after* someone else has already written that specific
+key. A stale leader mid-GC-pause can still win on any API the new leader
+hasn't published for yet, which is precisely the split-brain case fencing
+tokens exist to prevent. Checking against the shared lease token instead
+closes the window for every API at once, the instant a handoff happens —
+`Coordination.test.ts`'s "a stale token is rejected even for an API no one
+has checkpointed yet" test is that exact bug, pinned down.
+
+What ships here is the in-memory implementation — correct for a single
+process (which is what `main.ts` wires by default: solo mode is just "one
+instance that always wins its own lease," not a special case), and what lets
+a test run two independent "instances" against one shared coordinator in a
+single process to exercise a real failover without a second machine. A real
+multi-machine deployment needs `RedisCoordinationLayer`, which is written
+against a deliberately minimal `RedisLike` port (one `eval` method) so that
+any real client — `ioredis`, `node-redis` — plugs in with a one-line
+adapter, rather than pinning a dependency this repo does not otherwise need.
+Same honesty as the rest of the Envoy/Docker stack: the Lua scripts are
+reasoned from Redis's documented command semantics for `GET`/`SET`/`INCR`
+and single-threaded script execution, not run against a live Redis here.
+
 ## The fork this defers
 
 One question decides how much more there is to build: **must the aggregator's
@@ -538,8 +597,10 @@ If the open state must be enforced fleet-wide, three things follow:
 
 1. **The xDS push path.** Push a route with `direct_response` 503 rather than
    dropping endpoints — cleaner, and it returns a stable body callers can key on.
-2. **Replicated or leader-elected aggregator state,** since two aggregators
-   publishing sequences for the same API is a contract violation, not a race.
+2. **Leader-elected aggregator state** — done regardless of which side of this
+   fork gets taken, since two aggregators publishing sequences for the same
+   API is a contract violation, not a race, even in the purely observational
+   case. See [High availability](#high-availability).
 3. **A single owner for `HALF_OPEN` probing.** While an API is nominally closed,
    let Envoy handle local un-ejection (`base_ejection_time` backoff,
    `max_ejection_time`, `successful_active_health_check_uneject_host`). Once the
