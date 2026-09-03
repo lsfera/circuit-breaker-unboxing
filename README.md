@@ -38,7 +38,7 @@ So enforcement and publication are split:
 | | Enforces | Publishes | Latency |
 |---|---|---|---|
 | Envoy, per replica | yes, immediately | no | sub-second |
-| Aggregator, one machine per API | via config push | yes | seconds |
+| Aggregator, one machine per API | no — observational here (could push config; see [The fork this defers](#the-fork-this-defers)) | yes | seconds |
 
 ```mermaid
 flowchart LR
@@ -273,7 +273,9 @@ Grafana at <http://localhost:3000> (anonymous, pre-provisioned — no login) ope
 straight to the **Egress circuit breaker** dashboard: a state timeline per API,
 healthy/total endpoints, transitions, webhook delivery and latency, the two
 delivery-contract stat tiles that should read zero through an entire incident,
-and — scraped directly from each Envoy's own `/stats/prometheus` — the raw
+an aggregator-leadership timeline (one line per instance — see
+[High availability](#high-availability)) and its fencing-conflict counter, and
+— scraped directly from each Envoy's own `/stats/prometheus` — the raw
 per-replica healthy-host count, so you can see the disagreement the console's
 replica strip visualizes, in a second tool, at the same time.
 

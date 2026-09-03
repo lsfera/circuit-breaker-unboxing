@@ -2,7 +2,7 @@
   "title": "Egress circuit breaker",
   "uid": "egress-circuit-breaker",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "refresh": "2s",
   "time": { "from": "now-10m", "to": "now" },
@@ -271,6 +271,61 @@
         }
       ],
       "fieldConfig": { "defaults": { "custom": { "lineWidth": 2 } }, "overrides": [] }
+    },
+    {
+      "id": 13,
+      "type": "state-timeline",
+      "title": "Aggregator leadership",
+      "description": "Which aggregator instance currently holds the publishing lease. Exactly one line should read leader at a time; a docker kill of the leader should flip this to the other instance within lease_ttl_ms, with no gap in the state timeline above.",
+      "gridPos": { "x": 0, "y": 46, "w": 18, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "egress_aggregator_is_leader",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "standby", "color": "grey" },
+                "1": { "text": "leader", "color": "green" }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": { "mergeValues": true, "showValue": "always" }
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "Fencing conflicts",
+      "description": "Checkpoint writes rejected because a newer lease holder already took over. A clean, fast failover (e.g. a hard process kill) typically never triggers this — it's the safety net for a slower one, such as a GC pause outliving the lease.",
+      "gridPos": { "x": 18, "y": 46, "w": 6, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(egress_aggregator_fencing_conflicts_total)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }]
+          }
+        },
+        "overrides": []
+      }
     }
   ]
 }
