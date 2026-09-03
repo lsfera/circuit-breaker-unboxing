@@ -78,19 +78,38 @@ to be built wrong on a first pass:
 
 ## State → action mapping
 
+A note on terminology before the table: this design was first drafted in
+AMQP 0-9-1 terms ("prefetch"), but the client this repo would actually build
+on speaks AMQP 1.0, and **AMQP 1.0 has no prefetch** — RabbitMQ's own
+comparison of the two protocols doesn't call it a rename, it lists 0-9-1's
+"simple: consumer prefetch" against 1.0's "sophisticated: link flow control
+and session flow control" as different mechanisms entirely. In AMQP 1.0 the
+receiver grants the sender a number of **link credits**; the sender may send
+that many messages before it must be granted more. It's a pull-style
+analogue of prefetch, not the same knob under a new name, and it's
+negotiated per link rather than set once per channel. The table below uses
+"credit," not "prefetch," for exactly that reason.
+
 | Circuit state | Daemon action | Mechanism |
 |---|---|---|
-| `CLOSED` | Full prefetch | Consumer credit/prefetch set at creation |
-| `DEGRADED` | Reduced prefetch | ⚠️ **Not supported by the pinned client as published** — see below |
+| `CLOSED` | Full link credit | Credit granted at consumer creation |
+| `DEGRADED` | Reduced link credit | ⚠️ **Not supported by the pinned client as published** — see below |
 | `OPEN` | Stop pulling new work | Close the consumer on the *work* queue only — the connection and the control-plane subscription both stay up |
 | `HALF_OPEN` | Exactly one elected daemon probes | SAC promotion on `probe-trigger`; the elected daemon creates a work-queue consumer for one message, then closes it again |
-| → `CLOSED` (recovery) | Ramp prefetch back up on a schedule (1→4→16→max) | Never a snap to full — snapping is the actual thundering-herd risk on the way *back*. Also blocked by the same gap as `DEGRADED`. |
+| → `CLOSED` (recovery) | Ramp granted credit back up on a schedule (1→4→16→max) | Never a snap to full — snapping is the actual thundering-herd risk on the way *back*. Also blocked by the same gap as `DEGRADED`. |
 
 Judgment of `PROBE_SUCCEEDED` vs `PROBE_FAILED` is **not** reimplemented
 here — it stays with Envoy's outlier detection and the aggregator's existing
 quorum logic. The elected daemon's only job during `HALF_OPEN` is to
 guarantee one real call happens through the egress listener; the aggregator
 decides what that call meant, exactly as it already does today.
+
+One more thing AMQP 1.0's session-level flow control raises, not yet
+explored here: `DEGRADED`/ramp-back need per-daemon control, but if a single
+daemon process ever ran multiple consumer links over one session, session
+flow control would throttle all of them together — a coarser lever than
+what this design wants, worth ruling in or out explicitly if the daemon
+package ever gets built, not assumed either way.
 
 ## The `HALF_OPEN` election, end to end
 
@@ -171,11 +190,14 @@ verification elsewhere in this repo is.)
 
 - **The DEGRADED action has no home in the pinned client.** Checked the
   actual public surface rather than assumed it: `Consumer` exposes exactly
-  `start()`/`close()`/`id`/`replyTo` — no method to set or change
-  credit/prefetch after a consumer is created. AMQP 1.0 models this as
-  link credit, which `rabbitmq-amqp-js-client` does not yet expose (its own
-  roadmap lists "credit/prefetch management for flow control" as in
-  progress). Concretely: `CLOSED` (create at full credit), `OPEN` (close),
+  `start()`/`close()`/`id`/`replyTo` — no method to grant or withdraw link
+  credit after a consumer is created, which is the only lever AMQP 1.0 has
+  for this (see the terminology note above —
+  [RabbitMQ's own comparison](https://www.rabbitmq.com/blog/2024/08/05/native-amqp)
+  treats 0-9-1 prefetch and 1.0 flow control as different mechanisms, not a
+  rename). `rabbitmq-amqp-js-client`'s own roadmap lists "credit/prefetch
+  management for flow control" as still in progress. Concretely: `CLOSED`
+  (create at full credit), `OPEN` (close),
   and `HALF_OPEN` (create at minimal credit, close after one message) are
   all buildable today; `DEGRADED`'s live reduction *without* closing the
   consumer, and the gradual ramp-back on recovery, are not — both would
@@ -187,7 +209,7 @@ verification elsewhere in this repo is.)
   `WebhookSink`, implementing the same `EventSink` interface, publishing to
   `circuit.control` instead of POSTing a webhook. Not written.
 - **The daemon package itself** — connection handling, the state-machine
-  reaction to `circuit.control` messages, the prefetch ramp schedule. Not
+  reaction to `circuit.control` messages, the credit ramp schedule. Not
   written; would likely be `packages/rmq-consumer` if built, following this
   repo's existing `packages/domain` / `aggregator` / `subscriber` / `demo`
   split, using the same `Rmq` `Context.Service` shape the verification
