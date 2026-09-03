@@ -285,6 +285,20 @@ upstream_rq_pending_overflow + upstream_cx_overflow
 docker compose up
 ```
 
+Needs `$HOST_WORKSPACE_FOLDER` set to this repo's path *on the Docker host*,
+not inside whatever container you're running this from — every service
+bind-mounts something from the repo, and Docker's file-sharing permission
+check is keyed on the host path, not a container-internal one. In a
+devcontainer this is normally already exported correctly; overriding it with
+a container-internal path (e.g. `/workspace`) produces "mounts denied...not
+shared from the host" even though Docker itself is working fine. If your own
+shell can't reach the published ports afterward (`curl localhost:8088`
+hangs or refuses), you're likely on a different Docker network than the
+compose project's — every service here also joins the host devcontainer's
+own external `devcontainer` network for exactly that reason, so
+`curl http://aggregator:8088/metrics` from a shell on that same network
+works without needing a published port at all.
+
 Three Envoy replicas share the upstreams, so they diverge on their own.
 `infra/traffic-generator.mjs` runs as part of this stack for a reason worth being
 explicit about: outlier detection only reacts to requests it actually sees, so
@@ -341,6 +355,37 @@ host but Docker: `docker compose --profile demo run --rm demo`.
 - **`cluster_manager.outlier_detection.event_log_path`** for the discrete
   ejection stream.
 
+### Two real aggregator instances, one shared Redis
+
+`docker compose up` runs `aggregator` and `aggregator-2` — two separate
+containers, both `--ha=redis` against the one `redis` service — not one.
+This is the [High availability](#high-availability) design actually
+deployed, not just tested in-process: exactly one of them holds
+`egress_aggregator_is_leader=1` at a time, and it was verified by force —
+inject a real failure, let the current leader publish into `OPEN`, then
+`docker kill` its container outright:
+
+```
+leader (aggregator-2) before kill:  state=OPEN  sequence=7
+                                     $ docker kill workspace-aggregator-2-1
+standby (aggregator) after ~8s:     is_leader=1  state=OPEN  sequence=7
+```
+
+The standby took over within `lease_ttl_ms`, rehydrated `payments-provider`
+from its last Redis checkpoint (`OPEN`, not `CLOSED` — the state survived,
+not just the fact that *something* is now leading), and kept publishing
+from `sequence=7` onward, through the rest of the probe cycle to
+`PROBE_SUCCEEDED` / `CLOSED` at `sequence=13` — no reset, no gap, no
+duplicate, across a hard kill of a different OS process mid-incident. That
+is the property `Coordination.test.ts` and `RedisCoordination.test.ts` prove
+in a single test process; this is the same property, watched happen between
+two real containers.
+
+Prometheus scrapes both instances (`infra/monitoring/prometheus.yml`) with
+Prometheus's own `instance` label distinguishing them, so
+`egress_aggregator_is_leader` in Grafana shows exactly one of the two lines
+at 1 and the other at 0, flipping on a real failover.
+
 ### Fleet state stays per replica, on purpose
 
 Replicas are stateless behind an L4 load balancer, configured by xDS. That is
@@ -362,34 +407,34 @@ belongs in the aggregator, off the request path.
   swap it for the push-based `envoy.service.metrics.v3.MetricsService` sink,
   which also tags each report with the replica's node ID — it produces the same
   `ReplicaReport`, so nothing downstream changes.
-- **Aggregator state is in memory, but leader election is real — including
-  against a real Redis.** See [High availability](#high-availability): the
-  mechanism that stops two aggregators from publishing conflicting sequences
-  is implemented and tested, and the Redis-backed port is proven against an
-  actual `redis:7-alpine` container, not just reasoned about. What's still a
-  prototype is `main.ts`'s wiring: it defaults to the in-process layer
-  (correct for one instance), and no deployment here actually runs N
-  aggregator processes against a shared Redis — that integration, not the
-  coordination logic itself, is the remaining gap.
+- **Aggregator state is not a database — but leader election, failover, and
+  the Redis backend are all real, deployed, and watched working, not just
+  tested in isolation.** See
+  [Two real aggregator instances, one shared Redis](#two-real-aggregator-instances-one-shared-redis):
+  `docker compose up` runs two aggregator containers against a shared Redis,
+  and a hard `docker kill` of the leader mid-incident was used to confirm
+  the standby takes over and continues the sequence rather than resetting
+  it. What's still fair to call a prototype is durability of the checkpoint
+  store itself — one `redis:7-alpine` container with no persistence
+  configured is a second single point of failure, just moved one level
+  down. A real deployment wants Redis with AOF/replication, or a stronger
+  backing store entirely (etcd, a Postgres advisory lock) behind the same
+  `LeaderElection`/`CheckpointStore` interfaces — those interfaces, not the
+  demo's Redis config, are the part meant to carry over.
 - **Enforcement is observational here.** The aggregator publishes but does not
   push config — see [the fork this defers](#the-fork-this-defers).
-- **The Envoy and monitoring stacks are unrun.** Docker in this sandbox cannot
-  bind-mount the project directory, so `infra/envoy/envoy.yaml`,
-  `docker-compose.yml`, and `infra/monitoring/` are validated with
-  `docker compose config` and reasoned from the docs, not executed end-to-end.
-  `parseStats` is a pure exported function tested against realistic admin
-  output, including the noise stats that must not be mistaken for clusters.
-  The `/metrics` endpoint and every metric in
-  [Metrics & monitoring](#metrics--monitoring) *are* verified — they run in the
-  same Node process the tests do, no Docker required. Same split for the demo
-  driver: its envoy-mode failure injection and the Node side of
-  `infra/traffic-generator.mjs` are verified directly (against a plain HTTP
-  stand-in for Envoy, since none is running here); only the real Envoy routing
-  and outlier detection reacting to it is not. The generator's DNS-based
-  replica discovery is the same story: `dns.resolve4` against a real hostname
-  is verified directly, but that `envoy` actually resolves to three addresses
-  via the Compose network alias is Docker's documented behavior, reasoned
-  from the docs rather than watched happen.
+- **The Envoy and monitoring stack *is* run end to end now — the earlier
+  "Docker cannot bind-mount here" note was a false assumption, corrected by
+  actually running it.** `docker compose up` boots three real Envoy
+  replicas, a real aggregator pair, and drives a real incident through them
+  (see the section linked above); what looked like a sandbox limitation was
+  one environment variable pointing at the wrong path (see
+  [Running against real Envoy](#running-against-real-envoy) for the exact
+  failure mode and fix). `parseStats` is still additionally covered by a
+  pure unit test against realistic admin output, including the noise stats
+  that must not be mistaken for clusters, and the `/metrics` endpoint and
+  every metric in [Metrics & monitoring](#metrics--monitoring) are verified
+  in-process too — belt and suspenders, not a substitute for the real run.
 - **HTTPS egress needs TLS interception** for any of the L7 signals to exist. If
   you proxy via `CONNECT` you get L4 only, `consecutive_5xx` is dead, and the
   breaker degrades to connection-level detection. Decide this early: it drives
@@ -459,7 +504,7 @@ tested exhaustively with plain `assert`.
 
 ## What the build surfaced
 
-Five things worth knowing, all of them found by running the thing:
+Six things worth knowing, all of them found by running the thing:
 
 - **A reason code cannot be derived from averaged endpoint counts.** With four of
   five replicas seeing zero healthy hosts, the mean rounds to 1, so "all
@@ -484,6 +529,18 @@ Five things worth knowing, all of them found by running the thing:
   the exact split-brain window fencing tokens exist to close. The fix is
   checking against the one shared lease-token counter, not a per-key value —
   see [High availability](#high-availability).
+- **A documented sandbox limitation turned out to be a misconfigured
+  environment variable.** "Docker cannot bind-mount the project directory
+  here" had been true every time it was checked — until `HOST_WORKSPACE_FOLDER`
+  got explicitly re-exported to a container-internal path while debugging
+  something unrelated, silently shadowing the correct host path the
+  devcontainer had already set. The fix was not a workaround, it was
+  removing the override — three real Envoy replicas, two real aggregator
+  instances, and a real Redis now run end to end (see
+  [Running against real Envoy](#running-against-real-envoy)). The lesson
+  travels further than this one variable: re-verify an environment
+  assumption before designing around it, especially one written down as
+  fact by an earlier pass over the same repo.
 
 ## What Effect actually bought here
 
@@ -579,30 +636,29 @@ closes the window for every API at once, the instant a handoff happens —
 `Coordination.test.ts`'s "a stale token is rejected even for an API no one
 has checkpointed yet" test is that exact bug, pinned down.
 
-What `main.ts` wires by default is the in-memory implementation — correct
-for a single process (solo mode is just "one instance that always wins its
-own lease," not a special case), and what lets `Coordination.test.ts` run
-two independent "instances" against one shared coordinator in a single
-process to exercise a real failover without a second machine. A real
-multi-machine deployment needs `RedisCoordinationLayer`, written against a
-deliberately minimal `RedisLike` port (one `eval` method) so that any real
-client — `ioredis`, `node-redis` — plugs in with a one-line adapter, rather
-than pinning a dependency the default path does not need.
+`main.ts` supports both backends: `InMemoryCoordinationLayer` by default
+(one instance that always wins its own lease — not a special case, just
+what solo mode produces), or `--ha=redis --redis=<url>` for
+`RedisCoordinationLayer`, written against a deliberately minimal `RedisLike`
+port (one `eval` method) so that any real client — `ioredis`, `node-redis`
+— plugs in with a one-line adapter, rather than pinning a dependency the
+default path does not need.
 
-Unlike the Envoy/Docker stack, this part *is* run end to end, not just
-reasoned about: `test/integration/RedisCoordination.test.ts`
-(`pnpm run test:redis`, opt-in — needs Docker, not part of `pnpm test`) spins
-up a real `redis:7-alpine` container via Testcontainers and runs the same
-properties against it, including the exact fencing bug above — "a stale
-token is rejected even for an API no one has checkpointed yet" is proven by
-Redis's own Lua execution here, not by re-reading the script. It uses real
-wall-clock sleeps rather than `TestClock`, since Redis's own key expiry runs
-on real time that simulated time cannot drive, and skips cleanly (does not
-fail) when Docker is unavailable — the skip has to be checked from inside
-each test body, not as a static option on `test(...)`, because Docker
-availability is only known after `before()` has run, which happens after
-registration; getting that ordering wrong was caught the same way as the
-fencing bug, by watching the "no Docker" path fail instead of skip.
+Both are run for real, not just reasoned about, at increasing levels of
+integration:
+
+1. `Coordination.test.ts` runs two independent "instances" against one
+   shared in-memory coordinator in a single process — a real failover
+   without a second machine.
+2. `test/integration/RedisCoordination.test.ts` (`pnpm run test:redis`,
+   opt-in — needs Docker) spins up a real `redis:7-alpine` container via
+   Testcontainers and proves the same properties, including the exact
+   fencing bug above, by Redis's own Lua execution rather than by re-reading
+   the script.
+3. `docker compose up` runs it as an actual deployment — two real
+   `aggregator` containers against one real `redis` container, with a hard
+   `docker kill` of the leader used to confirm the failover live. See
+   [Two real aggregator instances, one shared Redis](#two-real-aggregator-instances-one-shared-redis).
 
 ## The fork this defers
 

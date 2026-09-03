@@ -35,10 +35,10 @@ importers:
       effect:
         specifier: 'catalog:'
         version: 4.0.0-rc.112
-    devDependencies:
       ioredis:
         specifier: ^5.4.1
         version: 5.11.1
+    devDependencies:
       testcontainers:
         specifier: ^12.1.0
         version: 12.1.0

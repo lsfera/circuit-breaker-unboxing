@@ -7,7 +7,10 @@ scrape_configs:
   # regardless of --source=sim or --source=envoy.
   - job_name: aggregator
     static_configs:
-      - targets: ["aggregator:8088"]
+      # Both real HA instances (see docker-compose.yml) — the `instance`
+      # label Prometheus adds from each target address is what lets
+      # egress_aggregator_is_leader show which one is currently active.
+      - targets: ["aggregator:8088", "aggregator-2:8088"]
         labels: { deployment: "docker-compose" }
       # Reaches `pnpm start` running on the host (the sim-fleet demo) so the
       # same Prometheus/Grafana stack works for both demo modes. Harmless if

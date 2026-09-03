@@ -11,10 +11,10 @@
   "dependencies": {
     "@effect/platform-node": "catalog:",
     "@egress/domain": "workspace:*",
-    "effect": "catalog:"
+    "effect": "catalog:",
+    "ioredis": "^5.4.1"
   },
   "devDependencies": {
-    "ioredis": "^5.4.1",
     "testcontainers": "^12.1.0"
   }
 }

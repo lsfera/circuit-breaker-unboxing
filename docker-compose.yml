@@ -1,6 +1,17 @@
 # Three Envoy replicas against shared upstreams. The replicas each run their own
 # outlier detection and will legitimately disagree — that divergence is the
 # thing the aggregator exists to resolve.
+#
+# Every service also joins the host devcontainer's own external network so it
+# can be reached directly by service name from outside this compose project
+# (e.g. a devcontainer shell), not just from other containers in this stack.
+# `default` remains how services in this project reach each other — nothing
+# about that changes.
+networks:
+  devcontainer:
+    name: devcontainer
+    external: true
+
 services:
   flaky-upstream:
     image: node:22-alpine
@@ -8,6 +19,7 @@ services:
     volumes: ["$HOST_WORKSPACE_FOLDER/infra/flaky-upstream.mjs:/app/flaky-upstream.mjs:ro"]
     command: node flaky-upstream.mjs
     ports: ["8080:8080", "8081:8081", "8082:8082"]
+    networks: [default, devcontainer]
 
   # envoy-01/02 merge in everything from envoy-00 via the &envoy/<<: anchor —
   # same image, config and command — and only override the admin port mapping,
@@ -29,6 +41,7 @@ services:
     networks:
       default:
         aliases: [envoy]
+      devcontainer: {}
   envoy-01:
     <<: *envoy
     ports: ["19002:9901"]
@@ -36,14 +49,30 @@ services:
     <<: *envoy
     ports: ["19003:9901"]
 
-  aggregator:
+  # Backs LeaderElection/CheckpointStore (Coordination.ts) for the two
+  # aggregator instances below — no bind mount, so this one needed nothing
+  # special to run even before HOST_WORKSPACE_FOLDER was set correctly.
+  redis:
+    image: redis:7-alpine
+    networks: [default, devcontainer]
+
+  # Two real instances against the shared Redis lease, not one — this is
+  # what makes HA a demonstrated property of the stack instead of a design
+  # only exercised in tests. `egress_aggregator_is_leader` on whichever one
+  # is currently active reads 1; the other reads 0 and is doing nothing but
+  # trying to acquire. Kill the leader's container and the other takes over
+  # within lease_ttl_ms, resuming `sequence` from its last checkpoint rather
+  # than restarting at zero — the same property Coordination.test.ts and
+  # RedisCoordination.test.ts prove, now visible from outside the process.
+  aggregator: &aggregator
     image: node:22-alpine
     working_dir: /app
     # Writable now: unlike the pre-Effect version this has dependencies to install.
     volumes: ["$HOST_WORKSPACE_FOLDER:/app"]
     # Installs deps, then runs main.ts against the three real Envoy admin ports
     # (not the sim fleet — --source=envoy is what makes this stack's outlier
-    # detection real instead of simulated).
+    # detection real instead of simulated) with Redis-backed HA instead of the
+    # in-memory default, since two instances are genuinely competing here.
     #
     # Keep node's args after "src/main.ts" on this one line. With YAML `>`
     # folding, only lines indented the SAME as the first content line
@@ -55,9 +84,17 @@ services:
     # a demo run against real Envoy never tripped the circuit.
     command: >
       sh -c "corepack enable && pnpm install --frozen-lockfile &&
-             node --experimental-strip-types packages/aggregator/src/main.ts --source=envoy --envoy=http://envoy-00:9901,http://envoy-01:9901,http://envoy-02:9901"
-    depends_on: [envoy-00, envoy-01, envoy-02]
+             node --experimental-strip-types packages/aggregator/src/main.ts --source=envoy --envoy=http://envoy-00:9901,http://envoy-01:9901,http://envoy-02:9901 --ha=redis --redis=redis://redis:6379 --instance-id=aggregator-1"
+    depends_on: [envoy-00, envoy-01, envoy-02, redis]
     ports: ["8088:8088"]
+    networks: [default, devcontainer]
+
+  aggregator-2:
+    <<: *aggregator
+    command: >
+      sh -c "corepack enable && pnpm install --frozen-lockfile &&
+             node --experimental-strip-types packages/aggregator/src/main.ts --source=envoy --envoy=http://envoy-00:9901,http://envoy-01:9901,http://envoy-02:9901 --ha=redis --redis=redis://redis:6379 --instance-id=aggregator-2"
+    ports: ["8089:8088"]
 
   # Without this, /__fail changes nothing: outlier detection only reacts to
   # requests it actually sees. Part of the default `docker compose up`, not
@@ -73,6 +110,7 @@ services:
       # services above) rather than being handed their names directly.
       EGRESS_ADDR: http://envoy:10000
     depends_on: [envoy-00, envoy-01, envoy-02]
+    networks: [default, devcontainer]
 
   # Runs demo/driver.ts against this stack, end to end: `docker compose
   # --profile demo run --rm demo` (or `-- shipping-rates` for a different API).
@@ -94,6 +132,7 @@ services:
       FLAKY_UPSTREAM: http://flaky-upstream
     depends_on: [aggregator, traffic]
     profiles: [demo]
+    networks: [default, devcontainer]
 
   # Scrapes the aggregator's /metrics (same registry the console reads from)
   # plus each Envoy's native /stats/prometheus. See monitoring/prometheus.yml.
@@ -104,6 +143,7 @@ services:
     # stack works for the sim-fleet demo, not just this docker-compose one.
     extra_hosts: ["host.docker.internal:host-gateway"]
     ports: ["9090:9090"]
+    networks: [default, devcontainer]
 
   grafana:
     image: grafana/grafana:11.3.1
@@ -116,3 +156,4 @@ services:
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on: [prometheus]
     ports: ["3000:3000"]
+    networks: [default, devcontainer]
