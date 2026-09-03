@@ -40,6 +40,35 @@ So enforcement and publication are split:
 | Envoy, per replica | yes, immediately | no | sub-second |
 | Aggregator, one machine per API | via config push | yes | seconds |
 
+```mermaid
+flowchart LR
+  classDef ok fill:#e2f5e8,stroke:#2e9e52,stroke-width:2px,color:#123423;
+  classDef deg fill:#fbedd6,stroke:#c07f16,stroke-width:2px,color:#3a2c12;
+  classDef down fill:#fbe2dd,stroke:#c9432f,stroke-width:2px,color:#3a1c17;
+  classDef gate fill:#eaeef6,stroke:#5b6478,stroke-width:1.5px,color:#161d2b;
+  classDef out fill:#dcf3f1,stroke:#0c8b86,stroke-width:3px,color:#04302e,font-weight:bold;
+
+  r0["envoy-00<br/>vote: DOWN"]:::down
+  r1["envoy-01<br/>vote: OK"]:::ok
+  r2["envoy-02<br/>vote: DEGRADED"]:::deg
+  r3["envoy-03<br/>vote: DOWN"]:::down
+  r4["envoy-04<br/>vote: DEGRADED"]:::deg
+  q{{"quorum ≥ 60% impaired<br/>AND held 2s (dwell)"}}:::gate
+  out(["state_changed<br/>seq=1 · DEGRADED"]):::out
+
+  r0 --> q
+  r1 --> q
+  r2 --> q
+  r3 --> q
+  r4 --> q
+  q -->|"4 of 5 impaired (80%)"| out
+```
+
+Five independent proxies, three different verdicts at the same instant — none
+of them wrong, outlier detection is deliberately local per replica. The
+aggregator counts votes against a quorum and waits for that count to hold for
+`dwellMs` before publishing anything; disagreement never reaches a subscriber.
+
 The console makes this visible. The coloured strip on each API is one block per
 replica showing that replica's local view. Drive an upstream to a partial
 failure rate and you will see the blocks disagree while the published state
@@ -64,6 +93,53 @@ of per-request `UO` rejections, and what a subscriber wants is one
 backpressuring into the proxy. In production the first hop is a broker (Kafka,
 NATS) with webhook delivery as a consumer of it, so replay is the broker's
 problem; `WebhookSink` here stands in for that hop.
+
+```mermaid
+flowchart LR
+  classDef leader fill:#dcf3f1,stroke:#0c8b86,stroke-width:3px,color:#04302e,font-weight:bold;
+  classDef standby fill:#eaeef6,stroke:#5b6478,stroke-width:1.5px,stroke-dasharray: 4 3,color:#5b6478;
+  classDef box fill:#eaeef6,stroke:#5b6478,stroke-width:1.5px,color:#161d2b;
+  classDef broker fill:transparent,stroke:#5b6478,stroke-width:1.5px,stroke-dasharray:4 3,color:#5b6478;
+
+  subgraph ENFORCEMENT["ENFORCEMENT — per replica, immediate"]
+    direction TB
+    e0["envoy-00<br/>outlier_detection"]:::box
+    e1["envoy-01<br/>outlier_detection"]:::box
+    e2["envoy-02<br/>outlier_detection"]:::box
+    up[("flaky-upstream")]:::box
+    e0 --- up
+    e1 --- up
+    e2 --- up
+  end
+
+  subgraph AGGREGATION["AGGREGATION — one machine per API"]
+    direction TB
+    lead["aggregator — LEADER<br/>Breaker.step (pure)"]:::leader
+    stby["aggregator-2 — standby<br/>polls nothing, publishes nothing"]:::standby
+    redis[("redis<br/>lease · fencing token · checkpoint")]:::box
+    lead -->|renew + checkpoint| redis
+    stby -.->|tryAcquireOrRenew → blocked| redis
+  end
+
+  subgraph PUBLICATION["PUBLICATION — fanout, replay"]
+    direction TB
+    bus["EventBus<br/>console · SSE"]:::box
+    hook["WebhookSink<br/>retry · dead-letter · shed"]:::box
+    broker[["broker (Kafka/NATS)<br/>stands in for"]]:::broker
+    sub["subscriber"]:::box
+    hook --> broker --> sub
+  end
+
+  e0 -->|"poll :9901/stats, 250ms"| lead
+  e1 -->|"poll :9901/stats, 250ms"| lead
+  e2 -->|"poll :9901/stats, 250ms"| lead
+  lead -->|"state_changed<br/>seq, previousState"| bus
+  lead -->|state_changed| hook
+```
+
+Only the node in teal is doing anything at a given moment. The standby holds
+one connection to Redis and nothing else — see
+[High availability](#high-availability) for what makes that safe.
 
 ## Why Envoy for the data plane
 
@@ -365,10 +441,22 @@ deployed, not just tested in-process: exactly one of them holds
 inject a real failure, let the current leader publish into `OPEN`, then
 `docker kill` its container outright:
 
-```
-leader (aggregator-2) before kill:  state=OPEN  sequence=7
-                                     $ docker kill workspace-aggregator-2-1
-standby (aggregator) after ~8s:     is_leader=1  state=OPEN  sequence=7
+```mermaid
+sequenceDiagram
+  participant A2 as aggregator-2 (LEADER)
+  participant R as redis
+  participant A1 as aggregator (standby)
+
+  A2->>R: renew lease (token=4)
+  A2->>A2: publish state_changed · seq=7 · OPEN
+  Note over A2: docker kill — no graceful shutdown
+  A1->>R: tryAcquireOrRenew → blocked (lease still live)
+  Note over A1,R: ~8s pass — lease_ttl_ms=5000 expires
+  A1->>R: tryAcquireOrRenew → token=5 (genuine handoff)
+  R-->>A1: checkpoint: state=OPEN, seq=7
+  A1->>A1: rehydrate BreakerState from checkpoint
+  A1->>R: publish + checkpoint · seq 8 → 13
+  Note over A1: seq=13 · CLOSED · PROBE_SUCCEEDED
 ```
 
 The standby took over within `lease_ttl_ms`, rehydrated `payments-provider`
