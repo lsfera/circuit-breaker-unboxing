@@ -68,6 +68,31 @@ static_resources:
                                 base_interval: 0.05s
                                 max_interval: 1s
                 http_filters:
+                  # Layer 4 (see README) - infers a concurrency limit from
+                  # observed latency instead of a hand-picked static number.
+                  # Applies fleet-wide across every cluster on this listener,
+                  # which is the point for egress: you don't know a third-party
+                  # upstream's real capacity, so a fixed max_requests threshold
+                  # is either too conservative or too late.
+                  - name: envoy.filters.http.adaptive_concurrency
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.adaptive_concurrency.v3.AdaptiveConcurrency
+                      gradient_controller_config:
+                        sample_aggregate_percentile:
+                          value: 50
+                        concurrency_limit_params:
+                          concurrency_update_interval: 0.1s
+                        min_rtt_calc_params:
+                          interval: 30s
+                          request_count: 50
+                          jitter:
+                            value: 15
+                          min_concurrency: 4
+                          buffer:
+                            value: 25
+                      enabled:
+                        default_value: true
+                        runtime_key: "adaptive_concurrency.enabled"
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router

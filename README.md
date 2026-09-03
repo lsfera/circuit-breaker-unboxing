@@ -83,11 +83,16 @@ problems:
   Without it, outlier ejection plus retries amplifies load onto whatever hosts
   are left. Not in `envoy/envoy.yaml`, which uses the older `max_retries`
   threshold; a budget is the better shape at real fleet size.
-
-Worth knowing about but deliberately unused here: the **adaptive concurrency
-filter** infers a concurrency limit from observed latency instead of you picking
-static numbers. For third-party egress, where you do not know the upstream's
-capacity, that is often more useful than hand-tuned thresholds.
+- **`adaptive_concurrency` filter** — infers a concurrency limit from observed
+  latency (a gradient controller against a periodically recalculated minimum
+  RTT) instead of a hand-picked static number. It sits in the shared
+  `http_filters` chain ahead of the router, so it applies fleet-wide across
+  every cluster on the listener. For third-party egress, where you do not know
+  the upstream's real capacity, that adapts where a fixed `max_requests`
+  threshold would either be too conservative or trip too late. It is a
+  request-shedding layer, not a breaker: it does not eject hosts or feed
+  `ReplicaReport`, so it does not show up in the aggregator's published states —
+  only `circuit_breakers` overflow and `outlier_detection` do.
 
 ### Alternatives considered
 
