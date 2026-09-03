@@ -20,6 +20,15 @@ services:
     command: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "egress"]
     depends_on: [flaky-upstream]
     ports: ["19001:9901"]
+    # All three replicas answer to this one alias on the data-plane port.
+    # Anything that is a *client* of the egress listener (traffic generator,
+    # a real service) resolves "envoy" and never learns there are three of
+    # them or what they're individually named — that topology stays known to
+    # exactly one thing: the aggregator, which polls envoy-00/01/02's admin
+    # ports by name below because per-replica polling is its actual job.
+    networks:
+      default:
+        aliases: [envoy]
   envoy-01:
     <<: *envoy
     ports: ["19002:9901"]
@@ -59,7 +68,10 @@ services:
     volumes: ["$HOST_WORKSPACE_FOLDER/infra/traffic-generator.mjs:/app/traffic-generator.mjs:ro"]
     command: node traffic-generator.mjs
     environment:
-      ENVOY_REPLICAS: http://envoy-00:10000,http://envoy-01:10000,http://envoy-02:10000
+      # One address, same one any real client would use. The generator
+      # discovers the replicas behind it via DNS (see the alias on the envoy
+      # services above) rather than being handed their names directly.
+      EGRESS_ADDR: http://envoy:10000
     depends_on: [envoy-00, envoy-01, envoy-02]
 
   # Runs demo/driver.ts against this stack, end to end: `docker compose

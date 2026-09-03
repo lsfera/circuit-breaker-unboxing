@@ -5,18 +5,20 @@
 // failure_percentage within the ~1s outlier_detection interval, the same way
 // production traffic would.
 //
-// One independent loop per (replica, route) pair, round-robin across replicas
-// — mirroring "stateless replicas behind an L4 LB" — so each replica samples
-// on its own, which is exactly the disagreement the aggregator resolves.
+// This generator is configured with exactly one address — EGRESS_ADDR — the
+// same one any real client would be given. It never hardcodes replica names:
+// it resolves that one hostname over DNS and fans out to whatever comes
+// back, one independent loop per (resolved replica, route) pair, mirroring
+// "stateless replicas behind an L4 LB" so each replica samples on its own —
+// exactly the disagreement the aggregator resolves. In docker-compose,
+// "envoy" is a shared alias on all three envoy-* containers (see
+// docker-compose.yml), so resolving it is what actually discovers them;
+// nothing here needs to know there are three, or what they're called.
 import { setTimeout as sleep } from "node:timers/promises";
+import dns from "node:dns/promises";
 
-const REPLICAS = (
-  process.env.ENVOY_REPLICAS ??
-  "http://envoy-00:10000,http://envoy-01:10000,http://envoy-02:10000"
-)
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
+const EGRESS_ADDR = process.env.EGRESS_ADDR ?? "http://envoy:10000";
+const { hostname, port, protocol } = new URL(EGRESS_ADDR);
 
 const ROUTES = ["/payments", "/shipping", "/tax"];
 const INTERVAL_MS = Number(process.env.TRAFFIC_INTERVAL_MS ?? 20);
@@ -38,11 +40,22 @@ async function loop(base, path) {
   }
 }
 
-for (const base of REPLICAS) {
+// Resolved once at startup — matches Envoy's own STRICT_DNS clusters, which
+// also resolve once and refresh on an interval rather than per request. A
+// production version of this generator would re-resolve periodically to
+// pick up replicas added after startup; this prototype doesn't need to.
+const addresses = await dns.resolve4(hostname);
+if (addresses.length === 0) {
+  throw new Error(`${hostname} resolved to no addresses`);
+}
+const replicas = addresses.map((ip) => `${protocol}//${ip}:${port}`);
+
+for (const base of replicas) {
   for (const path of ROUTES) loop(base, path);
 }
 
 console.log(
-  `traffic generator: ${REPLICAS.length} replicas x ${ROUTES.length} routes, ` +
-    `one request every ${INTERVAL_MS}ms per pair (${REPLICAS.join(", ")})`,
+  `traffic generator: ${EGRESS_ADDR} resolved to ${replicas.length} replica(s) x ` +
+    `${ROUTES.length} routes, one request every ${INTERVAL_MS}ms per pair ` +
+    `(${replicas.join(", ")})`,
 );

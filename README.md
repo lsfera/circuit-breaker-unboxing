@@ -290,6 +290,15 @@ without traffic flowing through the egress listener, setting a failure rate on
 through every replica so a real outage shows up the way production traffic
 would.
 
+It is configured with exactly one address, `EGRESS_ADDR` — the same one any
+real client would be given — and never hardcodes replica names. `envoy` is a
+DNS alias shared by all three `envoy-*` containers (`docker-compose.yml`), so
+resolving that one hostname is what discovers the replicas; the generator
+fans out to whatever comes back. Topology awareness stays where it belongs:
+the aggregator, which polls `envoy-00/01/02`'s admin ports individually
+because per-replica polling is its actual job — nothing that merely *calls*
+the API needs to know there are three of them, or what they're named.
+
 Drive one, by hand:
 
 ```bash
@@ -367,7 +376,11 @@ belongs in the aggregator, off the request path.
   driver: its envoy-mode failure injection and the Node side of
   `infra/traffic-generator.mjs` are verified directly (against a plain HTTP
   stand-in for Envoy, since none is running here); only the real Envoy routing
-  and outlier detection reacting to it is not.
+  and outlier detection reacting to it is not. The generator's DNS-based
+  replica discovery is the same story: `dns.resolve4` against a real hostname
+  is verified directly, but that `envoy` actually resolves to three addresses
+  via the Compose network alias is Docker's documented behavior, reasoned
+  from the docs rather than watched happen.
 - **HTTPS egress needs TLS interception** for any of the L7 signals to exist. If
   you proxy via `CONNECT` you get L4 only, `consecutive_5xx` is dead, and the
   breaker degrades to connection-level detection. Decide this early: it drives
