@@ -106,6 +106,27 @@ export type Settlement = "accept" | "requeue" | "discard";
  */
 export type DeliveryInfo = {
   readonly deliveryCount: number;
+  /**
+   * Where this message was dead-lettered from, when it was — RabbitMQ 4
+   * reports it as AMQP 1.0 message annotations (`x-first-death-queue`,
+   * `x-first-death-reason`, and the fuller `x-opt-deaths` array). `null` for
+   * a message that arrived normally.
+   *
+   * This is what makes one canonical dead-letter queue workable rather than
+   * a bin of unrelated things: anything consuming it can tell a work message
+   * that failed its third-party call from a control message that failed to
+   * decode, and treat them differently. Verified against a live broker
+   * rather than read off the spec.
+   */
+  readonly deadLetter: { readonly queue: string; readonly reason: string } | null;
+  /**
+   * Application properties carried on the message, as strings.
+   *
+   * The broker's death annotations are lost the moment anything republishes a
+   * message, so a consumer that moves messages around inside the dead-letter
+   * queue has to carry the provenance itself. This is where it puts it.
+   */
+  readonly properties: Readonly<Record<string, string>>;
 };
 
 export interface RmqService {
@@ -125,18 +146,20 @@ export interface RmqService {
    * than the consumer can absorb. A synchronous handler settles immediately
    * and gets no backpressure at all.
    *
-   * The resolved value chooses the outcome; returning nothing (or nothing at
-   * all, synchronously) accepts, which is what every handler that cannot
-   * fail wants. A handler that *rejects* also accepts — the alternative is
-   * an unbounded redelivery loop driven by a bug, which is worse than a lost
-   * message and much harder to see.
+   * The returned value chooses the outcome, synchronously or from a promise;
+   * returning nothing accepts, which is what every handler that cannot fail
+   * wants. A synchronous outcome matters for the handlers that decide
+   * immediately — a message that fails to decode is rejected on the spot,
+   * with no work to await. A handler that *rejects* accepts anyway: the
+   * alternative is an unbounded redelivery loop driven by a bug, which is
+   * worse than a lost message and much harder to see.
    */
   readonly consume: (
     queue: string,
     onMessage: (
       body: string,
       delivery: DeliveryInfo,
-    ) => void | Promise<void | Settlement>,
+    ) => void | Settlement | Promise<void | Settlement>,
   ) => Effect.Effect<Consumer, RmqError>;
   /** One publisher per fixed (exchange, routingKey) or (queue) target — see Client.ts's module doc for why this is a publisher-per-target library, not per-message addressing. */
   readonly publisherToExchange: (
@@ -144,7 +167,12 @@ export interface RmqService {
     routingKey: string,
   ) => Effect.Effect<Publisher, RmqError>;
   readonly publisherToQueue: (queue: string) => Effect.Effect<Publisher, RmqError>;
-  readonly send: (pub: Publisher, body: string) => Effect.Effect<void, RmqError>;
+  /** `properties` become AMQP application properties on the message — see `DeliveryInfo.properties` for why anything republishing needs them. */
+  readonly send: (
+    pub: Publisher,
+    body: string,
+    properties?: Record<string, string>,
+  ) => Effect.Effect<void, RmqError>;
   readonly closeConsumer: (c: Consumer) => Effect.Effect<void>;
 }
 
@@ -248,13 +276,35 @@ export const makeRmq = (
             const consumer = await connection.createConsumer({
               queue: { name: queue },
               messageHandler: (ctx, message) => {
+                const annotations =
+                  (message as { message_annotations?: Record<string, unknown> })
+                    .message_annotations ?? {};
+                const deathQueue = annotations["x-first-death-queue"];
+                const deathReason = annotations["x-first-death-reason"];
                 const delivery: DeliveryInfo = {
                   deliveryCount: Number(
                     (message as { delivery_count?: number }).delivery_count ?? 0,
                   ),
+                  deadLetter:
+                    typeof deathQueue === "string"
+                      ? {
+                          queue: deathQueue,
+                          reason: typeof deathReason === "string" ? deathReason : "unknown",
+                        }
+                      : null,
+                  properties: Object.fromEntries(
+                    Object.entries(
+                      (message as { application_properties?: Record<string, unknown> })
+                        .application_properties ?? {},
+                    ).map(([k, v]) => [k, String(v)]),
+                  ),
                 };
                 const done = onMessage(String(message.body), delivery);
                 if (done === undefined) return settle(ctx as DeliveryContext, "accept");
+                // A synchronous outcome is a string, not a thenable — calling
+                // .then() on it would throw from inside a socket callback,
+                // which is unreachable from any listener (see below).
+                if (typeof done === "string") return settle(ctx as DeliveryContext, done);
                 void done.then(
                   (outcome) => settle(ctx as DeliveryContext, outcome ?? "accept"),
                   () => settle(ctx as DeliveryContext, "accept"),
@@ -270,7 +320,14 @@ export const makeRmq = (
           ),
         publisherToQueue: (queue) =>
           guarded("publisherToQueue", () => connection.createPublisher({ queue: { name: queue } })),
-        send: (pub, body) => guarded("send", () => pub.publish({ body } as never)).pipe(Effect.asVoid),
+        send: (pub, body, properties) =>
+          guarded("send", () =>
+            pub.publish(
+              (properties === undefined
+                ? { body }
+                : { body, application_properties: properties }) as never,
+            ),
+          ).pipe(Effect.asVoid),
         closeConsumer: (c) => Effect.sync(() => c.close()),
       };
     });

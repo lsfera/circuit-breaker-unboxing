@@ -49,18 +49,48 @@ export const workQueueFor = (apiId: string): string => `${apiId}.work`;
 export const deadLetterQueueFor = (apiId: string): string => `${apiId}.work.dead`;
 
 /**
- * Declared identically by every process that touches the work queue —
- * producer and daemons alike — because RabbitMQ rejects a redeclare whose
- * arguments differ from the existing queue's, and there is no ordering
- * between those containers at startup.
+ * The dead-letter target, for *every* queue this API's fleet declares rather
+ * than only the work queue.
+ *
+ * One canonical destination is the point. A control message that fails to
+ * decode, a malformed election trigger, a work message whose call failed —
+ * all of them are "something arrived that could not be handled", and all of
+ * them should end up in one place you can look at, count, and replay from.
+ * The alternative is what this repo had: the work queue dead-lettered
+ * properly while every other queue silently dropped whatever it rejected,
+ * which is the same silent loss the work queue was fixed to avoid, just in
+ * the corner nobody looks at.
  *
  * Routing through the default exchange (`""`) with the dead-letter queue's
  * own name as the routing key is the plainest form of this: no extra
  * exchange to declare, no binding to keep in step.
+ *
+ * Declared identically by every process that touches a given queue —
+ * producer and daemons alike — because RabbitMQ rejects a redeclare whose
+ * arguments differ from the existing queue's, and there is no ordering
+ * between those containers at startup.
  */
-export const workQueueArgs = (apiId: string): Record<string, unknown> => ({
+export const deadLetterArgs = (apiId: string): Record<string, unknown> => ({
   "x-dead-letter-exchange": "",
   "x-dead-letter-routing-key": deadLetterQueueFor(apiId),
+});
+
+/** The work queue's arguments. Identical to `deadLetterArgs` today, kept as its own name because the work queue is the one whose dead-lettering is a designed behaviour rather than a backstop. */
+export const workQueueArgs = deadLetterArgs;
+
+/**
+ * A single-active-consumer queue that also dead-letters. The SAC queues carry
+ * election triggers, so nothing routine is ever rejected on them — but a
+ * malformed trigger is exactly the kind of thing worth keeping rather than
+ * dropping, and it costs one argument to say so.
+ *
+ * The dead-letter queue itself is deliberately not given a target: a queue
+ * that dead-letters to itself is a cycle, and it is the end of the line by
+ * definition.
+ */
+export const sacQueueArgs = (apiId: string): Record<string, unknown> => ({
+  ...deadLetterArgs(apiId),
+  "x-single-active-consumer": true,
 });
 
 export const encodeCircuitEvent = (event: CircuitEvent): string => JSON.stringify(event);

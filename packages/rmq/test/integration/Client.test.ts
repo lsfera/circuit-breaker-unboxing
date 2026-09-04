@@ -351,3 +351,101 @@ test("a rejected delivery dead-letters, and a released one is never counted as a
       "and a real cross-consumer redelivery budget has become possible",
   );
 });
+
+/**
+ * One canonical dead-letter queue for every queue in a fleet only works if
+ * whatever drains it can tell the messages apart — replaying a control event
+ * that failed to decode onto the *work* queue would be nonsense.
+ *
+ * RabbitMQ 4 records the origin as AMQP 1.0 message annotations, and this
+ * pins the two fields @egress/rmq-consumer's redrive filters on. If a broker
+ * upgrade stops sending them, `delivery.deadLetter` goes null, the redrive
+ * silently stops recognising anything as work, and only this test says so.
+ */
+test("a dead-lettered message says which queue it came from", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const dead = "origin.dead";
+  const work = "origin.work";
+  const control = "origin.control";
+
+  const seen = await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(dead);
+      const args = { "x-dead-letter-exchange": "", "x-dead-letter-routing-key": dead };
+      yield* rmq.declareQueue(work, args);
+      yield* rmq.declareQueue(control, args);
+
+      const seen: Array<{ body: string; queue: string | null; reason: string | null }> = [];
+      yield* rmq.consume(dead, (body, delivery) => {
+        seen.push({
+          body,
+          queue: delivery.deadLetter?.queue ?? null,
+          reason: delivery.deadLetter?.reason ?? null,
+        });
+      });
+
+      // Both queues reject their message, so both land on the one dead-letter
+      // queue — which is the arrangement the origin has to disambiguate.
+      yield* rmq.consume(work, () => "discard" as const);
+      yield* rmq.consume(control, () => "discard" as const);
+
+      const workPub = yield* rmq.publisherToQueue(work);
+      const controlPub = yield* rmq.publisherToQueue(control);
+      yield* rmq.send(workPub, "a-work-message");
+      yield* rmq.send(controlPub, "an-undecodable-control-message");
+      yield* Effect.promise(() => new Promise((r) => setTimeout(r, 2000)));
+      return seen;
+    }),
+  );
+
+  assert.equal(seen.length, 2, `both messages should reach the dead-letter queue, got ${seen.length}`);
+  const byBody = new Map(seen.map((s) => [s.body, s]));
+  assert.equal(byBody.get("a-work-message")?.queue, work);
+  assert.equal(byBody.get("an-undecodable-control-message")?.queue, control);
+  assert.equal(
+    byBody.get("a-work-message")?.reason,
+    "rejected",
+    "the reason distinguishes a rejection from an expiry or an overflow",
+  );
+});
+
+/**
+ * The other half of that: a republish drops the broker's death annotations,
+ * so anything that moves messages around inside a dead-letter queue has to
+ * carry the provenance itself. @egress/rmq-consumer's redrive stamps the
+ * origin as an application property when it parks a non-work message, and
+ * uses the presence of that stamp to know it has come full circle.
+ */
+test("application properties survive a republish, so provenance can outlive the annotations", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const queue = "props.queue";
+  const seen = await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(queue);
+      const got: Array<Record<string, string>> = [];
+      yield* rmq.consume(queue, (_body, delivery) => void got.push({ ...delivery.properties }));
+      const pub = yield* rmq.publisherToQueue(queue);
+      yield* rmq.send(pub, "stamped", {
+        "x-egress-origin-queue": "some.control.queue",
+        "x-egress-origin-reason": "rejected",
+      });
+      yield* rmq.send(pub, "unstamped");
+      yield* Effect.promise(() => new Promise((r) => setTimeout(r, 1200)));
+      return got;
+    }),
+  );
+
+  assert.equal(seen.length, 2);
+  const stamped = seen.find((p) => p["x-egress-origin-queue"] !== undefined);
+  assert.ok(stamped, "the stamped message must arrive with its application properties");
+  assert.equal(stamped!["x-egress-origin-queue"], "some.control.queue");
+  assert.equal(stamped!["x-egress-origin-reason"], "rejected");
+  assert.ok(
+    seen.some((p) => Object.keys(p).length === 0),
+    "a message published without properties must arrive with none, not with the previous message's",
+  );
+});

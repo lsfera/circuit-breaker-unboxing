@@ -66,6 +66,14 @@ export const redriven = Metric.counter("egress_daemon_redriven_total", {
     "is preserved, and preserving it is not the same as recovering it.",
 });
 
+export const undecodable = Metric.counter("egress_daemon_undecodable_total", {
+  description:
+    "Messages this daemon could not read — a control event that failed the " +
+    "published schema, a malformed election trigger — rejected onto the canonical " +
+    "dead-letter queue rather than accepted. Non-zero means someone is publishing " +
+    "something the fleet does not understand, and the evidence is still on the queue.",
+});
+
 export const probes = Metric.counter("egress_daemon_probes_total", {
   description: "HALF_OPEN probes this daemon was elected to run by the broker.",
 });

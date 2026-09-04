@@ -3,11 +3,13 @@ import { makeRmq, Rmq } from "@egress/rmq/Client.ts";
 import {
   CONTROL_EXCHANGE,
   controlQueueFor,
+  deadLetterArgs,
   deadLetterQueueFor,
   decodeCircuitEvent,
   probeTriggerQueueFor,
   redriveTriggerQueueFor,
   routingKeyFor,
+  sacQueueArgs,
   workQueueArgs,
   workQueueFor,
 } from "@egress/rmq/ControlPlane.ts";
@@ -161,11 +163,14 @@ export const runDaemon = (cfg: DaemonConfig) =>
     // The dead-letter queue is declared before the queue that points at it,
     // so a rejection during the first seconds of the fleet's life has
     // somewhere to land rather than being discarded by the broker.
+    // The dead-letter queue is the only one without a dead-letter target of
+    // its own: it is the end of the line, and pointing it at itself is a
+    // cycle. Everything else routes rejections to it — see deadLetterArgs.
     yield* control.declareQueue(deadQueue);
     yield* control.declareQueue(workQueue, workQueueArgs(cfg.apiId));
-    yield* control.declareQueue(probeQueue, { "x-single-active-consumer": true });
-    yield* control.declareQueue(redriveQueue, { "x-single-active-consumer": true });
-    const controlQ = yield* control.declareQueue(controlQueue);
+    yield* control.declareQueue(probeQueue, sacQueueArgs(cfg.apiId));
+    yield* control.declareQueue(redriveQueue, sacQueueArgs(cfg.apiId));
+    const controlQ = yield* control.declareQueue(controlQueue, deadLetterArgs(cfg.apiId));
     yield* control.bind(routingKeyFor(cfg.apiId), exchange, controlQ);
 
     const circuit = yield* Ref.make<State>(State.CLOSED);
@@ -185,6 +190,8 @@ export const runDaemon = (cfg: DaemonConfig) =>
     let failed = 0;
     let probed = 0;
     let redriven = 0;
+    /** Messages this daemon could not read at all, on any of its queues, and rejected onto the canonical dead-letter queue. */
+    let undecodable = 0;
 
     /**
      * The delivery contract, observed from this side of the broker.
@@ -363,14 +370,60 @@ export const runDaemon = (cfg: DaemonConfig) =>
      *    redrive that cannot end is a worse failure mode than a queue that
      *    does not drain.
      */
+    /** Stamped onto anything the redrive moves within the dead-letter queue, so its origin survives the republish that loses the broker's own annotations. */
+    const ORIGIN_PROPERTY = "x-egress-origin-queue";
+    const ORIGIN_REASON_PROPERTY = "x-egress-origin-reason";
+
     const redrivePass = Effect.gen(function* () {
       const scope = yield* Scope.make();
       const conn = yield* Effect.provideService(makeRmq(cfg.connect), Scope.Scope, scope);
       const into = yield* conn.publisherToQueue(workQueue);
+      const back = yield* conn.publisherToQueue(deadQueue);
 
       let moved = 0;
-      let lastAt = Date.now();
-      yield* conn.consume(deadQueue, async (body): Promise<Settlement> => {
+      let parked = 0;
+      let cycled = false;
+      let lastReplayAt = Date.now();
+      yield* conn.consume(deadQueue, async (body, delivery): Promise<Settlement> => {
+        // One canonical dead-letter queue means this one holds more than
+        // failed work: a control event that would not decode lands here too,
+        // and replaying *that* onto the work queue would be nonsense. The
+        // broker records where each message was dead-lettered from, so the
+        // filter is exact rather than a guess at the body's shape.
+        const origin = delivery.deadLetter;
+
+        // A message carrying our own stamp is one this pass already parked:
+        // republishing is what drops the broker's death annotations, so the
+        // stamp is both the record of where it came from and the signal that
+        // the pass has come the whole way round and everything left is stuff
+        // it will not replay. Without that signal the pass re-parks the same
+        // handful of messages tail to tail as fast as the broker can deliver
+        // them — measured at 17,703 republishes of two messages in 2.5
+        // seconds before an idle timer eventually noticed.
+        if (delivery.properties[ORIGIN_PROPERTY] !== undefined || origin === null) {
+          cycled = true;
+          return "requeue";
+        }
+
+        if (origin.queue !== workQueue) {
+          // Moved to the tail rather than released, because releasing puts it
+          // straight back at the head and starves everything behind it, and
+          // stamped on the way so the provenance the annotations carried is
+          // not lost with them.
+          parked++;
+          try {
+            await Effect.runPromise(
+              conn.send(back, body, {
+                [ORIGIN_PROPERTY]: origin.queue,
+                [ORIGIN_REASON_PROPERTY]: origin.reason,
+              }),
+            );
+            return "accept";
+          } catch {
+            return "requeue";
+          }
+        }
+
         // Reserve the slot *before* awaiting. The broker delivers with a
         // credit window in the hundreds, so a check-then-await-then-increment
         // lets every in-flight handler pass the same check and overshoot the
@@ -387,7 +440,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
           return "requeue";
         }
         redriven++;
-        lastAt = Date.now();
+        lastReplayAt = Date.now();
         return "accept";
       });
 
@@ -396,7 +449,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
       const deadline = Date.now() + 60_000;
       let reason = "deadline";
       while (true) {
-        yield* Effect.sleep("500 millis");
+        yield* Effect.sleep("200 millis");
         if ((yield* Ref.get(circuit)) !== State.CLOSED) {
           reason = "circuit reopened";
           break;
@@ -405,19 +458,28 @@ export const runDaemon = (cfg: DaemonConfig) =>
           reason = "cap reached";
           break;
         }
-        // Nothing for two seconds with a consumer attached means the queue is
-        // empty — there is no "queue drained" callback to wait on.
-        if (Date.now() - lastAt > 2000) {
-          reason = "drained";
+        if (cycled) {
+          reason = "came full circle";
+          break;
+        }
+        // Idle is measured on *replays* rather than on deliveries, so a pass
+        // that is only being handed things it will not replay still ends.
+        if (Date.now() - lastReplayAt > 2000) {
+          reason = parked > 0 ? "nothing left to replay" : "drained";
           break;
         }
         if (Date.now() > deadline) break;
       }
 
       yield* gate.withPermit(stopScope(redriveScope));
-      return { moved, reason };
+      if (parked > 0) {
+        yield* Effect.logWarning(
+          `${label}: left ${parked} non-work message(s) on ${deadQueue} — ` +
+            `dead-lettered from somewhere other than ${workQueue}, so not replayed as work`,
+        );
+      }
+      return { moved, parked, reason };
     });
-
     /**
      * Replay the dead-letter queue, in bounded passes, until it is empty or
      * something says stop. Runs on exactly one daemon — the broker elects it
@@ -439,7 +501,9 @@ export const runDaemon = (cfg: DaemonConfig) =>
       for (let pass = 1; pass <= REDRIVE_MAX_PASSES; pass++) {
         const { moved, reason } = yield* redrivePass;
         total += moved;
-        if (reason !== "cap reached") {
+        // A pass that replayed nothing means whatever is left is not work,
+        // so more passes would only cycle it.
+        if (reason !== "cap reached" || moved === 0) {
           yield* Effect.log(`${label}: redrive finished — ${total} replayed (${reason})`);
           return;
         }
@@ -491,9 +555,16 @@ export const runDaemon = (cfg: DaemonConfig) =>
       const decoded = decodeCircuitEvent(body);
       if (Option.isNone(decoded)) {
         // Same stance as @egress/subscriber: an event that does not match the
-        // published contract is dropped loudly, never half-applied.
-        Effect.runFork(Effect.logWarning(`${label}: undecodable control message, dropped`));
-        return;
+        // published contract is never half-applied. It is rejected rather
+        // than accepted, so it lands on the canonical dead-letter queue
+        // instead of existing only as a log line nobody can act on — a
+        // control message the fleet could not read is precisely the thing
+        // you want to still have in your hands afterwards.
+        undecodable++;
+        Effect.runFork(
+          Effect.logWarning(`${label}: undecodable control message, dead-lettered`),
+        );
+        return "discard";
       }
       const { data, type } = decoded.value;
       if (data.apiId !== cfg.apiId) return; // belt and braces; the binding already filters
@@ -528,7 +599,8 @@ export const runDaemon = (cfg: DaemonConfig) =>
       try {
         sequence = Number(JSON.parse(body).sequence ?? -1);
       } catch {
-        return;
+        undecodable++;
+        return "discard";
       }
       Effect.runFork(
         Ref.get(probedSequence).pipe(
@@ -551,7 +623,8 @@ export const runDaemon = (cfg: DaemonConfig) =>
       try {
         sequence = Number(JSON.parse(body).sequence ?? -1);
       } catch {
-        return;
+        undecodable++;
+        return "discard";
       }
       Effect.runFork(
         Ref.get(redrivenSequence).pipe(
@@ -583,7 +656,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
      * just set.
      */
     const attrs = { apiId: cfg.apiId };
-    let flushed = { ok: 0, failed: 0, probed: 0, redriven: 0, gaps: 0, duplicates: 0 };
+    let flushed = { ok: 0, failed: 0, probed: 0, redriven: 0, undecodable: 0, gaps: 0, duplicates: 0 };
     let flushedEvents = new Map<string, number>();
 
     const flush = Effect.gen(function* () {
@@ -608,10 +681,11 @@ export const runDaemon = (cfg: DaemonConfig) =>
         failed: failed - flushed.failed,
         probed: probed - flushed.probed,
         redriven: redriven - flushed.redriven,
+        undecodable: undecodable - flushed.undecodable,
         gaps: gaps - flushed.gaps,
         duplicates: duplicates - flushed.duplicates,
       };
-      flushed = { ok, failed, probed, redriven, gaps, duplicates };
+      flushed = { ok, failed, probed, redriven, undecodable, gaps, duplicates };
 
       if (delta.ok > 0) {
         yield* Metric.update(
@@ -644,6 +718,12 @@ export const runDaemon = (cfg: DaemonConfig) =>
       }
       if (delta.redriven > 0) {
         yield* Metric.update(Metric.withAttributes(Telemetry.redriven, attrs), delta.redriven);
+      }
+      if (delta.undecodable > 0) {
+        yield* Metric.update(
+          Metric.withAttributes(Telemetry.undecodable, attrs),
+          delta.undecodable,
+        );
       }
       if (delta.gaps > 0) {
         yield* Metric.update(Metric.withAttributes(Telemetry.controlGaps, attrs), delta.gaps);
@@ -680,6 +760,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
         Metric.update(Metric.withAttributes(Telemetry.deadLettered, attrs), 0),
         Metric.update(Metric.withAttributes(Telemetry.probes, attrs), 0),
         Metric.update(Metric.withAttributes(Telemetry.redriven, attrs), 0),
+        Metric.update(Metric.withAttributes(Telemetry.undecodable, attrs), 0),
         Metric.update(Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "ok" }), 0),
         Metric.update(Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "failed" }), 0),
       ],

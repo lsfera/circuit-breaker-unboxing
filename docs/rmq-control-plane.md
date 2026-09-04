@@ -371,6 +371,50 @@ shortcut past one. An unbounded requeue against a dead upstream is a hot
 loop with no counter to stop it, which is strictly worse than a queue full
 of messages you can look at.
 
+### One dead-letter queue for everything, and how to drain it anyway
+
+Every queue the fleet declares dead-letters to `<apiId>.work.dead`: the work
+queue, both SAC election queues, and each daemon's own control queue. Only
+the dead-letter queue itself has no target, because that would be a cycle.
+
+The reason to bother is the second silent-loss path, which looked nothing
+like the first. A control event that failed `CircuitEvent`'s schema used to
+be logged and *accepted* — so the only evidence of a version skew between
+publisher and fleet was a line in `docker logs`, and the message itself was
+gone. Rejecting it instead means it is still there to look at.
+
+That immediately raises the question the redrive has to answer: the queue now
+holds two kinds of thing, and replaying a poison control message onto the
+*work* queue would be nonsense. RabbitMQ 4 answers it — a dead-lettered
+message carries AMQP 1.0 annotations naming where it came from:
+
+```
+message_annotations = {
+  "x-first-death-queue": "payments-provider.control.daemon-0",
+  "x-first-death-reason": "rejected",
+  "x-opt-deaths": [{ queue: "...", reason: "rejected", count: 1, ... }]
+}
+```
+
+So the redrive replays only what was dead-lettered from the work queue, and
+moves anything else to the tail rather than releasing it — releasing puts a
+message straight back at the head, where one poison message starves
+everything behind it forever.
+
+Two things that took a live run to get right:
+
+- **A republish drops the annotations.** Moving a message to the tail loses
+  exactly the provenance the filter depends on, so the pass restamps it with
+  its origin as an application property on the way past
+  (`x-egress-origin-queue`). That property is also how the next delivery is
+  recognised as one this pass has already handled.
+- **Without that recognition, the pass eats itself.** The first version
+  re-parked whatever it could not replay and relied on an idle timer to stop:
+  measured at **17,703 republishes of two messages in 2.5 seconds**. With the
+  stamp it notices it has come full circle and stops — same scenario, 204ms,
+  five work messages replayed and both non-work messages left where a human
+  can find them.
+
 ### Recovering the dead-letter queue, once, by the broker's choice
 
 Dead-lettering preserves failed work; it does not recover it. Left alone the

@@ -428,6 +428,7 @@ And from the daemon fleet — the same in-process `effect` registry, served on
 | `egress_daemon_in_flight` / `_queued` | Concurrency against the per-daemon ceiling, and deliveries parked behind it — unsettled, which is where backpressure becomes the broker's problem |
 | `egress_daemon_dead_lettered_total` | Work rejected onto `<apiId>.work.dead` because its call failed |
 | `egress_daemon_redriven_total` | Dead-lettered work replayed onto the work queue after recovery — the two together are the round trip |
+| `egress_daemon_undecodable_total` | Messages the fleet could not read — a control event failing the published schema, a malformed election trigger — rejected onto the canonical dead-letter queue rather than logged and dropped |
 | `egress_daemon_control_events_total` / `_gaps_total` / `_duplicates_total` | The same per-API sequence contract, checked on the AMQP transport by five processes the publisher does not control |
 | `egress_daemon_probes_total` | `HALF_OPEN` probes this daemon was elected by the broker to run |
 | `egress_producer_published_total` | Arrival rate, against the fleet's completion rate — the difference is the queue |
@@ -641,6 +642,22 @@ expressed at all. Measured, not assumed, and pinned by a test that will fail
 if a client release fixes it. One attempt then dead-letter is what is honest
 given that; the failures are at least countable and replayable instead of
 gone.
+
+**Every queue in the fleet dead-letters to that one canonical queue** — the
+work queue, both SAC election queues, and each daemon's own control queue.
+The dead-letter queue itself is the only exception, because a queue that
+dead-letters to itself is a cycle. This closes a second silent-loss path that
+looked nothing like the first: a control event that failed the published
+schema used to be logged and accepted, so the only trace of a version skew
+between the aggregator and the fleet was a line in `docker logs`. It is now
+rejected, which means the message that could not be read is still in your
+hands. `egress_daemon_undecodable_total` counts them.
+
+One canonical queue only works if whatever drains it can tell the messages
+apart, and RabbitMQ 4 supplies exactly that: a dead-lettered message arrives
+annotated with `x-first-death-queue` and `x-first-death-reason`. The redrive
+below replays only what was dead-lettered from the *work* queue and leaves
+everything else, so a poison control message is never replayed as work.
 
 **Replayable is not the same as replayed**, though, and a dead-letter queue
 nobody drains is a slower way of losing things. So `REDRIVE_ON_CLOSE` turns
