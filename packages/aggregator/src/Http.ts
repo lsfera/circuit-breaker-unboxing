@@ -21,6 +21,13 @@ const HERE = dirname(fileURLToPath(import.meta.url));
  * Snapshots deliberately republish the current sequence, so only
  * state_changed events carry that guarantee.
  */
+/**
+ * How many gap descriptions to keep. Same reasoning as the sinks' dead-letter
+ * buffers: this is a diagnostic list in a long-running process, and the exact
+ * count is a Prometheus counter (`egress_subscriber_gaps_total`).
+ */
+export const GAP_BUFFER = 100;
+
 export type Integrity = {
   readonly received: number;
   readonly snapshots: number;
@@ -62,7 +69,7 @@ export const record = (self: Integrity, event: CircuitEvent): Integrity => {
     return {
       ...base,
       bySequence,
-      gaps: [...self.gaps, `${apiId}: jumped ${seen} -> ${sequence}`],
+      gaps: [...self.gaps, `${apiId}: jumped ${seen} -> ${sequence}`].slice(-GAP_BUFFER),
     };
   }
   return { ...base, bySequence };

@@ -15,6 +15,16 @@ import type { ApiSnapshot, CircuitEvent, State } from "@egress/domain/Model.ts";
 
 export const SOURCE = "egress-proxy/control-plane";
 
+/**
+ * How many dead letters a sink keeps in memory for inspection.
+ *
+ * This list is a diagnostic buffer, not a ledger: an unbounded one grows for
+ * as long as a subscriber stays broken, in a process meant to run for months.
+ * The authoritative total is `egress_webhook_dead_lettered_total`, which is a
+ * counter and costs nothing to keep exact.
+ */
+export const DEAD_LETTER_BUFFER = 200;
+
 const build = (
   type: CircuitEvent["type"],
   snap: ApiSnapshot,
@@ -115,8 +125,8 @@ export const makeWebhookSink = (url: string): Effect.Effect<SinkImpl> =>
 
       const post = (event: CircuitEvent) =>
         Effect.tryPromise({
-          try: (signal) =>
-            fetch(url, {
+          try: async (signal) => {
+            const res = await fetch(url, {
               method: "POST",
               headers: {
                 "content-type": "application/cloudevents+json",
@@ -127,7 +137,12 @@ export const makeWebhookSink = (url: string): Effect.Effect<SinkImpl> =>
               },
               body: JSON.stringify(event),
               signal,
-            }),
+            });
+            // Drained even though the status is all this cares about: an
+            // unconsumed body keeps its connection out of the pool.
+            await res.text().catch(() => {});
+            return res;
+          },
           catch: (cause) =>
             new DeliveryFailed({
               sink: "webhook",
@@ -172,10 +187,12 @@ export const makeWebhookSink = (url: string): Effect.Effect<SinkImpl> =>
           Effect.catchCause((cause) =>
             Effect.all(
               [
-                Ref.update(dead, (xs) => [
-                  ...xs,
-                  new DeliveryFailed({ sink: "webhook", apiId, cause: String(cause) }),
-                ]),
+                Ref.update(dead, (xs) =>
+                  [
+                    ...xs,
+                    new DeliveryFailed({ sink: "webhook", apiId, cause: String(cause) }),
+                  ].slice(-DEAD_LETTER_BUFFER),
+                ),
                 Metric.update(Metric.withAttributes(Telemetry.webhookDeadLettered, { apiId }), 1),
               ],
               { discard: true },

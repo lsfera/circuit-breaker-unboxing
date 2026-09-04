@@ -25,7 +25,11 @@ const INTERVAL_MS = Number(process.env.TRAFFIC_INTERVAL_MS ?? 20);
 
 async function hit(base, path) {
   try {
-    await fetch(base + path, { signal: AbortSignal.timeout(2000) });
+    const res = await fetch(base + path, { signal: AbortSignal.timeout(2000) });
+    // Nothing here wants the body, but leaving it unread keeps the connection
+    // out of the pool until the GC collects it — the standard way to leak
+    // sockets from a loop like this one.
+    await res.text().catch(() => {});
   } catch {
     // Timeouts and connection failures are expected once a cluster is fully
     // ejected or a route returns direct_response — this generator only needs

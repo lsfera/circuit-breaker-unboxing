@@ -957,7 +957,8 @@ tested exhaustively with plain `assert`.
 
 ## What the build surfaced
 
-Eleven things worth knowing, all of them found by running the thing:
+Twelve things worth knowing — eleven found by running the thing, one by
+reading it afterwards:
 
 - **A reason code cannot be derived from averaged endpoint counts.** With four of
   five replicas seeing zero healthy hosts, the mean rounds to 1, so "all
@@ -1041,6 +1042,18 @@ Eleven things worth knowing, all of them found by running the thing:
   genuinely absent rather than merely undocumented, so the daemons
   dead-letter on the first failure and a test pins the behaviour in case a
   client release changes it.
+- **The check that proves the contract had no test, and a blind spot for the
+  one bug most likely to break it.** `/api/subscriber` is what this README
+  points at to claim the stream is gapless and non-repeating. It counted a
+  *repeated* sequence as a duplicate and a *skipped* one as a gap — and let a
+  sequence going **backwards** fall through both branches, uncounted. That is
+  exactly the shape a leadership bug produces: an instance resuming from
+  stale in-memory state republishes numbers a later leader already used. So
+  the demotion bug found the same day would have been invisible to the very
+  check that exists to catch it, and the function had no unit test at all
+  despite being pure, twenty lines, and load-bearing. It has six now. The
+  lesson is not "write more tests" — it is that a verification mechanism is
+  itself code, and an untested one is a claim, not a proof.
 
 ## What Effect actually bought here
 

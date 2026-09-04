@@ -207,7 +207,7 @@ function renderState(msg){
   document.getElementById("meta").textContent = lead.isLeader === false
     ? `${lead.instanceId} · STANDBY — another instance holds the lease; it publishes, this one waits`
     : `${lead.instanceId ? lead.instanceId + " · LEADER · " : ""}`
-      + `${msg.apis.length} apis · ${msg.apis[0]?.reportingReplicas ?? 0} replicas · ${msg.deadLetters} dead-lettered`;
+      + `${msg.apis.length} apis · ${msg.apis[0]?.reportingReplicas ?? 0} replicas · ${msg.deadLetters} dead-lettered (recent)`;
 
   const s = msg.subscriber;
   const bad = s.gaps > 0 || s.duplicates > 0;

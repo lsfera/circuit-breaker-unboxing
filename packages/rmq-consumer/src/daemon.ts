@@ -242,6 +242,12 @@ export const runDaemon = (cfg: DaemonConfig) =>
         const res = await fetch(`${cfg.egressAddr}${cfg.apiPath}`, {
           signal: AbortSignal.timeout(2000),
         });
+        // Read the body even though nothing wants it. An unconsumed response
+        // holds its connection out of the pool until the GC gets to it, which
+        // is the standard way to leak sockets at rate — and this is the
+        // highest-rate call in the system. It also makes "the call finished"
+        // mean the response actually arrived, rather than just its headers.
+        await res.text().catch(() => {});
         if (res.ok) {
           ok++;
           return "accept";

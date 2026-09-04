@@ -190,3 +190,59 @@ test("release only removes the lease if the caller still holds it", async (t) =>
     freshLayer(),
   ));
 });
+
+/**
+ * A checkpoint is the one piece of this system's state that outlives the
+ * process, which makes it the one piece that arrives as untrusted input.
+ * Casting `JSON.parse` to `Checkpoint` would seed the breaker with
+ * `undefined` fields and publish `NaN` sequences to every subscriber; reading
+ * a value that does not decode as "no checkpoint" is a cold start, which the
+ * aggregator already handles correctly.
+ */
+test("a corrupt checkpoint reads as absent, not as garbage state", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const prefix = `test:${Date.now()}:corrupt`;
+  const layer = RedisCoordinationLayer(asRedisLike(client!), prefix);
+
+  const { valid, truncated, notJson, wrongShape } = await Effect.runPromise(
+    Effect.provide(
+      Effect.gen(function* () {
+        const store = yield* CheckpointStore;
+        const leader = yield* LeaderElection;
+        const token = yield* leader.tryAcquireOrRenew("writer", 10_000);
+        assert.ok(Option.isSome(token));
+
+        yield* store.save("good", token.value, {
+          state: "OPEN",
+          reason: "ALL_ENDPOINTS_EJECTED",
+          sequence: 7,
+          changedAt: 1_000,
+          openBackoffMs: 4000,
+        });
+
+        // Written straight past the store, the way a truncated write or an
+        // older build's format would actually arrive.
+        const put = (api: string, raw: string) =>
+          Effect.promise(() => client!.set(`${prefix}:checkpoint:${api}`, raw));
+        yield* put("truncated", '{"state":"OPEN","sequence":');
+        yield* put("garbage", "not json at all");
+        yield* put("shape", '{"state":"NOPE","sequence":"seven"}');
+
+        return {
+          valid: yield* store.load("good"),
+          truncated: yield* store.load("truncated"),
+          notJson: yield* store.load("garbage"),
+          wrongShape: yield* store.load("shape"),
+        };
+      }),
+      layer,
+    ),
+  );
+
+  assert.ok(Option.isSome(valid), "a well-formed checkpoint still loads");
+  assert.equal((valid as Option.Some<{ sequence: number }>).value.sequence, 7);
+  assert.ok(Option.isNone(truncated), "a truncated write must read as absent");
+  assert.ok(Option.isNone(notJson), "a non-JSON value must read as absent");
+  assert.ok(Option.isNone(wrongShape), "valid JSON of the wrong shape must read as absent");
+});

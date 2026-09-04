@@ -1,4 +1,4 @@
-import { Context, Data, Effect, Layer, Option, Ref } from "effect";
+import { Context, Data, Effect, Layer, Option, Ref, Schema } from "effect";
 import type { Reason, State } from "@egress/domain/Model.ts";
 
 /**
@@ -185,6 +185,26 @@ export const InMemoryCoordinationLayer: Layer.Layer<LeaderElection | CheckpointS
 // knows that, so swapping the client is an adapter change and not a rewrite.
 // ---------------------------------------------------------------------------
 
+/**
+ * A checkpoint read back out of Redis is untrusted input, whatever wrote it.
+ * Decoding it rather than casting means a truncated write, a value left by an
+ * older build, or anything else that does not match this shape is treated as
+ * "no checkpoint" — a cold start, which the aggregator already handles
+ * correctly — instead of seeding the breaker with a `sequence` of `undefined`
+ * and publishing `NaN` to every subscriber. Same stance the daemons take on
+ * an undecodable control event, applied to the one piece of state that
+ * outlives the process.
+ */
+const CheckpointFromJson = Schema.Struct({
+  state: Schema.Literals(["CLOSED", "DEGRADED", "OPEN", "HALF_OPEN"]),
+  reason: Schema.String,
+  sequence: Schema.Number,
+  changedAt: Schema.Number,
+  openBackoffMs: Schema.Number,
+});
+
+const decodeCheckpoint = Schema.decodeUnknownOption(CheckpointFromJson);
+
 export type RedisLike = {
   readonly eval: (
     script: string,
@@ -275,9 +295,16 @@ export const RedisCoordinationLayer = (
             args: [],
           }),
         ).pipe(
-          Effect.map((raw) =>
-            typeof raw === "string" ? Option.some(JSON.parse(raw) as Checkpoint) : Option.none(),
-          ),
+          Effect.map((raw) => {
+            if (typeof raw !== "string") return Option.none<Checkpoint>();
+            try {
+              return decodeCheckpoint(JSON.parse(raw)).pipe(
+                Option.map((cp): Checkpoint => ({ ...cp, reason: cp.reason as Reason })),
+              );
+            } catch {
+              return Option.none<Checkpoint>(); // not even JSON
+            }
+          }),
         ),
     }),
   );
