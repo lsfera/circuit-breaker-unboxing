@@ -371,6 +371,41 @@ shortcut past one. An unbounded requeue against a dead upstream is a hot
 loop with no counter to stop it, which is strictly worse than a queue full
 of messages you can look at.
 
+### Dead-lettering stops being reliable once the connection bug has been provoked
+
+Found by a test that kept failing about half the time, which is the only
+reason it was found at all.
+
+The setup is trivial: two queues declared identically, both with the same
+`x-dead-letter-exchange`, a consumer on each that rejects its one message,
+and a consumer on the dead-letter queue counting arrivals. In isolation it
+passes every time. Run immediately after the stranding test above — the one
+that deliberately provokes the client into stalling a connection — and about
+half the time only *one* of the two rejections dead-letters. The other
+message simply disappears.
+
+What was ruled out, one experiment at a time:
+
+- Not a slow broker: waiting fifteen seconds instead of two changed nothing.
+- Not the consumer being starved: the consumer received its message and
+  called `discard()` on it.
+- Not `discard()` failing: instrumenting the client's `settle` to log instead
+  of swallow produced no error at all.
+- Not creation order: swapping which consumer is created first left the
+  failure attached to the same queue.
+
+So the client reports success, the broker acknowledges the rejection, and the
+message is neither delivered onward nor left behind. Both the connection and
+the queues are freshly created; the only thing shared with the stranding test
+is the broker process itself.
+
+There is no fix here, only a boundary: the dead-letter tests now run in their
+own file, which means their own broker, and the stranding test cannot reach
+them. It is not pinned by a test of its own because it reproduces roughly
+half the time, and a test that fails half the time teaches nobody anything —
+but anything running a workload that provokes the stranding bug should not
+also be trusting dead-lettering on that broker.
+
 ### One dead-letter queue for everything, and how to drain it anyway
 
 Every queue the fleet declares dead-letters to `<apiId>.work.dead`: the work
