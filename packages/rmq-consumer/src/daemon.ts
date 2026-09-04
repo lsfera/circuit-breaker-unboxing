@@ -6,6 +6,7 @@ import {
   deadLetterQueueFor,
   decodeCircuitEvent,
   probeTriggerQueueFor,
+  redriveTriggerQueueFor,
   routingKeyFor,
   workQueueArgs,
   workQueueFor,
@@ -89,6 +90,17 @@ import type { DaemonPolicyState } from "./DaemonPolicy.ts";
  * rigour to prove that while silently dropping the payload work — which is
  * what accepting a failed message did.
  *
+ * Preserving failed work is not the same as recovering it, though, and a
+ * dead-letter queue nobody drains is just a slower way of losing things. So
+ * there is an opt-in redrive (`REDRIVE_ON_CLOSE`): on the transition back to
+ * `CLOSED`, one daemon — elected by the broker on a second SAC queue, the
+ * same mechanism as the prober — replays the dead-lettered messages onto the
+ * work queue and stops as soon as the queue is drained, a cap is reached, or
+ * the circuit leaves `CLOSED` again. It is off by default because replaying
+ * work is a policy decision about *this* workload, not a property of the
+ * transport: whether a two-minute-old payment attempt should be retried at
+ * all is the sort of question a queue cannot answer for you.
+ *
  * There is deliberately no retry. The client's `requeue` sends
  * `modified{delivery_failed: false}`, and RabbitMQ only increments AMQP
  * 1.0's `delivery-count` for a delivery marked *failed* — so a released
@@ -120,6 +132,15 @@ export type DaemonConfig = {
    * daemon hammered harder.
    */
   readonly maxInFlight: number;
+  /**
+   * Replay `<apiId>.work.dead` onto the work queue when the circuit closes.
+   * Off by default: see the module doc — this is a statement about whether
+   * this workload's messages are still worth doing later, which only the
+   * workload's owner knows.
+   */
+  readonly redriveOnClose: boolean;
+  /** Ceiling on messages moved in a single redrive pass, so a huge backlog is recovered in bounded bites rather than one burst. */
+  readonly redriveMax: number;
 };
 
 export const runDaemon = (cfg: DaemonConfig) =>
@@ -130,6 +151,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
     const workQueue = workQueueFor(cfg.apiId);
     const deadQueue = deadLetterQueueFor(cfg.apiId);
     const probeQueue = probeTriggerQueueFor(cfg.apiId);
+    const redriveQueue = redriveTriggerQueueFor(cfg.apiId);
     const controlQueue = controlQueueFor(cfg.apiId, cfg.instanceId);
 
     // Every daemon declares the shared topology. These are all idempotent
@@ -142,6 +164,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
     yield* control.declareQueue(deadQueue);
     yield* control.declareQueue(workQueue, workQueueArgs(cfg.apiId));
     yield* control.declareQueue(probeQueue, { "x-single-active-consumer": true });
+    yield* control.declareQueue(redriveQueue, { "x-single-active-consumer": true });
     const controlQ = yield* control.declareQueue(controlQueue);
     yield* control.bind(routingKeyFor(cfg.apiId), exchange, controlQ);
 
@@ -150,14 +173,18 @@ export const runDaemon = (cfg: DaemonConfig) =>
     /** The disposable work connection's scope — non-null exactly while this daemon is pulling work. */
     const workScope = yield* Ref.make<Scope.Closeable | null>(null);
     const probeScope = yield* Ref.make<Scope.Closeable | null>(null);
+    const redriveScope = yield* Ref.make<Scope.Closeable | null>(null);
     /** Highest circuit sequence this daemon has already probed for — see the trigger handler. */
     const probedSequence = yield* Ref.make(-1);
+    /** Same idea for the redrive election: one replay per recovery, not one per trigger message. */
+    const redrivenSequence = yield* Ref.make(-1);
 
     let inFlight = 0;
     let queued = 0;
     let ok = 0;
     let failed = 0;
     let probed = 0;
+    let redriven = 0;
 
     /**
      * The delivery contract, observed from this side of the broker.
@@ -268,6 +295,12 @@ export const runDaemon = (cfg: DaemonConfig) =>
         // state for any reason retires it, so it can never overlap the work
         // consumption CLOSED is about to start.
         if (state !== State.HALF_OPEN) yield* stopScope(probeScope);
+
+        // A redrive belongs to CLOSED and nothing else. Leaving that state
+        // for any reason retires it immediately: replaying a backlog into an
+        // upstream that has just started failing again is the one thing this
+        // whole design exists to prevent.
+        if (state !== State.CLOSED) yield* stopScope(redriveScope);
       }),
     );
 
@@ -309,11 +342,120 @@ export const runDaemon = (cfg: DaemonConfig) =>
       }),
     );
 
+    /**
+     * One bounded pass: move at most `redriveMax` messages from the
+     * dead-letter queue back onto the work queue, then stop. Returns why it
+     * stopped, which is what tells the caller whether another pass is worth
+     * running.
+     *
+     * Three properties worth stating, because each is a decision:
+     *
+     *  - **Its own connection**, like the probe, and for the same measured
+     *    reason: this closes a consumer with a backlog behind it, which is
+     *    what strands deliveries and eventually stalls every link on a shared
+     *    connection. The connection is retired from outside the handler.
+     *  - **Publish, then accept.** A crash between the two redelivers a
+     *    message that was already replayed, which is a duplicate; accepting
+     *    first would lose it. Duplicates are recoverable and losses are not,
+     *    and the whole point of this queue is that the work still matters.
+     *  - **It stops on its own.** Whichever comes first: the cap, the queue
+     *    running dry, the circuit leaving CLOSED, or a hard deadline. A
+     *    redrive that cannot end is a worse failure mode than a queue that
+     *    does not drain.
+     */
+    const redrivePass = Effect.gen(function* () {
+      const scope = yield* Scope.make();
+      const conn = yield* Effect.provideService(makeRmq(cfg.connect), Scope.Scope, scope);
+      const into = yield* conn.publisherToQueue(workQueue);
+
+      let moved = 0;
+      let lastAt = Date.now();
+      yield* conn.consume(deadQueue, async (body): Promise<Settlement> => {
+        // Reserve the slot *before* awaiting. The broker delivers with a
+        // credit window in the hundreds, so a check-then-await-then-increment
+        // lets every in-flight handler pass the same check and overshoot the
+        // cap by an order of magnitude — measured at 5739 against a cap of
+        // 5000 before this was reordered.
+        if (moved >= cfg.redriveMax) return "requeue";
+        moved++;
+        try {
+          await Effect.runPromise(conn.send(into, body));
+        } catch {
+          // The work queue is unreachable; leave the message where it is
+          // rather than accepting it into nothing.
+          moved--;
+          return "requeue";
+        }
+        redriven++;
+        lastAt = Date.now();
+        return "accept";
+      });
+
+      yield* gate.withPermit(Ref.set(redriveScope, scope));
+
+      const deadline = Date.now() + 60_000;
+      let reason = "deadline";
+      while (true) {
+        yield* Effect.sleep("500 millis");
+        if ((yield* Ref.get(circuit)) !== State.CLOSED) {
+          reason = "circuit reopened";
+          break;
+        }
+        if (moved >= cfg.redriveMax) {
+          reason = "cap reached";
+          break;
+        }
+        // Nothing for two seconds with a consumer attached means the queue is
+        // empty — there is no "queue drained" callback to wait on.
+        if (Date.now() - lastAt > 2000) {
+          reason = "drained";
+          break;
+        }
+        if (Date.now() > deadline) break;
+      }
+
+      yield* gate.withPermit(stopScope(redriveScope));
+      return { moved, reason };
+    });
+
+    /**
+     * Replay the dead-letter queue, in bounded passes, until it is empty or
+     * something says stop. Runs on exactly one daemon — the broker elects it
+     * on a second SAC queue, below — and only while the circuit is CLOSED.
+     *
+     * Passes rather than one long drain because each pass is a fresh
+     * connection it can afford to destroy, and because `redriveMax` is there
+     * to keep any single burst onto the work queue bounded. Looping until
+     * drained is what makes this actually self-healing: a backlog larger than
+     * the cap would otherwise need one outage per 5,000 messages to recover.
+     */
+    const REDRIVE_MAX_PASSES = 20;
+    const redriveOnce = Effect.gen(function* () {
+      if (!cfg.redriveOnClose) return;
+      if ((yield* gate.withPermit(Ref.get(redriveScope))) !== null) return;
+
+      yield* Effect.log(`${label}: redriving ${deadQueue} (max ${cfg.redriveMax} per pass)`);
+      let total = 0;
+      for (let pass = 1; pass <= REDRIVE_MAX_PASSES; pass++) {
+        const { moved, reason } = yield* redrivePass;
+        total += moved;
+        if (reason !== "cap reached") {
+          yield* Effect.log(`${label}: redrive finished — ${total} replayed (${reason})`);
+          return;
+        }
+      }
+      yield* Effect.log(
+        `${label}: redrive stopped after ${REDRIVE_MAX_PASSES} passes — ${total} replayed; ` +
+          `whatever is left will be picked up by the next recovery`,
+      );
+    });
+
     // Published by *every* daemon on entering HALF_OPEN, not just one, so the
     // trigger still arrives when some daemons are down. SAC delivers all of
     // them to the single elected consumer, which dedupes on the circuit
     // sequence below — that is why the sequence travels in the body.
     const trigger = yield* control.publisherToQueue(probeQueue);
+    const redriveTrigger = yield* control.publisherToQueue(redriveQueue);
 
     const describe = Effect.gen(function* () {
       const state = yield* Ref.get(circuit);
@@ -329,12 +471,19 @@ export const runDaemon = (cfg: DaemonConfig) =>
     const applyEvent = (state: State, sequence: number, reason: string) =>
       Effect.gen(function* () {
         const prior = yield* Ref.get(policy);
+        const priorState = yield* Ref.get(circuit);
         yield* Ref.set(circuit, state);
         yield* Ref.set(policy, step(prior, state, cfg.fleetSize));
         yield* reconcile;
         yield* Effect.log(`${label}: seq=${sequence} (${reason}) ${yield* describe}`);
         if (state === State.HALF_OPEN) {
           yield* control.send(trigger, JSON.stringify({ sequence }));
+        }
+        // Only on the actual transition back into CLOSED — the aggregator's
+        // periodic snapshots repeat the current state, and a redrive per
+        // snapshot would replay the queue every fifteen seconds forever.
+        if (cfg.redriveOnClose && state === State.CLOSED && priorState !== State.CLOSED) {
+          yield* control.send(redriveTrigger, JSON.stringify({ sequence }));
         }
       });
 
@@ -393,6 +542,29 @@ export const runDaemon = (cfg: DaemonConfig) =>
       );
     });
 
+    // The second SAC election, identical in shape to the prober's: every
+    // daemon publishes the trigger so it still arrives when some are down,
+    // the broker delivers all of them to one consumer, and that consumer
+    // dedupes on the circuit sequence so one recovery means one replay.
+    yield* control.consume(redriveQueue, (body) => {
+      let sequence = -1;
+      try {
+        sequence = Number(JSON.parse(body).sequence ?? -1);
+      } catch {
+        return;
+      }
+      Effect.runFork(
+        Ref.get(redrivenSequence).pipe(
+          Effect.flatMap((last) =>
+            sequence <= last
+              ? Effect.void
+              : Ref.set(redrivenSequence, sequence).pipe(Effect.andThen(redriveOnce)),
+          ),
+          Effect.catchCause((cause) => Effect.logError(`${label}: redrive failed`, cause)),
+        ),
+      );
+    });
+
     // CLOSED until told otherwise: a daemon that starts mid-incident learns
     // the real state from the aggregator's next snapshot (snapshotMs), which
     // is what those periodic republishes are for.
@@ -411,7 +583,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
      * just set.
      */
     const attrs = { apiId: cfg.apiId };
-    let flushed = { ok: 0, failed: 0, probed: 0, gaps: 0, duplicates: 0 };
+    let flushed = { ok: 0, failed: 0, probed: 0, redriven: 0, gaps: 0, duplicates: 0 };
     let flushedEvents = new Map<string, number>();
 
     const flush = Effect.gen(function* () {
@@ -435,10 +607,11 @@ export const runDaemon = (cfg: DaemonConfig) =>
         ok: ok - flushed.ok,
         failed: failed - flushed.failed,
         probed: probed - flushed.probed,
+        redriven: redriven - flushed.redriven,
         gaps: gaps - flushed.gaps,
         duplicates: duplicates - flushed.duplicates,
       };
-      flushed = { ok, failed, probed, gaps, duplicates };
+      flushed = { ok, failed, probed, redriven, gaps, duplicates };
 
       if (delta.ok > 0) {
         yield* Metric.update(
@@ -468,6 +641,9 @@ export const runDaemon = (cfg: DaemonConfig) =>
       }
       if (delta.probed > 0) {
         yield* Metric.update(Metric.withAttributes(Telemetry.probes, attrs), delta.probed);
+      }
+      if (delta.redriven > 0) {
+        yield* Metric.update(Metric.withAttributes(Telemetry.redriven, attrs), delta.redriven);
       }
       if (delta.gaps > 0) {
         yield* Metric.update(Metric.withAttributes(Telemetry.controlGaps, attrs), delta.gaps);
@@ -503,6 +679,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
         Metric.update(Metric.withAttributes(Telemetry.controlDuplicates, attrs), 0),
         Metric.update(Metric.withAttributes(Telemetry.deadLettered, attrs), 0),
         Metric.update(Metric.withAttributes(Telemetry.probes, attrs), 0),
+        Metric.update(Metric.withAttributes(Telemetry.redriven, attrs), 0),
         Metric.update(Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "ok" }), 0),
         Metric.update(Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "failed" }), 0),
       ],

@@ -5,6 +5,12 @@
 # Envoy's outlier detection here is per replica and stays that way: it protects
 # the request path immediately. The aggregator decides what the fleet as a whole
 # reports to subscribers.
+#
+# The three clusters are identical apart from name and endpoints, so the shared
+# blocks are declared once on the first cluster and aliased by the other two.
+# Plain YAML anchors, not merge keys: Envoy parses this with yaml-cpp, which
+# resolves aliases but does not implement the `<<:` merge key, so a merged map
+# would arrive as a literal "<<" field and fail proto validation.
 
 admin:
   address:
@@ -41,7 +47,15 @@ static_resources:
                           route:
                             cluster: payments-provider
                             timeout: 5s
-                            retry_policy:
+                            retry_policy: &retry_policy
+                              # No retry_budget here, and with several
+                              # endpoints per cluster that now matters: a
+                              # retry lands on a *different* host, so it is
+                              # genuine failover rather than the same dying
+                              # host hit three times. A budget capping
+                              # concurrent retries as a fraction of active
+                              # requests is still the better shape at real
+                              # fleet size - see the README.
                               retry_on: 5xx,reset,connect-failure
                               num_retries: 2
                               retry_back_off:
@@ -51,22 +65,12 @@ static_resources:
                           route:
                             cluster: shipping-rates
                             timeout: 5s
-                            retry_policy:
-                              retry_on: 5xx,reset,connect-failure
-                              num_retries: 2
-                              retry_back_off:
-                                base_interval: 0.05s
-                                max_interval: 1s
+                            retry_policy: *retry_policy
                         - match: { prefix: "/tax" }
                           route:
                             cluster: tax-calc
                             timeout: 5s
-                            retry_policy:
-                              retry_on: 5xx,reset,connect-failure
-                              num_retries: 2
-                              retry_back_off:
-                                base_interval: 0.05s
-                                max_interval: 1s
+                            retry_policy: *retry_policy
                 http_filters:
                   # Layer 4 (see README) - infers a concurrency limit from
                   # observed latency instead of a hand-picked static number.
@@ -108,13 +112,26 @@ static_resources:
           - lb_endpoints:
               - endpoint:
                   address:
-                    socket_address:
-                      address: flaky-upstream
-                      port_value: 8080
+                    socket_address: { address: flaky-upstream, port_value: 8080 }
+              - endpoint:
+                  address:
+                    socket_address: { address: flaky-upstream, port_value: 8081 }
+              - endpoint:
+                  address:
+                    socket_address: { address: flaky-upstream, port_value: 8082 }
+              - endpoint:
+                  address:
+                    socket_address: { address: flaky-upstream, port_value: 8083 }
+              - endpoint:
+                  address:
+                    socket_address: { address: flaky-upstream, port_value: 8084 }
+              - endpoint:
+                  address:
+                    socket_address: { address: flaky-upstream, port_value: 8085 }
       # Layer 1 - bulkheading. Caps resource consumption; detects nothing.
       # track_remaining exposes gauges rather than bare overflow counters,
       # which is what the aggregator edge-detects on.
-      circuit_breakers:
+      circuit_breakers: &circuit_breakers
         thresholds:
           - priority: DEFAULT
             max_connections: 512
@@ -123,7 +140,7 @@ static_resources:
             max_retries: 32
             track_remaining: true
       # Layer 2 - the actual breaker. Per replica, by design.
-      outlier_detection:
+      outlier_detection: &outlier_detection
         consecutive_5xx: 5
         consecutive_gateway_failure: 5
         enforcing_consecutive_5xx: 100
@@ -135,15 +152,32 @@ static_resources:
         # The aggregate breaker, not Envoy, decides what subscribers are told.
         max_ejection_percent: 100
         # Ratio-based detection scales cleanly with replica count; consecutive
-        # counts get effectively divided by the size of the fleet.
+        # counts get effectively divided by the size of the fleet. This only
+        # evaluates at all because every cluster below has at least
+        # failure_percentage_minimum_hosts endpoints - with a single host per
+        # cluster it is dead configuration.
         failure_percentage_threshold: 50
         failure_percentage_minimum_hosts: 3
         failure_percentage_request_volume: 30
         enforcing_failure_percentage: 100
         # Separate "upstream returned 503" from "we could not connect".
         split_external_local_origin_errors: true
+        # Only meaningful with the health_checks block below: without active
+        # health checking this flag is inert, and a recovered upstream stays
+        # ejected for base_ejection_time x ejection_count regardless.
         successful_active_health_check_uneject_host: true
-
+      # Layer 3 - active health checking, which is what makes the un-eject
+      # flag above real. /__health samples the same failing service normal
+      # traffic does (see infra/flaky-upstream.mjs), so at a partial failure
+      # rate hosts go unhealthy independently rather than all at once - which
+      # is what lets a replica report healthy < total and vote DEGRADED.
+      health_checks: &health_checks
+        - timeout: 1s
+          interval: 2s
+          unhealthy_threshold: 3
+          healthy_threshold: 2
+          http_health_check:
+            path: /__health
     - name: shipping-rates
       connect_timeout: 2s
       type: STRICT_DNS
@@ -154,42 +188,19 @@ static_resources:
           - lb_endpoints:
               - endpoint:
                   address:
-                    socket_address:
-                      address: flaky-upstream
-                      port_value: 8081
-      # Layer 1 - bulkheading. Caps resource consumption; detects nothing.
-      # track_remaining exposes gauges rather than bare overflow counters,
-      # which is what the aggregator edge-detects on.
-      circuit_breakers:
-        thresholds:
-          - priority: DEFAULT
-            max_connections: 512
-            max_pending_requests: 256
-            max_requests: 1024
-            max_retries: 32
-            track_remaining: true
-      # Layer 2 - the actual breaker. Per replica, by design.
-      outlier_detection:
-        consecutive_5xx: 5
-        consecutive_gateway_failure: 5
-        enforcing_consecutive_5xx: 100
-        enforcing_consecutive_gateway_failure: 100
-        interval: 1s
-        base_ejection_time: 5s
-        max_ejection_time: 30s
-        # 100% so a fully dead upstream can actually reach zero healthy hosts.
-        # The aggregate breaker, not Envoy, decides what subscribers are told.
-        max_ejection_percent: 100
-        # Ratio-based detection scales cleanly with replica count; consecutive
-        # counts get effectively divided by the size of the fleet.
-        failure_percentage_threshold: 50
-        failure_percentage_minimum_hosts: 3
-        failure_percentage_request_volume: 30
-        enforcing_failure_percentage: 100
-        # Separate "upstream returned 503" from "we could not connect".
-        split_external_local_origin_errors: true
-        successful_active_health_check_uneject_host: true
-
+                    socket_address: { address: flaky-upstream, port_value: 8090 }
+              - endpoint:
+                  address:
+                    socket_address: { address: flaky-upstream, port_value: 8091 }
+              - endpoint:
+                  address:
+                    socket_address: { address: flaky-upstream, port_value: 8092 }
+              - endpoint:
+                  address:
+                    socket_address: { address: flaky-upstream, port_value: 8093 }
+      circuit_breakers: *circuit_breakers
+      outlier_detection: *outlier_detection
+      health_checks: *health_checks
     - name: tax-calc
       connect_timeout: 2s
       type: STRICT_DNS
@@ -200,38 +211,13 @@ static_resources:
           - lb_endpoints:
               - endpoint:
                   address:
-                    socket_address:
-                      address: flaky-upstream
-                      port_value: 8082
-      # Layer 1 - bulkheading. Caps resource consumption; detects nothing.
-      # track_remaining exposes gauges rather than bare overflow counters,
-      # which is what the aggregator edge-detects on.
-      circuit_breakers:
-        thresholds:
-          - priority: DEFAULT
-            max_connections: 512
-            max_pending_requests: 256
-            max_requests: 1024
-            max_retries: 32
-            track_remaining: true
-      # Layer 2 - the actual breaker. Per replica, by design.
-      outlier_detection:
-        consecutive_5xx: 5
-        consecutive_gateway_failure: 5
-        enforcing_consecutive_5xx: 100
-        enforcing_consecutive_gateway_failure: 100
-        interval: 1s
-        base_ejection_time: 5s
-        max_ejection_time: 30s
-        # 100% so a fully dead upstream can actually reach zero healthy hosts.
-        # The aggregate breaker, not Envoy, decides what subscribers are told.
-        max_ejection_percent: 100
-        # Ratio-based detection scales cleanly with replica count; consecutive
-        # counts get effectively divided by the size of the fleet.
-        failure_percentage_threshold: 50
-        failure_percentage_minimum_hosts: 3
-        failure_percentage_request_volume: 30
-        enforcing_failure_percentage: 100
-        # Separate "upstream returned 503" from "we could not connect".
-        split_external_local_origin_errors: true
-        successful_active_health_check_uneject_host: true
+                    socket_address: { address: flaky-upstream, port_value: 8094 }
+              - endpoint:
+                  address:
+                    socket_address: { address: flaky-upstream, port_value: 8095 }
+              - endpoint:
+                  address:
+                    socket_address: { address: flaky-upstream, port_value: 8096 }
+      circuit_breakers: *circuit_breakers
+      outlier_detection: *outlier_detection
+      health_checks: *health_checks

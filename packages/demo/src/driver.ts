@@ -23,15 +23,36 @@ import { NodeRuntime } from "@effect/platform-node";
  * Everything downstream of that (waiting on /api/events, the delivery-contract
  * check) is identical either way.
  *
+ * The last step covers the other half of the system. When PROMETHEUS points
+ * at the monitoring stack, the driver also asserts what the RabbitMQ daemon
+ * fleet did — stopped pulling on OPEN, let the queue build, ramped back, and
+ * kept the same per-API sequence contract on the AMQP transport. Unset, or
+ * pointed at an API no fleet is running for, that step is skipped rather
+ * than failed.
+ *
  *   FAILURE_MODE=sim|envoy   (default sim)
  *   AGGREGATOR=http://host:port          (default http://127.0.0.1:8088)
  *   FLAKY_UPSTREAM=http://host           (default http://127.0.0.1; envoy mode only)
+ *   PROMETHEUS=http://host:port          (optional; enables the fleet step)
  */
 
-const ORIGIN = process.env["AGGREGATOR"] ?? "http://127.0.0.1:8088";
+/**
+ * One or more comma-separated aggregator instances. Only the leader publishes,
+ * so only the leader's /api/events has anything on it — pointing this at a
+ * standby means every wait below times out on an empty feed. With two real
+ * instances competing for one lease, which of them that is at any moment is
+ * not knowable in advance, so the list is resolved against the live
+ * `leader.isLeader` flag at startup rather than guessed in configuration.
+ */
+const CANDIDATES = (process.env["AGGREGATOR"] ?? "http://127.0.0.1:8088")
+  .split(",")
+  .map((s) => s.trim())
+  .filter((s) => s.length > 0);
+let ORIGIN = CANDIDATES[0] ?? "http://127.0.0.1:8088";
 const API = process.argv[2] ?? "payments-provider";
 const FAILURE_MODE = process.env["FAILURE_MODE"] === "envoy" ? "envoy" : "sim";
 const FLAKY_UPSTREAM = process.env["FLAKY_UPSTREAM"] ?? "http://127.0.0.1";
+const PROMETHEUS = process.env["PROMETHEUS"] ?? "";
 
 // Real Envoy's outlier detection needs actual requests flowing (see
 // traffic-generator.mjs, part of `docker compose up`) before failure injected
@@ -39,11 +60,17 @@ const FLAKY_UPSTREAM = process.env["FLAKY_UPSTREAM"] ?? "http://127.0.0.1";
 // envoy path more room on every wait below.
 const TIMEOUT_SCALE = FAILURE_MODE === "envoy" ? 2 : 1;
 
-/** flaky-upstream.mjs's three independently controllable ports, one per API. */
-const UPSTREAM_PORT: Readonly<Record<string, number>> = {
-  "payments-provider": 8080,
-  "shipping-rates": 8081,
-  "tax-calc": 8082,
+/**
+ * flaky-upstream.mjs's ports, several per API — one per endpoint in the
+ * matching Envoy cluster. Failing *all* of an API's ports is what this script
+ * does, because the six steps are about a whole third party degrading;
+ * failing a subset by hand is what produces partial ejection and therefore
+ * DEGRADED, which is the interesting thing to try afterwards.
+ */
+const UPSTREAM_PORTS: Readonly<Record<string, ReadonlyArray<number>>> = {
+  "payments-provider": [8080, 8081, 8082, 8083, 8084, 8085],
+  "shipping-rates": [8090, 8091, 8092, 8093],
+  "tax-calc": [8094, 8095, 8096],
 };
 
 type CircuitEventData = {
@@ -82,25 +109,142 @@ const setFailureRate = (apiId: string, rate: number) => {
       catch: (cause) => new Error(`POST /api/failure failed: ${String(cause)}`),
     });
   }
-  const port = UPSTREAM_PORT[apiId];
-  if (port === undefined) {
+  const ports = UPSTREAM_PORTS[apiId];
+  if (ports === undefined) {
     return Effect.fail(
       new Error(
-        `no flaky-upstream port known for "${apiId}" — expected one of ${Object.keys(UPSTREAM_PORT).join(", ")}`,
+        `no flaky-upstream ports known for "${apiId}" — expected one of ${Object.keys(UPSTREAM_PORTS).join(", ")}`,
       ),
     );
   }
-  const url = `${FLAKY_UPSTREAM}:${port}/__fail`;
-  return Effect.tryPromise({
-    try: () =>
-      fetch(url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ rate }),
-      }),
-    catch: (cause) => new Error(`POST ${url} failed: ${String(cause)}`),
-  });
+  return Effect.forEach(
+    ports,
+    (port) => {
+      const url = `${FLAKY_UPSTREAM}:${port}/__fail`;
+      return Effect.tryPromise({
+        try: () =>
+          fetch(url, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ rate }),
+          }),
+        catch: (cause) => new Error(`POST ${url} failed: ${String(cause)}`),
+      });
+    },
+    { discard: true },
+  );
 };
+
+/**
+ * One instant-vector query, summed. `null` means the series does not exist —
+ * which is how the fleet step tells "no daemons are running for this API"
+ * apart from "the daemons are running and the value is zero".
+ */
+const promQuery = (query: string) =>
+  Effect.tryPromise({
+    try: () =>
+      fetch(`${PROMETHEUS}/api/v1/query?query=${encodeURIComponent(query)}`).then(
+        (r) =>
+          r.json() as Promise<{ data?: { result?: ReadonlyArray<{ value: [number, string] }> } }>,
+      ),
+    catch: (cause) => new Error(`prometheus query ${query} failed: ${String(cause)}`),
+  }).pipe(
+    Effect.map((body) => {
+      const rows = body.data?.result ?? [];
+      return rows.length === 0
+        ? null
+        : rows.reduce((sum, row) => sum + Number(row.value[1]), 0);
+    }),
+  );
+
+type Fleet = {
+  readonly target: number | null;
+  readonly active: number | null;
+  readonly size: number | null;
+  readonly work: number | null;
+  readonly dead: number | null;
+  readonly broken: number | null;
+};
+
+const fleetSnapshot: Effect.Effect<Fleet, Error> = Effect.all({
+  target: promQuery(`max(egress_daemon_target_active{apiId="${API}"})`),
+  active: promQuery(`sum(egress_daemon_self_active{apiId="${API}"})`),
+  size: promQuery(`max(egress_daemon_fleet_size{apiId="${API}"})`),
+  work: promQuery(`rabbitmq_detailed_queue_messages{queue="${API}.work"}`),
+  dead: promQuery(`rabbitmq_detailed_queue_messages{queue="${API}.work.dead"}`),
+  broken: promQuery(
+    `sum(egress_daemon_control_gaps_total{apiId="${API}"}) + ` +
+      `sum(egress_daemon_control_duplicates_total{apiId="${API}"})`,
+  ),
+});
+
+/**
+ * The deepest the work queue was seen to get. Sampled by a background fiber
+ * rather than read once at the end of the outage: the queue is at its minimum
+ * the instant the fleet stops (that is when the drain finished and the build
+ * has not started) and at its maximum somewhere in the middle, so a single
+ * reading taken at either edge understates it by an order of magnitude.
+ */
+let peakWork = 0;
+
+const sampleFleet = Effect.forever(
+  fleetSnapshot.pipe(
+    Effect.map((f) => {
+      peakWork = Math.max(peakWork, f.work ?? 0);
+    }),
+    Effect.catchCause(() => Effect.void),
+    Effect.andThen(Effect.sleep(Duration.seconds(1))),
+  ),
+);
+
+const describeFleet = (f: Fleet) =>
+  `target=${f.target}/${f.size} pulling=${f.active} work=${f.work} dead-lettered=${f.dead}`;
+
+/**
+ * Polls Prometheus until the fleet satisfies `predicate`. Scrape interval is
+ * 2s and the daemons publish once a second, so anything asserted here is
+ * necessarily a few seconds behind the event that caused it — which is why
+ * this waits for a condition rather than reading once after a sleep.
+ */
+const awaitFleet = (predicate: (f: Fleet) => boolean, what: string, timeoutMs: number) =>
+  Effect.gen(function* () {
+    const deadline = Date.now() + timeoutMs;
+    let last: Fleet | null = null;
+    while (true) {
+      last = yield* fleetSnapshot;
+      if (predicate(last)) return last;
+      if (Date.now() > deadline) {
+        return yield* Effect.die(
+          `timed out after ${timeoutMs}ms waiting for ${what} — last saw ${describeFleet(last)}`,
+        );
+      }
+      yield* Effect.sleep(Duration.millis(500));
+    }
+  });
+
+/** Picks whichever candidate currently holds the publishing lease. */
+const resolveLeader = Effect.gen(function* () {
+  if (CANDIDATES.length === 1) return;
+  for (const candidate of CANDIDATES) {
+    const leading = yield* Effect.tryPromise({
+      try: () =>
+        fetch(`${candidate}/api/state`).then(
+          (r) => r.json() as Promise<{ leader?: { isLeader: boolean; instanceId: string } }>,
+        ),
+      catch: (cause) => new Error(String(cause)),
+    }).pipe(
+      Effect.map((body) => body.leader?.isLeader === true),
+      Effect.catchCause(() => Effect.succeed(false)),
+    );
+    if (leading) {
+      ORIGIN = candidate;
+      return;
+    }
+  }
+  console.log(
+    `  (none of ${CANDIDATES.join(", ")} reports itself leader — using ${ORIGIN} and hoping)`,
+  );
+});
 
 const header = (msg: string) => Effect.sync(() => console.log(`\n\x1b[1m== ${msg} ==\x1b[0m`));
 
@@ -145,9 +289,11 @@ const awaitTransition = (apiId: string, after: number, baseTimeoutMs: number) =>
   });
 
 const program = Effect.gen(function* () {
+  yield* resolveLeader;
+  const ports = UPSTREAM_PORTS[API];
   const injectVia =
     FAILURE_MODE === "envoy"
-      ? `${FLAKY_UPSTREAM}:${UPSTREAM_PORT[API] ?? "?"}/__fail`
+      ? `${FLAKY_UPSTREAM}:{${ports?.join(",") ?? "?"}}/__fail`
       : `${ORIGIN}/api/failure`;
   yield* Effect.log(`driving ${API} against ${ORIGIN} (failure via ${injectVia})`);
 
@@ -157,10 +303,30 @@ const program = Effect.gen(function* () {
   yield* getEvents.pipe(
     Effect.catchCause(() =>
       Effect.die(
-        `cannot reach the aggregator at ${ORIGIN} — start it first, in another terminal: pnpm start`,
+        `cannot reach the aggregator at ${ORIGIN} — start it first, in another terminal: pnpm start.\n` +
+          `  If the stack IS up and you are running this from a devcontainer, published ports on\n` +
+          `  localhost may not be reachable from here (see the README's note on the compose\n` +
+          `  network): use service names instead —\n` +
+          `    AGGREGATOR=http://aggregator:8088 FLAKY_UPSTREAM=http://flaky-upstream \\\n` +
+          `    PROMETHEUS=http://prometheus:9090 FAILURE_MODE=envoy pnpm run demo`,
       ),
     ),
   );
+
+  // The fleet step is opt-in twice over: PROMETHEUS has to be set, and there
+  // has to actually be a daemon fleet running for *this* API. A missing
+  // series is the signal for the second — distinct from a series reading 0.
+  const fleetPresent =
+    PROMETHEUS !== "" &&
+    (yield* fleetSnapshot.pipe(
+      Effect.map((f) => f.target !== null),
+      Effect.catchCause(() => Effect.succeed(false)),
+    ));
+  if (PROMETHEUS !== "" && !fleetPresent) {
+    console.log(`  (no daemon fleet metrics for ${API} at ${PROMETHEUS} — fleet step will be skipped)`);
+  }
+  // Interrupted with the program, so there is nothing to tear down by hand.
+  if (fleetPresent) yield* Effect.forkChild(sampleFleet);
 
   yield* header("Steady state");
   yield* setFailureRate(API, 0);
@@ -178,6 +344,17 @@ const program = Effect.gen(function* () {
   yield* header(`Drag ${API} to 100%`);
   yield* setFailureRate(API, 1.0);
   const s2 = yield* awaitTransition(API, s1, 15_000);
+
+  if (fleetPresent) {
+    yield* header("The daemon fleet reacts — no coordination, same events");
+    const stopped = yield* awaitFleet(
+      (f) => f.active === 0,
+      "every daemon to stop pulling work",
+      45_000,
+    );
+    console.log(`  ${describeFleet(stopped)}`);
+    console.log(`  nothing is calling the dead upstream; the backlog is the point.`);
+  }
 
   yield* header("Watch it probe — upstream is still dead, so this reopens with doubled backoff");
   const s3 = yield* awaitTransition(API, s2, 15_000); // HALF_OPEN
@@ -198,6 +375,26 @@ const program = Effect.gen(function* () {
     return yield* Effect.die("delivery contract broken — see gaps/duplicates above");
   }
   console.log(`  gapless and non-repeating through the full incident.`);
+
+  if (fleetPresent) {
+    yield* header("Fleet: ramp back, drain, and the same contract on AMQP");
+    const peak = peakWork;
+    const back = yield* awaitFleet(
+      (f) => f.active !== null && f.active === f.size && (f.work ?? 0) <= Math.max(50, peak * 0.25),
+      `the fleet to ramp back to full strength and drain the ${peak}-message backlog`,
+      120_000,
+    );
+    console.log(`  ${describeFleet(back)} (deepest backlog seen: ${peak})`);
+    if ((back.broken ?? 0) > 0) {
+      return yield* Effect.die(
+        "the sequence contract broke on circuit.control — gaps or duplicates seen by the daemons",
+      );
+    }
+    console.log(
+      `  the same per-API sequence guarantee held on the AMQP transport too, ` +
+        `checked by ${back.size} consumers the publisher does not control.`,
+    );
+  }
 });
 
 NodeRuntime.runMain(program);

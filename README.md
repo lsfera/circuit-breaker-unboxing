@@ -1,39 +1,104 @@
 # Per-API egress circuit breaker events
 
-Envoy enforces circuit breaking
-per replica, and a control-plane aggregator turns the fleet's disagreement into
-**one coherent, gapless event stream per API** for downstream subscribers.
+Services call third-party APIs through a shared egress path. When one of those
+third parties degrades, everything downstream needs to be **told** — per API,
+as discrete events, reliably enough to act on.
 
-Built on **Effect 4 (4.0.0-rc.112)**. Requires Node 22.6+ and TypeScript 5.9+.
-TypeScript runs natively via Node's type stripping, so there is still no build
-step — but `tsc --noEmit` is now load-bearing, because Effect's guarantees are
-type-level.
+That sounds like a circuit breaker, and a breaker is part of it. The
+interesting half is that protecting the request path and telling the rest of
+the system about it are different problems with different correct answers,
+and most of the obvious designs conflate them.
 
-```bash
-pnpm install
-pnpm start           # simulated 5-replica fleet
-pnpm run check       # typecheck + 34 tests
-pnpm run test:redis  # optional — needs Docker: HA coordination against a real Redis
-```
+## The problem
 
-Then open <http://localhost:8088>.
+Concretely, the requirement is: for each third-party API, publish an event
+when it starts failing and when it recovers, to subscribers who were not in
+the request path. Three constraints fall out of that, and every design below
+lives or dies on them.
 
-> Effect 4 is a release candidate. Versions are pinned exactly (`effect` and
-> `@effect/platform-node` ship in lockstep at the same version now) because RC
-> APIs still move — `ServiceMap` was renamed back to `Context`, and `Effect.fork`
-> was replaced by explicit `forkChild`/`forkScoped`/`forkIn`, between beta and
-> rc.112.
+**One verdict per API, not one per proxy.** Egress runs behind more than one
+proxy instance, and each one samples the upstream independently. That is
+correct for protection — a replica should eject a host it can see is bad,
+immediately, without asking anyone. It is wrong for notification: with ten
+replicas and a degrading upstream you get up to ten `circuit_opened` events at
+ten timestamps, then recoveries out of step. A subscriber sees an API flap
+several times for a single incident and has to de-duplicate a distributed
+system's internal disagreement on its own.
 
-## The problem it solves
+**Emission cannot sit in the request path.** At egress throughput no proxy
+holds its p99 while making an outbound POST per event, and a degrading
+upstream generates tens of thousands of per-request rejections when what a
+subscriber wants is one `circuit_opened`. Whatever publishes has to coalesce,
+buffer with a bound, and shed rather than backpressure into the proxy.
 
-Envoy's outlier detection is per-replica by design — each proxy independently
-samples upstream responses and ejects hosts it believes are bad. That is correct
-for *protection* and wrong for *notification*: with 10 replicas and a degrading
-upstream you get up to 10 `circuit_opened` events at different timestamps, then
-replicas recovering out of step. Subscribers see an API flapping several times
-for a single incident.
+**The stream has to be a contract, not a feed.** Per-API ordering, a sequence
+a subscriber can check, and enough state in each event that a consumer joining
+mid-incident is not blind. Otherwise every subscriber reimplements
+loss-detection, differently and mostly wrongly.
 
-So enforcement and publication are split:
+## Approaches, and where each one runs out
+
+These are the real options, in roughly increasing order of how much you build.
+Each is defensible; each fails one of the three constraints above.
+
+**A breaker library in every service** — Resilience4j, Polly, opossum,
+gobreaker. Mature, well understood, and the state lives in a variable in one
+process. Ten instances of a service hold ten independent opinions about the
+same third party, and two *different* services calling it learn separately.
+There is also nothing to publish from: you would add an event path to every
+service, in every language you run. Fails constraint one, at the worst
+possible granularity.
+
+**Publish straight from the proxy.** Envoy already emits discrete ejection
+records (`outlier_detection.event_log_path`); point them at a webhook and
+you are done in an afternoon. Except those records are *per replica*, so the
+flapping above is exactly what subscribers get — and the most important
+signal isn't in there at all: threshold saturation is a counter delta
+(`*_overflow`), not an event. Fails constraints one and two.
+
+**Share breaker state across replicas in Redis** so they agree before anyone
+publishes. This is the tempting fix, and it puts a network round trip and a
+shared failure domain in the hot path of the component whose entire job is
+surviving other people's failures. Fails constraint two, in the direction that
+hurts most.
+
+**A batteries-included gateway — Apache APISIX.** Genuinely less to build:
+`api-breaker` for breaking, `http-logger` to POST JSON to an endpoint (a
+literal webhook sink, no bridge), etcd for cluster config, a forward-proxy
+plugin for egress. The trade is that `api-breaker` is per-route and much
+cruder than outlier detection — no per-host ejection, no success-rate
+statistics — it is Lua/OpenResty, and `http-logger` fires *per request*, which
+is precisely the hot-path coupling constraint two rules out.
+
+**A service mesh.** Istio's outlier detection is Envoy's, configured through
+`DestinationRule`, so the enforcement is the same quality. But it runs per
+sidecar, which leaves the aggregation problem exactly where it was, and mesh
+telemetry is metrics-shaped rather than a discrete per-API event contract.
+Egress through a mesh means an egress gateway anyway, so you arrive at this
+repo's topology having also adopted a mesh.
+
+**Build the proxy — Pingora.** It would give precisely the breaker and event
+semantics wanted, and Cloudflare's cache runs on it, so it is proven at scale.
+But it is a library, not a proxy: no config plane, no admin API, no
+clustering. River is not a product yet. That is a quarter of engineering to
+arrive where Envoy starts.
+
+| | One verdict per API | Off the request path | Event contract |
+|---|---|---|---|
+| Breaker library per service | no — per process | n/a | build it yourself, per language |
+| Publish from the proxy | no — per replica | no | partial: saturation isn't an event |
+| Shared state in Redis | yes | **no** — round trip in the hot path | still to build |
+| APISIX | per route, not per host | no — `http-logger` is per request | yes, out of the box |
+| Service mesh | no — per sidecar | yes | metrics, not events |
+| Pingora | yes | yes | yes — and you build all of it |
+| **Enforce locally, publish centrally** | yes | yes | yes |
+
+## What this repo does instead
+
+Split the two jobs and let each be correct on its own terms. Envoy enforces,
+per replica, immediately, and never makes a call on behalf of an event. A
+control-plane aggregator watches all the replicas, resolves their
+disagreement into one state per API, and publishes.
 
 | | Enforces | Publishes | Latency |
 |---|---|---|---|
@@ -74,12 +139,7 @@ replica showing that replica's local view. Drive an upstream to a partial
 failure rate and you will see the blocks disagree while the published state
 stays steady.
 
-### Why publication is a separate component at all
-
-"All discrete events delivered by webhook" at egress throughput means emission
-cannot sit in the request path — no proxy holds its p99 while doing an outbound
-POST per event. That single requirement is what makes this three components
-rather than one:
+### Three components, because the constraints say three
 
 | | Owns |
 |---|---|
@@ -141,11 +201,37 @@ Only the node in teal is doing anything at a given moment. The standby holds
 one connection to Redis and nothing else — see
 [High availability](#high-availability) for what makes that safe.
 
+## Running it
+
+```bash
+pnpm install
+pnpm start           # simulated 5-replica fleet
+pnpm run check       # typecheck + 35 tests
+pnpm run test:redis  # optional — needs Docker: HA coordination against a real Redis
+pnpm run test:rmq    # optional — needs Docker: AMQP behaviour against a real broker
+```
+
+Then open <http://localhost:8088>. For the full thing — three real Envoy
+replicas, two aggregators, a real broker and the daemon fleet — see
+[Running against real Envoy](#running-against-real-envoy).
+
+Built on **Effect 4 (4.0.0-rc.112)**. Requires Node 22.6+ and TypeScript 5.9+.
+TypeScript runs natively via Node's type stripping, so there is still no build
+step — but `tsc --noEmit` is now load-bearing, because Effect's guarantees are
+type-level.
+
+> Effect 4 is a release candidate. Versions are pinned exactly (`effect` and
+> `@effect/platform-node` ship in lockstep at the same version now) because RC
+> APIs still move — `ServiceMap` was renamed back to `Context`, and `Effect.fork`
+> was replaced by explicit `forkChild`/`forkScoped`/`forkIn`, between beta and
+> rc.112.
+
 ## Why Envoy for the data plane
 
-It is the only option in this class with three genuinely independent layers,
-which matters because "circuit breaking" on egress is really three different
-problems:
+Having ruled out the alternatives above, the reason it is Envoy specifically:
+it is the only option in this class with genuinely independent layers, which
+matters because "circuit breaking" on egress is really several different
+problems that get given one name:
 
 - **`circuit_breakers` thresholds** — `max_connections`,
   `max_pending_requests`, `max_requests`, `max_retries`,
@@ -156,6 +242,12 @@ problems:
   `consecutive_5xx`, `consecutive_gateway_failure`,
   `failure_percentage_threshold`, or success-rate deviation. The `enforcing_*`
   knobs let ejection ramp in gradually rather than flipping on at 100%.
+- **Active health checking** — an out-of-band probe per host, which is what
+  makes `successful_active_health_check_uneject_host` mean anything. Without
+  it that flag is inert and a recovered upstream serves its full
+  `base_ejection_time × ejection_count` sentence anyway; with it, a host that
+  passes its next check is un-ejected immediately. Measured on the running
+  stack: **3.1s to un-eject six hosts carrying ~25s of accumulated backoff.**
 - **`retry_budget`** — caps concurrent retries as a fraction of active requests.
   Without it, outlier ejection plus retries amplifies load onto whatever hosts
   are left. Not in `infra/envoy/envoy.yaml`, which uses the older `max_retries`
@@ -171,19 +263,11 @@ problems:
   `ReplicaReport`, so it does not show up in the aggregator's published states —
   only `circuit_breakers` overflow and `outlier_detection` do.
 
-### Alternatives considered
-
-- **Apache APISIX** is the batteries-included answer: the `api-breaker` plugin
-  for circuit breaking, `http-logger` to push JSON to an HTTP endpoint — a
-  literal webhook sink, no bridge to build — etcd for cluster config, and a
-  forward-proxy plugin for egress. The trade is that `api-breaker` is per-route
-  and much cruder than outlier detection (no per-host ejection, no success-rate
-  statistics), it is Lua/OpenResty, and `http-logger` firing per request at high
-  throughput is exactly the hot-path coupling to avoid.
-- **Pingora** would give precisely the breaker and event semantics wanted, and
-  Cloudflare's cache runs on it, so it is proven at scale. But it is a library,
-  not a proxy: no config plane, no admin API, no clustering. River is not a
-  product yet. That is a quarter of engineering to arrive where Envoy starts.
+These layers are also why the config is worth reading rather than copying:
+`infra/envoy/envoy.yaml` turns each of them on deliberately, and the section
+on [running against real Envoy](#running-against-real-envoy) explains what
+each one is doing in the demo. The alternatives to Envoy itself are covered
+in [Approaches, and where each one runs out](#approaches-and-where-each-one-runs-out).
 
 ## Demo script
 
@@ -200,6 +284,17 @@ problems:
    succeeds, and it closes. Total lifecycle ~20s.
 6. **Check the right-hand panel** throughout: sequence gaps and duplicates both
    stay at zero. That is the delivery contract holding.
+7. **Watch the daemon fleet react** (real-Envoy stack only): the five
+   consumers stop pulling on `OPEN`, the work queue builds, and they ramp
+   back `1 → 4 → 5` as it recovers — with no coordination between them. See
+   [The RabbitMQ daemon fleet](#the-rabbitmq-daemon-fleet).
+
+A seventh thing worth trying by hand, because it is the state hardest to
+reach on purpose: fail *some* of an API's endpoints rather than all of them.
+`curl -X POST localhost:8080/__fail -d '{"rate":1.0}'` takes down one of
+payments-provider's six, every replica ejects that host, and the fleet
+reports `DEGRADED` at `4/6` healthy — partial ejection, which is what
+`DEGRADED` exists to describe.
 
 ```mermaid
 flowchart LR
@@ -246,7 +341,7 @@ pnpm run demo                    # payments-provider, against localhost:8088
 pnpm run demo -- shipping-rates  # a different API
 ```
 
-`packages/demo/src/driver.ts` drives exactly the six steps above through the same
+`packages/demo/src/driver.ts` drives exactly the steps above through the same
 `/api/failure` route the console's slider calls, and narrates every published
 transition as `/api/events` reports it — so a demo is one command in a second
 terminal, and the console (or the [Grafana dashboard](#metrics--monitoring)) is
@@ -254,6 +349,15 @@ what the audience actually watches. Nothing about the incident is scripted or
 mocked: the driver only sets the failure rate and waits for the real aggregator
 to publish, on the real wall clock. It ends by reading `/api/subscriber` and
 failing loudly if a gap or duplicate shows up — the automated form of step 6.
+
+Two details that only matter once the stack is real. `AGGREGATOR` takes a
+comma-separated list, because only the leader publishes and which instance
+that is depends on who won the lease — the driver asks each candidate and
+drives the one that answers `isLeader`. And if `PROMETHEUS` is set, it also
+asserts step 7 from the fleet's own metrics: that every daemon stopped on
+`OPEN`, that the backlog it built drained afterwards, and that the per-API
+sequence contract held on the AMQP transport too. Unset, that step is
+skipped rather than failed.
 
 ```
 == Drag payments-provider to 45% ==
@@ -273,6 +377,20 @@ failing loudly if a gap or duplicate shows up — the automated form of step 6.
 == Delivery contract, read from outside the process ==
   received=14 snapshots=8 duplicates=0 gaps=0
   gapless and non-repeating through the full incident.
+```
+
+Against the real stack, with `PROMETHEUS` set, it also prints the other half —
+this is a verbatim run:
+
+```
+== The daemon fleet reacts — no coordination, same events ==
+  target=0/5 pulling=0 work=290 dead-lettered=2343
+  nothing is calling the dead upstream; the backlog is the point.
+
+== Fleet: ramp back, drain, and the same contract on AMQP ==
+  target=5/5 pulling=5 work=0 dead-lettered=2343 (deepest backlog seen: 2170)
+  the same per-API sequence guarantee held on the AMQP transport too,
+  checked by 5 consumers the publisher does not control.
 ```
 
 ## Metrics & monitoring
@@ -309,6 +427,7 @@ And from the daemon fleet — the same in-process `effect` registry, served on
 | `egress_daemon_calls_total` | Third-party calls through the egress listener, by outcome |
 | `egress_daemon_in_flight` / `_queued` | Concurrency against the per-daemon ceiling, and deliveries parked behind it — unsettled, which is where backpressure becomes the broker's problem |
 | `egress_daemon_dead_lettered_total` | Work rejected onto `<apiId>.work.dead` because its call failed |
+| `egress_daemon_redriven_total` | Dead-lettered work replayed onto the work queue after recovery — the two together are the round trip |
 | `egress_daemon_control_events_total` / `_gaps_total` / `_duplicates_total` | The same per-API sequence contract, checked on the AMQP transport by five processes the publisher does not control |
 | `egress_daemon_probes_total` | `HALF_OPEN` probes this daemon was elected by the broker to run |
 | `egress_producer_published_total` | Arrival rate, against the fleet's completion rate — the difference is the queue |
@@ -437,6 +556,27 @@ own external `devcontainer` network for exactly that reason, so
 `curl http://aggregator:8088/metrics` from a shell on that same network
 works without needing a published port at all.
 
+Startup is ordered rather than raced: a one-shot `deps` service installs the
+workspace and everything running from `packages/` waits on it having
+*completed*. Eight containers racing `pnpm install` against one bind-mounted
+`node_modules` used to make the losers fail on pnpm's store lock, which four
+of them papered over with a retry loop; the dependency is real, so it belongs
+in `depends_on`. Every long-running service also carries `restart: unless-stopped`, which is
+what makes the crash-fast stance in `rmq-consumer/src/main.ts` coherent —
+letting exactly one library race through an `uncaughtException` handler and
+treating everything else as fatal only makes sense if "fatal" means "comes
+back", and without a policy it meant "stays dead".
+
+Worth knowing exactly what that does and does not cover, because the demo
+depends on the distinction: Docker treats an operator `docker kill` as a
+manual stop and does **not** restart it — which is precisely what the SAC
+failover step below needs, since the point is that the killed prober stays
+gone and the broker promotes another. The policy covers the other case, a
+process that exits on its own. (The policy being applied is verifiable with
+`docker inspect -f '{{.HostConfig.RestartPolicy.Name}}'`; synthesising a real
+crash from outside is not, because PID 1 ignores `SIGKILL` from inside its
+own namespace.)
+
 Three Envoy replicas share the upstreams, so they diverge on their own.
 `infra/traffic-generator.mjs` runs as part of this stack for a reason worth being
 explicit about: outlier detection only reacts to requests it actually sees, so
@@ -492,7 +632,7 @@ independently killable, and the `HALF_OPEN` prober is elected by RabbitMQ's
 `x-single-active-consumer` across real connections.
 
 Work whose third-party call fails is **rejected onto `<apiId>.work.dead`**,
-not accepted. There is deliberately no retry in front of that: the client's
+not accepted — and then, when the circuit closes again, replayed. There is deliberately no retry in front of that: the client's
 `requeue` sends `modified{delivery_failed: false}`, and RabbitMQ only
 increments AMQP 1.0's `delivery-count` for a delivery marked *failed* — so a
 released message comes back looking brand new, forever, and a redelivery
@@ -501,6 +641,28 @@ expressed at all. Measured, not assumed, and pinned by a test that will fail
 if a client release fixes it. One attempt then dead-letter is what is honest
 given that; the failures are at least countable and replayable instead of
 gone.
+
+**Replayable is not the same as replayed**, though, and a dead-letter queue
+nobody drains is a slower way of losing things. So `REDRIVE_ON_CLOSE` turns
+on self-healing: on the transition back to `CLOSED`, one daemon replays the
+dead-lettered messages onto the work queue in bounded passes until it is
+empty. Which daemon is the broker's decision, on a second
+`x-single-active-consumer` queue — the same mechanism as the prober election
+and separate from it, because five daemons each replaying the same backlog
+would turn a recovery into a fivefold burst at a third party that has just
+come back. A pass stops on whichever comes first: the per-pass cap, the queue
+running dry, the circuit leaving `CLOSED`, or a hard deadline.
+
+It is off by default in code and on in `docker-compose.yml`, and that split is
+deliberate: whether a two-minute-old payment attempt is still worth making is
+a question about the workload, not about the transport. Observed on the
+running stack — a 2,070-message dead-letter backlog, drained in one pass three
+seconds after recovery:
+
+```
+daemon-2: redriving payments-provider.work.dead (max 5000 per pass)
+daemon-2: redrive finished — 2070 replayed (drained)
+```
 
 ```bash
 # watch the fleet react — target=<k>/5 is the agreed active count
@@ -519,6 +681,20 @@ docker compose exec prometheus wget -qO- http://rmq-daemon-0:9464/metrics
 
 `infra/envoy/envoy.yaml` carries the config discussed:
 
+- **Several endpoints per cluster** — six for payments-provider, four for
+  shipping-rates, three for tax-calc, matching the simulated fleet exactly so
+  the two `FleetSource` layers can reach the same states rather than merely
+  producing the same record shape. With one host per cluster a replica can
+  only ever report `0/1` or `1/1`, so `healthy < total` is unreachable, no
+  replica can vote `DEGRADED` from partial ejection, and
+  `failure_percentage_*` never evaluates at all
+  (`failure_percentage_minimum_hosts` is 3). `infra/flaky-upstream.mjs` serves
+  one port per endpoint.
+- **Active health checking** against `/__health`, which is what makes
+  `successful_active_health_check_uneject_host` do anything. The health
+  endpoint samples the same failing service normal traffic does rather than
+  being a separate truth — a deterministic one would mark every host down at
+  once and collapse `DEGRADED` into `OPEN`.
 - **One cluster per API.** Every stat, outlier event and access-log record is
   keyed by cluster name, so cluster identity *is* API identity. Traffic through
   a `dynamic_forward_proxy` catch-all cannot produce per-API events — and worse,
@@ -715,7 +891,7 @@ tested exhaustively with plain `assert`.
 
 ## What the build surfaced
 
-Ten things worth knowing, all of them found by running the thing:
+Eleven things worth knowing, all of them found by running the thing:
 
 - **A reason code cannot be derived from averaged endpoint counts.** With four of
   five replicas seeing zero healthy hosts, the mean rounds to 1, so "all
@@ -724,9 +900,12 @@ Ten things worth knowing, all of them found by running the thing:
 - **Ejection backoff outlives the outage.** `base_ejection_time × ejection_count`
   walks up to the `max_ejection_time` cap, so a recovered upstream stays ejected
   long after it heals. The fix is not shorter timers, it is
-  `successful_active_health_check_uneject_host` — in the Envoy config, and now
-  modelled in the simulator too, so recovery lands ~5s after the upstream
-  returns.
+  `successful_active_health_check_uneject_host` — and that flag does nothing
+  on its own. It needs an actual `health_checks` block, which the config was
+  missing for a long time while the README claimed the problem was solved.
+  With one configured: six hosts carrying ~25s of accumulated ejection
+  backoff (34 enforced ejections between them) came back **3.1s** after the
+  upstream recovered.
 - **Snapshots are not duplicates.** The first delivery-integrity check counted
   them as such, because they deliberately repeat the current sequence. Only
   `state_changed` is sequence-checked; snapshots exist precisely to be re-applied

@@ -59,6 +59,13 @@ export const deadLettered = Metric.counter("egress_daemon_dead_lettered_total", 
     "Before this existed the same messages were accepted and silently lost.",
 });
 
+export const redriven = Metric.counter("egress_daemon_redriven_total", {
+  description:
+    "Dead-lettered work messages replayed onto the work queue after recovery. " +
+    "Without this the dead-letter queue only ever grows: it is where failed work " +
+    "is preserved, and preserving it is not the same as recovering it.",
+});
+
 export const probes = Metric.counter("egress_daemon_probes_total", {
   description: "HALF_OPEN probes this daemon was elected to run by the broker.",
 });

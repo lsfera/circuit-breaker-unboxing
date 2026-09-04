@@ -54,6 +54,10 @@ const program =
         egressAddr: env("EGRESS_ADDR", "http://envoy:10000"),
         apiPath: env("API_PATH", "/payments"),
         maxInFlight: Number(env("MAX_IN_FLIGHT", "32")),
+        // Off unless asked for: replaying work that failed during an outage
+        // is a decision about this workload, not a property of the queue.
+        redriveOnClose: env("REDRIVE_ON_CLOSE", "false") === "true",
+        redriveMax: Number(env("REDRIVE_MAX", "5000")),
       });
 
 if (role !== "producer" && role !== "daemon") {
@@ -73,7 +77,10 @@ if (role !== "producer" && role !== "daemon") {
  * no `error` listener to attach. Left alone it kills the process.
  *
  * Every other uncaught exception is still fatal, on purpose — a daemon that
- * swallows its own bugs is worse than one that restarts.
+ * swallows its own bugs is worse than one that restarts. That trade only
+ * holds because the container actually does restart: see
+ * `restart: unless-stopped` on the rmq-* services in docker-compose.yml,
+ * without which "fatal" just means "gone".
  */
 process.on("uncaughtException", (error) => {
   if (error instanceof Error && error.message === "transfer after detach") {
@@ -114,8 +121,8 @@ const MetricsRoute = HttpRouter.use((router) =>
  * shape the aggregator's tick loop uses: interruption is structural, and
  * failing setup (a broker that never comes up, a queue redeclared with
  * different arguments) is a defect rather than something to recover from —
- * hence `orDie`, and hence the container restarting rather than sitting
- * there half-wired.
+ * hence `orDie`, and hence the restart policy on these containers rather
+ * than a process sitting there half-wired.
  */
 const RoleDaemon = Layer.effectDiscard(Effect.forkScoped(Effect.orDie(program)));
 

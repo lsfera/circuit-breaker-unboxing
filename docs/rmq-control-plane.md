@@ -371,6 +371,44 @@ shortcut past one. An unbounded requeue against a dead upstream is a hot
 loop with no counter to stop it, which is strictly worse than a queue full
 of messages you can look at.
 
+### Recovering the dead-letter queue, once, by the broker's choice
+
+Dead-lettering preserves failed work; it does not recover it. Left alone the
+queue only grows, which is a slower and more dignified way of losing the same
+messages. `REDRIVE_ON_CLOSE` closes that loop: on the transition back to
+`CLOSED`, the dead-lettered messages are replayed onto the work queue.
+
+The interesting constraint is *who*. Five daemons each replaying the same
+backlog turns a recovery into a fivefold burst at a third party that has just
+come back — the exact herd the fleet policy exists to prevent, arriving
+through the back door. So the redrive is elected the same way the prober is,
+on a second `x-single-active-consumer` queue (`<apiId>.redrive-trigger`),
+deliberately separate from `probe-trigger`: the two elections are
+independent, and coupling them would let one daemon's failure take out both.
+
+Each pass is bounded and runs on its own throwaway connection — it closes a
+consumer with a backlog behind it, which is the stranding hazard this
+document is largely about. Passes repeat while the cap keeps being hit, so a
+backlog larger than one cap does not need one outage per `REDRIVE_MAX`
+messages to recover. A pass ends on the cap, an empty queue, the circuit
+leaving `CLOSED`, or a hard deadline, whichever comes first.
+
+Two things the first live run taught, both now fixed or written down:
+
+- **A cap checked before an `await` is not a cap.** The broker delivers with
+  a credit window in the hundreds, so every in-flight handler passed
+  `moved >= redriveMax` before any of them incremented it: a cap of 5,000
+  let 5,739 through. Reserving the slot before the await makes it exact.
+- **A fleet at full strength drains faster than it looks.** A 62,000-message
+  work queue went to zero inside one 5-second sample once the circuit closed
+  — five daemons × 32 in flight against a local upstream. Worth knowing
+  before reading a queue-depth graph and concluding something purged it.
+
+Verified end to end: a 2,070-message dead-letter backlog, elected to
+`daemon-2` (not the daemon that had been elected prober earlier, which is the
+evidence the two elections are independent), drained in a single pass three
+seconds after recovery, leaving both queues at zero.
+
 ### The fleet is on the dashboard now, because that bug was an observability bug
 
 Every daemon serves `/metrics` on `METRICS_PORT` from the same in-process
@@ -477,6 +515,27 @@ The recovery in this run went `target=0 → 1 → 4 → 5` again, through
 repeating `seq=9` in the middle — correctly not counted as a duplicate,
 which is the rule the AMQP-side contract check exists to apply.
 
+### `DEGRADED`, finally reached
+
+This sat under "what's still missing" for two passes, blamed on tuning. It
+was topology: every Envoy cluster had exactly one endpoint, so a replica
+could only ever report `0/1` or `1/1` and `healthy < total` — the condition a
+`DEGRADED` vote is derived from — was unreachable by construction. Failing
+the one endpoint went straight to `ALL_ENDPOINTS_EJECTED`.
+
+With six endpoints on `payments-provider` and two of them failed:
+
+```
+ state = DEGRADED | reason = OUTLIER_EJECTION | healthy/total = 4/6
+ votes = {'OK': 0, 'DEGRADED': 3, 'DOWN': 0}
+   envoy-00 DEGRADED 4/6 ejected=2
+   envoy-01 DEGRADED 4/6 ejected=2
+   envoy-02 DEGRADED 4/6 ejected=2
+```
+
+The fleet's `DEGRADED → target = ceil(fleetSize / 2)` rung is therefore
+reachable on the real stack now, not only in `DaemonPolicy.test.ts`.
+
 ## What's still missing
 
 - **The ramp-back schedule advances per event, not per unit of time.** A
@@ -486,12 +545,6 @@ which is the rule the AMQP-side contract check exists to apply.
   a ramp in shape but barely one in duration. Gating each rung on elapsed
   time, or on a count of successful calls at the current rung, is the
   obvious next move and is not built.
-- **`DEGRADED` was never reached in the live run.** Failing all three
-  upstream ports goes straight to `ALL_ENDPOINTS_EJECTED`, and failing one
-  of them still ended in `OPEN` because the backlog burst overwhelmed the
-  survivors. The `DEGRADED → target = ceil(fleet/2)` path is covered by
-  `DaemonPolicy.test.ts` but has not been watched happen against real
-  daemons.
 - **The DEGRADED-as-credit-reduction idea is abandoned, on purpose, not
   worked around.** Checked the actual public surface rather than assumed it:
   `Consumer` exposes exactly `start()`/`close()`/`id`/`replyTo` — no method

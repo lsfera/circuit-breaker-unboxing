@@ -20,6 +20,19 @@ export const controlQueueFor = (apiId: string, instanceId: string): string =>
 /** The always-idle SAC coordination queue for HALF_OPEN prober election — one per API, shared by every daemon in that API's fleet. */
 export const probeTriggerQueueFor = (apiId: string): string => `${apiId}.probe-trigger`;
 
+/**
+ * The second SAC coordination queue, same shape as the prober election and
+ * for the same reason: recovering the dead-letter queue is a job exactly one
+ * daemon may do. Five daemons each replaying the same backlog would turn a
+ * recovery into a fivefold burst at a third party that just came back.
+ *
+ * Separate from `probe-trigger` rather than reusing it, because the two
+ * elections are independent — the daemon that happens to be the elected
+ * prober has no particular claim on being the one that redrives, and
+ * coupling them would mean a single daemon's failure took out both.
+ */
+export const redriveTriggerQueueFor = (apiId: string): string => `${apiId}.redrive-trigger`;
+
 /** The primary competing-consumer work queue daemons drain. */
 export const workQueueFor = (apiId: string): string => `${apiId}.work`;
 

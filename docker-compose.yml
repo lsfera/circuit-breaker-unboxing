@@ -31,6 +31,14 @@ x-daemon-env: &daemon-env
   # scrapes them by service name on this network (infra/monitoring/
   # prometheus.yml), so five identical port numbers never collide.
   METRICS_PORT: "9464"
+  # Self-healing for the dead-letter queue: when the circuit closes, one
+  # daemon — elected by the broker on a second SAC queue — replays
+  # payments-provider.work.dead back onto the work queue. On here because the
+  # demo is precisely about recovering from a third-party outage; off by
+  # default in code, because whether stale work is still worth doing is a
+  # question about the workload rather than about the transport.
+  REDRIVE_ON_CLOSE: "true"
+  REDRIVE_MAX: "5000"
 
 services:
   flaky-upstream:
@@ -38,8 +46,32 @@ services:
     working_dir: /app
     volumes: ["$HOST_WORKSPACE_FOLDER/infra/flaky-upstream.mjs:/app/flaky-upstream.mjs:ro"]
     command: node flaky-upstream.mjs
-    ports: ["8080:8080", "8081:8081", "8082:8082"]
+    # One port per upstream endpoint: 8080-8085 payments-provider, 8090-8093
+    # shipping-rates, 8094-8096 tax-calc — the same endpoint counts the
+    # simulated fleet uses, so both FleetSource layers can reach the same
+    # states. See infra/flaky-upstream.mjs for why one host per cluster
+    # cannot. Two ranges rather than one because 8088/8089 belong to the
+    # aggregator pair below, and a contiguous range through them fails to
+    # bind.
+    ports: ["8080-8085:8080-8085", "8090-8096:8090-8096"]
+    restart: unless-stopped
     networks: [default, devcontainer]
+
+  # Installs the workspace once, then exits. Everything that runs from
+  # packages/ waits on it having *completed*, not merely started.
+  #
+  # Before this, eight containers raced `pnpm install` against the same
+  # bind-mounted node_modules and the losers failed on pnpm's store lock, so
+  # four of them wrapped it in `until pnpm install; do sleep 3; done`. That
+  # works, but it makes cold start non-deterministic and slow for no reason:
+  # the dependency is real, so it belongs in depends_on rather than in a
+  # retry loop.
+  deps:
+    image: node:22-alpine
+    working_dir: /app
+    volumes: ["$HOST_WORKSPACE_FOLDER:/app"]
+    command: sh -c "corepack enable && pnpm install --frozen-lockfile"
+    networks: [default]
 
   # envoy-01/02 merge in everything from envoy-00 via the &envoy/<<: anchor —
   # same image, config and command — and only override the admin port mapping,
@@ -50,6 +82,7 @@ services:
     # List (exec) form, so these are argv straight to the envoy binary — no
     # shell involved, so none of the sh -c/YAML-folding pitfalls below apply.
     command: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "egress"]
+    restart: unless-stopped
     depends_on: [flaky-upstream]
     ports: ["19001:9901"]
     # All three replicas answer to this one alias on the data-plane port.
@@ -74,6 +107,7 @@ services:
   # special to run even before HOST_WORKSPACE_FOLDER was set correctly.
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     networks: [default, devcontainer]
 
   # The control plane and the work queue both live here. 4.x specifically:
@@ -97,6 +131,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    restart: unless-stopped
     networks: [default, devcontainer]
 
   # Two real instances against the shared Redis lease, not one — this is
@@ -130,9 +165,13 @@ services:
     # every event on circuit.control. Only the leader publishes, so the two
     # instances never double-deliver.
     command: >
-      sh -c "corepack enable && pnpm install --frozen-lockfile &&
-             node --experimental-strip-types packages/aggregator/src/main.ts --source=envoy --envoy=http://envoy-00:9901,http://envoy-01:9901,http://envoy-02:9901 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-1"
+      node --experimental-strip-types packages/aggregator/src/main.ts --source=envoy --envoy=http://envoy-00:9901,http://envoy-01:9901,http://envoy-02:9901 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-1
+    # Restarting matters more here than it looks: a killed leader whose
+    # container never comes back leaves the survivor with nowhere to fail
+    # over to next time, so the second failover in a demo has no candidate.
+    restart: unless-stopped
     depends_on:
+      deps: {condition: service_completed_successfully}
       envoy-00: {condition: service_started}
       envoy-01: {condition: service_started}
       envoy-02: {condition: service_started}
@@ -144,8 +183,7 @@ services:
   aggregator-2:
     <<: *aggregator
     command: >
-      sh -c "corepack enable && pnpm install --frozen-lockfile &&
-             node --experimental-strip-types packages/aggregator/src/main.ts --source=envoy --envoy=http://envoy-00:9901,http://envoy-01:9901,http://envoy-02:9901 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-2"
+      node --experimental-strip-types packages/aggregator/src/main.ts --source=envoy --envoy=http://envoy-00:9901,http://envoy-01:9901,http://envoy-02:9901 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-2
     ports: ["8089:8088"]
 
   # The scenario from docs/rmq-control-plane.md, running for real: a producer
@@ -161,36 +199,37 @@ services:
     image: node:22-alpine
     working_dir: /app
     volumes: ["$HOST_WORKSPACE_FOLDER:/app"]
-    # The retry loop is not paranoia: six containers here plus the two
-    # aggregators all run `pnpm install` against the same bind-mounted
-    # node_modules at once, and pnpm's store lock makes the losers fail
-    # rather than queue. Retrying is the whole fix — the second attempt finds
-    # the work already done and returns immediately.
     command: >
-      sh -c "corepack enable && until pnpm install --frozen-lockfile; do sleep 3; done &&
-             node --experimental-strip-types packages/rmq-consumer/src/main.ts producer"
+      node --experimental-strip-types packages/rmq-consumer/src/main.ts producer
     environment:
       RMQ: rabbitmq:5672
       API_ID: payments-provider
       RATE_PER_SECOND: "200"
       METRICS_PORT: "9464"
-    depends_on:
+    # Restarting is what makes main.ts's stance on crashes coherent: it lets
+    # exactly one library race through an uncaughtException handler and
+    # treats everything else as fatal, on the grounds that a daemon
+    # swallowing its own bugs is worse than one that restarts. Without a
+    # policy here, "restarts" was wishful — the container just stayed dead.
+    restart: unless-stopped
+    depends_on: &rmq-depends
+      deps: {condition: service_completed_successfully}
       rabbitmq: {condition: service_healthy}
     networks: [default, devcontainer]
 
   rmq-daemon-0: &rmq-daemon
     <<: *rmq-node
     command: >
-      sh -c "corepack enable && until pnpm install --frozen-lockfile; do sleep 3; done &&
-             node --experimental-strip-types packages/rmq-consumer/src/main.ts daemon"
+      node --experimental-strip-types packages/rmq-consumer/src/main.ts daemon
     environment:
       <<: *daemon-env
       DAEMON_INDEX: "0"
       # Names the daemon's own control queue. Fixed rather than random so a
-      # restarted daemon reuses its queue instead of orphaning the old one.
+      # restarted daemon reuses its queue instead of orphaning the old one —
+      # which is exactly what happens now that these containers restart.
       INSTANCE_ID: daemon-0
     depends_on:
-      rabbitmq: {condition: service_healthy}
+      <<: *rmq-depends
       envoy-00: {condition: service_started}
   rmq-daemon-1:
     <<: *rmq-daemon
@@ -230,6 +269,7 @@ services:
       # discovers the replicas behind it via DNS (see the alias on the envoy
       # services above) rather than being handed their names directly.
       EGRESS_ADDR: http://envoy:10000
+    restart: unless-stopped
     depends_on: [envoy-00, envoy-01, envoy-02]
     networks: [default, devcontainer]
 
@@ -245,13 +285,23 @@ services:
     # get added, keep them on this same line — see the aggregator command
     # above for why a more-indented continuation line breaks silently.
     command: >
-      sh -c "corepack enable && pnpm install --frozen-lockfile &&
-             node --experimental-strip-types packages/demo/src/driver.ts"
+      node --experimental-strip-types packages/demo/src/driver.ts
     environment:
-      AGGREGATOR: http://aggregator:8088
+      # Both instances, because only the leader publishes and which one that
+      # is depends on who won the lease — the driver resolves it at startup.
+      AGGREGATOR: http://aggregator:8088,http://aggregator-2:8088
       FAILURE_MODE: envoy
       FLAKY_UPSTREAM: http://flaky-upstream
-    depends_on: [aggregator, traffic]
+      # Lets the driver assert the daemon fleet's reaction too, not just the
+      # aggregator's published stream — it reads egress_daemon_* and the
+      # broker's queue depths back out of Prometheus. Unset, that step is
+      # skipped rather than failed.
+      PROMETHEUS: http://prometheus:9090
+    # No restart policy: this one is a one-shot that is supposed to exit.
+    depends_on:
+      deps: {condition: service_completed_successfully}
+      aggregator: {condition: service_started}
+      traffic: {condition: service_started}
     profiles: [demo]
     networks: [default, devcontainer]
 
@@ -263,6 +313,7 @@ services:
     # Lets Prometheus also reach `pnpm start` running on the host, so the same
     # stack works for the sim-fleet demo, not just this docker-compose one.
     extra_hosts: ["host.docker.internal:host-gateway"]
+    restart: unless-stopped
     ports: ["9090:9090"]
     networks: [default, devcontainer]
 
@@ -270,11 +321,15 @@ services:
     image: grafana/grafana:11.3.1
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: "Editor"
+      # Viewer, not Editor: the dashboard is provisioned from a file in this
+      # repo, and an anonymous visitor being able to overwrite it means the
+      # thing you demo and the thing in git quietly stop matching.
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    restart: unless-stopped
     depends_on: [prometheus]
     ports: ["3000:3000"]
     networks: [default, devcontainer]
