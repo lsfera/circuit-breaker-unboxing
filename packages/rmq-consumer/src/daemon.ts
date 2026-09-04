@@ -191,7 +191,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
     let failed = 0;
     let probed = 0;
     let redriven = 0;
-    /** Messages this daemon could not read at all, on any of its queues, and rejected onto the canonical dead-letter queue. */
+    /** Messages this daemon could not read at all, on any of its queues. */
     let undecodable = 0;
 
     /**
@@ -273,6 +273,42 @@ export const runDaemon = (cfg: DaemonConfig) =>
      * without a permit two of them could each observe "no work connection"
      * and both open one.
      */
+    /**
+     * How many unreadable messages this daemon preserves before it starts
+     * letting them go.
+     *
+     * Rejecting one is right: the evidence is worth more than the message.
+     * Rejecting every one is not, and the arithmetic is unkind — control
+     * events fan out to *every* daemon's own queue, so a schema mismatch
+     * between publisher and fleet is not one bad message, it is every message
+     * multiplied by the fleet size, all of it landing on one dead-letter
+     * queue at the full event rate. A bounded sample answers the question a
+     * human actually has ("what does the message look like?") without turning
+     * a version skew into a second incident. `egress_daemon_undecodable_total`
+     * keeps counting past the bound, so the *rate* stays visible even after
+     * the samples stop.
+     */
+    const UNDECODABLE_SAMPLE = 20;
+
+    /** Preserve this one if we are still sampling; otherwise let it go, loudly, once. */
+    const sampleUnreadable = (what: string): Settlement => {
+      undecodable++;
+      if (undecodable <= UNDECODABLE_SAMPLE) {
+        Effect.runFork(Effect.logWarning(`${label}: ${what}, dead-lettered`));
+        return "discard";
+      }
+      if (undecodable === UNDECODABLE_SAMPLE + 1) {
+        Effect.runFork(
+          Effect.logWarning(
+            `${label}: ${UNDECODABLE_SAMPLE} unreadable messages already preserved on ` +
+              `${deadQueue} — accepting further ones rather than flooding it; ` +
+              `egress_daemon_undecodable_total still counts them all`,
+          ),
+        );
+      }
+      return "accept";
+    };
+
     const gate = yield* Semaphore.make(1);
 
     /** Open a throwaway connection and consume the work queue on it. */
@@ -586,12 +622,9 @@ export const runDaemon = (cfg: DaemonConfig) =>
         // than accepted, so it lands on the canonical dead-letter queue
         // instead of existing only as a log line nobody can act on — a
         // control message the fleet could not read is precisely the thing
-        // you want to still have in your hands afterwards.
-        undecodable++;
-        Effect.runFork(
-          Effect.logWarning(`${label}: undecodable control message, dead-lettered`),
-        );
-        return "discard";
+        // you want to still have in your hands afterwards. Up to a point:
+        // see UNDECODABLE_SAMPLE for why that point exists.
+        return sampleUnreadable("undecodable control message");
       }
       const { data, type } = decoded.value;
       if (data.apiId !== cfg.apiId) return; // belt and braces; the binding already filters
@@ -626,8 +659,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
       try {
         sequence = Number(JSON.parse(body).sequence ?? -1);
       } catch {
-        undecodable++;
-        return "discard";
+        return sampleUnreadable("malformed probe trigger");
       }
       Effect.runFork(
         Ref.get(probedSequence).pipe(
@@ -650,8 +682,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
       try {
         sequence = Number(JSON.parse(body).sequence ?? -1);
       } catch {
-        undecodable++;
-        return "discard";
+        return sampleUnreadable("malformed redrive trigger");
       }
       Effect.runFork(
         Ref.get(redrivenSequence).pipe(

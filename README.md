@@ -701,6 +701,16 @@ between the aggregator and the fleet was a line in `docker logs`. It is now
 rejected, which means the message that could not be read is still in your
 hands. `egress_daemon_undecodable_total` counts them.
 
+Preserving one unreadable message is right; preserving every one is not, and
+the arithmetic is unkind. Control events fan out to *every* daemon's own
+queue, so a schema mismatch between publisher and fleet is not one bad
+message — it is every message multiplied by the fleet size, arriving on one
+queue at the full event rate. Each daemon therefore preserves a bounded
+sample (20) and accepts the rest, saying so once in its log;
+`egress_daemon_undecodable_total` keeps counting past the bound, so the rate
+stays visible after the samples stop. Measured: 25 malformed events in, 20
+on the dead-letter queue, all 25 in the metric.
+
 One canonical queue only works if whatever drains it can tell the messages
 apart, and RabbitMQ 4 supplies exactly that: a dead-lettered message arrives
 annotated with `x-first-death-queue` and `x-first-death-reason`. The redrive

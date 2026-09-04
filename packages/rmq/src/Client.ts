@@ -112,6 +112,9 @@ export type DeliveryInfo = {
    * `x-first-death-reason`, and the fuller `x-opt-deaths` array). `null` for
    * a message that arrived normally.
    *
+   * Computed on first access rather than on arrival, and cached: the
+   * high-rate handlers never read it.
+   *
    * This is what makes one canonical dead-letter queue workable rather than
    * a bin of unrelated things: anything consuming it can tell a work message
    * that failed its third-party call from a control message that failed to
@@ -283,28 +286,44 @@ export const makeRmq = (
             const consumer = await connection.createConsumer({
               queue: { name: queue },
               messageHandler: (ctx, message) => {
-                const annotations =
-                  (message as { message_annotations?: Record<string, unknown> })
-                    .message_annotations ?? {};
-                const deathQueue = annotations["x-first-death-queue"];
-                const deathReason = annotations["x-first-death-reason"];
+                // `deadLetter` and `properties` are computed on access, not
+                // on arrival. Only the dead-letter redrive ever reads them,
+                // and the handler that runs hundreds of times a second is the
+                // one that ignores the delivery entirely — so building two
+                // objects per message to hand it something it never looks at
+                // is the wrong default. Each is cached after the first read,
+                // so a handler that does use them pays once.
+                let deadLetter: DeliveryInfo["deadLetter"] | undefined;
+                let properties: Readonly<Record<string, string>> | undefined;
                 const delivery: DeliveryInfo = {
                   deliveryCount: Number(
                     (message as { delivery_count?: number }).delivery_count ?? 0,
                   ),
-                  deadLetter:
-                    typeof deathQueue === "string"
-                      ? {
-                          queue: deathQueue,
-                          reason: typeof deathReason === "string" ? deathReason : "unknown",
-                        }
-                      : null,
-                  properties: Object.fromEntries(
-                    Object.entries(
-                      (message as { application_properties?: Record<string, unknown> })
-                        .application_properties ?? {},
-                    ).map(([k, v]) => [k, String(v)]),
-                  ),
+                  get deadLetter() {
+                    if (deadLetter === undefined) {
+                      const annotations =
+                        (message as { message_annotations?: Record<string, unknown> })
+                          .message_annotations ?? {};
+                      const queue = annotations["x-first-death-queue"];
+                      const reason = annotations["x-first-death-reason"];
+                      deadLetter =
+                        typeof queue === "string"
+                          ? { queue, reason: typeof reason === "string" ? reason : "unknown" }
+                          : null;
+                    }
+                    return deadLetter;
+                  },
+                  get properties() {
+                    if (properties === undefined) {
+                      properties = Object.fromEntries(
+                        Object.entries(
+                          (message as { application_properties?: Record<string, unknown> })
+                            .application_properties ?? {},
+                        ).map(([k, v]) => [k, String(v)]),
+                      );
+                    }
+                    return properties;
+                  },
                 };
                 // A handler that throws *synchronously* would escape into
                 // rhea's socket callback, where nothing can catch it — the

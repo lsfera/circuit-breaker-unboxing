@@ -17,7 +17,14 @@ import type { RedisLike } from "./Coordination.ts";
 
 const args = new Map<string, string>();
 for (const arg of process.argv.slice(2)) {
-  const [k, v = "true"] = arg.replace(/^--/, "").split("=");
+  // Split on the *first* `=` only. `split("=")` with array destructuring
+  // silently truncates any value that contains one — a Redis URL with a
+  // password, most obviously — and the resulting connection string is wrong
+  // in a way that looks like a typo rather than a parser bug.
+  const raw = arg.replace(/^--/, "");
+  const eq = raw.indexOf("=");
+  const k = eq === -1 ? raw : raw.slice(0, eq);
+  const v = eq === -1 ? "true" : raw.slice(eq + 1);
   if (k) args.set(k, v);
 }
 

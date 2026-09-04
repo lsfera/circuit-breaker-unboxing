@@ -418,6 +418,15 @@ be logged and *accepted* — so the only evidence of a version skew between
 publisher and fleet was a line in `docker logs`, and the message itself was
 gone. Rejecting it instead means it is still there to look at.
 
+Rejecting is bounded, though. A control event goes to every daemon's own
+queue, so a persistent schema mismatch is every event times the fleet size,
+landing on a single queue at the full event rate — a version skew becoming a
+second incident. Each daemon preserves the first 20 unreadable messages and
+accepts the rest with one log line saying so, which answers the question a
+human actually has ("what does the message look like?") without the flood.
+The metric counts past the bound, so the rate is still visible. Verified: 25
+malformed events published, 20 preserved, 25 counted.
+
 That immediately raises the question the redrive has to answer: the queue now
 holds two kinds of thing, and replaying a poison control message onto the
 *work* queue would be nonsense. RabbitMQ 4 answers it — a dead-lettered
