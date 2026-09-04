@@ -13,6 +13,7 @@ import {
   workQueueArgs,
   workQueueFor,
 } from "@egress/rmq/ControlPlane.ts";
+import { randomUUID } from "node:crypto";
 import { State, STATE_CODE } from "@egress/domain/Model.ts";
 import { activeIndices, initial, step } from "./DaemonPolicy.ts";
 import * as Telemetry from "./Telemetry.ts";
@@ -373,6 +374,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
     /** Stamped onto anything the redrive moves within the dead-letter queue, so its origin survives the republish that loses the broker's own annotations. */
     const ORIGIN_PROPERTY = "x-egress-origin-queue";
     const ORIGIN_REASON_PROPERTY = "x-egress-origin-reason";
+    const ORIGIN_PASS_PROPERTY = "x-egress-redrive-pass";
 
     const redrivePass = Effect.gen(function* () {
       const scope = yield* Scope.make();
@@ -380,6 +382,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
       const into = yield* conn.publisherToQueue(workQueue);
       const back = yield* conn.publisherToQueue(deadQueue);
 
+      const passId = randomUUID();
       let moved = 0;
       let parked = 0;
       let cycled = false;
@@ -390,22 +393,32 @@ export const runDaemon = (cfg: DaemonConfig) =>
         // and replaying *that* onto the work queue would be nonsense. The
         // broker records where each message was dead-lettered from, so the
         // filter is exact rather than a guess at the body's shape.
-        const origin = delivery.deadLetter;
 
-        // A message carrying our own stamp is one this pass already parked:
-        // republishing is what drops the broker's death annotations, so the
-        // stamp is both the record of where it came from and the signal that
-        // the pass has come the whole way round and everything left is stuff
-        // it will not replay. Without that signal the pass re-parks the same
-        // handful of messages tail to tail as fast as the broker can deliver
-        // them — measured at 17,703 republishes of two messages in 2.5
-        // seconds before an idle timer eventually noticed.
-        if (delivery.properties[ORIGIN_PROPERTY] !== undefined || origin === null) {
+        // Our own stamp, from *this* pass: the queue has come the whole way
+        // round and everything left is stuff this pass will not replay.
+        // Without that signal the pass re-parks the same handful of messages
+        // tail to tail as fast as the broker can deliver them — measured at
+        // 17,703 republishes of two messages in 2.5 seconds before an idle
+        // timer eventually noticed. A stamp from an *older* pass means only
+        // "something already decided this is not work", and must be moved on
+        // rather than ending the lap: otherwise one parked message sitting at
+        // the head makes every later redrive give up before replaying
+        // anything, which is the opposite of self-healing.
+        if (delivery.properties[ORIGIN_PASS_PROPERTY] === passId) {
           cycled = true;
           return "requeue";
         }
 
-        if (origin.queue !== workQueue) {
+        // Where it came from: the broker's annotation on first sight, our own
+        // stamp once an earlier pass moved it, and "unknown" for anything
+        // published straight onto this queue by something else. Only work is
+        // ever replayed, so anything unattributable is kept, not guessed at.
+        const originQueue =
+          delivery.deadLetter?.queue ?? delivery.properties[ORIGIN_PROPERTY] ?? "unknown";
+        const originReason =
+          delivery.deadLetter?.reason ?? delivery.properties[ORIGIN_REASON_PROPERTY] ?? "unknown";
+
+        if (originQueue !== workQueue) {
           // Moved to the tail rather than released, because releasing puts it
           // straight back at the head and starves everything behind it, and
           // stamped on the way so the provenance the annotations carried is
@@ -414,8 +427,9 @@ export const runDaemon = (cfg: DaemonConfig) =>
           try {
             await Effect.runPromise(
               conn.send(back, body, {
-                [ORIGIN_PROPERTY]: origin.queue,
-                [ORIGIN_REASON_PROPERTY]: origin.reason,
+                [ORIGIN_PROPERTY]: originQueue,
+                [ORIGIN_REASON_PROPERTY]: originReason,
+                [ORIGIN_PASS_PROPERTY]: passId,
               }),
             );
             return "accept";
@@ -471,7 +485,14 @@ export const runDaemon = (cfg: DaemonConfig) =>
         if (Date.now() > deadline) break;
       }
 
-      yield* gate.withPermit(stopScope(redriveScope));
+      // Close *this pass's* scope, and only clear the Ref if it still points
+      // at it. Closing whatever the Ref happens to hold is not the same
+      // thing: reconcile retires the scope on any state change, so a pass
+      // whose scope had already been retired and replaced by a newer one
+      // would tear down the newer pass's live connection on its way out.
+      yield* gate.withPermit(Ref.update(redriveScope, (s) => (s === scope ? null : s)));
+      yield* Scope.close(scope, Exit.void);
+
       if (parked > 0) {
         yield* Effect.logWarning(
           `${label}: left ${parked} non-work message(s) on ${deadQueue} — ` +

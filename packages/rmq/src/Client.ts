@@ -237,7 +237,14 @@ export const makeRmq = (
       });
       const connection: Connection = yield* Effect.acquireRelease(
         wrap("connect", () => env.createConnection()),
-        () => Effect.promise(() => env.close()),
+        // Swallowed deliberately: this runs on every scope close, and the
+        // daemon closes connections constantly (a probe, a redrive pass, the
+        // work connection on every transition). A broker that has already
+        // gone makes `close` reject, and `Effect.promise` turns a rejection
+        // into a defect — so without this, tearing down a connection to a
+        // broker that died first would fail the teardown rather than
+        // complete it.
+        () => Effect.promise(() => env.close().then(() => {}, () => {})),
       );
       const management = connection.management();
 
@@ -299,11 +306,21 @@ export const makeRmq = (
                     ).map(([k, v]) => [k, String(v)]),
                   ),
                 };
-                const done = onMessage(String(message.body), delivery);
+                // A handler that throws *synchronously* would escape into
+                // rhea's socket callback, where nothing can catch it — the
+                // client keeps its container private, so there is no error
+                // listener to attach and the process dies. Every handler in
+                // this repo is careful, which is exactly the kind of thing
+                // that stops being true later.
+                let done: void | Settlement | Promise<void | Settlement>;
+                try {
+                  done = onMessage(String(message.body), delivery);
+                } catch {
+                  return settle(ctx as DeliveryContext, "accept");
+                }
                 if (done === undefined) return settle(ctx as DeliveryContext, "accept");
                 // A synchronous outcome is a string, not a thenable — calling
-                // .then() on it would throw from inside a socket callback,
-                // which is unreachable from any listener (see below).
+                // .then() on it would throw from the same unreachable place.
                 if (typeof done === "string") return settle(ctx as DeliveryContext, done);
                 void done.then(
                   (outcome) => settle(ctx as DeliveryContext, outcome ?? "accept"),

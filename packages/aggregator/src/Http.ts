@@ -50,7 +50,14 @@ export const record = (self: Integrity, event: CircuitEvent): Integrity => {
   const bySequence = new Map(self.bySequence);
   if (seen === undefined || sequence > seen) bySequence.set(apiId, sequence);
   if (seen === undefined) return { ...base, bySequence };
-  if (sequence === seen) return { ...base, bySequence, duplicates: self.duplicates + 1 };
+  // `<=`, not `===`. A sequence that goes *backwards* is the same violation
+  // as one that repeats — a number was reused — and it is the shape a
+  // leadership bug actually produces: an instance that resumes from stale
+  // in-memory state republishes numbers a later leader already used. Testing
+  // only for equality left that case falling through this function
+  // uncounted, which made the one check that is supposed to prove the
+  // contract blind to the most likely way of breaking it.
+  if (sequence <= seen) return { ...base, bySequence, duplicates: self.duplicates + 1 };
   if (sequence > seen + 1) {
     return {
       ...base,

@@ -6,6 +6,7 @@ import { Aggregator, AggregatorLayer } from "../src/Aggregator.ts";
 import { InMemoryCoordinationLayer } from "../src/Coordination.ts";
 import { EventBus, EventBusLayer, EventSink } from "../src/Events.ts";
 import { FleetSource, SimFleetLayer, parseStats } from "../src/FleetSource.ts";
+import { emptyIntegrity, record } from "../src/Http.ts";
 import { Config, defaultConfig, State } from "@egress/domain/Model.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 
@@ -248,4 +249,91 @@ test("missing stats default to zero rather than NaN", () => {
   assert.equal(reports[0]?.healthy, 0);
   assert.equal(reports[0]?.overflowTotal, 0);
   assert.equal(reports[0]?.total, 4);
+});
+
+// ---------------------------------------------------------------------------
+// Delivery integrity, as a pure function.
+//
+// This is what /api/subscriber reports and what the README points at when it
+// claims the stream is gapless and non-repeating, and it had no test at all.
+// ---------------------------------------------------------------------------
+
+const changed = (apiId: string, sequence: number): CircuitEvent => ({
+  specversion: "1.0",
+  type: "egress.circuit.state_changed",
+  source: "test",
+  subject: `api://${apiId}`,
+  id: `id-${apiId}-${sequence}`,
+  time: new Date(0).toISOString(),
+  datacontenttype: "application/json",
+  data: {
+    apiId,
+    sequence,
+    previousState: "CLOSED",
+    state: "OPEN",
+    reason: "OUTLIER_EJECTION",
+    healthyEndpoints: 0,
+    totalEndpoints: 6,
+    observedSince: new Date(0).toISOString(),
+    reportingReplicas: 3,
+  },
+});
+
+const snapshotOf = (apiId: string, sequence: number): CircuitEvent => ({
+  ...changed(apiId, sequence),
+  type: "egress.circuit.snapshot",
+});
+
+const fold = (events: ReadonlyArray<CircuitEvent>) =>
+  events.reduce(record, emptyIntegrity);
+
+test("a consecutive run is neither gapped nor duplicated", () => {
+  const i = fold([1, 2, 3, 4].map((n) => changed("payments", n)));
+  assert.equal(i.received, 4);
+  assert.equal(i.duplicates, 0);
+  assert.deepEqual(i.gaps, []);
+});
+
+test("a skipped sequence is a gap", () => {
+  const i = fold([1, 2, 5].map((n) => changed("payments", n)));
+  assert.equal(i.gaps.length, 1);
+  assert.match(i.gaps[0]!, /payments: jumped 2 -> 5/);
+});
+
+test("a repeated sequence is a duplicate", () => {
+  const i = fold([1, 2, 2].map((n) => changed("payments", n)));
+  assert.equal(i.duplicates, 1);
+  assert.deepEqual(i.gaps, []);
+});
+
+test("a sequence that goes backwards is a duplicate too", () => {
+  // The shape a leadership bug produces: an instance resumes from stale
+  // in-memory state and republishes numbers a later leader already used.
+  // Counting only exact repeats left this invisible.
+  const i = fold([10, 11, 12, 8, 9].map((n) => changed("payments", n)));
+  assert.equal(i.duplicates, 2, "8 and 9 both reuse a sequence already published");
+  assert.deepEqual(i.gaps, [], "going backwards is not a gap");
+});
+
+test("snapshots repeat the current sequence and are exempt", () => {
+  const i = fold([
+    changed("payments", 1),
+    snapshotOf("payments", 1),
+    snapshotOf("payments", 1),
+    changed("payments", 2),
+  ]);
+  assert.equal(i.snapshots, 2);
+  assert.equal(i.duplicates, 0, "a snapshot repeating the sequence is the contract, not a breach");
+  assert.deepEqual(i.gaps, []);
+});
+
+test("sequences are tracked per API, not globally", () => {
+  const i = fold([
+    changed("payments", 1),
+    changed("shipping", 1),
+    changed("payments", 2),
+    changed("shipping", 2),
+  ]);
+  assert.equal(i.duplicates, 0);
+  assert.deepEqual(i.gaps, []);
 });

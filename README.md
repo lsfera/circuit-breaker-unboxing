@@ -9,6 +9,7 @@ interesting half is that protecting the request path and telling the rest of
 the system about it are different problems with different correct answers,
 and most of the obvious designs conflate them.
 
+
 Who wants what from it:
 
 ```mermaid
@@ -253,7 +254,7 @@ one connection to Redis and nothing else — see
 ```bash
 pnpm install
 pnpm start           # simulated 5-replica fleet
-pnpm run check       # typecheck + 35 tests
+pnpm run check       # typecheck + 41 tests
 pnpm run test:redis  # optional — needs Docker: HA coordination against a real Redis
 pnpm run test:rmq    # optional — needs Docker: AMQP behaviour against a real broker
 ```
@@ -895,7 +896,8 @@ packages/
     src/Telemetry.ts         every Metric the app emits, in one place
     src/main.ts              layer composition, NodeRuntime.runMain
     public/index.html        operator console (unchanged — plain HTML/CSS/JS)
-    test/Aggregator.test.ts    8 tests under TestClock — full pipeline, zero sleeps
+    test/Aggregator.test.ts   14 tests — full pipeline under TestClock, stats parsing,
+                              and the delivery-integrity tracker as a pure function
     test/Coordination.test.ts  6 tests — fencing primitives, a real two-instance failover, and a re-promotion
     test/integration/          Redis-backed HA, opt-in (`pnpm run test:redis`) — needs Docker
 
@@ -905,7 +907,7 @@ packages/
   rmq/                       @egress/rmq — Effect wrapper over AMQP 1.0 (RabbitMQ 4 native)
     src/Client.ts            the Rmq service; two silent client bugs guarded here
     src/ControlPlane.ts      circuit.control naming, shared by publisher and consumers
-    test/integration/        6 tests against a real broker, opt-in (`pnpm run test:rmq`)
+    test/integration/        8 tests against a real broker, opt-in (`pnpm run test:rmq`)
 
   rmq-consumer/              @egress/rmq-consumer — the competing-consumer daemon fleet
     src/DaemonPolicy.ts      pure: (prior, circuit state, fleet size) -> target active count

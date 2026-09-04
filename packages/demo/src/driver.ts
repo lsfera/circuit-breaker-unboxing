@@ -211,11 +211,21 @@ const awaitFleet = (predicate: (f: Fleet) => boolean, what: string, timeoutMs: n
     const deadline = Date.now() + timeoutMs;
     let last: Fleet | null = null;
     while (true) {
-      last = yield* fleetSnapshot;
-      if (predicate(last)) return last;
+      // A transient scrape failure is not a demo failure. `sampleFleet`
+      // already ignores them; without the same treatment here a single blip
+      // ends the run with a stack trace instead of a verdict.
+      const now = yield* fleetSnapshot.pipe(
+        Effect.map((f): Fleet | null => f),
+        Effect.catchCause(() => Effect.succeed(null)),
+      );
+      if (now !== null) {
+        last = now;
+        if (predicate(now)) return now;
+      }
       if (Date.now() > deadline) {
         return yield* Effect.die(
-          `timed out after ${timeoutMs}ms waiting for ${what} — last saw ${describeFleet(last)}`,
+          `timed out after ${timeoutMs}ms waiting for ${what} — ` +
+            `last saw ${last === null ? "no readable fleet metrics at all" : describeFleet(last)}`,
         );
       }
       yield* Effect.sleep(Duration.millis(500));
