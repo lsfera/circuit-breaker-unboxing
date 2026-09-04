@@ -9,6 +9,53 @@ interesting half is that protecting the request path and telling the rest of
 the system about it are different problems with different correct answers,
 and most of the obvious designs conflate them.
 
+Who wants what from it:
+
+```mermaid
+flowchart LR
+  classDef actor fill:#eaeef6,stroke:#5b6478,stroke-width:2px,color:#161d2b;
+  classDef enforce fill:#fbe2dd,stroke:#c9432f,stroke-width:2px,color:#3a1c17;
+  classDef publish fill:#dcf3f1,stroke:#0c8b86,stroke-width:2px,color:#04302e;
+  classDef react fill:#fbedd6,stroke:#c07f16,stroke-width:2px,color:#3a2c12;
+  classDef ext fill:transparent,stroke:#5b6478,stroke-width:1.5px,stroke-dasharray:4 3,color:#5b6478;
+
+  caller["Calling service"]:::actor
+  worker["Queue worker fleet"]:::actor
+  subscriber["Subscriber<br/>status page · billing · incident tooling"]:::actor
+  operator["Operator"]:::actor
+
+  subgraph SYSTEM[" "]
+    direction TB
+    u1(["Reach a third party<br/>through one address"]):::enforce
+    u2(["Stop hammering it<br/>once it is failing"]):::enforce
+    u3(["Be told when an API<br/>breaks and recovers"]):::publish
+    u4(["Detect a missed<br/>or repeated event"]):::publish
+    u5(["Scale my own work<br/>to the agreed state"]):::react
+    u6(["Recover work that<br/>failed during the outage"]):::react
+    u7(["See why the fleet<br/>decided that"]):::publish
+  end
+
+  third[("Third-party API")]:::ext
+
+  caller --> u1
+  caller --> u2
+  worker --> u5
+  worker --> u6
+  worker --> u3
+  subscriber --> u3
+  subscriber --> u4
+  operator --> u7
+  operator --> u3
+  u1 --> third
+  u2 -.->|"ejects failing hosts"| third
+```
+
+Red is enforcement, in the request path and immediate. Teal is publication,
+off the request path and seconds later. Amber is what a *consumer* of those
+events does with them — and it is a first-class actor here, not an
+afterthought: the fleet that reacts to an outage is where the cost of getting
+this wrong actually lands.
+
 ## The problem
 
 Concretely, the requirement is: for each third-party API, publish an event
