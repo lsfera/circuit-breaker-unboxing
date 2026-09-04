@@ -1,4 +1,5 @@
 import { Context, Data, Effect, Layer, Option, Ref, Schema } from "effect";
+import { ReasonSchema, StateSchema } from "@egress/domain/Model.ts";
 import type { Reason, State } from "@egress/domain/Model.ts";
 
 /**
@@ -196,8 +197,11 @@ export const InMemoryCoordinationLayer: Layer.Layer<LeaderElection | CheckpointS
  * outlives the process.
  */
 const CheckpointFromJson = Schema.Struct({
-  state: Schema.Literals(["CLOSED", "DEGRADED", "OPEN", "HALF_OPEN"]),
-  reason: Schema.String,
+  state: StateSchema,
+  // The reason is validated against the real set rather than accepted as any
+  // string and cast. A cast here would have made this function look like a
+  // validator while letting anything through the one field it did not check.
+  reason: ReasonSchema,
   sequence: Schema.Number,
   changedAt: Schema.Number,
   openBackoffMs: Schema.Number,
@@ -298,9 +302,7 @@ export const RedisCoordinationLayer = (
           Effect.map((raw) => {
             if (typeof raw !== "string") return Option.none<Checkpoint>();
             try {
-              return decodeCheckpoint(JSON.parse(raw)).pipe(
-                Option.map((cp): Checkpoint => ({ ...cp, reason: cp.reason as Reason })),
-              );
+              return decodeCheckpoint(JSON.parse(raw));
             } catch {
               return Option.none<Checkpoint>(); // not even JSON
             }

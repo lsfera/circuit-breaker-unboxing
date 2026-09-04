@@ -9,7 +9,7 @@ import {
   LeaderElection,
   makeInMemoryCoordination,
 } from "../src/Coordination.ts";
-import { EventBus, EventBusLayer, EventSink } from "../src/Events.ts";
+import { EventBusLayer, EventSink } from "../src/Events.ts";
 import { FleetSource, SimFleetLayer } from "../src/FleetSource.ts";
 import { Config, defaultConfig } from "@egress/domain/Model.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";

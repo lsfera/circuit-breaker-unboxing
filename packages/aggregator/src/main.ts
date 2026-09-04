@@ -4,7 +4,7 @@ import { NodeHttpServer, NodeRuntime } from "@effect/platform-node";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
-import { Rmq, RmqLive } from "@egress/rmq/Client.ts";
+import { RmqLive } from "@egress/rmq/Client.ts";
 import { Aggregator, AggregatorLayer } from "./Aggregator.ts";
 import { makeAmqpControlPlaneSink } from "./AmqpControlPlaneSink.ts";
 import { HaSettings, InMemoryCoordinationLayer, RedisCoordinationLayer } from "./Coordination.ts";

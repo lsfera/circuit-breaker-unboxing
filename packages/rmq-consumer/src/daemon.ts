@@ -13,11 +13,13 @@ import {
   workQueueArgs,
   workQueueFor,
 } from "@egress/rmq/ControlPlane.ts";
-import { randomUUID } from "node:crypto";
 import { State, STATE_CODE } from "@egress/domain/Model.ts";
+import { initialContract, observe } from "./Contract.ts";
+import { makeRedrive } from "./Redrive.ts";
 import { activeIndices, initial, step } from "./DaemonPolicy.ts";
 import * as Telemetry from "./Telemetry.ts";
 import type { Consumer, RmqConnectOptions, Settlement } from "@egress/rmq/Client.ts";
+import type { ContractState } from "./Contract.ts";
 import type { DaemonPolicyState } from "./DaemonPolicy.ts";
 
 /**
@@ -194,16 +196,8 @@ export const runDaemon = (cfg: DaemonConfig) =>
     /** Messages this daemon could not read at all, on any of its queues. */
     let undecodable = 0;
 
-    /**
-     * The delivery contract, observed from this side of the broker.
-     *
-     * `-1` until the first state_changed arrives: a daemon that starts
-     * mid-incident legitimately joins the sequence part-way through, and
-     * calling that a gap would make the metric lie on every restart.
-     */
-    let lastSequence = -1;
-    let gaps = 0;
-    let duplicates = 0;
+    /** The delivery contract, observed from this side of the broker — see Contract.ts. */
+    let contract: ContractState = initialContract;
     const eventsByType = new Map<string, number>();
 
     /**
@@ -413,168 +407,26 @@ export const runDaemon = (cfg: DaemonConfig) =>
      *    redrive that cannot end is a worse failure mode than a queue that
      *    does not drain.
      */
-    /** Stamped onto anything the redrive moves within the dead-letter queue, so its origin survives the republish that loses the broker's own annotations. */
-    const ORIGIN_PROPERTY = "x-egress-origin-queue";
-    const ORIGIN_REASON_PROPERTY = "x-egress-origin-reason";
-    const ORIGIN_PASS_PROPERTY = "x-egress-redrive-pass";
-
-    const redrivePass = Effect.gen(function* () {
-      const scope = yield* Scope.make();
-      const conn = yield* Effect.provideService(makeRmq(cfg.connect), Scope.Scope, scope);
-      const into = yield* conn.publisherToQueue(workQueue);
-      const back = yield* conn.publisherToQueue(deadQueue);
-
-      const passId = randomUUID();
-      let moved = 0;
-      let parked = 0;
-      let cycled = false;
-      let lastReplayAt = Date.now();
-      yield* conn.consume(deadQueue, async (body, delivery): Promise<Settlement> => {
-        // One canonical dead-letter queue means this one holds more than
-        // failed work: a control event that would not decode lands here too,
-        // and replaying *that* onto the work queue would be nonsense. The
-        // broker records where each message was dead-lettered from, so the
-        // filter is exact rather than a guess at the body's shape.
-
-        // Our own stamp, from *this* pass: the queue has come the whole way
-        // round and everything left is stuff this pass will not replay.
-        // Without that signal the pass re-parks the same handful of messages
-        // tail to tail as fast as the broker can deliver them — measured at
-        // 17,703 republishes of two messages in 2.5 seconds before an idle
-        // timer eventually noticed. A stamp from an *older* pass means only
-        // "something already decided this is not work", and must be moved on
-        // rather than ending the lap: otherwise one parked message sitting at
-        // the head makes every later redrive give up before replaying
-        // anything, which is the opposite of self-healing.
-        if (delivery.properties[ORIGIN_PASS_PROPERTY] === passId) {
-          cycled = true;
-          return "requeue";
-        }
-
-        // Where it came from: the broker's annotation on first sight, our own
-        // stamp once an earlier pass moved it, and "unknown" for anything
-        // published straight onto this queue by something else. Only work is
-        // ever replayed, so anything unattributable is kept, not guessed at.
-        const originQueue =
-          delivery.deadLetter?.queue ?? delivery.properties[ORIGIN_PROPERTY] ?? "unknown";
-        const originReason =
-          delivery.deadLetter?.reason ?? delivery.properties[ORIGIN_REASON_PROPERTY] ?? "unknown";
-
-        if (originQueue !== workQueue) {
-          // Moved to the tail rather than released, because releasing puts it
-          // straight back at the head and starves everything behind it, and
-          // stamped on the way so the provenance the annotations carried is
-          // not lost with them.
-          parked++;
-          try {
-            await Effect.runPromise(
-              conn.send(back, body, {
-                [ORIGIN_PROPERTY]: originQueue,
-                [ORIGIN_REASON_PROPERTY]: originReason,
-                [ORIGIN_PASS_PROPERTY]: passId,
-              }),
-            );
-            return "accept";
-          } catch {
-            return "requeue";
-          }
-        }
-
-        // Reserve the slot *before* awaiting. The broker delivers with a
-        // credit window in the hundreds, so a check-then-await-then-increment
-        // lets every in-flight handler pass the same check and overshoot the
-        // cap by an order of magnitude — measured at 5739 against a cap of
-        // 5000 before this was reordered.
-        if (moved >= cfg.redriveMax) return "requeue";
-        moved++;
-        try {
-          await Effect.runPromise(conn.send(into, body));
-        } catch {
-          // The work queue is unreachable; leave the message where it is
-          // rather than accepting it into nothing.
-          moved--;
-          return "requeue";
-        }
-        redriven++;
-        lastReplayAt = Date.now();
-        return "accept";
-      });
-
-      yield* gate.withPermit(Ref.set(redriveScope, scope));
-
-      const deadline = Date.now() + 60_000;
-      let reason = "deadline";
-      while (true) {
-        yield* Effect.sleep("200 millis");
-        if ((yield* Ref.get(circuit)) !== State.CLOSED) {
-          reason = "circuit reopened";
-          break;
-        }
-        if (moved >= cfg.redriveMax) {
-          reason = "cap reached";
-          break;
-        }
-        if (cycled) {
-          reason = "came full circle";
-          break;
-        }
-        // Idle is measured on *replays* rather than on deliveries, so a pass
-        // that is only being handed things it will not replay still ends.
-        if (Date.now() - lastReplayAt > 2000) {
-          reason = parked > 0 ? "nothing left to replay" : "drained";
-          break;
-        }
-        if (Date.now() > deadline) break;
-      }
-
-      // Close *this pass's* scope, and only clear the Ref if it still points
-      // at it. Closing whatever the Ref happens to hold is not the same
-      // thing: reconcile retires the scope on any state change, so a pass
-      // whose scope had already been retired and replaced by a newer one
-      // would tear down the newer pass's live connection on its way out.
-      yield* gate.withPermit(Ref.update(redriveScope, (s) => (s === scope ? null : s)));
-      yield* Scope.close(scope, Exit.void);
-
-      if (parked > 0) {
-        yield* Effect.logWarning(
-          `${label}: left ${parked} non-work message(s) on ${deadQueue} — ` +
-            `dead-lettered from somewhere other than ${workQueue}, so not replayed as work`,
-        );
-      }
-      return { moved, parked, reason };
-    });
     /**
-     * Replay the dead-letter queue, in bounded passes, until it is empty or
-     * something says stop. Runs on exactly one daemon — the broker elects it
-     * on a second SAC queue, below — and only while the circuit is CLOSED.
-     *
-     * Passes rather than one long drain because each pass is a fresh
-     * connection it can afford to destroy, and because `redriveMax` is there
-     * to keep any single burst onto the work queue bounded. Looping until
-     * drained is what makes this actually self-healing: a backlog larger than
-     * the cap would otherwise need one outage per 5,000 messages to recover.
+     * Dead-letter recovery lives in its own module — see Redrive.ts. What is
+     * passed here is the coupling, made explicit: a connection it can destroy,
+     * the two queue names, the circuit state it must stop on, and this
+     * daemon's scope Ref and permit, because `reconcile` retires the
+     * connection from the other side when the state changes.
      */
-    const REDRIVE_MAX_PASSES = 20;
-    const redriveOnce = Effect.gen(function* () {
-      if (!cfg.redriveOnClose) return;
-      if ((yield* gate.withPermit(Ref.get(redriveScope))) !== null) return;
-
-      yield* Effect.log(`${label}: redriving ${deadQueue} (max ${cfg.redriveMax} per pass)`);
-      let total = 0;
-      for (let pass = 1; pass <= REDRIVE_MAX_PASSES; pass++) {
-        const { moved, reason } = yield* redrivePass;
-        total += moved;
-        // A pass that replayed nothing means whatever is left is not work,
-        // so more passes would only cycle it.
-        if (reason !== "cap reached" || moved === 0) {
-          yield* Effect.log(`${label}: redrive finished — ${total} replayed (${reason})`);
-          return;
-        }
-      }
-      yield* Effect.log(
-        `${label}: redrive stopped after ${REDRIVE_MAX_PASSES} passes — ${total} replayed; ` +
-          `whatever is left will be picked up by the next recovery`,
-      );
+    const redriveOnce = makeRedrive({
+      label,
+      enabled: cfg.redriveOnClose,
+      connect: cfg.connect,
+      workQueue,
+      deadQueue,
+      maxPerPass: cfg.redriveMax,
+      isClosed: Ref.get(circuit).pipe(Effect.map((s) => s === State.CLOSED)),
+      onReplayed: () => {
+        redriven++;
+      },
+      scope: redriveScope,
+      gate,
     });
 
     // Published by *every* daemon on entering HALF_OPEN, not just one, so the
@@ -591,7 +443,8 @@ export const runDaemon = (cfg: DaemonConfig) =>
       return (
         `${state} target=${targetActive}/${cfg.fleetSize} self=${active ? "ACTIVE" : "idle"} ` +
         `calls ok=${ok} failed=${failed} inFlight=${inFlight} queued=${queued} ` +
-        `control=${[...eventsByType.values()].reduce((a, b) => a + b, 0)} gaps=${gaps} dup=${duplicates}`
+        `control=${[...eventsByType.values()].reduce((a, b) => a + b, 0)} ` +
+        `gaps=${contract.gaps} dup=${contract.duplicates}`
       );
     });
 
@@ -630,18 +483,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
       if (data.apiId !== cfg.apiId) return; // belt and braces; the binding already filters
       eventsByType.set(type, (eventsByType.get(type) ?? 0) + 1);
 
-      // Snapshots deliberately repeat the current sequence, so only
-      // state_changed carries the gapless guarantee — the same rule
-      // @egress/aggregator's own Integrity tracker applies to the webhook
-      // stream. Checking it here proves it a second time, over a different
-      // transport, from a process the publisher does not control.
-      if (type === "egress.circuit.state_changed") {
-        if (lastSequence >= 0) {
-          if (data.sequence <= lastSequence) duplicates++;
-          else if (data.sequence > lastSequence + 1) gaps++;
-        }
-        lastSequence = Math.max(lastSequence, data.sequence);
-      }
+      contract = observe(contract, type, data.sequence);
 
       Effect.runFork(
         applyEvent(data.state, data.sequence, data.reason).pipe(
@@ -740,10 +582,18 @@ export const runDaemon = (cfg: DaemonConfig) =>
         probed: probed - flushed.probed,
         redriven: redriven - flushed.redriven,
         undecodable: undecodable - flushed.undecodable,
-        gaps: gaps - flushed.gaps,
-        duplicates: duplicates - flushed.duplicates,
+        gaps: contract.gaps - flushed.gaps,
+        duplicates: contract.duplicates - flushed.duplicates,
       };
-      flushed = { ok, failed, probed, redriven, undecodable, gaps, duplicates };
+      flushed = {
+        ok,
+        failed,
+        probed,
+        redriven,
+        undecodable,
+        gaps: contract.gaps,
+        duplicates: contract.duplicates,
+      };
 
       if (delta.ok > 0) {
         yield* Metric.update(

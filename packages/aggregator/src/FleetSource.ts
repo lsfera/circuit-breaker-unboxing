@@ -310,7 +310,15 @@ export const EnvoyFleetLayer = (
           Effect.timeout("2 seconds"),
           // One unreachable replica must not fail the whole poll — the quorum
           // rule already tolerates a missing replica.
-          Effect.catchCause(() => Effect.succeed([] as ReplicaReport[])),
+          //
+          // `catchAll`, not `catchCause`: the expected failures here are a
+          // replica being unreachable and the poll timing out, and both mean
+          // "no report from this one". A *defect* means a bug — a parser that
+          // throws on a stat it did not expect, say — and disguising that as
+          // an unreachable replica would turn a crash into a fleet that
+          // quietly reports fewer members, which is far harder to notice.
+          // (`Effect.catch` is v4's failure-only catch; v3's `catchAll` is gone.)
+          Effect.catch(() => Effect.succeed([] as ReplicaReport[])),
         );
 
       return {

@@ -89,13 +89,31 @@ export type ApiSnapshot = {
   }>;
 };
 
+/**
+ * The vocabulary as schemas, so the literals are written once rather than
+ * copied wherever something needs to validate them. Three places had their
+ * own copy of the state list, and a checkpoint validator accepted any string
+ * as a reason and cast it — which is not validation, it is a type assertion
+ * wearing a schema's clothes.
+ */
+export const StateSchema = Schema.Literals(["CLOSED", "DEGRADED", "OPEN", "HALF_OPEN"]);
+export const ReasonSchema = Schema.Literals([
+  "HEALTHY",
+  "OUTLIER_EJECTION",
+  "ALL_ENDPOINTS_EJECTED",
+  "THRESHOLD_OVERFLOW",
+  "PROBE_SUCCEEDED",
+  "PROBE_FAILED",
+  "OPEN_TIMEOUT_ELAPSED",
+]);
+
 // The published contract, declared once and used for both encoding and the
 // subscriber's decode. In v3 this lived in @effect/schema; in v4 Schema is core.
 export const CircuitEventData = Schema.Struct({
   apiId: Schema.String,
   sequence: Schema.Number,
-  previousState: Schema.NullOr(Schema.Literals(["CLOSED", "DEGRADED", "OPEN", "HALF_OPEN"])),
-  state: Schema.Literals(["CLOSED", "DEGRADED", "OPEN", "HALF_OPEN"]),
+  previousState: Schema.NullOr(StateSchema),
+  state: StateSchema,
   reason: Schema.String,
   healthyEndpoints: Schema.Number,
   totalEndpoints: Schema.Number,

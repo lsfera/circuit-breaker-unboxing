@@ -254,7 +254,7 @@ one connection to Redis and nothing else — see
 ```bash
 pnpm install
 pnpm start           # simulated 5-replica fleet
-pnpm run check       # typecheck + 41 tests
+pnpm run check       # typecheck + 48 tests
 pnpm run test:redis  # optional — needs Docker: HA coordination against a real Redis
 pnpm run test:rmq    # optional — needs Docker: AMQP behaviour against a real broker
 ```
@@ -921,11 +921,14 @@ packages/
 
   rmq-consumer/              @egress/rmq-consumer — the competing-consumer daemon fleet
     src/DaemonPolicy.ts      pure: (prior, circuit state, fleet size) -> target active count
-    src/daemon.ts            one daemon, one process; two connections, SAC prober election
+    src/Contract.ts          pure: the per-API sequence guarantee, checked on the AMQP side
+    src/daemon.ts            one daemon, one process; two connections, two SAC elections
+    src/Redrive.ts           dead-letter recovery: bounded passes, own connection per pass
     src/producer.ts          floods the work queue; never backs off, on purpose
     src/Telemetry.ts         every metric the fleet emits, in one place
     src/main.ts              role dispatch — `daemon` or `producer` — plus /metrics
     test/DaemonPolicy.test.ts  9 tests, pure — no runtime, no broker
+    test/Contract.test.ts      7 tests, pure — including the backwards-sequence case
 
   demo/                      @egress/demo — no dependency on the others, speaks only HTTP
     src/driver.ts            drives the demo script over HTTP, narrates transitions
@@ -1104,10 +1107,20 @@ so these were taken from the installed types rather than from summaries:
   `jsonUnsafe` is the plain constructor
 - `Schema.decodeUnknownEffect` does not exist; only `decodeUnknownOption` takes
   `unknown`
+- `Effect.catchAll` is `Effect.catch` — and `catchCause` is *not* the
+  drop-in it looks like, because it swallows defects as well as failures
 - `Schema` is core now, not `@effect/schema`
+- There is no `Runtime.runFork(runtime)` to bridge a callback back into the
+  fiber tree the way v3 allowed; a `Queue` the callback writes to and a fiber
+  that drains it is the shape that replaces it
 
 `tsconfig.json` sets `erasableSyntaxOnly`, so the compiler enforces
-strip-types compatibility rather than leaving it to discipline.
+strip-types compatibility rather than leaving it to discipline. It also sets
+`noUnusedLocals`, `noUnusedParameters`, `noImplicitOverride` and
+`noFallthroughCasesInSwitch` — with no build step and no linter in this repo,
+`tsc` is the only automated thing that reads the source, so it may as well be
+asked the questions a linter would. Turning them on found three dead imports
+immediately, one of them left behind by the refactor in the same commit.
 
 ## Tuning
 

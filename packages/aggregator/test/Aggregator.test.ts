@@ -26,7 +26,6 @@ const CFG = { ...defaultConfig, dwellMs: 500, minStateMs: 500, openMs: 1000 };
 // TestClock starts at the epoch, which would make a genuine "we published
 // 1970" bug indistinguishable from normal test time. Start at a realistic
 // instant so epoch leakage is unambiguous.
-const START = Date.parse("2026-09-02T12:00:00.000Z");
 
 /**
  * TestClock starts at the epoch. Anchoring it to a realistic instant keeps
