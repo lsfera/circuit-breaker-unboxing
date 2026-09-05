@@ -802,13 +802,31 @@ reachable on the real stack now, not only in `DaemonPolicy.test.ts`.
 
 ## What's still missing
 
-- **The ramp-back schedule advances per event, not per unit of time.** A
-  "tick" is any `circuit.control` message for the API, so the pace is set by
-  the aggregator's `snapshotMs` and by how often the state actually changes.
-  In the live run that meant `1 → 4 → 5` in about fifteen seconds, which is
-  a ramp in shape but barely one in duration. Gating each rung on elapsed
-  time, or on a count of successful calls at the current rung, is the
-  obvious next move and is not built.
+- ~~**The ramp-back schedule advances per event, not per unit of time.**~~
+  **Fixed.** It used to advance one rung per `circuit.control` message, so its
+  pace was an accident of the aggregator's `snapshotMs` rather than a
+  decision — a recovering third party got more load because a snapshot was due,
+  not because the current rung was working. Rungs are now held for
+  `RAMP_DWELL_MS`, and each daemon re-evaluates the policy on its own second,
+  because a ramp gated on elapsed time still needs something to look at the
+  clock. Measured on the running stack, from `PROBE_SUCCEEDED`:
+
+  ```
+  23:18:58.528  CLOSED  target=1/5   control=9
+  23:19:02.884  ramp 1 -> 4          control=9
+  23:19:07.893  ramp 4 -> 5          control=9
+  ```
+
+  `control=9` throughout: the ramp advanced with no control events at all,
+  which is the whole point. The first interval reads as 4.4s rather than 5s
+  because the rung clock starts at `HALF_OPEN` — one prober active *is* the
+  first rung, and the transition to `CLOSED` does not restart it.
+
+  The gate is time and not "N successful calls at this rung", which sounds
+  more principled and is wrong here: every daemon must derive the same target
+  from the same inputs, and a success count is per daemon, so the busy ones
+  would ramp while the idle ones held and the fleet would disagree about its
+  own size. A clock is the only input all five share.
 - **The DEGRADED-as-credit-reduction idea is abandoned, on purpose, not
   worked around.** Checked the actual public surface rather than assumed it:
   `Consumer` exposes exactly `start()`/`close()`/`id`/`replyTo` — no method

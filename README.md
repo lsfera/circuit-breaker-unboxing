@@ -1001,7 +1001,8 @@ packages/
     src/producer.ts          floods the work queue; never backs off, on purpose
     src/Telemetry.ts         every metric the fleet emits, in one place
     src/main.ts              role dispatch — `daemon` or `producer` — plus /metrics
-    test/DaemonPolicy.test.ts  9 tests, pure — no runtime, no broker
+    test/DaemonPolicy.test.ts  11 tests, pure — no runtime, no broker; the ramp is gated on
+                              elapsed time, so they pass the clock in rather than mock one
     test/Contract.test.ts      7 tests, pure — including the backwards-sequence case
 
   demo/                      @egress/demo — no dependency on the others, speaks only HTTP

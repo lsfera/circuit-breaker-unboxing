@@ -355,7 +355,7 @@ field, do not reshape the record.
 
 ---
 
-## Phase 7 — The recovery ramp advances on time, not on chatter
+## Phase 7 — The recovery ramp advances on time, not on chatter  ✅ done
 
 **What to implement.** Today a ramp rung advances per *control event*, so its
 pace is set by `snapshotMs` — "a ramp in shape but barely one in duration"

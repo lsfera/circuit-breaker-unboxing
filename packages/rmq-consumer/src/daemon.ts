@@ -182,7 +182,8 @@ export const runDaemon = (cfg: DaemonConfig) =>
     yield* control.bind(routingKeyFor(cfg.apiId), exchange, controlQ);
 
     const circuit = yield* Ref.make<State>(State.CLOSED);
-    const policy = yield* Ref.make<DaemonPolicyState>(initial(cfg.fleetSize));
+    const now = yield* Effect.clockWith((c) => c.currentTimeMillis);
+    const policy = yield* Ref.make<DaemonPolicyState>(initial(cfg.fleetSize, now));
     /** The disposable work connection's scope — non-null exactly while this daemon is pulling work. */
     const workScope = yield* Ref.make<Scope.Closeable | null>(null);
     const probeScope = yield* Ref.make<Scope.Closeable | null>(null);
@@ -466,7 +467,8 @@ export const runDaemon = (cfg: DaemonConfig) =>
         const prior = yield* Ref.get(policy);
         const priorState = yield* Ref.get(circuit);
         yield* Ref.set(circuit, state);
-        yield* Ref.set(policy, step(prior, state, cfg.fleetSize));
+        const at = yield* Effect.clockWith((c) => c.currentTimeMillis);
+        yield* Ref.set(policy, step(prior, state, cfg.fleetSize, at));
         yield* reconcile;
         yield* Effect.log(`${label}: seq=${sequence} (${reason}) ${yield* describe}`);
         if (state === State.HALF_OPEN) {
@@ -690,6 +692,37 @@ export const runDaemon = (cfg: DaemonConfig) =>
 
     yield* Effect.forkScoped(
       Effect.forever(Effect.sleep("1 second").pipe(Effect.andThen(flush))),
+    );
+
+    /**
+     * The ramp advances on a clock, so something has to look at the clock.
+     *
+     * Gating rungs on elapsed time fixes half the problem; the other half is
+     * that `step` only ran when a control message arrived, so a quiet recovery
+     * — no transitions, one snapshot every `snapshotMs` — still advanced the
+     * ramp at the aggregator's pace rather than its own. This is the daemon
+     * asking the question on its own schedule.
+     *
+     * Only while CLOSED, and only when the answer changes: every other state
+     * is a level, not a ramp, and re-reconciling an unchanged target would
+     * rebuild connections once a second for no reason.
+     */
+    const advanceRamp = Effect.gen(function* () {
+      const state = yield* Ref.get(circuit);
+      if (state !== State.CLOSED) return;
+      const prior = yield* Ref.get(policy);
+      const at = yield* Effect.clockWith((c) => c.currentTimeMillis);
+      const next = step(prior, state, cfg.fleetSize, at);
+      if (next.targetActive === prior.targetActive) return;
+      yield* Ref.set(policy, next);
+      yield* reconcile;
+      yield* Effect.log(
+        `${label}: ramp ${prior.targetActive} -> ${next.targetActive} ${yield* describe}`,
+      );
+    });
+
+    yield* Effect.forkScoped(
+      Effect.forever(Effect.sleep("1 second").pipe(Effect.andThen(advanceRamp))),
     );
 
     // A heartbeat independent of the control plane. Without it a daemon that
