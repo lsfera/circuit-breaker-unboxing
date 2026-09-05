@@ -371,6 +371,26 @@ shortcut past one. An unbounded requeue against a dead upstream is a hot
 loop with no counter to stop it, which is strictly worse than a queue full
 of messages you can look at.
 
+**Amendment, 2026-09-05: this is a fact about the client, not about the
+system.** The budget is a *queue* property. A quorum queue declared with
+`x-delivery-limit` makes the broker count the attempts and dead-letter the
+message itself, and it works through the client already in use. Measured
+against a live broker, with the handler returning `requeue` every time:
+
+```
+deliveryCount reported to the handler : [0, 0, 0, 0]   (still always zero)
+total deliveries before it stopped    : 4
+dead-lettered                         : reason "delivery_limit"
+```
+
+So the client genuinely cannot count attempts, and does not have to. The
+work queue becomes quorum in Phase 2 of
+`.claude/plans/production-readiness.md`, which is where
+"one attempt then dead-letter" becomes "N attempts then dead-letter" with no
+daemon code change. See `docs/decisions/001-amqp-client.md` for the full
+measurement, including the same property seen from AMQP 0-9-1, where the
+consumer can also read `x-delivery-count` directly.
+
 ### Dead-lettering stops being reliable once the connection bug has been provoked
 
 Found by a test that kept failing about half the time, which is the only

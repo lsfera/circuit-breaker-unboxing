@@ -966,6 +966,7 @@ infra/
   monitoring/                Prometheus scrape config + provisioned Grafana dashboard
 
 docs/rmq-control-plane.md    the RabbitMQ scenario: design, live run, and what it exposed
+docs/decisions/              decision records: what was chosen, and the measurement it rests on
 docker-compose.yml           wires infra/ and the packages/ entrypoints together
 .github/workflows/ci.yml     `pnpm run check` on every push, and both Docker-backed
                              suites (`test:redis`, `test:rmq`) in a second job — they
@@ -1081,7 +1082,12 @@ reading it afterwards:
   cannot be built. Same shape as the link-credit finding: the lever is
   genuinely absent rather than merely undocumented, so the daemons
   dead-letter on the first failure and a test pins the behaviour in case a
-  client release changes it.
+  client release changes it. **Amended 2026-09-05**: that is a fact about the
+  client, not about the system — a quorum queue with `x-delivery-limit` makes
+  the *broker* count attempts and dead-letter at the limit, through this same
+  client (measured: four deliveries, then `reason "delivery_limit"`). The
+  lever was in the queue the whole time. See
+  [docs/decisions/001-amqp-client.md](docs/decisions/001-amqp-client.md).
 - **The check that proves the contract had no test, and a blind spot for the
   one bug most likely to break it.** `/api/subscriber` is what this README
   points at to claim the stream is gapless and non-repeating. It counted a
