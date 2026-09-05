@@ -107,6 +107,14 @@ services:
   # special to run even before HOST_WORKSPACE_FOLDER was set correctly.
   redis:
     image: redis:7-alpine
+    # AOF, because this is the checkpoint store. Without persistence a restart
+    # loses every checkpoint, and a newly promoted leader resumes from nothing
+    # rather than from where the last one stopped — a sequence reset, which is
+    # the one thing the published contract promises never happens. Fencing is
+    # safe across a wipe (tokens carry an epoch, see Coordination.ts), but safe
+    # is not the same as intact.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: ["redis-data:/data"]
     restart: unless-stopped
     networks: [default, devcontainer]
 
@@ -131,6 +139,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    # Durable quorum queues keep their messages across a broker *restart*; they
+    # keep them across a container being recreated only if the broker's data
+    # directory outlives the container. Both halves are needed, and only one of
+    # them is a queue argument.
+    volumes: ["rabbitmq-data:/var/lib/rabbitmq"]
     restart: unless-stopped
     networks: [default, devcontainer]
 
@@ -312,6 +325,9 @@ services:
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      # Otherwise every incident this stack demonstrates is gone the moment the
+      # container is recreated, including the ones worth comparing against.
+      - prometheus-data:/prometheus
     # Lets Prometheus also reach `pnpm start` running on the host, so the same
     # stack works for the sim-fleet demo, not just this docker-compose one.
     extra_hosts: ["host.docker.internal:host-gateway"]
@@ -331,7 +347,18 @@ services:
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
     restart: unless-stopped
     depends_on: [prometheus]
     ports: ["3000:3000"]
     networks: [default, devcontainer]
+
+# Named, not bind-mounted: this is service state, not repo content, and it must
+# survive a container being recreated. Everything stateful in the stack has one
+# now — before this, "durable" was a property of a queue in a broker whose
+# entire data directory lived in a container's writable layer.
+volumes:
+  redis-data:
+  rabbitmq-data:
+  prometheus-data:
+  grafana-data:

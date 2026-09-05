@@ -383,13 +383,40 @@ total deliveries before it stopped    : 4
 dead-lettered                         : reason "delivery_limit"
 ```
 
-So the client genuinely cannot count attempts, and does not have to. The
-work queue becomes quorum in Phase 2 of
-`.claude/plans/production-readiness.md`, which is where
-"one attempt then dead-letter" becomes "N attempts then dead-letter" with no
-daemon code change. See `docs/decisions/001-amqp-client.md` for the full
-measurement, including the same property seen from AMQP 0-9-1, where the
-consumer can also read `x-delivery-count` directly.
+So the client genuinely cannot count attempts, and does not have to.
+
+**This is now what the fleet does.** The work queue is a quorum queue with
+`x-delivery-limit: 3` (`WORK_DELIVERY_LIMIT` in `ControlPlane.ts`), and a
+daemon whose third-party call fails returns `requeue` rather than `discard`.
+Three retries, then the broker parks the message on `<apiId>.work.dead`
+itself, with `reason "delivery_limit"` where it used to say `"rejected"`.
+
+Three rather than more because RabbitMQ redelivers immediately, with no
+backoff: each extra attempt is extra load on a third party that is already
+failing, and what ends the amplification is the circuit opening, which stops
+the daemons consuming at all.
+
+The interaction with `REDRIVE_ON_CLOSE` is the part worth knowing, because it
+is easy to read `WORK_DELIVERY_LIMIT` and conclude the wrong thing. **The
+budget resets on redrive.** The redrive replays work by publishing the body
+again, and a republished message is a new message to the broker, with a full
+budget. Measured — one message, always requeued, through one redrive cycle:
+
+```
+work deliveries total : 8        (4 + 4)
+dead-letter arrivals  : ["delivery_limit", "delivery_limit"]
+```
+
+So it is three attempts *per outage*, not three ever. A genuinely poison
+message therefore comes back once per recovery rather than looping hot — a
+bound worth having, and not the same thing as a stop. Capping the number of
+redrives a single message may receive is not built; it would go where
+`Redrive.ts` already stamps `x-egress-redrive-pass`.
+
+`DeadLetter.test.ts` pins both halves against a real broker. See
+`docs/decisions/001-amqp-client.md` for the full measurement, including the
+same property seen from AMQP 0-9-1, where the consumer can also read
+`x-delivery-count` directly.
 
 ### Dead-lettering stops being reliable once the connection bug has been provoked
 
@@ -578,13 +605,73 @@ are asserted together because the contrast is the decision — transient is the
 right choice for a live subscription and the wrong one for work you promised
 to keep, and the two differ by a single flag.
 
-Queue durability is necessary and not sufficient, and the demo says so: the
-`rabbitmq` service in `docker-compose.yml` has no volume, so the broker's data
-lives in the container's writable layer. That survives
-`docker compose restart rabbitmq` — which is what this is about, and what the
-test reproduces — and does not survive `docker compose down`. Same shape as
-the Redis note in the README: the queue-level decision is the part meant to
-carry over, the storage under the demo is a prototype.
+Queue durability is necessary and not sufficient. The broker now has a volume,
+so its data directory outlives the container and not only the process — but
+one broker is a quorum of one: the durability and the delivery limit are real
+on a single node, and tolerating the loss of a node needs three, which is a
+topology this repo does not run.
+
+**Verified on the running stack**, with the circuit `OPEN` and the producer
+stopped so the numbers hold still:
+
+```
+before  docker compose restart rabbitmq redis
+        payments-provider.work        6249
+        payments-provider.work.dead    379     (total 6628)
+
+after   payments-provider.work        5692
+        payments-provider.work.dead    936     (total 6628)
+```
+
+Nothing lost, and the 557 that moved are the deliveries the daemons had in
+flight when the broker went down, retried and then parked by the limit. The
+aggregator carried on from its checkpoint through the same restart —
+`sequence` 7 → 9 → 23, no reset — and every daemon reported `gaps=0 dup=0`
+across both, which is the contract holding through an event the contract has
+never been tested against before.
+
+One caveat on measuring this yourself: a quorum queue reports 0 messages until
+its Raft leader has been elected, which happens *after* `rabbitmq-diagnostics
+ping` starts answering. Reading depths the instant the broker says it is up
+shows an empty queue that is not empty.
+
+### Changing queue topology on a broker that already has the queues
+
+A queue's properties are part of its identity, and a redeclare that disagrees
+is refused rather than merged. Measured, in both directions:
+
+```
+409 "inequivalent arg 'durable' for queue 'mix.q' in vhost '/':
+     received 'true' but current is 'false'"
+```
+
+`x-queue-type` and `x-delivery-limit` behave the same way. So every change in
+this document that touched a queue argument — dead-lettering, durability,
+quorum, the delivery limit — is a migration on any broker that has been
+running, and a first-boot detail everywhere else. The failure is loud, which
+is the good news: the first daemon to start dies with a 409 rather than
+running against a queue that is not what its code says it is.
+
+The procedure, in order:
+
+1. **Stop the producers.** Nothing new arriving.
+2. **Let the daemons drain the work queue**, or accept that what is in it is
+   about to be lost. There is no in-place upgrade: a queue cannot change type,
+   and deleting it deletes its messages.
+3. **Stop the daemons.** A queue with a consumer attached cannot be deleted
+   cleanly, and a daemon that redeclares mid-migration re-creates the old
+   shape.
+4. **Delete the queues** — work, dead-letter, control, and both election
+   queues. The dead-letter queue is the one to think about: it holds work the
+   fleet could not complete, so drain it with `REDRIVE_ON_CLOSE` or copy it
+   somewhere before it goes.
+5. **Start the fleet.** The first daemon up redeclares everything with the new
+   arguments, exactly as it does on a cold broker.
+
+The alternative to steps 2-4, for a queue whose contents cannot be lost, is a
+versioned name — `<apiId>.work.v2` — declared alongside the old one, with
+consumers moved over and the old queue drained and then deleted. That trades a
+maintenance window for a naming scheme, and this repo has not needed it.
 
 ### The fleet is on the dashboard now, because that bug was an observability bug
 

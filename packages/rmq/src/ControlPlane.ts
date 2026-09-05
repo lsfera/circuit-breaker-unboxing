@@ -105,17 +105,62 @@ export const sacQueueArgs = (apiId: string): Record<string, unknown> => ({
  * control queue is a live subscription: a daemon that comes back learns the
  * real state from the aggregator's next snapshot, which is what `snapshotMs`
  * is for, so keeping those events across a restart buys nothing and risks a
- * queue growing behind a daemon that never returns. The election queues are
- * transient by nature. The work queue and the dead-letter queue are the
- * opposite: nothing can reconstruct them, and losing them means losing work
- * this system promised to keep.
+ * queue growing behind a daemon that never returns — so it stays a classic
+ * transient queue, one per daemon, and dies with it.
+ *
+ * Everything else is `quorum`, which is the second half of the same question:
+ * `durable` decides what survives the broker process, `x-queue-type` decides
+ * what survives losing the node the queue lives on. A quorum queue cannot be
+ * transient — measured: `400 "invalid property 'non-durable'"` — so the two
+ * choices are made together or not at all. The work and dead-letter queues
+ * hold work nothing can reconstruct. The election queues are always empty,
+ * which makes quorum free for them and means an election survives a node
+ * loss instead of vanishing with it.
  */
+
+/**
+ * How many times a unit of work is attempted before the broker parks it.
+ *
+ * This repo said twice that a redelivery budget could not be expressed here,
+ * because the client cannot mark a delivery failed and RabbitMQ will not
+ * count one that is not. Both halves are true and neither matters: the budget
+ * is a queue property. A quorum queue with `x-delivery-limit` counts the
+ * redeliveries itself and dead-letters at the limit, through the same client
+ * that still reports `deliveryCount: 0` on every delivery. Measured, handler
+ * returning `requeue` every time: four deliveries, then the dead-letter queue
+ * with `reason "delivery_limit"`. See docs/decisions/001-amqp-client.md.
+ *
+ * Three rather than more because RabbitMQ redelivers immediately, with no
+ * backoff: every extra attempt is extra load on a third party that is already
+ * failing. What ends the amplification is the circuit opening, which stops
+ * the daemons consuming at all.
+ *
+ * It composes with `REDRIVE_ON_CLOSE` by resetting: the redrive republishes
+ * the body, so a replayed message arrives as a new one with a fresh budget.
+ * Measured — one message, always requeued, through one redrive cycle: eight
+ * deliveries and two arrivals on the dead-letter queue, both
+ * `reason "delivery_limit"`. Three attempts per outage, not three ever.
+ */
+export const WORK_DELIVERY_LIMIT = 3;
+
 export const workQueueOptions = (apiId: string) => ({
-  args: workQueueArgs(apiId),
+  args: {
+    ...workQueueArgs(apiId),
+    "x-queue-type": "quorum",
+    "x-delivery-limit": WORK_DELIVERY_LIMIT,
+  },
   durable: true,
 });
 
-export const deadLetterQueueOptions = () => ({ durable: true });
+/**
+ * No delivery limit of its own: this queue is the end of the line, nothing
+ * requeues on it, and a message dropped here would be the silent loss the
+ * dead-letter queue exists to prevent.
+ */
+export const deadLetterQueueOptions = () => ({
+  args: { "x-queue-type": "quorum" },
+  durable: true,
+});
 
 export const controlQueueOptions = (apiId: string) => ({
   args: deadLetterArgs(apiId),
@@ -123,8 +168,8 @@ export const controlQueueOptions = (apiId: string) => ({
 });
 
 export const sacQueueOptions = (apiId: string) => ({
-  args: sacQueueArgs(apiId),
-  durable: false,
+  args: { ...sacQueueArgs(apiId), "x-queue-type": "quorum" },
+  durable: true,
 });
 
 /** Durable so the topology itself survives, even though what it feeds does not need to. */

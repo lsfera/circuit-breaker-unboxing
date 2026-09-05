@@ -151,7 +151,7 @@ not write an xDS server on spec.
 
 ---
 
-## Phase 2 — Durable state: survive the process, the node, and the restart
+## Phase 2 — Durable state: survive the process, the node, and the restart  ✅ done
 
 **What to implement.**
 

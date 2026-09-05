@@ -690,16 +690,20 @@ same reason there are three real Envoy replicas: the daemons have to be
 independently killable, and the `HALF_OPEN` prober is elected by RabbitMQ's
 `x-single-active-consumer` across real connections.
 
-Work whose third-party call fails is **rejected onto `<apiId>.work.dead`**,
-not accepted — and then, when the circuit closes again, replayed. There is deliberately no retry in front of that: the client's
-`requeue` sends `modified{delivery_failed: false}`, and RabbitMQ only
-increments AMQP 1.0's `delivery-count` for a delivery marked *failed* — so a
-released message comes back looking brand new, forever, and a redelivery
-budget that survives the message moving to another daemon cannot be
-expressed at all. Measured, not assumed, and pinned by a test that will fail
-if a client release fixes it. One attempt then dead-letter is what is honest
-given that; the failures are at least countable and replayable instead of
-gone.
+Work whose third-party call fails is **retried three times and then parked on
+`<apiId>.work.dead`** — and then, when the circuit closes again, replayed.
+The budget is the broker's, not the daemon's: the work queue is a quorum queue
+carrying `x-delivery-limit`, so RabbitMQ counts the redeliveries and
+dead-letters the message itself with `reason "delivery_limit"`. That matters
+because the client cannot count — it reports `deliveryCount: 0` on every
+delivery, and an in-process counter would be lost the moment the message moved
+to another daemon. Three rather than more because RabbitMQ redelivers
+immediately, with no backoff, so each extra attempt is more load on a third
+party that is already failing; what ends the amplification is the circuit
+opening, which stops the daemons consuming at all. The budget resets on
+redrive, since a replayed message is a new message — three attempts per
+outage, not three ever. Measured, pinned by a test, and written up in
+[docs/decisions/001-amqp-client.md](docs/decisions/001-amqp-client.md).
 
 **Every queue in the fleet dead-letters to that one canonical queue** — the
 work queue, both SAC election queues, and each daemon's own control queue.
@@ -749,17 +753,25 @@ daemon-2: redriving payments-provider.work.dead (max 5000 per pass)
 daemon-2: redrive finished — 2070 replayed (drained)
 ```
 
-The work queue and the dead-letter queue are **durable**, which they were not
-to begin with: a broker restart used to empty both, and silently, because the
-first daemon back redeclares them with the same name and arguments. The
-control and election queues stay transient on purpose — a daemon that comes
-back relearns the circuit state from the aggregator's next snapshot, so
-keeping those events buys nothing while a queue growing behind a daemon that
-never returns costs something. Queue durability is only half of it, though:
-the `rabbitmq` service in `docker-compose.yml` has no volume, so the broker's
-data lives in the container's writable layer. That survives
-`docker compose restart rabbitmq` and does not survive `docker compose down`
-— the same honest caveat as the Redis under the aggregators.
+Everything but the per-daemon control queue is a **durable quorum queue**, and
+neither half of that was true to begin with: a broker restart used to empty
+the dead-letter queue silently, because the first daemon back redeclares it
+with the same name and arguments. `durable` decides what survives the broker
+process; `x-queue-type` decides what survives losing the node the queue lives
+on, and a quorum queue cannot be transient, so the two are one decision. The
+control queue stays a classic transient queue on purpose — it is one daemon's
+live subscription, and a daemon that comes back relearns the circuit state
+from the aggregator's next snapshot, so keeping those events buys nothing
+while a queue outliving its daemon costs something. The election queues are
+always empty, which makes quorum free for them and means an election survives
+a node loss rather than vanishing with it.
+
+The broker now has a volume too, so the data directory outlives the container
+and not just the process. What this stack still cannot demonstrate is the
+part quorum queues are actually for: **one broker is a quorum of one.** The
+durability and the delivery limit are real on a single node; tolerating the
+loss of a node needs three of them, and that is a deployment topology this
+repo does not run.
 
 ```bash
 # watch the fleet react — target=<k>/5 is the agreed active count
@@ -886,8 +898,11 @@ belongs in the aggregator, off the request path.
   down. A real deployment wants Redis with AOF/replication, or a stronger
   backing store entirely (etcd, a Postgres advisory lock) behind the same
   `LeaderElection`/`CheckpointStore` interfaces — those interfaces, not the
-  demo's Redis config, are the part meant to carry over. What losing that
-  Redis costs is now bounded to the checkpoints themselves — a new leader
+  demo's Redis config, are the part meant to carry over. Redis now runs with
+  AOF and a named volume, so a restart no longer starts the next leader from
+  nothing; what is still missing is replication, which is why one Redis
+  remains one Redis. What losing it costs is bounded to the checkpoints
+  themselves — a new leader
   resumes from nothing rather than from where the last one stopped — and no
   longer extends to correctness: because the fencing token carries an epoch
   (see [High availability](#high-availability)), a coordinator that has lost
@@ -944,7 +959,7 @@ packages/
   rmq/                       @egress/rmq — Effect wrapper over AMQP 1.0 (RabbitMQ 4 native)
     src/Client.ts            the Rmq service; two silent client bugs guarded here
     src/ControlPlane.ts      circuit.control naming, shared by publisher and consumers
-    test/integration/        9 tests against a real broker, opt-in (`pnpm run test:rmq`)
+    test/integration/        10 tests against a real broker, opt-in (`pnpm run test:rmq`)
 
   rmq-consumer/              @egress/rmq-consumer — the competing-consumer daemon fleet
     src/DaemonPolicy.ts      pure: (prior, circuit state, fleet size) -> target active count

@@ -4,6 +4,13 @@ import { Effect } from "effect";
 import { GenericContainer, Wait } from "testcontainers";
 import type { StartedTestContainer } from "testcontainers";
 import { Rmq, RmqLive } from "../../src/Client.ts";
+import {
+  deadLetterQueueFor,
+  deadLetterQueueOptions,
+  WORK_DELIVERY_LIMIT,
+  workQueueFor,
+  workQueueOptions,
+} from "../../src/ControlPlane.ts";
 
 /**
  * Dead-lettering: what a rejection does, what it carries, and what survives a
@@ -315,4 +322,75 @@ test("a durable queue keeps its messages across a broker restart; a transient on
   assert.equal(kept.length, 5, `durable queue must keep its messages, kept ${kept.length}`);
   assert.deepEqual([...kept].sort(), ["keep-0", "keep-1", "keep-2", "keep-3", "keep-4"]);
   assert.equal(lost.length, 0, "a transient queue is empty again, which is the whole contrast");
+});
+
+/**
+ * The redelivery budget this repo spent two documents saying it could not
+ * have.
+ *
+ * The client cannot mark a delivery failed, and RabbitMQ will not count one
+ * that is not — both still true, and neither matters, because the budget is a
+ * property of the queue. The work queue is a quorum queue carrying
+ * `x-delivery-limit`, so the broker counts the attempts and parks the message
+ * itself once they are spent.
+ *
+ * Two things are asserted together because each is only half the behaviour.
+ * The budget is spent by *requeue*, the outcome that was supposed to be
+ * useless. And a redrive resets it: `Redrive.ts` replays work by publishing
+ * the body again, so a replayed message is a new message with a full budget —
+ * three attempts per outage, not three ever. The handler here stands in for
+ * that republish, deliberately, because that interaction is the part someone
+ * reading `WORK_DELIVERY_LIMIT` would get wrong.
+ */
+test("the work queue parks a message at the delivery limit, and a redrive republish grants a fresh budget", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const apiId = `budget-${Date.now()}`;
+  const work = workQueueFor(apiId);
+  const dead = deadLetterQueueFor(apiId);
+
+  const { attempts, parked } = await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(dead, deadLetterQueueOptions());
+      yield* rmq.declareQueue(work, workQueueOptions(apiId));
+      const into = yield* rmq.publisherToQueue(work);
+
+      const parked: string[] = [];
+      let replayed = false;
+      yield* rmq.consume(dead, (body, delivery) => {
+        parked.push(delivery.deadLetter?.reason ?? "unknown");
+        if (replayed) return "accept" as const;
+        replayed = true;
+        // What Redrive.ts does on the transition back to CLOSED: publish the
+        // body onto the work queue, which is a new message to the broker.
+        return Effect.runPromise(rmq.send(into, body)).then(() => "accept" as const);
+      });
+
+      const attempts: number[] = [];
+      yield* rmq.send(into, "unit-of-work");
+      yield* rmq.consume(work, (_body, delivery) => {
+        attempts.push(delivery.deliveryCount);
+        return "requeue" as const;
+      });
+
+      yield* waitFor(() => parked.length >= 2);
+      return { attempts, parked };
+    }),
+  );
+
+  assert.deepEqual(
+    parked,
+    ["delivery_limit", "delivery_limit"],
+    "both parkings must be the broker enforcing the limit, not something else rejecting",
+  );
+  assert.equal(
+    attempts.length,
+    (WORK_DELIVERY_LIMIT + 1) * 2,
+    `one delivery plus ${WORK_DELIVERY_LIMIT} redeliveries, twice — the redrive resets the budget`,
+  );
+  assert.ok(
+    attempts.every((count) => count === 0),
+    "the client reports deliveryCount 0 throughout: the counting is the broker's, which is the whole point",
+  );
 });

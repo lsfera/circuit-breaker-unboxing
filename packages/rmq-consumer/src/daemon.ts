@@ -252,15 +252,23 @@ export const runDaemon = (cfg: DaemonConfig) =>
           return "accept";
         }
         failed++;
-        return "discard";
+        return "requeue";
       } catch {
         // Connection refused / timeout once the cluster is fully ejected is
         // the expected shape of an outage, not an error to report here — the
         // aggregator is what judges the API's health, from Envoy's own view.
-        // The message still goes to the dead-letter queue rather than being
-        // accepted, so the work is recoverable even though the call is lost.
+        //
+        // `requeue`, not `discard`: the work queue is a quorum queue carrying
+        // `x-delivery-limit`, so the broker counts the attempts and parks the
+        // message on the dead-letter queue itself once the budget is spent
+        // (WORK_DELIVERY_LIMIT in @egress/rmq/ControlPlane.ts). The daemon
+        // does not count, and could not — the client reports deliveryCount 0
+        // on every delivery — which is exactly why this had to be the
+        // broker's job. `failed` therefore counts *attempts* now, not
+        // messages: a message that fails its whole budget increments it once
+        // per try, which is what a rate of failing calls should measure.
         failed++;
-        return "discard";
+        return "requeue";
       } finally {
         release();
       }
