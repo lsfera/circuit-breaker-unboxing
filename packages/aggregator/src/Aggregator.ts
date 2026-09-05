@@ -326,6 +326,16 @@ export const AggregatorLayer = Layer.effect(
         yield* Effect.forEach(publishable, (e) => sink.deliver(e), {
           discard: true,
         });
+
+        // Then replay whatever an earlier attempt could not deliver.
+        //
+        // Here, and only here, because this branch runs only when the lease
+        // was acquired: two instances draining one shared outbox would deliver
+        // every entry twice, which is exactly the break the sequence contract
+        // exists to make visible. Forked for the same reason delivery is —
+        // a subscriber that hangs must cost the loop nothing — and the sink
+        // itself refuses to run two passes at once.
+        yield* Effect.forkChild(sink.drainOutbox);
         return publishable;
       },
     );

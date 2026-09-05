@@ -129,6 +129,7 @@ const RecordingSink = (into: Ref.Ref<ReadonlyArray<CircuitEvent>>) =>
     name: "recording",
     deliver: (event: CircuitEvent) => Ref.update(into, (xs) => [...xs, event]),
     deadLetters: Effect.succeed([]),
+    drainOutbox: Effect.succeed(0),
   });
 
 const instanceLayer = (

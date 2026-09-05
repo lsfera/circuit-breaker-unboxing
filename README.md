@@ -465,6 +465,8 @@ endpoint is live on the same port in both modes (`--source=sim` or
 | `egress_aggregator_fencing_conflicts_total` | Checkpoint writes rejected because a newer lease holder already took over, by API |
 | `egress_webhook_delivered_total` / `_failed_total` / `_dead_lettered_total` | Sink outcomes, by API |
 | `egress_webhook_delivery_duration_ms` | Successful-delivery latency, including retries |
+| `egress_webhook_outbox_depth` | Events waiting in the durable outbox for a subscriber that is not taking them, by API — zero in every healthy minute, so a non-zero reading is the whole signal |
+| `egress_webhook_outbox_replayed_total` / `_dropped_total` | Events delivered from the outbox after an earlier failure, and events discarded because the per-API bound was hit |
 | `egress_subscriber_events_received_total` / `_gaps_total` / `_duplicates_total` | The delivery contract, read from outside the process — same numbers the console's right-hand panel shows, as counters |
 
 And from the daemon fleet — the same in-process `effect` registry, served on
@@ -961,6 +963,7 @@ packages/
     src/Aggregator.ts        service: tick loop over the pure machine, on a Schedule
     src/Coordination.ts      leader election + fencing-token checkpoints — see High availability
     src/Events.ts            EventBus (PubSub) + EventSink (webhook, declarative retry)
+    src/Outbox.ts            durable outbox: what a subscriber that was down gets when it returns
     src/FleetSource.ts       service with two layers: simulated fleet, real Envoy
     src/Http.ts              routes, SSE as a merged Stream, delivery-integrity tracking,
                              /metrics, and /livez + /readyz (liveness is the tick loop,
@@ -970,8 +973,11 @@ packages/
     public/index.html        operator console (unchanged — plain HTML/CSS/JS)
     test/Aggregator.test.ts   14 tests — full pipeline under TestClock, stats parsing,
                               and the delivery-integrity tracker as a pure function
-    test/Coordination.test.ts  6 tests — fencing primitives, a real two-instance failover, and a re-promotion
-    test/integration/          Redis-backed HA, opt-in (`pnpm run test:redis`) — needs Docker
+    test/Coordination.test.ts  7 tests — fencing primitives, a real two-instance failover, a
+                              re-promotion, and a clean shutdown handing the lease back
+    test/Outbox.test.ts        3 tests, pure — ordering, partial commit, and which end the bound drops
+    test/integration/          Redis-backed HA and the durable outbox, opt-in
+                               (`pnpm run test:redis`) — needs Docker
 
   subscriber/                @egress/subscriber — depends on @egress/domain
     src/subscriber.ts        standalone consumer; decodes with the producer's Schema
@@ -1158,6 +1164,20 @@ reading it afterwards:
   `ControlLoopStalled` alert make the silence audible. Same 55-second outage
   after the fix: the loop kept ticking, recovered on its own, and published
   the next incident at `sequence=102` with no gap.
+- **The guarantee this repo is about stopped one hop short of the party it is
+  for.** Inside the aggregator the per-API sequence is gapless and strictly
+  ordered, proven by tests at three levels. At the edge it was not: a webhook
+  that failed its three retries went into a 200-entry in-memory list that
+  exists to be *read*, not replayed, and that dies with the process. So a
+  subscriber down for longer than about a second lost whatever happened while
+  it was away, permanently, and nothing in the system disagreed — the
+  aggregator's own counters called it delivered-then-dead-lettered and moved
+  on. `Outbox.ts` is the durable half: the same `RedisLike` port the lease
+  uses, replay in order on the instance that holds the lease, bounded per API.
+  The failure mode worth naming is the one the drain deliberately refuses:
+  skipping a stuck event to deliver the ones behind it would manufacture
+  exactly the gap this system exists to prevent, and it would look like
+  progress.
 - **A lease that is only ever surrendered by expiring turns every deploy into
   an outage-shaped event.** `LeaderElection.release` was written in the first
   version of `Coordination.ts` and never called from anywhere — grepping the
@@ -1388,6 +1408,45 @@ integration:
    `aggregator` containers against one real `redis` container, with a hard
    `docker kill` of the leader used to confirm the failover live. See
    [Two real aggregator instances, one shared Redis](#two-real-aggregator-instances-one-shared-redis).
+
+### Delivery that outlives the subscriber
+
+Everything above is about the aggregator surviving. This is about the
+*guarantee* surviving, which is a different question and had a different
+answer: inside the process the per-API sequence is gapless and strictly
+ordered, and at the last hop it was not. A webhook that failed its three
+retries went into a 200-entry in-memory list — a diagnostic, not a ledger —
+which dies with the process. A subscriber down for a minute lost that minute,
+and nothing in the system disagreed.
+
+[`Outbox.ts`](packages/aggregator/src/Outbox.ts) is the durable half, and it
+is deliberately the same shape as `CheckpointStore`: one `RedisLike` port, one
+`eval`, scripts that read and write in one round trip, and an in-memory
+implementation that is what solo mode actually runs rather than a mock. Four
+rules, each of which is a way to get this wrong:
+
+- **The leader drains it, and only the leader.** The outbox is shared state;
+  two instances replaying it would deliver every event twice, which is
+  precisely the break the sequence contract exists to make visible.
+- **In order, stopping at the first failure.** A drain that skipped a stuck
+  event to deliver the ones behind it would manufacture the gap this system
+  exists to prevent — and it would look like progress.
+- **Committed only after delivery.** A crash mid-pass replays rather than
+  loses; the `idempotency-key` header was already there for exactly this.
+- **Bounded, dropping the oldest.** A subscriber that stays down does not get
+  to consume the aggregator's memory on its way out. Dropping the oldest
+  leaves the subscriber with a gap it can *see* — its own integrity check
+  counts it — rather than a state it wrongly trusts.
+
+Draining is forked, not awaited, and the sink refuses to run two passes at
+once: a subscriber that hangs rather than refusing must cost the control loop
+nothing, and a 250ms tick against a 2s timeout would otherwise stack passes
+faster than they finish.
+
+`test/integration/Outbox.test.ts` drives it against a real Redis and a real
+HTTP subscriber that refuses, then recovers, then falls over again mid-drain:
+five events kept while it was down, five replayed in order when it came back,
+each committed exactly once.
 
 ## The fork this defers
 

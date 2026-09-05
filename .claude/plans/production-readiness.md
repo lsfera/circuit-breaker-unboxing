@@ -285,7 +285,7 @@ not release the lease on a *demotion* (losing it is already handled at
 
 ---
 
-## Phase 5 — Delivery that survives the subscriber being down
+## Phase 5 — Delivery that survives the subscriber being down  ✅ done
 
 **What to implement.** A durable outbox behind `EventSink`, replacing the
 in-memory `DEAD_LETTER_BUFFER` as the last line of defence.

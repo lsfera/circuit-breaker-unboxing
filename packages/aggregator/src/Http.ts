@@ -105,6 +105,14 @@ export const HttpLive = HttpRouter.use((router) =>
                 Metric.update(Metric.withAttributes(Telemetry.webhookDelivered, { apiId }), 0),
                 Metric.update(Metric.withAttributes(Telemetry.webhookFailed, { apiId }), 0),
                 Metric.update(Metric.withAttributes(Telemetry.webhookDeadLettered, { apiId }), 0),
+                // The outbox metrics belong in this list more than any of the
+                // others: depth is zero in every healthy minute this system
+                // will ever have, so without a series at zero the panel that
+                // is supposed to show "nothing is stuck" shows "no data",
+                // which is what a broken exporter looks like.
+                Metric.update(Metric.withAttributes(Telemetry.outboxDepth, { apiId }), 0),
+                Metric.update(Metric.withAttributes(Telemetry.outboxReplayed, { apiId }), 0),
+                Metric.update(Metric.withAttributes(Telemetry.outboxDropped, { apiId }), 0),
               ],
               { discard: true },
             ),

@@ -8,6 +8,7 @@ import { RmqLive } from "@egress/rmq/Client.ts";
 import { Aggregator, AggregatorLayer } from "./Aggregator.ts";
 import { makeAmqpControlPlaneSink } from "./AmqpControlPlaneSink.ts";
 import { HaSettings, InMemoryCoordinationLayer, RedisCoordinationLayer } from "./Coordination.ts";
+import { InMemoryOutboxLayer, RedisOutboxLayer } from "./Outbox.ts";
 import { combineSinks, EventBusLayer, EventSink, makeWebhookSink, NoopSinkLayer } from "./Events.ts";
 import { EnvoyFleetLayer, SimFleetLayer } from "./FleetSource.ts";
 import { HttpLive } from "./Http.ts";
@@ -112,9 +113,18 @@ const CoordinationLayer =
         Effect.acquireRelease(
           Effect.sync(() => new Redis(args.get("redis") ?? "redis://127.0.0.1:6379")),
           (redis) => Effect.promise(() => redis.quit().then(() => {}, () => {})),
-        ).pipe(Effect.map((redis) => RedisCoordinationLayer(asRedisLike(redis)))),
+        ).pipe(
+          Effect.map((redis) => {
+            // One connection, two stores. The lease and the outbox are the
+            // same kind of state — small, durable, and only interesting to the
+            // instance that holds the lease — so they share a client rather
+            // than opening a second one to the same server.
+            const like = asRedisLike(redis);
+            return Layer.mergeAll(RedisCoordinationLayer(like), RedisOutboxLayer(like));
+          }),
+        ),
       )
-    : InMemoryCoordinationLayer;
+    : Layer.mergeAll(InMemoryCoordinationLayer, InMemoryOutboxLayer);
 
 const HaLayer = Layer.mergeAll(
   CoordinationLayer,
@@ -131,9 +141,11 @@ const HaLayer = Layer.mergeAll(
  */
 const AppLayer = HttpLive.pipe(
   Layer.provideMerge(AggregatorLayer),
-  Layer.provideMerge(
-    Layer.mergeAll(FleetLayer, EventBusLayer, SinkLayer, HaLayer),
-  ),
+  // The sink layer sits *above* HaLayer rather than beside it: the webhook
+  // sink needs the Outbox, which is part of the same durable state the lease
+  // lives in.
+  Layer.provideMerge(Layer.mergeAll(FleetLayer, EventBusLayer, SinkLayer)),
+  Layer.provideMerge(HaLayer),
   Layer.provide(Layer.succeed(Config, defaultConfig)),
 );
 

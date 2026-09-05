@@ -79,7 +79,11 @@ export const makeAmqpControlPlaneSink: Effect.Effect<SinkImpl, RmqError, Rmq> = 
       );
     };
 
-    return { name: "amqp", deliver, deadLetters: Ref.get(dead) };
+    // Nothing durable behind this one: an event the control-plane exchange
+    // could not take is dead-lettered and counted, not replayed. The daemons
+    // re-learn the real state from the next snapshot, which is what
+    // `snapshotMs` is for — a queue of stale transitions helps nobody.
+    return { name: "amqp", deliver, deadLetters: Ref.get(dead), drainOutbox: Effect.succeed(0) };
   },
 );
 

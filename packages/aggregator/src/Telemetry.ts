@@ -123,6 +123,29 @@ export const webhookDeliveryDuration = Metric.timer(
 );
 
 /**
+ * The durable outbox (Outbox.ts), which is where an event goes when the
+ * subscriber will not take it.
+ *
+ * Depth is the one to alert on: it is zero in the healthy case, and a value
+ * that stays non-zero is a subscriber that has stopped taking events while
+ * everything else looks fine. `dropped_total` moving at all means the bound
+ * was hit and a subscriber has permanently missed events — the gap it will
+ * see is deliberate, and this is where it becomes visible from the publisher's
+ * side too.
+ */
+export const outboxDepth = Metric.gauge("egress_webhook_outbox_depth", {
+  description: "Events waiting in the durable outbox for a subscriber that is not taking them, by API.",
+});
+
+export const outboxReplayed = Metric.counter("egress_webhook_outbox_replayed_total", {
+  description: "Events delivered from the outbox after an earlier attempt failed, by API.",
+});
+
+export const outboxDropped = Metric.counter("egress_webhook_outbox_dropped_total", {
+  description: "Oldest events discarded because the outbox hit its per-API bound, by API.",
+});
+
+/**
  * These three read the delivery contract from OUTSIDE the process — the same
  * boundary Http.ts's `Integrity` tracker checks — so a gap or duplicate here
  * is a real, observable break of the per-API sequence guarantee, not a
