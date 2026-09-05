@@ -1,6 +1,11 @@
 import { Duration, Effect, Layer, Ref, Schedule } from "effect";
 import { Rmq, RmqError } from "@egress/rmq/Client.ts";
-import { CONTROL_EXCHANGE, encodeCircuitEvent, routingKeyFor } from "@egress/rmq/ControlPlane.ts";
+import {
+  CONTROL_EXCHANGE,
+  CONTROL_EXCHANGE_OPTIONS,
+  encodeCircuitEvent,
+  routingKeyFor,
+} from "@egress/rmq/ControlPlane.ts";
 import { DeliveryFailed } from "@egress/domain/Model.ts";
 import { DEAD_LETTER_BUFFER, EventSink } from "./Events.ts";
 import type { SinkImpl } from "./Events.ts";
@@ -29,7 +34,7 @@ import type { Publisher } from "@egress/rmq/Client.ts";
 export const makeAmqpControlPlaneSink: Effect.Effect<SinkImpl, RmqError, Rmq> = Effect.gen(
   function* () {
     const rmq = yield* Rmq;
-    yield* rmq.declareTopicExchange(CONTROL_EXCHANGE);
+    yield* rmq.declareTopicExchange(CONTROL_EXCHANGE, CONTROL_EXCHANGE_OPTIONS);
 
     const dead = yield* Ref.make<ReadonlyArray<DeliveryFailed>>([]);
     const publishers = yield* Ref.make(new Map<string, Publisher>());

@@ -749,6 +749,18 @@ daemon-2: redriving payments-provider.work.dead (max 5000 per pass)
 daemon-2: redrive finished — 2070 replayed (drained)
 ```
 
+The work queue and the dead-letter queue are **durable**, which they were not
+to begin with: a broker restart used to empty both, and silently, because the
+first daemon back redeclares them with the same name and arguments. The
+control and election queues stay transient on purpose — a daemon that comes
+back relearns the circuit state from the aggregator's next snapshot, so
+keeping those events buys nothing while a queue growing behind a daemon that
+never returns costs something. Queue durability is only half of it, though:
+the `rabbitmq` service in `docker-compose.yml` has no volume, so the broker's
+data lives in the container's writable layer. That survives
+`docker compose restart rabbitmq` and does not survive `docker compose down`
+— the same honest caveat as the Redis under the aggregators.
+
 ```bash
 # watch the fleet react — target=<k>/5 is the agreed active count
 docker compose logs -f rmq-daemon-0 rmq-daemon-3
@@ -874,7 +886,12 @@ belongs in the aggregator, off the request path.
   down. A real deployment wants Redis with AOF/replication, or a stronger
   backing store entirely (etcd, a Postgres advisory lock) behind the same
   `LeaderElection`/`CheckpointStore` interfaces — those interfaces, not the
-  demo's Redis config, are the part meant to carry over.
+  demo's Redis config, are the part meant to carry over. What losing that
+  Redis costs is now bounded to the checkpoints themselves — a new leader
+  resumes from nothing rather than from where the last one stopped — and no
+  longer extends to correctness: because the fencing token carries an epoch
+  (see [High availability](#high-availability)), a coordinator that has lost
+  its state cannot hand a stale leader a token that outranks the live one.
 - **Enforcement is observational here.** The aggregator publishes but does not
   push config — see [the fork this defers](#the-fork-this-defers).
 - **The Envoy and monitoring stack *is* run end to end now — the earlier
@@ -927,7 +944,7 @@ packages/
   rmq/                       @egress/rmq — Effect wrapper over AMQP 1.0 (RabbitMQ 4 native)
     src/Client.ts            the Rmq service; two silent client bugs guarded here
     src/ControlPlane.ts      circuit.control naming, shared by publisher and consumers
-    test/integration/        8 tests against a real broker, opt-in (`pnpm run test:rmq`)
+    test/integration/        9 tests against a real broker, opt-in (`pnpm run test:rmq`)
 
   rmq-consumer/              @egress/rmq-consumer — the competing-consumer daemon fleet
     src/DaemonPolicy.ts      pure: (prior, circuit state, fleet size) -> target active count
@@ -1098,6 +1115,41 @@ reading it afterwards:
   `ControlLoopStalled` alert make the silence audible. Same 55-second outage
   after the fix: the loop kept ticking, recovered on its own, and published
   the next incident at `sequence=102` with no gap.
+- **A dead-letter queue that does not outlive the broker is a dead-letter
+  queue in name only.** Every queue the RabbitMQ fleet declared was
+  transient, because `durable: false` was hardcoded in the client wrapper —
+  a default nobody had ever decided on. Rejecting a failed message therefore
+  preserved it exactly as long as the broker process lived: measured on the
+  running stack, a dead-letter queue holding 24 messages held **0** after
+  `docker compose restart rabbitmq`. What makes it worth naming is that
+  nothing looks wrong afterwards — the first daemon back redeclares the queue
+  with the same name and the same arguments, so a dead-letter queue that lost
+  everything and one that never received anything are the same queue from the
+  outside, in the management UI and in the metrics alike. Messages were also
+  published without the durable header, which on its own would have moved the
+  loss one level down and left the fix looking like it worked. The decision
+  is now explicit and made in one place (`ControlPlane.ts`, so the producer
+  and the daemons cannot disagree): work and dead-letter queues are durable
+  because nothing can reconstruct them, control and election queues stay
+  transient because a restarting daemon relearns the state from the next
+  snapshot. A real broker restart is in the test suite now, asserting both
+  halves — the contrast is the point.
+- **A fencing token that can go backwards is not a fence.** The lease token
+  came from Redis `INCR`, so a coordinator that lost its own state — a
+  restart without persistence, a failover to an empty replica — began issuing
+  from 1 again. A leader paused across that moment still held token 5, and
+  the checkpoint script's `attempted < current` test then read `5 < 1`, which
+  is false: the stale leader was waved through and overwrote the live one's
+  checkpoints. The same split brain as the per-key fencing bug above, reached
+  with no race at all — just by making the counter smaller. Tokens are now
+  `<epoch>:<counter>`, the epoch minted by whichever coordinator finds no
+  state to inherit, and they are ordered only within an epoch: a token from
+  before the wipe is not a low number, it is an unrecognisable one. The Lua
+  script requires the epoch *and* the counter to have survived together,
+  deliberately — an epoch that outlived its counter would let the counter
+  restart inside an epoch that stale leaders still recognise, which is the
+  same bug wearing a disguise. Pinned against a real Redis by deleting its
+  keys mid-test.
 
 ## What Effect actually bought here
 
@@ -1202,6 +1254,20 @@ tokens exist to prevent. Checking against the shared lease token instead
 closes the window for every API at once, the instant a handoff happens —
 `Coordination.test.ts`'s "a stale token is rejected even for an API no one
 has checkpointed yet" test is that exact bug, pinned down.
+
+There is a second way to lose the same guarantee, and it needs no race
+either. The token was a bare counter from `INCR`, so a coordinator that lost
+its own state — a restart with no persistence, a failover to an empty
+replica — started issuing from 1 again, and `attempted < current` comparing a
+surviving leader's 5 against a fresh 1 is false. The stale writer wins.
+Tokens are therefore `<epoch>:<counter>`: the epoch is minted once, by
+whichever coordinator finds nothing to inherit, and tokens are ordered only
+*within* an epoch. Across epochs they are incomparable by design, which is
+the stronger and simpler property — a token issued before the wipe is not a
+low number, it is an unrecognisable one.
+`test/integration/RedisCoordination.test.ts` deletes the lease keys mid-test
+and asserts that the leader still holding a pre-wipe token can no longer
+write, while the instance that actually holds the lease can.
 
 `main.ts` supports both backends: `InMemoryCoordinationLayer` by default
 (one instance that always wins its own lease — not a special case, just

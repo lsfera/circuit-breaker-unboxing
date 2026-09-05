@@ -497,6 +497,75 @@ Verified end to end: a 2,070-message dead-letter backlog, elected to
 evidence the two elections are independent), drained in a single pass three
 seconds after recovery, leaving both queues at zero.
 
+### Rejecting a message preserves it only if the queue outlives the broker
+
+Everything above assumes the dead-letter queue is still there afterwards. It
+was not.
+
+Every queue the fleet declared was transient — `durable: false` was hardcoded
+in `@egress/rmq`'s `declareQueue`, which made it a default rather than a
+decision. Measured on the running stack: 24 messages on
+`payments-provider.work.dead`, then `docker compose restart rabbitmq`, then
+zero. The work queue was declared the same way.
+
+What makes this worth a section rather than a line is that the aftermath looks
+healthy. The first daemon back redeclares the queue with the same name and the
+same arguments, so a dead-letter queue that lost everything is
+indistinguishable from one that never received anything — same name, same
+arguments, depth 0, in the management UI and in `rabbitmq_prometheus` alike.
+The only evidence is a number that had been climbing and then was not.
+
+Durability is two flags rather than one. A durable queue keeps durable
+messages; a message published without the durable header is dropped on restart
+even from a durable queue, which would have moved the loss one level down and
+left the fix looking like it had worked. `send` therefore sets it on every
+publish and offers no per-call flag: on a transient queue the broker ignores
+it, on a durable one it is the difference between keeping a message and
+appearing to, and this is the one place where getting it wrong is silent.
+
+Which queues get it is a real decision, made once in `ControlPlane.ts` so the
+producer and the daemons cannot disagree:
+
+- **Durable — the work queue and the dead-letter queue.** Nothing can
+  reconstruct them. They hold work this system promised to keep, and the
+  dead-letter queue is where that promise is most visible.
+- **Transient — each daemon's control queue and both SAC election queues.** A
+  control queue is a live subscription: a daemon that restarts learns the real
+  state from the aggregator's next snapshot, which is what `snapshotMs` is
+  for. Keeping those events across a restart buys nothing, and a control queue
+  that survives its daemon is a queue growing behind a consumer that may never
+  come back. The election queues are always empty by design.
+- **Durable — the `circuit.control` exchange**, so the topology itself
+  survives even though what it feeds does not need to.
+
+One thing to know before changing any of this on a broker that is already
+running: durability is part of a queue's identity, so a redeclare that
+disagrees is refused rather than merged. Measured, in both directions:
+
+```
+409 "inequivalent arg 'durable' for queue 'mix.q' in vhost '/':
+     received 'true' but current is 'false'"
+```
+
+The upgrade path over a live broker is therefore to delete the old queues —
+or the broker's data — first, exactly as it would be for a changed
+`x-dead-letter-routing-key`.
+
+`DeadLetter.test.ts` pins the property against a real broker rather than
+reasoning about it: five messages onto a durable queue and five onto a
+transient one, one `container.restart()`, then five kept and none. Both halves
+are asserted together because the contrast is the decision — transient is the
+right choice for a live subscription and the wrong one for work you promised
+to keep, and the two differ by a single flag.
+
+Queue durability is necessary and not sufficient, and the demo says so: the
+`rabbitmq` service in `docker-compose.yml` has no volume, so the broker's data
+lives in the container's writable layer. That survives
+`docker compose restart rabbitmq` — which is what this is about, and what the
+test reproduces — and does not survive `docker compose down`. Same shape as
+the Redis note in the README: the queue-level decision is the part meant to
+carry over, the storage under the demo is a prototype.
+
 ### The fleet is on the dashboard now, because that bug was an observability bug
 
 Every daemon serves `/metrics` on `METRICS_PORT` from the same in-process

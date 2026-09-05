@@ -133,9 +133,23 @@ export type DeliveryInfo = {
 };
 
 export interface RmqService {
-  /** durable: false, exclusive: false — every queue this repo declares is a demo fixture, not durable state. */
-  readonly declareQueue: (name: string, args?: QueueArgs) => Effect.Effect<RmqQueue, RmqError>;
-  readonly declareTopicExchange: (name: string) => Effect.Effect<RmqExchange, RmqError>;
+  /**
+   * `durable` decides whether the queue and its contents survive a broker
+   * restart, and it is a real decision rather than a default worth inheriting.
+   * A transient queue is right for a live subscription that a restarting
+   * consumer can rebuild from the next snapshot. It is badly wrong for a queue
+   * whose entire purpose is holding work you promised to keep: measured on
+   * this stack, a broker restart took a dead-letter queue from 24 preserved
+   * messages to zero.
+   */
+  readonly declareQueue: (
+    name: string,
+    options?: { readonly args?: QueueArgs; readonly durable?: boolean },
+  ) => Effect.Effect<RmqQueue, RmqError>;
+  readonly declareTopicExchange: (
+    name: string,
+    options?: { readonly durable?: boolean },
+  ) => Effect.Effect<RmqExchange, RmqError>;
   readonly bind: (
     routingKey: string,
     source: RmqExchange,
@@ -170,7 +184,17 @@ export interface RmqService {
     routingKey: string,
   ) => Effect.Effect<Publisher, RmqError>;
   readonly publisherToQueue: (queue: string) => Effect.Effect<Publisher, RmqError>;
-  /** `properties` become AMQP application properties on the message — see `DeliveryInfo.properties` for why anything republishing needs them. */
+  /**
+   * `properties` become AMQP application properties on the message — see
+   * `DeliveryInfo.properties` for why anything republishing needs them.
+   *
+   * Every message is published with the durable header set. There is no flag
+   * for it because there is no case here for publishing otherwise: on a
+   * transient queue the broker ignores it, and on a durable one it is the
+   * difference between keeping the message across a restart and only
+   * appearing to. A per-call flag would be one more thing to get wrong in the
+   * one place where getting it wrong is silent.
+   */
   readonly send: (
     pub: Publisher,
     body: string,
@@ -259,23 +283,26 @@ export const makeRmq = (
         gate.withPermit(wrap(operation, promise));
 
       return {
-        declareQueue: (name, args = {}) =>
+        declareQueue: (name, options = {}) =>
           guarded("declareQueue", () =>
             management.declareQueue(name, {
               exclusive: false,
-              durable: false,
+              durable: options.durable ?? false,
               // The library's own type narrows `arguments` to
               // Record<string,string>, but it only ever spreads this object
               // verbatim into the AMQP declare body — non-string values
               // (e.g. x-single-active-consumer: true) pass through fine at
               // runtime. Checked directly against a live broker, not
               // assumed — see docs/rmq-control-plane.md.
-              arguments: args as Record<string, string>,
+              arguments: (options.args ?? {}) as Record<string, string>,
             } as never),
           ),
-        declareTopicExchange: (name) =>
+        declareTopicExchange: (name, options = {}) =>
           guarded("declareExchange", () =>
-            management.declareExchange(name, { type: "topic", durable: false }),
+            management.declareExchange(name, {
+              type: "topic",
+              durable: options.durable ?? false,
+            }),
           ),
         bind: (routingKey, source, destination) =>
           guarded("bind", () => management.bind(routingKey, { source, destination } as never)).pipe(
@@ -360,8 +387,8 @@ export const makeRmq = (
           guarded("send", () =>
             pub.publish(
               (properties === undefined
-                ? { body }
-                : { body, application_properties: properties }) as never,
+                ? { body, durable: true }
+                : { body, durable: true, application_properties: properties }) as never,
             ),
           ).pipe(Effect.asVoid),
         closeConsumer: (c) => Effect.sync(() => c.close()),

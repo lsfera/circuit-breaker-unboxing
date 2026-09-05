@@ -129,7 +129,7 @@ test("x-single-active-consumer elects one consumer and promotes another when it 
   await run(
     Effect.gen(function* () {
       const rmq = yield* Rmq;
-      yield* rmq.declareQueue(queue, { "x-single-active-consumer": true });
+      yield* rmq.declareQueue(queue, { args: { "x-single-active-consumer": true } });
 
       const consumers: Record<string, Awaited<ReturnType<typeof Effect.runPromise>>> = {};
       for (const id of ["a", "b", "c"]) {

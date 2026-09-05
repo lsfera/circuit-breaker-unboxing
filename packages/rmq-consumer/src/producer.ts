@@ -1,6 +1,11 @@
 import { Duration, Effect, Metric, Schedule } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
-import { deadLetterQueueFor, workQueueArgs, workQueueFor } from "@egress/rmq/ControlPlane.ts";
+import {
+  deadLetterQueueFor,
+  deadLetterQueueOptions,
+  workQueueFor,
+  workQueueOptions,
+} from "@egress/rmq/ControlPlane.ts";
 import * as Telemetry from "./Telemetry.ts";
 
 /**
@@ -28,8 +33,8 @@ export const runProducer = (cfg: ProducerConfig) =>
     // Same arguments the daemons declare, because whichever container starts
     // first is what actually creates the queue and a mismatched redeclare is
     // a hard error, not a merge.
-    yield* rmq.declareQueue(deadLetterQueueFor(cfg.apiId));
-    yield* rmq.declareQueue(queue, workQueueArgs(cfg.apiId));
+    yield* rmq.declareQueue(deadLetterQueueFor(cfg.apiId), deadLetterQueueOptions());
+    yield* rmq.declareQueue(queue, workQueueOptions(cfg.apiId));
     const publisher = yield* rmq.publisherToQueue(queue);
 
     // One batch per 100ms rather than one timer per message: at a few hundred

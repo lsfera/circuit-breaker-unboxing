@@ -93,6 +93,43 @@ export const sacQueueArgs = (apiId: string): Record<string, unknown> => ({
   "x-single-active-consumer": true,
 });
 
+/**
+ * Which queues survive a broker restart, decided once so producer and daemons
+ * cannot disagree — a durability mismatch is a redeclare conflict, exactly
+ * like a mismatched argument. Measured in both directions rather than assumed:
+ * the broker answers `409 "inequivalent arg 'durable' for queue ... received
+ * 'true' but current is 'false'"`, so flipping this on a broker that already
+ * holds the queues means deleting them first.
+ *
+ * The split is about what a restarting consumer can rebuild for itself. A
+ * control queue is a live subscription: a daemon that comes back learns the
+ * real state from the aggregator's next snapshot, which is what `snapshotMs`
+ * is for, so keeping those events across a restart buys nothing and risks a
+ * queue growing behind a daemon that never returns. The election queues are
+ * transient by nature. The work queue and the dead-letter queue are the
+ * opposite: nothing can reconstruct them, and losing them means losing work
+ * this system promised to keep.
+ */
+export const workQueueOptions = (apiId: string) => ({
+  args: workQueueArgs(apiId),
+  durable: true,
+});
+
+export const deadLetterQueueOptions = () => ({ durable: true });
+
+export const controlQueueOptions = (apiId: string) => ({
+  args: deadLetterArgs(apiId),
+  durable: false,
+});
+
+export const sacQueueOptions = (apiId: string) => ({
+  args: sacQueueArgs(apiId),
+  durable: false,
+});
+
+/** Durable so the topology itself survives, even though what it feeds does not need to. */
+export const CONTROL_EXCHANGE_OPTIONS = { durable: true };
+
 export const encodeCircuitEvent = (event: CircuitEvent): string => JSON.stringify(event);
 
 const decode = Schema.decodeUnknownOption(CircuitEvent);

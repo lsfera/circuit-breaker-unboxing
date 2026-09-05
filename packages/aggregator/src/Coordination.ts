@@ -25,7 +25,31 @@ import type { Reason, State } from "@egress/domain/Model.ts";
  * this comment deliberately does not restate it.
  */
 
-export type LeaseToken = number;
+/**
+ * `"<epoch>:<counter>"`.
+ *
+ * The counter alone was not enough, and the way it failed is worth keeping in
+ * front of whoever reads this. It came from `INCR`, so a coordinator that lost
+ * its state — a Redis restart without persistence, a failover to an empty
+ * replica — started issuing from 1 again. A leader paused through that still
+ * held token 5, and `attempted < current` then read `5 < 1`, which is false:
+ * the stale leader was waved through and overwrote the new leader's
+ * checkpoints. Split brain, reached by making the counter go backwards rather
+ * than by any race. Verified against a real Redis before it was fixed.
+ *
+ * The epoch is generated once, when a coordinator finds itself with no state.
+ * A token from a previous epoch is then not merely stale, it is
+ * unrecognisable — which is the stronger and simpler property.
+ */
+export type LeaseToken = string;
+
+/** Tokens are only ordered within an epoch; across epochs they are incomparable by design. */
+export const tokenEpoch = (token: LeaseToken): string => token.slice(0, token.indexOf(":"));
+export const tokenCounter = (token: LeaseToken): number =>
+  Number(token.slice(token.indexOf(":") + 1));
+
+/** Fresh identity for a coordinator that has no state to inherit. */
+const newEpoch = (): string => Math.random().toString(36).slice(2, 10);
 
 /**
  * The minimum state needed to resume publishing for one API without
@@ -146,11 +170,16 @@ export class CheckpointStore extends Context.Service<
 
 type LockState = {
   readonly holderId: string;
-  readonly token: LeaseToken;
+  readonly counter: number;
   readonly expiresAt: number;
 } | null;
 
 export const makeInMemoryCoordination = Effect.gen(function* () {
+  // One coordinator, one epoch: an in-memory store cannot lose its state
+  // without the process going with it, so the epoch never rotates here. It
+  // exists so this layer and the Redis one have the same shape rather than
+  // two notions of what a token is.
+  const epoch = newEpoch();
   const lock = yield* Ref.make<LockState>(null);
   const checkpoints = yield* Ref.make(new Map<string, Checkpoint>());
 
@@ -159,15 +188,21 @@ export const makeInMemoryCoordination = Effect.gen(function* () {
       Effect.flatMap((now) =>
         Ref.modify(lock, (current) => {
           if (current && current.expiresAt > now && current.holderId !== holderId) {
-            return [Option.none(), current]; // someone else holds a live lease
+            return [Option.none<LeaseToken>(), current]; // someone else holds a live lease
           }
           if (current && current.holderId === holderId && current.expiresAt > now) {
             // Renewal: same token, extended TTL.
-            return [Option.some(current.token), { ...current, expiresAt: now + ttlMs }];
+            return [
+              Option.some(`${epoch}:${current.counter}`),
+              { ...current, expiresAt: now + ttlMs },
+            ];
           }
-          // Expired or never held: a genuine handoff, token strictly increases.
-          const token = (current?.token ?? 0) + 1;
-          return [Option.some(token), { holderId, token, expiresAt: now + ttlMs }];
+          // Expired or never held: a genuine handoff, counter strictly increases.
+          const next = (current?.counter ?? 0) + 1;
+          return [
+            Option.some(`${epoch}:${next}`),
+            { holderId, counter: next, expiresAt: now + ttlMs },
+          ];
         }),
       ),
     );
@@ -175,12 +210,14 @@ export const makeInMemoryCoordination = Effect.gen(function* () {
   const release = (holderId: string) =>
     Ref.update(lock, (current) => (current?.holderId === holderId ? null : current));
 
-  const currentToken = Ref.get(lock).pipe(Effect.map((l) => l?.token ?? 0));
+  const currentToken = Ref.get(lock).pipe(
+    Effect.map((l): LeaseToken => `${epoch}:${l?.counter ?? 0}`),
+  );
 
   const save = (apiId: string, token: LeaseToken, checkpoint: Checkpoint) =>
     currentToken.pipe(
       Effect.flatMap((current) =>
-        token < current
+        tokenEpoch(token) !== epoch || tokenCounter(token) < tokenCounter(current)
           ? Effect.fail(new CheckpointFenced({ apiId, attempted: token, current }))
           : Ref.update(checkpoints, (map) => new Map(map).set(apiId, checkpoint)),
       ),
@@ -245,17 +282,31 @@ export type RedisLike = {
   ) => Promise<string | number | null>;
 };
 
+// KEYS: holder, counter, epoch.  ARGV: holderId, ttlMs, candidateEpoch.
+//
+// A coordinator missing *either* the epoch or the counter has lost its state,
+// and adopts the caller's candidate epoch starting from zero. Checking both is
+// deliberate: an epoch that survived while the counter did not would otherwise
+// let the counter restart inside an epoch that stale leaders still recognise,
+// which is the same bug wearing a disguise.
 const ACQUIRE_SCRIPT = `
+local epoch = redis.call("GET", KEYS[3])
+local counter = redis.call("GET", KEYS[2])
+if epoch == false or counter == false then
+  epoch = ARGV[3]
+  redis.call("SET", KEYS[3], epoch)
+  redis.call("SET", KEYS[2], 0)
+end
 local holder = redis.call("GET", KEYS[1])
 if holder == false then
-  local token = redis.call("INCR", KEYS[2])
+  local issued = redis.call("INCR", KEYS[2])
   redis.call("SET", KEYS[1], ARGV[1], "PX", ARGV[2])
-  return token
+  return epoch .. ":" .. issued
 elseif holder == ARGV[1] then
   redis.call("PEXPIRE", KEYS[1], ARGV[2])
-  return tonumber(redis.call("GET", KEYS[2]))
+  return epoch .. ":" .. redis.call("GET", KEYS[2])
 else
-  return -1
+  return "-1"
 end
 `;
 
@@ -271,13 +322,26 @@ return 0
 // once, including ones the new leader has not published for yet. GET+SET
 // happen inside one script, so there is no read-then-write gap for Redis to
 // interleave a concurrent writer into.
+// KEYS: epoch, counter, checkpoint.  ARGV: attemptedToken, payload.
+//
+// Epoch first, then counter. A token from a previous epoch is not stale, it is
+// unrecognisable — which is what closes the window a counter alone left open
+// when the coordinator lost its state and started issuing from 1 again.
 const CHECKPOINT_SCRIPT = `
-local current = tonumber(redis.call("GET", KEYS[1]) or "0")
-if tonumber(ARGV[1]) < current then
+local epoch = redis.call("GET", KEYS[1])
+local counter = tonumber(redis.call("GET", KEYS[2]) or "0")
+local current = (epoch or "none") .. ":" .. counter
+local sep = string.find(ARGV[1], ":", 1, true)
+if sep == nil or epoch == false then
   return current
 end
-redis.call("SET", KEYS[2], ARGV[2])
-return tonumber(ARGV[1])
+local attemptedEpoch = string.sub(ARGV[1], 1, sep - 1)
+local attemptedCounter = tonumber(string.sub(ARGV[1], sep + 1))
+if attemptedEpoch ~= epoch or attemptedCounter == nil or attemptedCounter < counter then
+  return current
+end
+redis.call("SET", KEYS[3], ARGV[2])
+return ARGV[1]
 `;
 
 /** Every call to the store goes through this: a rejected promise is a failure, never a defect. */
@@ -300,12 +364,16 @@ export const RedisCoordinationLayer = (
     Layer.succeed(LeaderElection, {
       tryAcquireOrRenew: (holderId, ttlMs) =>
         evalGuarded(redis, "tryAcquireOrRenew", ACQUIRE_SCRIPT, {
-          keys: [`${keyPrefix}:leader:holder`, `${keyPrefix}:leader:token`],
-          args: [holderId, String(ttlMs)],
+          keys: [
+            `${keyPrefix}:leader:holder`,
+            `${keyPrefix}:leader:token`,
+            `${keyPrefix}:leader:epoch`,
+          ],
+          args: [holderId, String(ttlMs), newEpoch()],
         }).pipe(
           Effect.map((result) => {
-            const token = Number(result);
-            return token > 0 ? Option.some(token) : Option.none();
+            const token = String(result);
+            return token === "-1" ? Option.none<LeaseToken>() : Option.some(token);
           }),
         ),
       release: (holderId) =>
@@ -317,11 +385,15 @@ export const RedisCoordinationLayer = (
     Layer.succeed(CheckpointStore, {
       save: (apiId, token, checkpoint) =>
         evalGuarded(redis, "save", CHECKPOINT_SCRIPT, {
-          keys: [`${keyPrefix}:leader:token`, `${keyPrefix}:checkpoint:${apiId}`],
-          args: [String(token), JSON.stringify(checkpoint)],
+          keys: [
+            `${keyPrefix}:leader:epoch`,
+            `${keyPrefix}:leader:token`,
+            `${keyPrefix}:checkpoint:${apiId}`,
+          ],
+          args: [token, JSON.stringify(checkpoint)],
         }).pipe(
           Effect.flatMap((result) => {
-            const current = Number(result);
+            const current = String(result);
             return current === token
               ? Effect.void
               : Effect.fail(new CheckpointFenced({ apiId, attempted: token, current }));

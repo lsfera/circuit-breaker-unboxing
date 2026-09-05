@@ -2,16 +2,18 @@ import { Effect, Exit, Metric, Option, Ref, Scope, Semaphore } from "effect";
 import { makeRmq, Rmq } from "@egress/rmq/Client.ts";
 import {
   CONTROL_EXCHANGE,
+  CONTROL_EXCHANGE_OPTIONS,
   controlQueueFor,
-  deadLetterArgs,
+  controlQueueOptions,
   deadLetterQueueFor,
+  deadLetterQueueOptions,
   decodeCircuitEvent,
   probeTriggerQueueFor,
   redriveTriggerQueueFor,
   routingKeyFor,
-  sacQueueArgs,
-  workQueueArgs,
+  sacQueueOptions,
   workQueueFor,
+  workQueueOptions,
 } from "@egress/rmq/ControlPlane.ts";
 import { State, STATE_CODE } from "@egress/domain/Model.ts";
 import { initialContract, observe } from "./Contract.ts";
@@ -162,18 +164,21 @@ export const runDaemon = (cfg: DaemonConfig) =>
     // Every daemon declares the shared topology. These are all idempotent
     // declares of the same arguments, so N daemons racing to start is fine —
     // whoever gets there first wins and the rest are no-ops.
-    const exchange = yield* control.declareTopicExchange(CONTROL_EXCHANGE);
+    const exchange = yield* control.declareTopicExchange(
+      CONTROL_EXCHANGE,
+      CONTROL_EXCHANGE_OPTIONS,
+    );
     // The dead-letter queue is declared before the queue that points at it,
     // so a rejection during the first seconds of the fleet's life has
     // somewhere to land rather than being discarded by the broker.
     // The dead-letter queue is the only one without a dead-letter target of
     // its own: it is the end of the line, and pointing it at itself is a
     // cycle. Everything else routes rejections to it — see deadLetterArgs.
-    yield* control.declareQueue(deadQueue);
-    yield* control.declareQueue(workQueue, workQueueArgs(cfg.apiId));
-    yield* control.declareQueue(probeQueue, sacQueueArgs(cfg.apiId));
-    yield* control.declareQueue(redriveQueue, sacQueueArgs(cfg.apiId));
-    const controlQ = yield* control.declareQueue(controlQueue, deadLetterArgs(cfg.apiId));
+    yield* control.declareQueue(deadQueue, deadLetterQueueOptions());
+    yield* control.declareQueue(workQueue, workQueueOptions(cfg.apiId));
+    yield* control.declareQueue(probeQueue, sacQueueOptions(cfg.apiId));
+    yield* control.declareQueue(redriveQueue, sacQueueOptions(cfg.apiId));
+    const controlQ = yield* control.declareQueue(controlQueue, controlQueueOptions(cfg.apiId));
     yield* control.bind(routingKeyFor(cfg.apiId), exchange, controlQ);
 
     const circuit = yield* Ref.make<State>(State.CLOSED);

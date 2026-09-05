@@ -9,6 +9,7 @@ import {
   CheckpointStore,
   LeaderElection,
   RedisCoordinationLayer,
+  tokenCounter,
 } from "../../src/Coordination.ts";
 import type { RedisLike } from "../../src/Coordination.ts";
 
@@ -106,7 +107,8 @@ test("acquire, renew keeps the token, real TTL expiry allows a strictly higher o
       const handoff = yield* leader.tryAcquireOrRenew("B", 200);
       assert.ok(Option.isSome(handoff));
       assert.ok(
-        (handoff as Option.Some<number>).value > (first as Option.Some<number>).value,
+        tokenCounter((handoff as Option.Some<string>).value) >
+          tokenCounter((first as Option.Some<string>).value),
         "a real handoff must produce a strictly higher token",
       );
     }),
@@ -144,7 +146,7 @@ test("a stale token is rejected even for an API no one has checkpointed yet", as
       // written there yet. Here it is Redis's own Lua execution deciding,
       // not our in-memory Ref.
       const stale = yield* checkpoints
-        .save("brand-new-api", (aToken as Option.Some<number>).value, {
+        .save("brand-new-api", (aToken as Option.Some<string>).value, {
           state: "OPEN",
           reason: "ALL_ENDPOINTS_EJECTED",
           sequence: 1,
@@ -155,7 +157,7 @@ test("a stale token is rejected even for an API no one has checkpointed yet", as
       assert.equal(stale, "fenced", "A's stale token must be rejected by real Redis, not just reasoned about");
 
       const fresh = yield* checkpoints
-        .save("brand-new-api", (bToken as Option.Some<number>).value, {
+        .save("brand-new-api", (bToken as Option.Some<string>).value, {
           state: "OPEN",
           reason: "ALL_ENDPOINTS_EJECTED",
           sequence: 1,
@@ -245,4 +247,88 @@ test("a corrupt checkpoint reads as absent, not as garbage state", async (t) => 
   assert.ok(Option.isNone(truncated), "a truncated write must read as absent");
   assert.ok(Option.isNone(notJson), "a non-JSON value must read as absent");
   assert.ok(Option.isNone(wrongShape), "valid JSON of the wrong shape must read as absent");
+});
+
+/**
+ * Fencing has to survive the coordinator losing its own state, and this is
+ * the case where it did not.
+ *
+ * The token comes from `INCR`, so a Redis that restarts without persistence —
+ * or fails over to an empty replica — starts issuing from 1 again. A leader
+ * that was paused when that happened still holds, say, token 5, and the
+ * checkpoint script's `attempted < current` test then reads `5 < 1`, which is
+ * false. The stale leader is waved through and overwrites the new leader's
+ * checkpoints: precisely the split brain fencing tokens exist to prevent,
+ * reached by making the counter go backwards rather than by any race.
+ *
+ * The fix is that a token is not just a counter, it is an epoch and a
+ * counter. A coordinator that has lost its state issues a new epoch, and a
+ * token from the old one is not stale — it is unrecognisable, which is
+ * stronger.
+ */
+test("a coordinator that loses its state does not let a stale leader win", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const prefix = `test:${Date.now()}:wipe`;
+  const layer = RedisCoordinationLayer(asRedisLike(client!), prefix);
+
+  const { staleWrite, freshWrite } = await Effect.runPromise(
+    Effect.provide(
+      Effect.gen(function* () {
+        const leader = yield* LeaderElection;
+        const store = yield* CheckpointStore;
+
+        const first = yield* leader.tryAcquireOrRenew("A", 10_000);
+        assert.ok(Option.isSome(first));
+        const cp = {
+          state: "OPEN",
+          reason: "ALL_ENDPOINTS_EJECTED",
+          sequence: 7,
+          changedAt: 1_000,
+          openBackoffMs: 4000,
+        } as const;
+        yield* store.save("payments", first.value, cp);
+
+        // The coordinator loses everything: a restart with no persistence, or
+        // a failover to an empty replica. Nothing about this is exotic — it
+        // is the default configuration of the Redis in this repo's compose.
+        yield* Effect.promise(() =>
+          client!.del(
+            `${prefix}:leader:holder`,
+            `${prefix}:leader:token`,
+            `${prefix}:leader:epoch`,
+          ),
+        );
+
+        // B comes along and takes the lease from a blank coordinator.
+        const second = yield* leader.tryAcquireOrRenew("B", 10_000);
+        assert.ok(Option.isSome(second));
+
+        // A was paused through all of this and still believes it leads.
+        const staleWrite = yield* store
+          .save("payments", first.value, { ...cp, sequence: 99 })
+          .pipe(
+            Effect.as("accepted" as const),
+            Effect.catchTag("CheckpointFenced", () => Effect.succeed("fenced" as const)),
+          );
+
+        const freshWrite = yield* store
+          .save("payments", second.value, { ...cp, sequence: 8 })
+          .pipe(
+            Effect.as("accepted" as const),
+            Effect.catchTag("CheckpointFenced", () => Effect.succeed("fenced" as const)),
+          );
+
+        return { staleWrite, freshWrite };
+      }),
+      layer,
+    ),
+  );
+
+  assert.equal(
+    staleWrite,
+    "fenced",
+    "a leader holding a token from before the coordinator lost its state must not be able to write",
+  );
+  assert.equal(freshWrite, "accepted", "and the instance that actually holds the lease must be");
 });

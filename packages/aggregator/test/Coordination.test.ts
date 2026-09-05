@@ -10,6 +10,7 @@ import {
   HaSettings,
   LeaderElection,
   makeInMemoryCoordination,
+  tokenCounter,
 } from "../src/Coordination.ts";
 import { EventBusLayer, EventSink } from "../src/Events.ts";
 import { FleetSource, SimFleetLayer } from "../src/FleetSource.ts";
@@ -50,7 +51,8 @@ test("renewal keeps the same token; a genuine handoff strictly increases it", as
         const handoff = yield* leaderElection.tryAcquireOrRenew("B", 1000);
         assert.ok(Option.isSome(first) && Option.isSome(handoff));
         assert.ok(
-          (handoff as Option.Some<number>).value > (first as Option.Some<number>).value,
+          tokenCounter((handoff as Option.Some<string>).value) >
+            tokenCounter((first as Option.Some<string>).value),
           "a real handoff must produce a strictly higher token",
         );
       }),
@@ -90,7 +92,7 @@ test("a stale token is rejected even for an API no one has checkpointed yet", as
         // that was the bug. Fencing against the shared lease token closes it
         // for every key at once, the moment leadership actually changed.
         const staleWrite = yield* checkpointStore
-          .save("brand-new-api", (aToken as Option.Some<number>).value, {
+          .save("brand-new-api", (aToken as Option.Some<string>).value, {
             state: "OPEN",
             reason: "ALL_ENDPOINTS_EJECTED",
             sequence: 1,
@@ -101,7 +103,7 @@ test("a stale token is rejected even for an API no one has checkpointed yet", as
         assert.equal(staleWrite, "fenced", "A's stale token must be rejected");
 
         const freshWrite = yield* checkpointStore
-          .save("brand-new-api", (bToken as Option.Some<number>).value, {
+          .save("brand-new-api", (bToken as Option.Some<string>).value, {
             state: "OPEN",
             reason: "ALL_ENDPOINTS_EJECTED",
             sequence: 1,
