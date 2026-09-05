@@ -41,8 +41,12 @@ x-daemon-env: &daemon-env
   REDRIVE_MAX: "5000"
 
 services:
+  # Stays on the stock Node image with a single file bind-mounted: this is a
+  # fake third party, not part of the product, and it has no dependencies to
+  # install. Putting it in the application image would ship the test fixture
+  # inside the artifact.
   flaky-upstream:
-    image: node:22-alpine
+    image: &node-image node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
     working_dir: /app
     volumes: ["$HOST_WORKSPACE_FOLDER/infra/flaky-upstream.mjs:/app/flaky-upstream.mjs:ro"]
     command: node flaky-upstream.mjs
@@ -57,27 +61,11 @@ services:
     restart: unless-stopped
     networks: [default, devcontainer]
 
-  # Installs the workspace once, then exits. Everything that runs from
-  # packages/ waits on it having *completed*, not merely started.
-  #
-  # Before this, eight containers raced `pnpm install` against the same
-  # bind-mounted node_modules and the losers failed on pnpm's store lock, so
-  # four of them wrapped it in `until pnpm install; do sleep 3; done`. That
-  # works, but it makes cold start non-deterministic and slow for no reason:
-  # the dependency is real, so it belongs in depends_on rather than in a
-  # retry loop.
-  deps:
-    image: node:22-alpine
-    working_dir: /app
-    volumes: ["$HOST_WORKSPACE_FOLDER:/app"]
-    command: sh -c "corepack enable && pnpm install --frozen-lockfile"
-    networks: [default]
-
   # envoy-01/02 merge in everything from envoy-00 via the &envoy/<<: anchor —
   # same image, config and command — and only override the admin port mapping,
   # so all three run identically and stay in sync by construction.
   envoy-00: &envoy
-    image: envoyproxy/envoy:v1.31-latest
+    image: envoyproxy/envoy:v1.31-latest@sha256:caa5b411be1633b90023592a34a7e010c933d6e60206c758f631485e53006865
     volumes: ["$HOST_WORKSPACE_FOLDER/infra/envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro"]
     # List (exec) form, so these are argv straight to the envoy binary — no
     # shell involved, so none of the sh -c/YAML-folding pitfalls below apply.
@@ -106,7 +94,7 @@ services:
   # aggregator instances below — no bind mount, so this one needed nothing
   # special to run even before HOST_WORKSPACE_FOLDER was set correctly.
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     # AOF, because this is the checkpoint store. Without persistence a restart
     # loses every checkpoint, and a newly promoted leader resumes from nothing
     # rather than from where the last one stopped — a sequence reset, which is
@@ -125,7 +113,7 @@ services:
   # payments-provider.work's depth climb during an outage and drain on the
   # ramp back — the single most legible view of what this fleet does.
   rabbitmq:
-    image: rabbitmq:4.0-management-alpine
+    image: rabbitmq:4.0-management-alpine@sha256:d808ad631ae0a8182bbba362ffbd5408c27e90dddfa1b0ca2f4bbdce126ce3bf
     # 15692 is rabbitmq_prometheus, enabled by default in the management
     # image — the per-queue depth on the Grafana dashboard comes from there,
     # so the queue filling and draining is visible in the same place as the
@@ -156,11 +144,15 @@ services:
   # than restarting at zero — the same property Coordination.test.ts and
   # RedisCoordination.test.ts prove, now visible from outside the process.
   aggregator: &aggregator
-    image: node:22-alpine
-    working_dir: /app
-    # Writable now: unlike the pre-Effect version this has dependencies to install.
-    volumes: ["$HOST_WORKSPACE_FOLDER:/app"]
-    # Installs deps, then runs main.ts against the three real Envoy admin ports
+    # One image for every process this repo runs — see Dockerfile. Built here
+    # rather than bind-mounted: what runs is an artifact with its dependencies
+    # already inside it, so cold start is a container start rather than a pnpm
+    # install, and the thing that boots is the thing that was built.
+    image: &app-image egress-breaker:dev
+    build: &app-build
+      context: .
+      dockerfile: Dockerfile
+    # Runs main.ts against the three real Envoy admin ports
     # (not the sim fleet — --source=envoy is what makes this stack's outlier
     # detection real instead of simulated) with Redis-backed HA instead of the
     # in-memory default, since two instances are genuinely competing here.
@@ -184,7 +176,6 @@ services:
     # over to next time, so the second failover in a demo has no candidate.
     restart: unless-stopped
     depends_on:
-      deps: {condition: service_completed_successfully}
       envoy-00: {condition: service_started}
       envoy-01: {condition: service_started}
       envoy-02: {condition: service_started}
@@ -209,9 +200,8 @@ services:
   # prober election is x-single-active-consumer contended by five real
   # connections rather than five fibers sharing one.
   rmq-producer: &rmq-node
-    image: node:22-alpine
-    working_dir: /app
-    volumes: ["$HOST_WORKSPACE_FOLDER:/app"]
+    image: *app-image
+    build: *app-build
     command: >
       node --experimental-strip-types packages/rmq-consumer/src/main.ts producer
     environment:
@@ -226,7 +216,6 @@ services:
     # policy here, "restarts" was wishful — the container just stayed dead.
     restart: unless-stopped
     depends_on: &rmq-depends
-      deps: {condition: service_completed_successfully}
       rabbitmq: {condition: service_healthy}
     networks: [default, devcontainer]
 
@@ -273,7 +262,7 @@ services:
   # requests it actually sees. Part of the default `docker compose up`, not
   # optional — same role flaky-upstream itself plays.
   traffic:
-    image: node:22-alpine
+    image: *node-image
     working_dir: /app
     volumes: ["$HOST_WORKSPACE_FOLDER/infra/traffic-generator.mjs:/app/traffic-generator.mjs:ro"]
     command: node traffic-generator.mjs
@@ -290,10 +279,9 @@ services:
   # --profile demo run --rm demo` (or `-- shipping-rates` for a different API).
   # Not part of plain `docker compose up` — this is a one-shot, not a daemon.
   demo:
-    image: node:22-alpine
-    working_dir: /app
-    volumes: ["$HOST_WORKSPACE_FOLDER:/app"]
-    # Installs deps, then runs the driver (see the module comment in
+    image: *app-image
+    build: *app-build
+    # Runs the driver (see the module comment in
     # demo/driver.ts for what it does). No extra node args here, but if any
     # get added, keep them on this same line — see the aggregator command
     # above for why a more-indented continuation line breaks silently.
@@ -312,7 +300,6 @@ services:
       PROMETHEUS: http://prometheus:9090
     # No restart policy: this one is a one-shot that is supposed to exit.
     depends_on:
-      deps: {condition: service_completed_successfully}
       aggregator: {condition: service_started}
       traffic: {condition: service_started}
     profiles: [demo]
@@ -321,7 +308,7 @@ services:
   # Scrapes the aggregator's /metrics (same registry the console reads from)
   # plus each Envoy's native /stats/prometheus. See monitoring/prometheus.yml.
   prometheus:
-    image: prom/prometheus:v2.55.1
+    image: prom/prometheus:v2.55.1@sha256:2659f4c2ebb718e7695cb9b25ffa7d6be64db013daba13e05c875451cf51b0d3
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
@@ -336,7 +323,7 @@ services:
     networks: [default, devcontainer]
 
   grafana:
-    image: grafana/grafana:11.3.1
+    image: grafana/grafana:11.3.1@sha256:fa801ab6e1ae035135309580891e09f7eb94d1abdbd2106bdc288030b028158c
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       # Viewer, not Editor: the dashboard is provisioned from a file in this

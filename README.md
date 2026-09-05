@@ -598,13 +598,20 @@ upstream_rq_pending_overflow + upstream_cx_overflow
 ## Running against real Envoy
 
 ```bash
-docker compose up
+docker compose up --build
 ```
 
+Every process this repo runs — both aggregators, the producer, the five
+daemons, the demo driver — runs from one image built by the [Dockerfile](Dockerfile),
+with its dependencies already inside it. What boots is an artifact rather than
+a directory plus an install.
+
 Needs `$HOST_WORKSPACE_FOLDER` set to this repo's path *on the Docker host*,
-not inside whatever container you're running this from — every service
-bind-mounts something from the repo, and Docker's file-sharing permission
-check is keyed on the host path, not a container-internal one. In a
+not inside whatever container you're running this from — the infrastructure
+fixtures still bind-mount from the repo (`infra/envoy/envoy.yaml`,
+`flaky-upstream.mjs`, the traffic generator, the Prometheus and Grafana
+config), and Docker's file-sharing permission check is keyed on the host path,
+not a container-internal one. In a
 devcontainer this is normally already exported correctly; overriding it with
 a container-internal path (e.g. `/workspace`) produces "mounts denied...not
 shared from the host" even though Docker itself is working fine. If your own
@@ -615,12 +622,22 @@ own external `devcontainer` network for exactly that reason, so
 `curl http://aggregator:8088/metrics` from a shell on that same network
 works without needing a published port at all.
 
-Startup is ordered rather than raced: a one-shot `deps` service installs the
-workspace and everything running from `packages/` waits on it having
-*completed*. Eight containers racing `pnpm install` against one bind-mounted
-`node_modules` used to make the losers fail on pnpm's store lock, which four
-of them papered over with a retry loop; the dependency is real, so it belongs
-in `depends_on`. Every long-running service also carries `restart: unless-stopped`, which is
+Startup used to be ordered around a one-shot `deps` service, because eight
+containers racing `pnpm install` against one bind-mounted `node_modules` made
+the losers fail on pnpm's store lock. Building an image deletes the problem
+rather than sequencing it: dependencies are installed once, at build time, in
+a layer that is rebuilt only when a manifest changes. Cold start is now a
+container start.
+
+There is still no compile step, and that is deliberate — every process runs
+TypeScript directly through node's type stripping, which is why `tsc --noEmit`
+is load-bearing in CI rather than cosmetic. The cost of that choice is that
+the runtime version matters, so the base image is pinned **by digest** rather
+than by the moving `node:22-alpine` tag (currently v22.23.2), as are Envoy,
+RabbitMQ, Redis, Prometheus and Grafana. An image that moves is an image
+nobody can reproduce.
+
+Every long-running service also carries `restart: unless-stopped`, which is
 what makes the crash-fast stance in `rmq-consumer/src/main.ts` coherent —
 letting exactly one library race through an `uncaughtException` handler and
 treating everything else as fatal only makes sense if "fatal" means "comes
@@ -671,7 +688,8 @@ This posts to `flaky-upstream`'s `/__fail` instead of the console's
 reacts to what the upstream actually returns — but everything downstream
 (waiting on `/api/events`, the delivery-contract check) is the identical code
 path. There is also a fully containerized version that needs nothing on the
-host but Docker: `docker compose --profile demo run --rm demo`.
+host but Docker: `docker compose --profile demo run --rm demo` — it runs from
+the same image every other service does, so it needs no install of its own.
 
 ### The RabbitMQ daemon fleet
 
@@ -980,6 +998,8 @@ infra/
   traffic-generator.mjs      keeps requests flowing through Envoy so /__fail means something
   monitoring/                Prometheus scrape config + provisioned Grafana dashboard
 
+Dockerfile                   one image for every process here; deps at build time, no compile step
+.dockerignore                keeps the host's node_modules (absolute symlinks) out of the build context
 docs/rmq-control-plane.md    the RabbitMQ scenario: design, live run, and what it exposed
 docs/decisions/              decision records: what was chosen, and the measurement it rests on
 docker-compose.yml           wires infra/ and the packages/ entrypoints together

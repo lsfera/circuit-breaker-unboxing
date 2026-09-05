@@ -1,0 +1,19 @@
+# The build context is the workspace, and the two things that must never enter
+# it are the ones that are largest and most misleading. node_modules is a pnpm
+# store of absolute symlinks pointing at paths that do not exist in the image —
+# copying it in produces a container that fails at import time for reasons that
+# look nothing like "you copied the wrong node_modules". .git is simply large.
+node_modules
+**/node_modules
+.git
+.pnpm-store
+
+# Agent and editor state: not part of the product, and changing constantly,
+# which would bust the build cache on every session.
+.claude
+.agents
+.vscode
+skills-lock.json
+
+*.log
+.DS_Store

@@ -204,7 +204,7 @@ broker still has no volume — that pairing is the whole point of this phase.
 
 ---
 
-## Phase 3 — Deployable artifacts
+## Phase 3 — Deployable artifacts  ✅ done
 
 **What to implement.**
 
