@@ -1305,6 +1305,13 @@ integration:
 
 ## The fork this defers
 
+> **Answered, 2026-09-05: observational.** See
+> [docs/decisions/002-enforcement-authority.md](docs/decisions/002-enforcement-authority.md)
+> — the aggregator publishes and never pushes config, because enforcement is
+> already local and immediate in Envoy, and making the aggregator
+> authoritative would put it in-band for every request. The reasoning below
+> is what the decision rests on; it is no longer an open question.
+
 One question decides how much more there is to build: **must the aggregator's
 `OPEN` be authoritative, or are the events purely observational?**
 
