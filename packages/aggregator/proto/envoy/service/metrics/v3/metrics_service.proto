@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package envoy.service.metrics.v3;
+
+import "io/prometheus/client/metrics.proto";
+
+// The server side of Envoy's `envoy.stat_sinks.metrics_service`, declared with
+// only the fields this repo reads — see io/prometheus/client/metrics.proto for
+// why a partial schema is safe and why it is preferable to vendoring Envoy's
+// api tree.
+//
+// Field numbers and the rpc signature are from
+// envoy/service/metrics/v3/metrics_service.proto at v1.31.0. Envoy's real
+// `Identifier.node` is a full `config.core.v3.Node`; the two fields below are
+// the ones that identify a replica, and everything else in it decodes to
+// nothing and is dropped.
+//
+// The stream is client-side streaming: Envoy opens one stream per sink and
+// pushes a message per flush interval, and **only the first message carries
+// the identifier**. A receiver that reads the node id off each message
+// individually works in a test with one message and loses every replica's
+// identity in production.
+
+message Node {
+  string id = 1;
+  string cluster = 2;
+}
+
+message StreamMetricsMessage {
+  message Identifier {
+    Node node = 1;
+  }
+
+  Identifier identifier = 1;
+  repeated io.prometheus.client.MetricFamily envoy_metrics = 2;
+}
+
+message StreamMetricsResponse {
+}
+
+service MetricsService {
+  rpc StreamMetrics(stream StreamMetricsMessage) returns (StreamMetricsResponse);
+}

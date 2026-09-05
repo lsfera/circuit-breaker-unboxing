@@ -18,6 +18,43 @@ admin:
       address: 0.0.0.0
       port_value: 9901
 
+# Push the stats to the aggregators instead of making them come and get it.
+#
+# One sink per aggregator instance, and that is not redundancy — it is
+# correctness. A stats sink names one gRPC cluster; put both aggregators in one
+# cluster and Envoy load-balances the stream, so each instance would see some
+# replicas and compute a quorum from a partial fleet. Two sinks means every
+# instance sees every replica, which is what the polling path gave for free by
+# asking all three itself.
+#
+# The interval is the detection latency of the push path, the way tickMs is for
+# the polling path — and it is the whole cost side of the comparison, because
+# Envoy serialises *every* stat it holds on each flush, not the handful the
+# aggregator's regex keeps.
+stats_flush_interval: 0.25s
+
+stats_sinks:
+  - name: envoy.stat_sinks.metrics_service
+    typed_config:
+      "@type": type.googleapis.com/envoy.config.metrics.v3.MetricsServiceConfig
+      transport_api_version: V3
+      grpc_service:
+        envoy_grpc:
+          cluster_name: aggregator_metrics_1
+      # Names must stay in Envoy's own dotted form
+      # (cluster.payments-provider.membership_healthy) — with tags emitted as
+      # labels the name is shortened and the aggregator's parser, which is
+      # shared with the polling path, matches nothing at all.
+      emit_tags_as_labels: false
+  - name: envoy.stat_sinks.metrics_service
+    typed_config:
+      "@type": type.googleapis.com/envoy.config.metrics.v3.MetricsServiceConfig
+      transport_api_version: V3
+      grpc_service:
+        envoy_grpc:
+          cluster_name: aggregator_metrics_2
+      emit_tags_as_labels: false
+
 cluster_manager:
   outlier_detection:
     # Discrete ejection/un-ejection records, one JSON object per line.
@@ -102,6 +139,39 @@ static_resources:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
 
   clusters:
+    # The two metrics sinks above. gRPC, so HTTP/2 has to be explicit — an
+    # upstream left to negotiate it will speak HTTP/1.1 and the sink will fail
+    # every flush with a protocol error rather than a connection error, which
+    # reads like an application bug.
+    - name: aggregator_metrics_1
+      connect_timeout: 1s
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      typed_extension_protocol_options: &grpc_http2
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: aggregator_metrics_1
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: aggregator, port_value: 9900 }
+    - name: aggregator_metrics_2
+      connect_timeout: 1s
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      typed_extension_protocol_options: *grpc_http2
+      load_assignment:
+        cluster_name: aggregator_metrics_2
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: aggregator-2, port_value: 9900 }
+
     - name: payments-provider
       connect_timeout: 2s
       type: STRICT_DNS

@@ -320,7 +320,7 @@ kill the tick loop — `catchCause` at the sink boundary is deliberate
 
 ---
 
-## Phase 6 — Ingestion: polling to push
+## Phase 6 — Ingestion: polling to push  ✅ done
 
 **What to implement.** Replace `EnvoyFleetLayer`'s admin `/stats` polling
 (`packages/aggregator/src/FleetSource.ts:275`) with Envoy's push-based metrics

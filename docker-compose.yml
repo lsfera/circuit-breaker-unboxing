@@ -69,7 +69,11 @@ services:
     volumes: ["$HOST_WORKSPACE_FOLDER/infra/envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro"]
     # List (exec) form, so these are argv straight to the envoy binary — no
     # shell involved, so none of the sh -c/YAML-folding pitfalls below apply.
-    command: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "egress"]
+    # --service-node is what a pushed stats stream identifies itself by: the
+    # aggregator polls by URL and therefore names replicas itself, but a replica
+    # that pushes has to say who it is, once, in the first message of the
+    # stream. Each replica overrides this; without it all three arrive as one.
+    command: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "egress", "--service-node", "envoy-00"]
     restart: unless-stopped
     depends_on: [flaky-upstream]
     ports: ["19001:9901"]
@@ -85,9 +89,11 @@ services:
       devcontainer: {}
   envoy-01:
     <<: *envoy
+    command: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "egress", "--service-node", "envoy-01"]
     ports: ["19002:9901"]
   envoy-02:
     <<: *envoy
+    command: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "egress", "--service-node", "envoy-02"]
     ports: ["19003:9901"]
 
   # Backs LeaderElection/CheckpointStore (Coordination.ts) for the two
@@ -170,7 +176,7 @@ services:
     # every event on circuit.control. Only the leader publishes, so the two
     # instances never double-deliver.
     command: >
-      node --experimental-strip-types packages/aggregator/src/main.ts --source=envoy --envoy=http://envoy-00:9901,http://envoy-01:9901,http://envoy-02:9901 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-1
+      node --experimental-strip-types packages/aggregator/src/main.ts --source=envoy-push --push-port=9900 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-1
     # Restarting matters more here than it looks: a killed leader whose
     # container never comes back leaves the survivor with nowhere to fail
     # over to next time, so the second failover in a demo has no candidate.
@@ -187,7 +193,7 @@ services:
   aggregator-2:
     <<: *aggregator
     command: >
-      node --experimental-strip-types packages/aggregator/src/main.ts --source=envoy --envoy=http://envoy-00:9901,http://envoy-01:9901,http://envoy-02:9901 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-2
+      node --experimental-strip-types packages/aggregator/src/main.ts --source=envoy-push --push-port=9900 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-2
     ports: ["8089:8088"]
 
   # The scenario from docs/rmq-control-plane.md, running for real: a producer

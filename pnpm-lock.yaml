@@ -38,6 +38,12 @@ importers:
       '@egress/rmq':
         specifier: workspace:*
         version: link:../rmq
+      '@grpc/grpc-js':
+        specifier: ^1.14.4
+        version: 1.14.4
+      '@grpc/proto-loader':
+        specifier: ^0.8.1
+        version: 0.8.1
       effect:
         specifier: 'catalog:'
         version: 4.0.0-rc.112

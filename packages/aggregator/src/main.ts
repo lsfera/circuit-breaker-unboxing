@@ -11,6 +11,7 @@ import { HaSettings, InMemoryCoordinationLayer, RedisCoordinationLayer } from ".
 import { InMemoryOutboxLayer, RedisOutboxLayer } from "./Outbox.ts";
 import { combineSinks, EventBusLayer, EventSink, makeWebhookSink, NoopSinkLayer } from "./Events.ts";
 import { EnvoyFleetLayer, SimFleetLayer } from "./FleetSource.ts";
+import { EnvoyPushFleetLayer } from "./EnvoyPushSource.ts";
 import { HttpLive } from "./Http.ts";
 import { Config, defaultConfig } from "@egress/domain/Model.ts";
 import type { ApiSpec } from "./FleetSource.ts";
@@ -39,18 +40,33 @@ const APIS: ReadonlyArray<ApiSpec> = [
   { apiId: "tax-calc", endpoints: 3, rps: 120, failureRate: 0 },
 ];
 
+/**
+ * Three ingestion layers, one interface.
+ *
+ * `sim` is the simulator. `envoy` polls each replica's admin `/stats`.
+ * `envoy-push` runs the gRPC sink Envoy pushes to, which inverts the
+ * direction: no admin ports to reach, and a replica this process has never
+ * been told about still reports, because it is the one doing the talking.
+ *
+ * Which is *better* is a measurement, not a preference — see the README. The
+ * one thing worth knowing at the call site is that push latency is Envoy's
+ * `stats_flush_interval` and poll latency is `tickMs`, so they are tuned in
+ * different files.
+ */
 const FleetLayer =
   MODE === "sim"
     ? SimFleetLayer(APIS, REPLICAS)
-    : EnvoyFleetLayer(
-        (args.get("envoy") ?? "http://127.0.0.1:9901")
-          .split(",")
-          .map((adminUrl, i) => ({
-            replicaId: `envoy-${String(i).padStart(2, "0")}`,
-            adminUrl: adminUrl.trim(),
-          })),
-        APIS,
-      );
+    : MODE === "envoy-push"
+      ? EnvoyPushFleetLayer(Number(args.get("push-port") ?? 9900), APIS)
+      : EnvoyFleetLayer(
+          (args.get("envoy") ?? "http://127.0.0.1:9901")
+            .split(",")
+            .map((adminUrl, i) => ({
+              replicaId: `envoy-${String(i).padStart(2, "0")}`,
+              adminUrl: adminUrl.trim(),
+            })),
+          APIS,
+        );
 
 /**
  * `--rmq=<host>:<port>` mounts AmqpControlPlaneSink alongside (not instead

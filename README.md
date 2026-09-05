@@ -900,11 +900,15 @@ belongs in the aggregator, off the request path.
 
 ## What is a prototype, not production
 
-- **Ingestion is polling.** `packages/aggregator/src/FleetSource.ts` polls each replica's admin
-  `/stats`. It needs no proto codegen, which is why it is here. In production
-  swap it for the push-based `envoy.service.metrics.v3.MetricsService` sink,
-  which also tags each report with the replica's node ID — it produces the same
-  `ReplicaReport`, so nothing downstream changes.
+- **Ingestion is push now, and polling is the peer it was measured against.**
+  This bullet used to say "swap it for the push-based
+  `envoy.service.metrics.v3.MetricsService` sink in production". That swap is
+  done — see [Ingestion](#ingestion-push-or-poll-decided-by-measurement) — and
+  the premise that made it a *later* problem, that a gRPC server needs
+  generated stubs and therefore a build step, turned out to be false.
+  `EnvoyFleetLayer` (polling) remains a first-class layer: it is what runs when
+  you cannot reconfigure Envoy, and it is the control the push path was
+  compared against.
 - **Aggregator state is not a database — but leader election, failover, and
   the Redis backend are all real, deployed, and watched working, not just
   tested in isolation.** See
@@ -964,7 +968,9 @@ packages/
     src/Coordination.ts      leader election + fencing-token checkpoints — see High availability
     src/Events.ts            EventBus (PubSub) + EventSink (webhook, declarative retry)
     src/Outbox.ts            durable outbox: what a subscriber that was down gets when it returns
-    src/FleetSource.ts       service with two layers: simulated fleet, real Envoy
+    src/FleetSource.ts       service with two layers: simulated fleet, real Envoy (polling)
+    src/EnvoyPushSource.ts   the third: Envoy's metrics-service sink pushing here, no build step
+    proto/                   partial, wire-compatible schemas — only the fields this repo reads
     src/Http.ts              routes, SSE as a merged Stream, delivery-integrity tracking,
                              /metrics, and /livez + /readyz (liveness is the tick loop,
                              readiness is not leadership)
@@ -1298,6 +1304,60 @@ production — `openMs` in particular is 4s so recovery is watchable.
 `dwellMs` and `minStateMs` are not cosmetic. Without them a marginal upstream
 generates an event storm, and every subscriber ends up debouncing it themselves
 — badly, and differently from each other.
+
+## Ingestion: push or poll, decided by measurement
+
+Two layers produce the same `ReplicaReport` and nothing downstream can tell
+them apart, which is the claim `FleetSource` was written to make good on:
+
+- **`--source=envoy`** polls each replica's admin `/stats?format=json` every
+  tick.
+- **`--source=envoy-push`** runs the gRPC server Envoy's
+  `envoy.stat_sinks.metrics_service` pushes to, on `--push-port` (9900).
+
+`docker compose up` uses push. That is a measured decision, not a preference —
+on this stack (three replicas, three APIs, 250ms tick, 250ms
+`stats_flush_interval`), injecting a total upstream failure and timing from
+*Envoy's own stat moving* to *the aggregator reporting it*:
+
+| | ingestion lag (3 runs) | Envoy CPU | aggregator CPU (leader + standby) |
+| --- | --- | --- | --- |
+| poll | 165 / 194 / 196 ms | 4.29% | 3.11% + 0.21% |
+| push | 30 / 139 / 113 ms | 3.88% | 1.37% + 0.90% |
+
+Push roughly halves the lag, which is what you would expect: polling waits up
+to a full tick and then pays an HTTP round trip and a JSON parse, while a push
+is already in memory when the tick reads it. The Envoy-side difference is
+inside the noise at this size — serialising every stat on each flush is not
+free, and a fleet with far more stats than this one should measure again
+before assuming the same answer.
+
+Three things this cost to get right, none of them in the docs:
+
+**A gRPC server did not need a build step.** That belief is why the polling
+layer was written first. `@grpc/proto-loader` reads `.proto` at runtime, and
+protobuf addresses fields by number — so
+[`proto/`](packages/aggregator/proto) holds deliberately *partial* schemas
+carrying only the fields this repo reads, and Envoy's real messages decode
+against them without vendoring Envoy's api tree or its dependencies.
+
+**One sink per aggregator, not one cluster with two endpoints.** A stats sink
+names one gRPC cluster. Put both instances in that cluster and Envoy
+load-balances the stream, so each aggregator sees *some* replicas and computes
+a quorum from a partial fleet — data that is wrong rather than absent.
+`infra/envoy/envoy.yaml` declares two sinks, and both instances see all three
+replicas (`reportingReplicas: 3` on each).
+
+**The node identifier arrives once.** Envoy opens one stream per sink and
+sends `identifier` only in the first message, so it is remembered per call.
+Reading it off each message works perfectly in a test with one message and
+loses every replica's identity in production. It comes from `--service-node`,
+which each replica now sets — a polling aggregator names replicas itself from
+the URL it dialled, but a replica that pushes has to say who it is.
+
+Verified end to end on the push path: `CLOSED → OPEN
+(ALL_ENDPOINTS_EJECTED) → HALF_OPEN → OPEN (PROBE_FAILED) → HALF_OPEN → CLOSED
+(PROBE_SUCCEEDED)`, all three replicas reporting throughout.
 
 ## High availability
 

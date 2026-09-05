@@ -12,6 +12,8 @@
     "@effect/platform-node": "catalog:",
     "@egress/domain": "workspace:*",
     "@egress/rmq": "workspace:*",
+    "@grpc/grpc-js": "^1.14.4",
+    "@grpc/proto-loader": "^0.8.1",
     "effect": "catalog:",
     "ioredis": "^5.4.1"
   },
