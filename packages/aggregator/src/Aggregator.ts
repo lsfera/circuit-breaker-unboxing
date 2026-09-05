@@ -25,8 +25,24 @@ export class Aggregator extends Context.Service<
     /**
      * The tick loop. Runs until interrupted — the caller decides how to fork
      * it, so its lifetime is tied to a scope the caller owns.
+     *
+     * On the way out it surrenders the lease if this instance holds it, so a
+     * planned stop hands leadership over immediately instead of leaving the
+     * standby to wait out the TTL.
      */
     readonly run: Effect.Effect<void>;
+    /**
+     * When the loop last completed a pass, in epoch millis; 0 before the
+     * first one.
+     *
+     * This is the liveness signal, and it is deliberately not leadership: a
+     * standby ticks on exactly the same schedule as a leader, it just does
+     * nothing but try to acquire. A health check that conflated the two would
+     * report the standby unhealthy for doing its job correctly.
+     */
+    readonly lastTickAt: Effect.Effect<number>;
+    /** The loop's interval, so a health check can say what "stalled" means in its own terms. */
+    readonly tickMs: number;
   }
 >()("Aggregator") {}
 
@@ -106,9 +122,20 @@ export const AggregatorLayer = Layer.effect(
     /** Flips only on change, so an outage is two log lines rather than four a second. */
     const coordinationOk = yield* Ref.make(true);
 
+    /**
+     * Stamped every pass, leader or not. `egress_aggregator_ticks_total`
+     * already proves the loop is alive to Prometheus; this is the same fact
+     * in a form a health check can read in one request, without a scrape
+     * interval's worth of delay.
+     */
+    const lastTick = yield* Ref.make(0);
+
     const attemptTick = Effect.gen(
       function* () {
         yield* Metric.update(Telemetry.ticks, 1);
+        yield* Effect.clockWith((c) => c.currentTimeMillis).pipe(
+          Effect.flatMap((now) => Ref.set(lastTick, now)),
+        );
         const tokenOpt = yield* leader.tryAcquireOrRenew(ha.instanceId, ha.leaseTtlMs);
         if (!(yield* Ref.get(coordinationOk))) {
           yield* Ref.set(coordinationOk, true);
@@ -348,15 +375,59 @@ export const AggregatorLayer = Layer.effect(
 
     const isLeader = Ref.get(leadership).pipe(Effect.map((l) => l.isLeader));
 
+    /**
+     * Hand the lease back on the way out.
+     *
+     * `LeaderElection.release` existed from the start and nothing ever called
+     * it, so a lease was only ever surrendered by expiring. That is correct
+     * for a crash and wasteful for a planned stop: every rolling deploy cost
+     * the standby up to `leaseTtlMs` of waiting before it could acquire, with
+     * nobody publishing in between. `release` only removes the lease if this
+     * instance still holds it, so a demoted instance calling it is a no-op
+     * rather than a way to evict whoever took over.
+     *
+     * Best effort by construction. This runs while the process is going away:
+     * if the coordinator is unreachable, the lease expires the old way and
+     * the outcome is exactly what it was before this existed. Failing here
+     * would replace a clean shutdown with a noisy one and change nothing.
+     */
+    const releaseOnShutdown = Effect.gen(function* () {
+      if (!(yield* Ref.get(leadership)).isLeader) return;
+      yield* leader.release(ha.instanceId).pipe(
+        Effect.flatMap(() =>
+          Effect.logInfo(`${ha.instanceId}: lease released on shutdown`),
+        ),
+        Effect.catch((err) =>
+          Effect.logWarning(
+            `${ha.instanceId}: could not release the lease on shutdown ` +
+              `(${err.operation}) — it will expire instead`,
+          ),
+        ),
+      );
+    });
+
     // The loop is a Schedule, not a setInterval. That is what lets TestClock
     // drive thousands of simulated seconds instantly and deterministically,
     // and what makes the loop interruptible as a value rather than via a
     // clearInterval handle someone has to remember to call.
+    //
+    // `ensuring` rather than a finalizer on the layer: the lease belongs to
+    // this loop, so it should be given back exactly when the loop stops,
+    // whether that is an interrupt from SIGTERM or the scope closing.
     const run = tick.pipe(
       Effect.repeat(Schedule.spaced(Duration.millis(cfg.tickMs))),
       Effect.asVoid,
+      Effect.ensuring(releaseOnShutdown),
     );
 
-    return { tick, snapshots, stateOf, isLeader, run };
+    return {
+      tick,
+      snapshots,
+      stateOf,
+      isLeader,
+      run,
+      lastTickAt: Ref.get(lastTick),
+      tickMs: cfg.tickMs,
+    };
   }),
 );

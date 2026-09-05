@@ -172,6 +172,68 @@ export const HttpLive = HttpRouter.use((router) =>
 
     yield* router.add("GET", "/api/state", stateFrame.pipe(Effect.map((f) => HttpServerResponse.jsonUnsafe(f))));
 
+    /**
+     * Liveness and readiness, and the distinction between them is the whole
+     * point of having two routes.
+     *
+     * **Liveness** is "is the control loop still running". The failure this
+     * catches is the one that actually happened here: a defect out of the
+     * tick killed `Effect.repeat`, the loop was simply gone, and the process
+     * kept serving HTTP 200 with every gauge frozen at its last value — which
+     * is indistinguishable from a system where nothing is happening. Anything
+     * that restarts unhealthy containers should watch this.
+     *
+     * **Readiness** is "can this instance serve requests", and it is
+     * emphatically **not** leadership. A standby serves the same read-only
+     * API, keeps its own metrics, and is one lease away from leading. Marking
+     * it unready would take it out of rotation for doing its job, and during
+     * a rolling deploy it would take out the pair: the leader is stopping and
+     * the standby is "not ready", so nothing is left. What readiness waits
+     * for is one completed pass, so `/api/state` answers with the fleet
+     * rather than with an empty registry.
+     */
+    const health = Effect.gen(function* () {
+      const [now, last, leader] = yield* Effect.all([
+        Effect.clockWith((c) => c.currentTimeMillis),
+        agg.lastTickAt,
+        agg.isLeader,
+      ]);
+      // Three ticks, or five seconds, whichever is longer: one missed tick is
+      // a slow poll, three is a loop that has stopped. A short tickMs must not
+      // turn a GC pause into a restart.
+      const staleAfterMs = Math.max(agg.tickMs * 3, 5000);
+      const started = last > 0;
+      return {
+        started,
+        isLeader: leader,
+        lastTickAgoMs: started ? now - last : null,
+        staleAfterMs,
+        live: !started || now - last <= staleAfterMs,
+        instanceId: ha.instanceId,
+      };
+    });
+
+    yield* router.add(
+      "GET",
+      "/livez",
+      health.pipe(
+        Effect.map((h) =>
+          HttpServerResponse.jsonUnsafe(h, { status: h.live ? 200 : 503 }),
+        ),
+        HttpMiddleware.withLoggerDisabled,
+      ),
+    );
+    yield* router.add(
+      "GET",
+      "/readyz",
+      health.pipe(
+        Effect.map((h) =>
+          HttpServerResponse.jsonUnsafe(h, { status: h.started && h.live ? 200 : 503 }),
+        ),
+        HttpMiddleware.withLoggerDisabled,
+      ),
+    );
+
     // Same in-process Metric registry the Aggregator and EventSink update —
     // nothing here is scraped or pushed separately. Point Prometheus (or the
     // docker-compose monitoring stack) at this path in either sim or real-Envoy

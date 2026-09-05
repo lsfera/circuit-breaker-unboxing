@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Duration, Effect, Layer, Option, Ref } from "effect";
+import { Duration, Effect, Fiber, Layer, Option, Ref } from "effect";
 import { TestClock } from "effect/testing";
 import { Aggregator, AggregatorLayer } from "../src/Aggregator.ts";
 import {
@@ -138,6 +138,7 @@ const instanceLayer = (
     readonly checkpointStore: typeof CheckpointStore.Service;
   },
   delivered: Ref.Ref<ReadonlyArray<CircuitEvent>>,
+  leaseTtlMs = 1000,
 ) =>
   AggregatorLayer.pipe(
     Layer.provideMerge(
@@ -147,7 +148,7 @@ const instanceLayer = (
         RecordingSink(delivered),
         Layer.succeed(LeaderElection, coordination.leaderElection),
         Layer.succeed(CheckpointStore, coordination.checkpointStore),
-        Layer.succeed(HaSettings, { instanceId, leaseTtlMs: 1000 }),
+        Layer.succeed(HaSettings, { instanceId, leaseTtlMs }),
       ),
     ),
     // TestClock is deliberately not provided here — shared from the test's
@@ -455,4 +456,58 @@ test("an unreachable coordinator stands the instance down, and the loop recovers
   assert.equal(ticked, 120, "the loop must survive the outage — every tick ran");
   assert.equal(duringOutage, false, "an instance that cannot confirm its lease must stand down");
   assert.equal(afterRecovery, true, "and take the lease again once the coordinator returns");
+});
+
+/**
+ * A planned stop is not a crash, and the lease should know the difference.
+ *
+ * `LeaderElection.release` was defined from the first commit and never
+ * called, so the only way a lease was ever surrendered was by expiring. On a
+ * crash that is exactly right. On a rolling deploy it means every restart
+ * costs the standby up to `leaseTtlMs` of waiting with nobody publishing —
+ * paid on every deploy, forever, for a case that is not an emergency.
+ *
+ * The lease here is a minute long, deliberately. Nothing else can acquire it
+ * within this test by waiting, so an acquire that succeeds succeeded because
+ * the lease was handed back. Both halves are asserted: held while the loop
+ * runs, free the moment it stops.
+ */
+test("a clean shutdown hands the lease back rather than leaving it to expire", async () => {
+  await Effect.runPromise(
+    Effect.provide(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(T0);
+        const coordination = yield* makeInMemoryCoordination;
+        const delivered = yield* Ref.make<ReadonlyArray<CircuitEvent>>([]);
+
+        yield* Effect.gen(function* () {
+          const agg = yield* Aggregator;
+          const loop = yield* Effect.forkChild(agg.run);
+          yield* TestClock.adjust(Duration.millis(CFG.tickMs));
+
+          assert.equal(yield* agg.isLeader, true, "the running instance must hold the lease");
+          const blocked = yield* coordination.leaderElection.tryAcquireOrRenew(
+            "arriving",
+            60_000,
+          );
+          assert.ok(
+            Option.isNone(blocked),
+            "while the leader is running, a competing acquire must fail",
+          );
+
+          yield* Fiber.interrupt(loop);
+        }).pipe(
+          Effect.provide(instanceLayer("leaving", coordination, delivered, 60_000)),
+          Effect.provideService(Config, CFG),
+        );
+
+        const taken = yield* coordination.leaderElection.tryAcquireOrRenew("arriving", 60_000);
+        assert.ok(
+          Option.isSome(taken),
+          "the lease must be free the moment the leader stops, not a minute later",
+        );
+      }),
+      TestClock.layer(),
+    ),
+  );
 });

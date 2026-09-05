@@ -962,7 +962,9 @@ packages/
     src/Coordination.ts      leader election + fencing-token checkpoints — see High availability
     src/Events.ts            EventBus (PubSub) + EventSink (webhook, declarative retry)
     src/FleetSource.ts       service with two layers: simulated fleet, real Envoy
-    src/Http.ts              routes, SSE as a merged Stream, delivery-integrity tracking, /metrics
+    src/Http.ts              routes, SSE as a merged Stream, delivery-integrity tracking,
+                             /metrics, and /livez + /readyz (liveness is the tick loop,
+                             readiness is not leadership)
     src/Telemetry.ts         every Metric the app emits, in one place
     src/main.ts              layer composition, NodeRuntime.runMain
     public/index.html        operator console (unchanged — plain HTML/CSS/JS)
@@ -1156,6 +1158,17 @@ reading it afterwards:
   `ControlLoopStalled` alert make the silence audible. Same 55-second outage
   after the fix: the loop kept ticking, recovered on its own, and published
   the next incident at `sequence=102` with no gap.
+- **A lease that is only ever surrendered by expiring turns every deploy into
+  an outage-shaped event.** `LeaderElection.release` was written in the first
+  version of `Coordination.ts` and never called from anywhere — grepping the
+  aggregator for `.release(` returned nothing — so leadership moved only when
+  a lease timed out. Correct for a crash; paid on every planned stop, forever.
+  Measured on the running stack: `docker kill` of the leader put the standby
+  in charge after 4952 ms, the full `leaseTtlMs`, while a `docker compose
+  stop` now does it in 234 ms. The interesting part is not the twenty-fold
+  difference, it is that nothing was broken — the primitive existed, the
+  interface exposed it, the tests passed, and no code path connected the two.
+  A capability nobody calls is indistinguishable from one nobody built.
 - **A dead-letter queue that does not outlive the broker is a dead-letter
   queue in name only.** Every queue the RabbitMQ fleet declared was
   transient, because `durable: false` was hardcoded in the client wrapper —
@@ -1309,6 +1322,44 @@ low number, it is an unrecognisable one.
 `test/integration/RedisCoordination.test.ts` deletes the lease keys mid-test
 and asserts that the leader still holding a pre-wipe token can no longer
 write, while the instance that actually holds the lease can.
+
+Two things make that survivable as a *deployment* and not only as a design.
+
+**A planned stop hands the lease back.** `LeaderElection.release` existed from
+the first version of this file and nothing ever called it, so leadership only
+ever moved when a lease expired — correct for a crash, and a waste on every
+deploy. The tick loop now surrenders the lease as it stops. Measured on the
+running stack, leader down to standby publishing:
+
+| how the leader went away | standby leads after |
+| --- | --- |
+| `docker kill` (crash — nobody said goodbye) | 4952 ms (the full `leaseTtlMs`) |
+| `docker compose stop` (SIGTERM — a deploy) | **234 ms** |
+
+The crash number is unchanged, and should be: waiting out the lease is the
+only safe answer when the previous holder never spoke. Releasing is
+best-effort by construction — it runs while the process is going away, so an
+unreachable coordinator just means the lease expires the old way.
+
+**`/livez` and `/readyz` are different questions.** Liveness is "is the
+control loop still running", answered from the timestamp of the last tick
+against three tick intervals (or five seconds, whichever is longer) — the
+failure it catches is the one that actually happened here, a loop that died
+while the process kept serving HTTP 200 with every gauge frozen. Readiness is
+"can this instance serve requests", and it is deliberately **not** leadership:
+a standby serves the same read-only API and is one lease away from leading, so
+marking it unready would take it out of rotation for doing its job — and
+during a rolling deploy it would take out the pair, since the leader is
+stopping and the standby would be "not ready". Readiness waits for one
+completed pass, so `/api/state` answers with the fleet rather than an empty
+registry.
+
+```
+$ curl -s aggregator-2:8088/readyz
+{"started":true,"isLeader":true,"lastTickAgoMs":73,"staleAfterMs":5000,"live":true,"instanceId":"aggregator-2"}
+$ curl -s aggregator:8088/readyz     # the standby: ready, and not the leader
+{"started":true,"isLeader":false,"lastTickAgoMs":205,"staleAfterMs":5000,"live":true,"instanceId":"aggregator-1"}
+```
 
 `main.ts` supports both backends: `InMemoryCoordinationLayer` by default
 (one instance that always wins its own lease — not a special case, just

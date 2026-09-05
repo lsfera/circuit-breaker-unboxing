@@ -241,7 +241,7 @@ against real Envoy" instructions still work — update them if not.
 
 ---
 
-## Phase 4 — Lifecycle: release the lease, split liveness from readiness
+## Phase 4 — Lifecycle: release the lease, split liveness from readiness  ✅ done
 
 **What to implement.**
 
