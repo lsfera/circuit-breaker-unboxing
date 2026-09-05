@@ -254,7 +254,7 @@ one connection to Redis and nothing else — see
 ```bash
 pnpm install
 pnpm start           # simulated 5-replica fleet
-pnpm run check       # typecheck + 48 tests
+pnpm run check       # typecheck + 49 tests
 pnpm run test:redis  # optional — needs Docker: HA coordination against a real Redis
 pnpm run test:rmq    # optional — needs Docker: AMQP behaviour against a real broker
 ```
@@ -459,6 +459,8 @@ endpoint is live on the same port in both modes (`--source=sim` or
 | `egress_circuit_transitions_total` | Published `state_changed` events, by API/state/reason |
 | `egress_circuit_snapshots_total` | Periodic full-state republishes, by API |
 | `egress_fleet_poll_duration_ms` | Time to poll and parse every replica once per tick |
+| `egress_aggregator_ticks_total` | Control-loop iterations per instance — the liveness signal. A zero rate means the loop is gone, which no other metric distinguishes from a quiet system |
+| `egress_aggregator_coordination_errors_total` | Ticks that could not reach the coordinator and stood down |
 | `egress_aggregator_is_leader` | 1 if this instance currently holds the publishing lease, 0 otherwise — see [High availability](#high-availability) |
 | `egress_aggregator_fencing_conflicts_total` | Checkpoint writes rejected because a newer lease holder already took over, by API |
 | `egress_webhook_delivered_total` / `_failed_total` / `_dead_lettered_total` | Sink outcomes, by API |
@@ -496,6 +498,14 @@ an aggregator-leadership timeline (one line per instance — see
 — scraped directly from each Envoy's own `/stats/prometheus` — the raw
 per-replica healthy-host count, so you can see the disagreement the console's
 replica strip visualizes, in a second tool, at the same time.
+
+[infra/monitoring/alerts.yml](infra/monitoring/alerts.yml) evaluates alongside
+it — six rules, each one there because something went wrong in a way that
+looked fine from outside. `ControlLoopStalled` is the one that matters most;
+see the note on transient dependency outages under
+[What the build surfaced](#what-the-build-surfaced). No Alertmanager is wired,
+so they surface in Prometheus's own `/alerts`; routing them to a human is a
+deployment concern.
 
 A **RabbitMQ daemon fleet** row sits underneath it, so the reaction is on the
 same screen as the cause: work-queue and dead-letter depth (from RabbitMQ's
@@ -970,7 +980,7 @@ tested exhaustively with plain `assert`.
 
 ## What the build surfaced
 
-Twelve things worth knowing — eleven found by running the thing, one by
+Thirteen things worth knowing — twelve found by running the thing, one by
 reading it afterwards:
 
 - **A reason code cannot be derived from averaged endpoint counts.** With four of
@@ -1067,6 +1077,27 @@ reading it afterwards:
   despite being pure, twenty lines, and load-bearing. It has six now. The
   lesson is not "write more tests" — it is that a verification mechanism is
   itself code, and an untested one is a claim, not a proof.
+- **A one-minute dependency outage killed the control plane permanently, and
+  every health signal stayed green.** The Redis calls used `Effect.promise`,
+  which turns a rejected promise into a *defect* rather than a failure — and a
+  defect out of the tick terminates `Effect.repeat`, so the loop was simply
+  gone. Measured on the running stack: 55 seconds without Redis stopped the
+  loop after seven more ticks, it never restarted when Redis returned, and a
+  total upstream failure afterwards published nothing at all. Both instances,
+  because a shared dependency fails for everyone at once. Meanwhile both
+  processes served HTTP 200, `/api/state` still reported `isLeader: true` with
+  three APIs, and every gauge held its last value — which is indistinguishable
+  from a system where nothing is happening. Three things were wrong and all
+  three are worth naming: an expected failure was modelled as a defect; the
+  loop had no supervision, so its death was unobservable; and there was no
+  metric that moves when the loop runs, so nothing could have alerted. Now:
+  coordination failures are typed and a tick that cannot reach the coordinator
+  stands down and retries (an instance that cannot confirm it holds the lease
+  must not act as leader), a defect logs fatally and exits so the restart
+  policy does its job, and `egress_aggregator_ticks_total` plus a
+  `ControlLoopStalled` alert make the silence audible. Same 55-second outage
+  after the fix: the loop kept ticking, recovered on its own, and published
+  the next incident at `sequence=102` with no gap.
 
 ## What Effect actually bought here
 

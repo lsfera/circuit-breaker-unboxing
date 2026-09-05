@@ -1,0 +1,90 @@
+# The alerts that would have caught the failures this repo actually had.
+#
+# Each one exists because something went wrong in a way that looked fine from
+# outside: a process that was up and serving 200s while doing nothing at all.
+# That is the shape to alert on — not CPU, not memory, but "the thing that is
+# supposed to be moving has stopped".
+groups:
+  - name: egress-control-plane
+    interval: 15s
+    rules:
+      # The one that matters most. A Redis outage used to end the control loop
+      # permanently, in a process that stayed up, kept its gauges frozen at
+      # their last values, and reported itself leader forever. Nothing else
+      # here distinguishes that from a quiet system.
+      - alert: ControlLoopStalled
+        expr: sum(rate(egress_aggregator_ticks_total[2m])) == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "No aggregator is ticking"
+          description: >-
+            Every aggregator instance has stopped iterating its control loop.
+            Nothing is being polled and nothing will be published, however
+            healthy the processes look. Check the logs for a fatal defect and
+            whether the coordinator is reachable.
+
+      # Standing down is the safe response to an unreachable coordinator, but
+      # while it lasts there is no leader and therefore no publisher.
+      - alert: NoLeaderElected
+        expr: sum(egress_aggregator_is_leader) == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "No aggregator holds the publishing lease"
+          description: >-
+            Instances are running but none can confirm it holds the lease, so
+            no circuit events are being published. Usually means the
+            coordinator (Redis) is unreachable — see
+            egress_aggregator_coordination_errors_total.
+
+      # Two leaders at once is the contract violation the fencing tokens exist
+      # to prevent, and it is worth knowing about immediately.
+      - alert: SplitBrain
+        expr: sum(egress_aggregator_is_leader) > 1
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "More than one aggregator believes it is leader"
+
+      # The delivery contract, on both transports. These are the numbers the
+      # console and the demo assert; if either moves, the guarantee this whole
+      # system exists to provide has been broken.
+      - alert: DeliveryContractBroken
+        expr: >-
+          increase(egress_subscriber_gaps_total[5m]) > 0
+          or increase(egress_subscriber_duplicates_total[5m]) > 0
+          or increase(egress_daemon_control_gaps_total[5m]) > 0
+          or increase(egress_daemon_control_duplicates_total[5m]) > 0
+        for: 0m
+        labels: { severity: critical }
+        annotations:
+          summary: "A per-API sequence gap or duplicate was observed"
+
+  - name: egress-daemon-fleet
+    interval: 15s
+    rules:
+      # The deaf-daemon signature: every daemon derives the same target from
+      # the same events, so these two track each other. When they stop
+      # tracking, a daemon has stopped hearing the control plane while its
+      # container, CPU and sockets all still look normal.
+      - alert: FleetDisagreesWithTarget
+        expr: sum(egress_daemon_self_active) != max(egress_daemon_target_active)
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Daemons pulling work does not match the agreed target"
+          description: >-
+            Expected {{ $value }} active. A daemon that has gone deaf to
+            circuit.control keeps working (or keeps idling) while the rest of
+            the fleet moves on.
+
+      - alert: DeadLetterQueueGrowing
+        expr: increase(rabbitmq_detailed_queue_messages{queue=~".*work.dead"}[15m]) > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Dead-lettered work is accumulating and not being recovered"
+          description: >-
+            Failed work is preserved but not replayed. Either the circuit has
+            not closed since, or REDRIVE_ON_CLOSE is off.

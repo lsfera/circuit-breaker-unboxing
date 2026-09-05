@@ -71,6 +71,30 @@ export const isLeader = Metric.gauge("egress_aggregator_is_leader", {
     "1 if this aggregator instance currently holds the publishing lease, 0 otherwise.",
 });
 
+/**
+ * The liveness signal for the control loop itself, incremented every tick by
+ * every instance whether or not it leads.
+ *
+ * There was no such signal, and its absence is what made the failure it now
+ * detects invisible: when the loop died, `/metrics` kept serving the last
+ * values it had, `egress_aggregator_is_leader` stayed pinned at 1, and every
+ * gauge simply stopped moving — which looks exactly like a quiet system.
+ * `rate(egress_aggregator_ticks_total[1m]) == 0` is the alert that says
+ * otherwise.
+ */
+export const ticks = Metric.counter("egress_aggregator_ticks_total", {
+  description: "Control-loop iterations, by instance. Zero rate means the loop is gone.",
+});
+
+export const coordinationErrors = Metric.counter(
+  "egress_aggregator_coordination_errors_total",
+  {
+    description:
+      "Ticks that could not reach the coordinator and stood down. Sustained non-zero " +
+      "means no instance is publishing, because none of them can confirm it holds the lease.",
+  },
+);
+
 export const fencingConflicts = Metric.counter(
   "egress_aggregator_fencing_conflicts_total",
   {

@@ -309,7 +309,9 @@ services:
   # plus each Envoy's native /stats/prometheus. See monitoring/prometheus.yml.
   prometheus:
     image: prom/prometheus:v2.55.1
-    volumes: ["$HOST_WORKSPACE_FOLDER/infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    volumes:
+      - $HOST_WORKSPACE_FOLDER/infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - $HOST_WORKSPACE_FOLDER/infra/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
     # Lets Prometheus also reach `pnpm start` running on the host, so the same
     # stack works for the sim-fleet demo, not just this docker-compose one.
     extra_hosts: ["host.docker.internal:host-gateway"]

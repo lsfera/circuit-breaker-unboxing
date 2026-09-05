@@ -145,7 +145,23 @@ const AppLayer = HttpLive.pipe(
 const AggregatorDaemon = Layer.effectDiscard(
   Effect.gen(function* () {
     const agg = yield* Aggregator;
-    yield* Effect.forkScoped(agg.run);
+    /**
+     * A coordination outage is handled inside the tick and the loop keeps
+     * running. A *defect* is a bug, and the one thing it must not do is end
+     * this fiber quietly: the HTTP server would carry on answering 200 with
+     * whatever the gauges last held, which is indistinguishable from a system
+     * where nothing is happening. Same stance as the daemon fleet's — crash
+     * and let the restart policy do its job, rather than swallow it.
+     */
+    yield* Effect.forkScoped(
+      agg.run.pipe(
+        Effect.catchDefect((defect) =>
+          Effect.logFatal(`${instanceId}: control loop died, restarting the process`, defect).pipe(
+            Effect.andThen(Effect.sync(() => process.exit(1))),
+          ),
+        ),
+      ),
+    );
     yield* Effect.log(
       `egress circuit breaker console  source=${MODE}` +
         (MODE === "sim" ? ` replicas=${REPLICAS}` : "") +

@@ -51,6 +51,26 @@ export class CheckpointFenced extends Data.TaggedError("CheckpointFenced")<{
 }> {}
 
 /**
+ * The coordinator could not be reached.
+ *
+ * This is a *failure*, deliberately, and the distinction is the whole point.
+ * These calls used to be `Effect.promise`, which turns a rejected promise into
+ * a defect — and a defect propagating out of the tick means `Effect.repeat`
+ * terminates and the aggregator's control loop is gone for good, in a process
+ * that stays up and keeps serving 200s. Measured: a 55-second Redis outage
+ * stopped the loop after seven more ticks and it never restarted, and a total
+ * upstream failure afterwards published nothing at all.
+ *
+ * Typed, it is something the caller can reason about, and there is exactly one
+ * safe reading of it: an instance that cannot confirm it still holds the lease
+ * must not behave as leader.
+ */
+export class CoordinationUnavailable extends Data.TaggedError("CoordinationUnavailable")<{
+  readonly operation: string;
+  readonly cause: string;
+}> {}
+
+/**
  * Runtime identity, as opposed to AggregatorConfig's breaker tuning — this is
  * "which process am I," not "how should the state machine behave."
  */
@@ -80,8 +100,8 @@ export class LeaderElection extends Context.Service<
     readonly tryAcquireOrRenew: (
       holderId: string,
       ttlMs: number,
-    ) => Effect.Effect<Option.Option<LeaseToken>>;
-    readonly release: (holderId: string) => Effect.Effect<void>;
+    ) => Effect.Effect<Option.Option<LeaseToken>, CoordinationUnavailable>;
+    readonly release: (holderId: string) => Effect.Effect<void, CoordinationUnavailable>;
   }
 >()("LeaderElection") {}
 
@@ -102,8 +122,17 @@ export class CheckpointStore extends Context.Service<
       apiId: string,
       token: LeaseToken,
       checkpoint: Checkpoint,
-    ) => Effect.Effect<void, CheckpointFenced>;
-    readonly load: (apiId: string) => Effect.Effect<Option.Option<Checkpoint>>;
+    ) => Effect.Effect<void, CheckpointFenced | CoordinationUnavailable>;
+    /**
+     * Fails rather than returning `None` when the store is unreachable. The
+     * difference matters more than it looks: `None` means "this API has never
+     * been checkpointed", which the aggregator correctly reads as a cold start
+     * — and a cold start resets `sequence` to zero. A blip must never be
+     * allowed to look like a fresh API.
+     */
+    readonly load: (
+      apiId: string,
+    ) => Effect.Effect<Option.Option<Checkpoint>, CoordinationUnavailable>;
   }
 >()("CheckpointStore") {}
 
@@ -251,6 +280,18 @@ redis.call("SET", KEYS[2], ARGV[2])
 return tonumber(ARGV[1])
 `;
 
+/** Every call to the store goes through this: a rejected promise is a failure, never a defect. */
+const evalGuarded = (
+  redis: RedisLike,
+  operation: string,
+  script: string,
+  options: { readonly keys: ReadonlyArray<string>; readonly args: ReadonlyArray<string> },
+) =>
+  Effect.tryPromise({
+    try: () => redis.eval(script, options),
+    catch: (cause) => new CoordinationUnavailable({ operation, cause: String(cause) }),
+  });
+
 export const RedisCoordinationLayer = (
   redis: RedisLike,
   keyPrefix = "egress:aggregator",
@@ -258,33 +299,27 @@ export const RedisCoordinationLayer = (
   Layer.mergeAll(
     Layer.succeed(LeaderElection, {
       tryAcquireOrRenew: (holderId, ttlMs) =>
-        Effect.promise(() =>
-          redis.eval(ACQUIRE_SCRIPT, {
-            keys: [`${keyPrefix}:leader:holder`, `${keyPrefix}:leader:token`],
-            args: [holderId, String(ttlMs)],
-          }),
-        ).pipe(
+        evalGuarded(redis, "tryAcquireOrRenew", ACQUIRE_SCRIPT, {
+          keys: [`${keyPrefix}:leader:holder`, `${keyPrefix}:leader:token`],
+          args: [holderId, String(ttlMs)],
+        }).pipe(
           Effect.map((result) => {
             const token = Number(result);
             return token > 0 ? Option.some(token) : Option.none();
           }),
         ),
       release: (holderId) =>
-        Effect.promise(() =>
-          redis.eval(RELEASE_SCRIPT, {
-            keys: [`${keyPrefix}:leader:holder`],
-            args: [holderId],
-          }),
-        ).pipe(Effect.asVoid),
+        evalGuarded(redis, "release", RELEASE_SCRIPT, {
+          keys: [`${keyPrefix}:leader:holder`],
+          args: [holderId],
+        }).pipe(Effect.asVoid),
     }),
     Layer.succeed(CheckpointStore, {
       save: (apiId, token, checkpoint) =>
-        Effect.promise(() =>
-          redis.eval(CHECKPOINT_SCRIPT, {
-            keys: [`${keyPrefix}:leader:token`, `${keyPrefix}:checkpoint:${apiId}`],
-            args: [String(token), JSON.stringify(checkpoint)],
-          }),
-        ).pipe(
+        evalGuarded(redis, "save", CHECKPOINT_SCRIPT, {
+          keys: [`${keyPrefix}:leader:token`, `${keyPrefix}:checkpoint:${apiId}`],
+          args: [String(token), JSON.stringify(checkpoint)],
+        }).pipe(
           Effect.flatMap((result) => {
             const current = Number(result);
             return current === token
@@ -293,12 +328,10 @@ export const RedisCoordinationLayer = (
           }),
         ),
       load: (apiId) =>
-        Effect.promise(() =>
-          redis.eval("return redis.call('GET', KEYS[1])", {
-            keys: [`${keyPrefix}:checkpoint:${apiId}`],
-            args: [],
-          }),
-        ).pipe(
+        evalGuarded(redis, "load", "return redis.call('GET', KEYS[1])", {
+          keys: [`${keyPrefix}:checkpoint:${apiId}`],
+          args: [],
+        }).pipe(
           Effect.map((raw) => {
             if (typeof raw !== "string") return Option.none<Checkpoint>();
             try {

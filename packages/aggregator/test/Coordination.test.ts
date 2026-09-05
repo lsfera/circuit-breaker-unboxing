@@ -4,7 +4,9 @@ import { Duration, Effect, Layer, Option, Ref } from "effect";
 import { TestClock } from "effect/testing";
 import { Aggregator, AggregatorLayer } from "../src/Aggregator.ts";
 import {
+  CheckpointFenced,
   CheckpointStore,
+  CoordinationUnavailable,
   HaSettings,
   LeaderElection,
   makeInMemoryCoordination,
@@ -12,6 +14,7 @@ import {
 import { EventBusLayer, EventSink } from "../src/Events.ts";
 import { FleetSource, SimFleetLayer } from "../src/FleetSource.ts";
 import { Config, defaultConfig } from "@egress/domain/Model.ts";
+import type { Checkpoint } from "../src/Coordination.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 
 /**
@@ -348,4 +351,106 @@ test("a re-promoted instance resumes from the checkpoint, not its own stale sequ
     after.every((e) => e.data.sequence > handoffSequence),
     "no event after re-promotion may reuse a sequence the other leader already published",
   );
+});
+
+/**
+ * The failure this exists to prevent, reproduced in miniature.
+ *
+ * A coordinator that rejects used to arrive as a *defect* — the Redis layer
+ * called `Effect.promise`, so an unreachable store was not a failure but a
+ * bug — and a defect out of the tick terminates `Effect.repeat`. The control
+ * loop was then gone for good in a process that stayed up and kept serving
+ * 200s. Measured on the running stack before the fix: a 55-second Redis
+ * outage stopped the loop after seven more ticks, it never restarted, and a
+ * total upstream failure afterwards published nothing at all.
+ *
+ * The contract now: while the coordinator is unreachable the instance stands
+ * down (it cannot confirm it holds the lease, so it must not act as leader),
+ * and when the coordinator returns it picks up again with no intervention.
+ */
+test("an unreachable coordinator stands the instance down, and the loop recovers when it returns", async () => {
+  const { duringOutage, afterRecovery, ticked } = await Effect.runPromise(
+    Effect.provide(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(T0);
+        const inner = yield* makeInMemoryCoordination;
+        const reachable = yield* Ref.make(true);
+        const ticks = yield* Ref.make(0);
+        const delivered = yield* Ref.make<ReadonlyArray<CircuitEvent>>([]);
+
+        const unavailable = (operation: string) =>
+          new CoordinationUnavailable({ operation, cause: "simulated outage" });
+
+        // Exactly what the Redis layer does when the store is unreachable:
+        // every call fails, rather than dying.
+        const flaky: {
+          readonly leaderElection: typeof LeaderElection.Service;
+          readonly checkpointStore: typeof CheckpointStore.Service;
+        } = {
+          leaderElection: {
+            tryAcquireOrRenew: (holder, ttl) =>
+              Ref.get(reachable).pipe(
+                Effect.flatMap((up) =>
+                  up
+                    ? inner.leaderElection.tryAcquireOrRenew(holder, ttl)
+                    : Effect.fail(unavailable("tryAcquireOrRenew")),
+                ),
+              ),
+            release: inner.leaderElection.release,
+          },
+          checkpointStore: {
+            save: (apiId, token, cp) =>
+              Ref.get(reachable).pipe(
+                Effect.flatMap(
+                  (up): Effect.Effect<void, CheckpointFenced | CoordinationUnavailable> =>
+                    up
+                      ? inner.checkpointStore.save(apiId, token, cp)
+                      : Effect.fail(unavailable("save")),
+                ),
+              ),
+            load: (apiId) =>
+              Ref.get(reachable).pipe(
+                Effect.flatMap(
+                  (up): Effect.Effect<Option.Option<Checkpoint>, CoordinationUnavailable> =>
+                    up ? inner.checkpointStore.load(apiId) : Effect.fail(unavailable("load")),
+                ),
+              ),
+          },
+        };
+
+        const drive = (n: number) =>
+          Effect.gen(function* () {
+            const agg = yield* Aggregator;
+            for (let i = 0; i < n; i++) {
+              yield* agg.tick;
+              yield* Ref.update(ticks, (t) => t + 1);
+              yield* TestClock.adjust(Duration.millis(CFG.tickMs));
+            }
+            return yield* agg.isLeader;
+          });
+
+        return yield* Effect.gen(function* () {
+          const fleet = yield* FleetSource;
+          yield* fleet.setFailureRate("payments", 1);
+          yield* drive(40); // healthy: takes the lease, publishes the outage
+
+          yield* Ref.set(reachable, false);
+          const duringOutage = yield* drive(40);
+
+          yield* Ref.set(reachable, true);
+          const afterRecovery = yield* drive(40);
+
+          return { duringOutage, afterRecovery, ticked: yield* Ref.get(ticks) };
+        }).pipe(
+          Effect.provide(instanceLayer("A", flaky, delivered)),
+          Effect.provideService(Config, CFG),
+        );
+      }),
+      TestClock.layer(),
+    ),
+  );
+
+  assert.equal(ticked, 120, "the loop must survive the outage — every tick ran");
+  assert.equal(duringOutage, false, "an instance that cannot confirm its lease must stand down");
+  assert.equal(afterRecovery, true, "and take the lease again once the coordinator returns");
 });

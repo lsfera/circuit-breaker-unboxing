@@ -1,6 +1,13 @@
 global:
   scrape_interval: 2s # fast enough that a demo incident shows up within a tick or two
 
+# Alerting on "the thing that should be moving has stopped" — see alerts.yml
+# for why each rule exists. No Alertmanager is wired here: the rules evaluate
+# and show up in Prometheus's own /alerts, which is enough to demonstrate the
+# signal. Routing them somewhere a human reads is a deployment concern.
+rule_files:
+  - /etc/prometheus/alerts.yml
+
 scrape_configs:
   # The aggregator's own registry: per-API circuit state, transitions, webhook
   # delivery, and the subscriber's delivery-integrity counters. Same endpoint

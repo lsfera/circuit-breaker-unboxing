@@ -103,9 +103,17 @@ export const AggregatorLayer = Layer.effect(
       { discard: true },
     );
 
-    const tick: Effect.Effect<ReadonlyArray<CircuitEvent>> = Effect.gen(
+    /** Flips only on change, so an outage is two log lines rather than four a second. */
+    const coordinationOk = yield* Ref.make(true);
+
+    const attemptTick = Effect.gen(
       function* () {
+        yield* Metric.update(Telemetry.ticks, 1);
         const tokenOpt = yield* leader.tryAcquireOrRenew(ha.instanceId, ha.leaseTtlMs);
+        if (!(yield* Ref.get(coordinationOk))) {
+          yield* Ref.set(coordinationOk, true);
+          yield* Effect.logInfo(`${ha.instanceId}: coordination is reachable again`);
+        }
         yield* Metric.update(Telemetry.isLeader, Option.isSome(tokenOpt) ? 1 : 0);
 
         if (Option.isNone(tokenOpt)) {
@@ -293,6 +301,36 @@ export const AggregatorLayer = Layer.effect(
         });
         return publishable;
       },
+    );
+
+    /**
+     * A tick that cannot reach the coordinator is a *skipped* tick, not a dead
+     * loop. Standing down is the only safe reading — an instance that cannot
+     * confirm it still holds the lease must not act as leader — and the next
+     * tick tries again, so recovery needs no intervention.
+     *
+     * The shape matters as much as the handling. This used to be an
+     * `Effect.promise` deep in the Redis layer, so an outage arrived as a
+     * defect, `Effect.repeat` terminated, and the loop was gone permanently in
+     * a process that stayed up and kept answering 200. Measured before the
+     * fix: 55 seconds without Redis ended the loop for good, and a total
+     * upstream failure afterwards published nothing.
+     */
+    const tick: Effect.Effect<ReadonlyArray<CircuitEvent>> = attemptTick.pipe(
+      Effect.catchTag("CoordinationUnavailable", (err) =>
+        Effect.gen(function* () {
+          yield* demote;
+          yield* Metric.update(Telemetry.coordinationErrors, 1);
+          if (yield* Ref.get(coordinationOk)) {
+            yield* Ref.set(coordinationOk, false);
+            yield* Effect.logWarning(
+              `${ha.instanceId}: coordination unavailable during ${err.operation}, ` +
+                `standing down until it returns — ${err.cause}`,
+            );
+          }
+          return [] as ReadonlyArray<CircuitEvent>;
+        }),
+      ),
     );
 
     const snapshots = Ref.get(registry).pipe(
