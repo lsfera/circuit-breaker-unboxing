@@ -2,11 +2,19 @@ global:
   scrape_interval: 2s # fast enough that a demo incident shows up within a tick or two
 
 # Alerting on "the thing that should be moving has stopped" — see alerts.yml
-# for why each rule exists. No Alertmanager is wired here: the rules evaluate
-# and show up in Prometheus's own /alerts, which is enough to demonstrate the
-# signal. Routing them somewhere a human reads is a deployment concern.
+# for why each rule exists, and docs/runbooks/ for what to do about each one.
 rule_files:
   - /etc/prometheus/alerts.yml
+
+# Rules that evaluate and go nowhere are the same failure they are written to
+# catch: something that looks like it is working because it is running. These
+# reach Alertmanager, which groups, inhibits and forwards them to a receiver
+# that logs (infra/alert-sink.mjs) — swap that receiver for a real integration
+# and nothing else here changes.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
 
 scrape_configs:
   # The aggregator's own registry: per-API circuit state, transitions, webhook
@@ -19,11 +27,18 @@ scrape_configs:
       # egress_aggregator_is_leader show which one is currently active.
       - targets: ["aggregator:8088", "aggregator-2:8088"]
         labels: { deployment: "docker-compose" }
-      # Reaches `pnpm start` running on the host (the sim-fleet demo) so the
-      # same Prometheus/Grafana stack works for both demo modes. Harmless if
-      # nothing is listening there.
-      - targets: ["host.docker.internal:8088"]
-        labels: { deployment: "host" }
+      # There used to be a `host.docker.internal:8088` target here, to reach
+      # `pnpm start` running on the host for the sim-fleet demo, with a comment
+      # calling it "harmless if nothing is listening there". It was not
+      # harmless when something *was*: the compose aggregator publishes 8088 to
+      # the host, so Prometheus scraped the same process twice, under two
+      # instance labels. `sum(egress_aggregator_is_leader)` then read 2 with a
+      # single leader, and SplitBrain — the alert for the worst correctness
+      # failure this system can have — fired on a duplicate scrape target.
+      #
+      # To watch a host-run instance, add it back on a port compose does not
+      # publish, and keep the `deployment` label so the rules stay per
+      # deployment (see alerts.yml).
 
   # Envoy's own admin stats, in its native Prometheus format — the per-replica
   # ground truth the aggregator is reconciling. Useful side-by-side with the

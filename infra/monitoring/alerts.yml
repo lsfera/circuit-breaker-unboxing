@@ -4,6 +4,9 @@
 # outside: a process that was up and serving 200s while doing nothing at all.
 # That is the shape to alert on — not CPU, not memory, but "the thing that is
 # supposed to be moving has stopped".
+# `runbook_url` is a path in this repo rather than a URL, because there is no
+# canonical host to point at and a link that 404s at three in the morning is
+# worse than a path you can open next to the code.
 groups:
   - name: egress-control-plane
     interval: 15s
@@ -13,10 +16,11 @@ groups:
       # their last values, and reported itself leader forever. Nothing else
       # here distinguishes that from a quiet system.
       - alert: ControlLoopStalled
-        expr: sum(rate(egress_aggregator_ticks_total[2m])) == 0
+        expr: sum by (deployment) (rate(egress_aggregator_ticks_total[2m])) == 0
         for: 1m
         labels: { severity: critical }
         annotations:
+          runbook_url: "docs/runbooks/ControlLoopStalled.md"
           summary: "No aggregator is ticking"
           description: >-
             Every aggregator instance has stopped iterating its control loop.
@@ -26,11 +30,20 @@ groups:
 
       # Standing down is the safe response to an unreachable coordinator, but
       # while it lasts there is no leader and therefore no publisher.
+      # `absent() or sum() == 0`, not just the comparison. The gauge used to be
+      # written only after an acquire attempt *returned*, so an instance that
+      # could not reach the coordinator published no series at all — and
+      # `sum(...) == 0` cannot fire on a metric that does not exist. The
+      # aggregator sets it to 0 when standing down now, and this expression
+      # covers the case where every instance is gone as well.
       - alert: NoLeaderElected
-        expr: sum(egress_aggregator_is_leader) == 0
+        expr: >-
+          absent(egress_aggregator_is_leader) == 1
+          or sum by (deployment) (egress_aggregator_is_leader) == 0
         for: 2m
         labels: { severity: critical }
         annotations:
+          runbook_url: "docs/runbooks/NoLeaderElected.md"
           summary: "No aggregator holds the publishing lease"
           description: >-
             Instances are running but none can confirm it holds the lease, so
@@ -40,11 +53,20 @@ groups:
 
       # Two leaders at once is the contract violation the fencing tokens exist
       # to prevent, and it is worth knowing about immediately.
+      #
+      # `by (deployment)`, and that is not defensive typing. This rule fired
+      # for real with exactly one leader running, because the scrape config
+      # reached the same aggregator twice — once by service name, once through
+      # the port it publishes to the host — and a sum over both said 2. An
+      # alert this severe has to be summed over things that are actually
+      # different processes, or its first appearance teaches everyone to
+      # ignore it.
       - alert: SplitBrain
-        expr: sum(egress_aggregator_is_leader) > 1
+        expr: sum by (deployment) (egress_aggregator_is_leader) > 1
         for: 30s
         labels: { severity: critical }
         annotations:
+          runbook_url: "docs/runbooks/SplitBrain.md"
           summary: "More than one aggregator believes it is leader"
 
       # The delivery contract, on both transports. These are the numbers the
@@ -59,6 +81,7 @@ groups:
         for: 0m
         labels: { severity: critical }
         annotations:
+          runbook_url: "docs/runbooks/DeliveryContractBroken.md"
           summary: "A per-API sequence gap or duplicate was observed"
 
   - name: egress-daemon-fleet
@@ -73,6 +96,7 @@ groups:
         for: 2m
         labels: { severity: warning }
         annotations:
+          runbook_url: "docs/runbooks/FleetDisagreesWithTarget.md"
           summary: "Daemons pulling work does not match the agreed target"
           description: >-
             Expected {{ $value }} active. A daemon that has gone deaf to
@@ -84,7 +108,85 @@ groups:
         for: 15m
         labels: { severity: warning }
         annotations:
+          runbook_url: "docs/runbooks/DeadLetterQueueGrowing.md"
           summary: "Dead-lettered work is accumulating and not being recovered"
           description: >-
             Failed work is preserved but not replayed. Either the circuit has
             not closed since, or REDRIVE_ON_CLOSE is off.
+
+  # ---------------------------------------------------------------------------
+  # Service level objectives.
+  #
+  # The rules above fire on things that have stopped. These fire on the two
+  # things this system actually promises a subscriber, before they have stopped:
+  # that published events arrive, and that the per-API sequence is intact.
+  #
+  # Multi-window burn rate rather than a threshold on the raw ratio. A single
+  # window either pages on a blip (short) or notices an outage an hour late
+  # (long); requiring a short *and* a long window to be burning at the same
+  # time is what makes fast burn urgent and slow burn merely true.
+  # ---------------------------------------------------------------------------
+  - name: egress-slo
+    interval: 30s
+    rules:
+      # Delivery: of everything the sink was asked to deliver, how much it could
+      # not. `clamp_min` keeps the ratio defined when nothing is being delivered
+      # at all — a quiet system is not a failing one.
+      - record: egress:delivery_failure_ratio:5m
+        expr: >-
+          sum(rate(egress_webhook_dead_lettered_total[5m]))
+          / clamp_min(sum(rate(egress_webhook_delivered_total[5m]))
+            + sum(rate(egress_webhook_dead_lettered_total[5m])), 0.0001)
+      - record: egress:delivery_failure_ratio:1h
+        expr: >-
+          sum(rate(egress_webhook_dead_lettered_total[1h]))
+          / clamp_min(sum(rate(egress_webhook_delivered_total[1h]))
+            + sum(rate(egress_webhook_dead_lettered_total[1h])), 0.0001)
+      - record: egress:delivery_failure_ratio:30m
+        expr: >-
+          sum(rate(egress_webhook_dead_lettered_total[30m]))
+          / clamp_min(sum(rate(egress_webhook_delivered_total[30m]))
+            + sum(rate(egress_webhook_dead_lettered_total[30m])), 0.0001)
+      - record: egress:delivery_failure_ratio:6h
+        expr: >-
+          sum(rate(egress_webhook_dead_lettered_total[6h]))
+          / clamp_min(sum(rate(egress_webhook_delivered_total[6h]))
+            + sum(rate(egress_webhook_dead_lettered_total[6h])), 0.0001)
+
+      # 99.9% delivered over 30 days. 14.4x burn exhausts that budget in two
+      # days, 6x in five.
+      - alert: DeliverySLOFastBurn
+        expr: >-
+          egress:delivery_failure_ratio:5m > (14.4 * 0.001)
+          and egress:delivery_failure_ratio:1h > (14.4 * 0.001)
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          runbook_url: "docs/runbooks/DeliverySLOBurn.md"
+          summary: "Delivery is burning the 99.9% error budget fast"
+          description: >-
+            Undelivered events are being dead-lettered at more than fourteen
+            times the rate the objective allows, over both a five-minute and a
+            one-hour window. The durable outbox holds what failed
+            (egress_webhook_outbox_depth), so this is recoverable — but the
+            subscriber is not getting events now.
+
+      - alert: DeliverySLOSlowBurn
+        expr: >-
+          egress:delivery_failure_ratio:30m > (6 * 0.001)
+          and egress:delivery_failure_ratio:6h > (6 * 0.001)
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          runbook_url: "docs/runbooks/DeliverySLOBurn.md"
+          summary: "Delivery is steadily burning the error budget"
+
+      # Sequence integrity: the honest framing is that its budget is zero, so
+      # DeliveryContractBroken already pages on the first occurrence. This
+      # ratio exists so the *size* of a violation is visible next to the
+      # delivery one, on the same dashboard and in the same units.
+      - record: egress:sequence_violation_ratio:5m
+        expr: >-
+          (sum(rate(egress_subscriber_gaps_total[5m]))
+            + sum(rate(egress_subscriber_duplicates_total[5m])))
+          / clamp_min(sum(rate(egress_subscriber_events_received_total[5m])), 0.0001)

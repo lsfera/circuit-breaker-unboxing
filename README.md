@@ -519,12 +519,57 @@ same target from the same events, so those two lines track each other, and
 when they stop tracking, a daemon has gone deaf while still looking healthy.
 Finding that by hand once is what put the panel there.
 
-This works for *either* demo mode: [infra/monitoring/prometheus.yml](infra/monitoring/prometheus.yml)
-scrapes both `aggregator:8088` (the `docker compose up` / real-Envoy path) and
-`host.docker.internal:8088` (a `pnpm start` sim fleet running on the host), so
-you can run just `docker compose up prometheus grafana` alongside `pnpm start`
-without bringing up Envoy at all. Prometheus scrapes every 2s, so an incident
-you trigger in the console shows up within a point or two.
+Prometheus scrapes every 2s, so an incident you trigger in the console shows
+up within a point or two. It used to also scrape `host.docker.internal:8088`
+so the same stack could watch a `pnpm start` sim fleet on the host; that target
+is gone, because the compose aggregator publishes 8088 to the host and the
+result was Prometheus scraping one process under two instance labels — see
+[What the build surfaced](#what-the-build-surfaced) for what that did to the
+`SplitBrain` alert.
+
+### Alerting, and what to do when one fires
+
+Six rules in [infra/monitoring/alerts.yml](infra/monitoring/alerts.yml), each
+one written because something here failed in a way that looked fine from
+outside, plus two SLO burn-rate alerts. They now go somewhere:
+Prometheus → Alertmanager → a receiver. The receiver in this stack is
+[infra/alert-sink.mjs](infra/alert-sink.mjs), which logs what it is sent —
+deliberately not Slack or PagerDuty, because this repo cannot own anyone's
+credentials and the property worth demonstrating is that a firing rule leaves
+Prometheus. Swap the webhook URL in
+[alertmanager.yml](infra/monitoring/alertmanager.yml) for a real integration
+and nothing else changes.
+
+Alertmanager also does the two things that make alerts readable during an
+incident: grouping (by alert and API, so a fleet-wide problem is one
+notification), and **inhibition** — while `ControlLoopStalled` is firing,
+everything downstream of it is also true and none of it is the cause.
+
+Every rule carries a `runbook_url` pointing into
+[docs/runbooks/](docs/runbooks/), one per alert, each starting from what was
+actually observed rather than from the metric's name. The link travels with the
+notification, so it arrives where the alert does.
+
+The **SLOs** are the two things this system promises a subscriber: that
+published events arrive (99.9%, multi-window burn rate at 14.4× and 6×), and
+that the per-API sequence is intact. The second one is written down honestly as
+what it is — a property whose error budget is zero, so `DeliveryContractBroken`
+pages on the first occurrence and the ratio exists only so the *size* of a
+violation is visible in the same units as the delivery one.
+
+Verified by breaking it: `docker compose stop redis` at 08:37:53, the rule
+pending at +30s, firing at +150s (its `for: 2m`), and the notification in the
+sink's log with its runbook path attached. Redis back, and `RESOLVED` followed.
+
+```
+FIRING   critical/NoLeaderElected — No aggregator holds the publishing lease (runbook: docs/runbooks/NoLeaderElected.md)
+RESOLVED critical/NoLeaderElected — No aggregator holds the publishing lease (runbook: docs/runbooks/NoLeaderElected.md)
+```
+
+Tracing is not wired. `@effect/opentelemetry` publishes the exact version this
+repo pins, so that is a decision rather than a limitation —
+[docs/decisions/003-tracing.md](docs/decisions/003-tracing.md) records why, and
+which path here would actually earn a trace.
 
 ## Event contract
 
@@ -1013,12 +1058,15 @@ infra/
   traffic-generator.mjs      keeps requests flowing through Envoy so /__fail means something
   scale-probe.mjs            what one instance costs at N APIs — ticks, poll, series, payloads
   chaos.mjs                  kill the leader, kill the elected prober; assertions, not a story
-  monitoring/                Prometheus scrape config + provisioned Grafana dashboard
+  monitoring/                Prometheus scrape config, alert rules + SLOs, Alertmanager
+                             routing, and the provisioned Grafana dashboard
+  alert-sink.mjs             stands in for Slack: logs what Alertmanager sends it
 
 Dockerfile                   one image for every process here; deps at build time, no compile step
 .dockerignore                keeps the host's node_modules (absolute symlinks) out of the build context
 docs/rmq-control-plane.md    the RabbitMQ scenario: design, live run, and what it exposed
 docs/decisions/              decision records: what was chosen, and the measurement it rests on
+docs/runbooks/               one per alert — what fired, what to check, what to do about it
 docker-compose.yml           wires infra/ and the packages/ entrypoints together
 .github/workflows/ci.yml     `pnpm run check` on every push, and both Docker-backed
                              suites (`test:redis`, `test:rmq`) in a second job — they
@@ -1203,6 +1251,19 @@ reading it afterwards:
   Redis client is configured to fail rather than queue. Same partition
   afterwards: 4 ticks/s sustained, one error per tick, and the other instance
   holding the lease throughout.
+- **The alert for the worst failure this system can have fired because
+  Prometheus was scraping one process twice.** `SplitBrain` — two aggregators
+  believing they hold the lease — went off with exactly one leader running. The
+  scrape config had a `host.docker.internal:8088` target so the same monitoring
+  stack could also watch a sim fleet started on the host, with a comment
+  calling it "harmless if nothing is listening there". It stopped being
+  harmless the moment something was: the compose aggregator publishes 8088 to
+  the host, so that target and `aggregator:8088` were the *same process* under
+  two instance labels, and `sum(egress_aggregator_is_leader)` read 2. The
+  target is gone, and the fleet-wide rules aggregate `by (deployment)` so a
+  future mixed setup cannot reproduce it. The lesson is not about Prometheus:
+  an alert that fires falsely on its first outing teaches everyone to ignore
+  the one thing it exists to say.
 - **The gauge that says who leads was *absent* on the instance that could not
   lead, rather than zero.** `egress_aggregator_is_leader` is only written after
   an acquire attempt returns, so an instance that has never reached the
@@ -1573,9 +1634,17 @@ together. Nothing in the control path notices, which is exactly why it would
 be found late. A production console at this size sends diffs, or a page of
 APIs, not the fleet.
 
-None of this was measured beyond one process on one machine: no multi-hour
-soak, no memory profile over days, and RSS at 1000 APIs is a single reading
-rather than a curve.
+A soak, of the short kind that is honest to call a soak: 27 minutes on the
+compose stack, deliberately not a quiet window — it contained two chaos runs, a
+one-sided Redis partition, a Redis outage and several rebuilds. Aggregator RSS
+went 98.7 → 103.4 MiB and 99.2 → 105.4 MiB, a daemon 95.7 → 97.1 MiB, with
+6,619 ticks, zero gaps and zero duplicates recorded across all of it, and both
+queues drained at the end. That rules out a fast leak under disruption and
+nothing more: hours, not minutes, is what would say anything about a slow one.
+
+None of the rest was measured beyond one process on one machine either: no
+multi-hour run at 1000 APIs, no memory profile over days, and RSS at that size
+is a single reading rather than a curve.
 
 ### Chaos, on demand rather than by hand
 

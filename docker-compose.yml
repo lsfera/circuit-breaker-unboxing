@@ -328,6 +328,29 @@ services:
     ports: ["9090:9090"]
     networks: [default, devcontainer]
 
+  # Where alerts.yml's rules actually go. Prometheus evaluated them and routed
+  # them nowhere until now, which is the same failure shape the rules are about:
+  # something that looks fine because it is running.
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    volumes:
+      - $HOST_WORKSPACE_FOLDER/infra/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    restart: unless-stopped
+    depends_on: [alert-sink]
+    ports: ["9093:9093"]
+    networks: [default, devcontainer]
+
+  # Stands in for Slack or PagerDuty: it logs what it is sent, so routing is
+  # something you can watch rather than infer. Not the product, so it stays a
+  # bind-mounted file on the stock Node image like the other fixtures.
+  alert-sink:
+    image: *node-image
+    working_dir: /app
+    volumes: ["$HOST_WORKSPACE_FOLDER/infra/alert-sink.mjs:/app/alert-sink.mjs:ro"]
+    command: node alert-sink.mjs
+    restart: unless-stopped
+    networks: [default, devcontainer]
+
   grafana:
     image: grafana/grafana:11.3.1@sha256:fa801ab6e1ae035135309580891e09f7eb94d1abdbd2106bdc288030b028158c
     environment:

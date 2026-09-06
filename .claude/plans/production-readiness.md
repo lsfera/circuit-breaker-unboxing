@@ -410,7 +410,7 @@ running system.
 
 ---
 
-## Phase 9 — Operations
+## Phase 9 — Operations  ✅ done
 
 **What to implement.**
 
