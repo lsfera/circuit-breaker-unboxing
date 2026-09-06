@@ -14,6 +14,13 @@ import type { CircuitEvent } from "@egress/domain/Model.ts";
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 /**
+ * How many gap descriptions to keep. Same reasoning as the sinks' dead-letter
+ * buffers: this is a diagnostic list in a long-running process, and the exact
+ * count is a Prometheus counter (`egress_subscriber_gaps_total`).
+ */
+export const GAP_BUFFER = 100;
+
+/**
  * Delivery integrity as seen from OUTSIDE the process. The webhook sink posts
  * here over real HTTP, so this measures the contract rather than an in-process
  * function call: per-API sequences must be gapless and non-repeating.
@@ -21,13 +28,6 @@ const HERE = dirname(fileURLToPath(import.meta.url));
  * Snapshots deliberately republish the current sequence, so only
  * state_changed events carry that guarantee.
  */
-/**
- * How many gap descriptions to keep. Same reasoning as the sinks' dead-letter
- * buffers: this is a diagnostic list in a long-running process, and the exact
- * count is a Prometheus counter (`egress_subscriber_gaps_total`).
- */
-export const GAP_BUFFER = 100;
-
 export type Integrity = {
   readonly received: number;
   readonly snapshots: number;

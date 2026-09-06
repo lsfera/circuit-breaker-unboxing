@@ -26,97 +26,62 @@ import type { Action, Command, DaemonState } from "./DaemonState.ts";
 
 /**
  * One competing-consumer daemon: one process, one index in a fleet of
- * `fleetSize`. This is deliberately *not* a fleet simulator —
- * docker-compose.yml runs N of these as N separate containers, the same way
- * it runs envoy-00/01/02 and aggregator/aggregator-2, so the SAC election
- * below is contended by real separate processes rather than by fibers that
- * happen to share a runtime.
+ * `fleetSize`. docker-compose.yml runs N of these as N containers, so the SAC
+ * elections below are contended by real separate processes rather than by
+ * fibers that happen to share a runtime.
  *
- * Nothing here coordinates with the other daemons directly. Each one:
- *
- *  - subscribes to its *own* queue on `circuit.control`, bound to only its
- *    API's routing key, so every daemon sees the same event stream;
- *  - feeds each event through the pure `DaemonPolicy.step` to get a target
- *    active count, and starts or stops its own work consumption according to
- *    whether its index falls under that target (`activeIndices`);
- *  - registers on the SAC `probe-trigger` queue and waits, doing nothing
- *    until RabbitMQ promotes it.
- *
- * The whole fleet therefore converges on the same target from the same
- * events with no leader, no gossip and no shared state — the aggregator
- * already did the hard part of turning divergent replica views into one
- * agreed state, and this side just reads it.
+ * Nothing here coordinates with the other daemons. Each one subscribes to its
+ * own queue on `circuit.control`, feeds every event through the pure reducer
+ * in DaemonState.ts, and starts or stops its own work consumption according to
+ * whether its index falls under the agreed target. The fleet converges from
+ * the same events with no leader and no shared state — the aggregator already
+ * did the hard part of turning divergent replica views into one state.
  *
  * ## Two connections, on purpose
  *
- * The control plane runs on the connection from the `Rmq` layer, and that
- * connection *only ever opens links* — the control consumer, the SAC
- * consumer and the trigger publisher are created at startup and live for the
- * life of the process.
+ * The control connection only ever *opens* links: the control consumer, the
+ * two SAC consumers and the trigger publishers live for the life of the
+ * process. Everything that churns — the work consumer, opened and closed on
+ * every transition, and the one-message HALF_OPEN probe — runs on a second
+ * connection this module opens and destroys itself.
  *
- * Everything that churns — the work consumer, opened and closed on every
- * transition, and the one-message HALF_OPEN probe — runs on a second
- * connection this module opens and destroys itself. That is not tidiness.
- * Closing a consumer while the broker still has deliveries in flight for it
- * strands those deliveries, and enough of them stall every link on that
- * connection (see Client.ts's module doc for the measurement). A daemon
- * whose work consumer shared the control connection went deaf to
+ * That is not tidiness. Closing a consumer while the broker still has
+ * deliveries in flight strands them, and enough stranded deliveries stall
+ * every link on that connection (measured — see Client.ts's module doc). A
+ * daemon whose work consumer shared the control connection went deaf to
  * `circuit.control` after a handful of transitions and sat there looking
- * healthy — the failure this split exists to make impossible. Throwing the
- * work connection away is what returns the stranded capacity.
+ * healthy. Throwing the work connection away is what returns the capacity.
  *
  * ## Egress stays transparent
  *
- * Same invariant as infra/traffic-generator.mjs: one configured address, no
- * replica names, no admin ports. A daemon calls `${egressAddr}${apiPath}`
- * and never learns Envoy is a fleet — that topology is known to exactly one
- * thing in this repo, the aggregator's FleetSource.
+ * One configured address, no replica names, no admin ports. A daemon calls
+ * `${egressAddr}${apiPath}` and never learns Envoy is a fleet — that topology
+ * is known to exactly one thing in this repo, the aggregator's FleetSource.
  *
- * ## Backpressure, and where it actually comes from
+ * ## Backpressure is settlement timing
  *
  * The work handler returns the egress call's promise, and `@egress/rmq`
- * accepts the message only once that settles. That is the whole flow-control
- * story: AMQP 1.0 replenishes credit on settlement, so a daemon holding
- * `maxInFlight` calls open stops settling, the broker stops pushing, and the
- * backlog stays where it belongs — in the queue, visible, rather than in a
- * process-local buffer or in a burst of concurrent requests at a service
- * that is already struggling.
+ * settles only once it resolves. AMQP 1.0 replenishes credit on settlement, so
+ * a daemon holding `maxInFlight` calls open stops settling, the broker stops
+ * pushing, and the backlog stays where it belongs — in the queue, visible.
+ * The first version of this file accepted every message on arrival and called
+ * afterwards, which turned a 50k backlog into 50k concurrent calls from one
+ * daemon: precisely the herd the fleet-level policy exists to prevent.
  *
- * The first version of this file accepted every message on arrival and fired
- * the call afterwards. It looked fine and it was not: draining a 50k backlog
- * meant tens of thousands of concurrent calls from a single daemon, which is
- * precisely the herd the fleet-level policy is scaling daemons down to
- * avoid.
+ * ## Work that fails
  *
- * ## What happens to work that fails
+ * A failed call requeues its message and the *broker* counts the attempts —
+ * the work queue is a quorum queue carrying `x-delivery-limit`, so RabbitMQ
+ * dead-letters the message itself once the budget is spent. The daemon does
+ * not count and could not: this client reports `deliveryCount: 0` on every
+ * delivery, and an in-process counter would be lost the moment the message
+ * moved to another daemon. See WORK_DELIVERY_LIMIT in @egress/rmq.
  *
- * A failed call rejects its message, and the work queue is declared with a
- * dead-letter exchange, so it lands on `<apiId>.work.dead` where it can be
- * counted, inspected and replayed. That is the whole point: this repo proves
- * a delivery contract for control events, and it would be a strange kind of
- * rigour to prove that while silently dropping the payload work — which is
- * what accepting a failed message did.
- *
- * Preserving failed work is not the same as recovering it, though, and a
- * dead-letter queue nobody drains is just a slower way of losing things. So
- * there is an opt-in redrive (`REDRIVE_ON_CLOSE`): on the transition back to
- * `CLOSED`, one daemon — elected by the broker on a second SAC queue, the
- * same mechanism as the prober — replays the dead-lettered messages onto the
- * work queue and stops as soon as the queue is drained, a cap is reached, or
- * the circuit leaves `CLOSED` again. It is off by default because replaying
- * work is a policy decision about *this* workload, not a property of the
- * transport: whether a two-minute-old payment attempt should be retried at
- * all is the sort of question a queue cannot answer for you.
- *
- * There is deliberately no retry. The client's `requeue` sends
- * `modified{delivery_failed: false}`, and RabbitMQ only increments AMQP
- * 1.0's `delivery-count` for a delivery marked *failed* — so a released
- * message comes back indistinguishable from a new one, forever, and a
- * redelivery budget that survives the message moving to another daemon
- * cannot be expressed. Verified against a real broker, and pinned by
- * `@egress/rmq`'s integration tests so that a client release which fixes it
- * turns the test red. One attempt then dead-letter is the honest policy
- * given that, not a shortcut around it.
+ * Preserving failed work is not recovering it, so `REDRIVE_ON_CLOSE` replays
+ * `<apiId>.work.dead` onto the work queue when the circuit closes, from the
+ * one daemon a second SAC election picks. Off by default: whether a
+ * two-minute-old payment attempt is still worth making is a property of the
+ * workload, not of the transport.
  */
 
 export type DaemonConfig = {
@@ -168,12 +133,10 @@ export const runDaemon = (cfg: DaemonConfig) =>
       CONTROL_EXCHANGE,
       CONTROL_EXCHANGE_OPTIONS,
     );
-    // The dead-letter queue is declared before the queue that points at it,
-    // so a rejection during the first seconds of the fleet's life has
-    // somewhere to land rather than being discarded by the broker.
-    // The dead-letter queue is the only one without a dead-letter target of
-    // its own: it is the end of the line, and pointing it at itself is a
-    // cycle. Everything else routes rejections to it — see deadLetterArgs.
+    // Declared before the queue that points at it, so a rejection in the
+    // fleet's first seconds has somewhere to land. It is the only queue with
+    // no dead-letter target of its own — the end of the line, and pointing it
+    // at itself is a cycle. Everything else routes rejections here.
     yield* control.declareQueue(deadQueue, deadLetterQueueOptions());
     yield* control.declareQueue(workQueue, workQueueOptions(cfg.apiId));
     yield* control.declareQueue(probeQueue, sacQueueOptions(cfg.apiId));
@@ -288,12 +251,6 @@ export const runDaemon = (cfg: DaemonConfig) =>
     };
 
     /**
-     * Reconciliation is serialized against itself: control events and probe
-     * triggers both land on AMQP callbacks that fork into the runtime, so
-     * without a permit two of them could each observe "no work connection"
-     * and both open one.
-     */
-    /**
      * How many unreadable messages this daemon preserves before it starts
      * letting them go.
      *
@@ -329,6 +286,12 @@ export const runDaemon = (cfg: DaemonConfig) =>
       return "accept";
     };
 
+    /**
+     * Serializes reconciliation against itself. Control events and probe
+     * triggers both land on AMQP callbacks that fork into the runtime, so
+     * without a permit two of them could each observe "no work connection" and
+     * both open one.
+     */
     const gate = yield* Semaphore.make(1);
 
     /** Open a throwaway connection and consume the work queue on it. */
@@ -405,27 +368,6 @@ export const runDaemon = (cfg: DaemonConfig) =>
       }),
     );
 
-    /**
-     * One bounded pass: move at most `redriveMax` messages from the
-     * dead-letter queue back onto the work queue, then stop. Returns why it
-     * stopped, which is what tells the caller whether another pass is worth
-     * running.
-     *
-     * Three properties worth stating, because each is a decision:
-     *
-     *  - **Its own connection**, like the probe, and for the same measured
-     *    reason: this closes a consumer with a backlog behind it, which is
-     *    what strands deliveries and eventually stalls every link on a shared
-     *    connection. The connection is retired from outside the handler.
-     *  - **Publish, then accept.** A crash between the two redelivers a
-     *    message that was already replayed, which is a duplicate; accepting
-     *    first would lose it. Duplicates are recoverable and losses are not,
-     *    and the whole point of this queue is that the work still matters.
-     *  - **It stops on its own.** Whichever comes first: the cap, the queue
-     *    running dry, the circuit leaving CLOSED, or a hard deadline. A
-     *    redrive that cannot end is a worse failure mode than a queue that
-     *    does not drain.
-     */
     /**
      * Dead-letter recovery lives in its own module — see Redrive.ts. What is
      * passed here is the coupling, made explicit: a connection it can destroy,
@@ -739,8 +681,6 @@ export const runDaemon = (cfg: DaemonConfig) =>
     const advanceRamp = Effect.gen(function* () {
       const at = yield* Effect.clockWith((c) => c.currentTimeMillis);
       const { prior, next } = yield* dispatch({ _tag: "RampTick", at });
-      // Only when the answer changes: rebuilding connections once a second for
-      // an unchanged target would be its own kind of thundering herd.
       if (next.policy.targetActive === prior.policy.targetActive) return;
       yield* reconcile;
       yield* Effect.log(

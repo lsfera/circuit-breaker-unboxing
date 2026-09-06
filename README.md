@@ -243,9 +243,9 @@ flowchart LR
     hook --> broker --> sub
   end
 
-  e0 -->|"poll :9901/stats, 250ms"| lead
-  e1 -->|"poll :9901/stats, 250ms"| lead
-  e2 -->|"poll :9901/stats, 250ms"| lead
+  e0 -->|"push stats, gRPC :9900"| lead
+  e1 -->|"push stats, gRPC :9900"| lead
+  e2 -->|"push stats, gRPC :9900"| lead
   lead -->|"state_changed<br/>seq, previousState"| bus
   lead -->|state_changed| hook
 ```

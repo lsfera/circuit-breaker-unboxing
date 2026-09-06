@@ -158,15 +158,17 @@ services:
     build: &app-build
       context: .
       dockerfile: Dockerfile
-    # Runs main.ts against the three real Envoy admin ports
-    # (not the sim fleet — --source=envoy is what makes this stack's outlier
-    # detection real instead of simulated) with Redis-backed HA instead of the
-    # in-memory default, since two instances are genuinely competing here.
+    # Runs main.ts against the three real Envoy replicas, which push their
+    # stats here over gRPC (not the sim fleet — --source=envoy-push is what
+    # makes this stack's outlier detection real instead of simulated), with
+    # Redis-backed HA instead of the in-memory default, since two instances
+    # are genuinely competing here. --source=envoy is the polling alternative;
+    # see "Ingestion" in README.md for the measurement that chose between them.
     #
     # Keep node's args after "src/main.ts" on this one line. With YAML `>`
     # folding, only lines indented the SAME as the first content line
     # ("sh -c ...") get their newline folded to a space; lines indented
-    # further keep a literal newline. Splitting --source=envoy /
+    # further keep a literal newline. Splitting --source=... /
     # --envoy=... onto their own (more-indented) lines silently turned them
     # into separate shell commands that never reached node's argv — the
     # aggregator ran in sim mode with no error, so nothing looked wrong until

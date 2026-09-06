@@ -344,7 +344,6 @@ redis.call("SET", KEYS[3], ARGV[2])
 return ARGV[1]
 `;
 
-/** Every call to the store goes through this: a rejected promise is a failure, never a defect. */
 /**
  * How long a single coordination call may take before it counts as
  * unavailable.
@@ -362,6 +361,7 @@ return ARGV[1]
  */
 export const COORDINATION_TIMEOUT_MS = 1000;
 
+/** Every call to the store goes through this: a rejected promise is a failure, never a defect. */
 const evalGuarded = (
   redis: RedisLike,
   operation: string,

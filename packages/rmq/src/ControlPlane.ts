@@ -10,14 +10,14 @@ import { CircuitEvent } from "@egress/domain/Model.ts";
 
 export const CONTROL_EXCHANGE = "circuit.control";
 
-/** One routing key per API — daemons for `payments-provider` bind only this, never see other APIs' events. */
+/** One routing key per API: a fleet binds only its own and never sees other APIs' events. */
 export const routingKeyFor = (apiId: string): string => `circuit.${apiId}`;
 
-/** Each daemon fleet's own queue on the control exchange. Not durable, not shared — every daemon process gets its own. */
+/** Every daemon process gets its own queue on the control exchange — not shared, not durable. */
 export const controlQueueFor = (apiId: string, instanceId: string): string =>
   `${apiId}.control.${instanceId}`;
 
-/** The always-idle SAC coordination queue for HALF_OPEN prober election — one per API, shared by every daemon in that API's fleet. */
+/** The always-idle SAC queue that elects the HALF_OPEN prober: one per API, contended by that API's whole fleet. */
 export const probeTriggerQueueFor = (apiId: string): string => `${apiId}.probe-trigger`;
 
 /**
@@ -75,7 +75,11 @@ export const deadLetterArgs = (apiId: string): Record<string, unknown> => ({
   "x-dead-letter-routing-key": deadLetterQueueFor(apiId),
 });
 
-/** The work queue's arguments. Identical to `deadLetterArgs` today, kept as its own name because the work queue is the one whose dead-lettering is a designed behaviour rather than a backstop. */
+/**
+ * The work queue's arguments — identical to `deadLetterArgs` today, kept
+ * separately named because here dead-lettering is designed behaviour rather
+ * than a backstop.
+ */
 export const workQueueArgs = deadLetterArgs;
 
 /**
@@ -94,55 +98,49 @@ export const sacQueueArgs = (apiId: string): Record<string, unknown> => ({
 });
 
 /**
- * Which queues survive a broker restart, decided once so producer and daemons
- * cannot disagree — a durability mismatch is a redeclare conflict, exactly
- * like a mismatched argument. Measured in both directions rather than assumed:
- * the broker answers `409 "inequivalent arg 'durable' for queue ... received
- * 'true' but current is 'false'"`, so flipping this on a broker that already
- * holds the queues means deleting them first.
- *
- * The split is about what a restarting consumer can rebuild for itself. A
- * control queue is a live subscription: a daemon that comes back learns the
- * real state from the aggregator's next snapshot, which is what `snapshotMs`
- * is for, so keeping those events across a restart buys nothing and risks a
- * queue growing behind a daemon that never returns — so it stays a classic
- * transient queue, one per daemon, and dies with it.
- *
- * Everything else is `quorum`, which is the second half of the same question:
- * `durable` decides what survives the broker process, `x-queue-type` decides
- * what survives losing the node the queue lives on. A quorum queue cannot be
- * transient — measured: `400 "invalid property 'non-durable'"` — so the two
- * choices are made together or not at all. The work and dead-letter queues
- * hold work nothing can reconstruct. The election queues are always empty,
- * which makes quorum free for them and means an election survives a node
- * loss instead of vanishing with it.
- */
-
-/**
  * How many times a unit of work is attempted before the broker parks it.
  *
- * This repo said twice that a redelivery budget could not be expressed here,
- * because the client cannot mark a delivery failed and RabbitMQ will not
- * count one that is not. Both halves are true and neither matters: the budget
- * is a queue property. A quorum queue with `x-delivery-limit` counts the
- * redeliveries itself and dead-letters at the limit, through the same client
- * that still reports `deliveryCount: 0` on every delivery. Measured, handler
- * returning `requeue` every time: four deliveries, then the dead-letter queue
- * with `reason "delivery_limit"`. See docs/decisions/001-amqp-client.md.
+ * The budget is a queue property, not a client capability — which is why this
+ * repo twice concluded it could not be expressed. A quorum queue with
+ * `x-delivery-limit` counts the redeliveries itself and dead-letters at the
+ * limit, through the same client that still reports `deliveryCount: 0` on
+ * every delivery. Measured with the handler returning `requeue` every time:
+ * four deliveries, then the dead-letter queue with `reason "delivery_limit"`.
+ * See docs/decisions/001-amqp-client.md.
  *
- * Three rather than more because RabbitMQ redelivers immediately, with no
- * backoff: every extra attempt is extra load on a third party that is already
- * failing. What ends the amplification is the circuit opening, which stops
- * the daemons consuming at all.
+ * Three rather than more because RabbitMQ redelivers immediately with no
+ * backoff, so every extra attempt is load on a third party that is already
+ * failing. What ends the amplification is the circuit opening, which stops the
+ * daemons consuming at all.
  *
- * It composes with `REDRIVE_ON_CLOSE` by resetting: the redrive republishes
- * the body, so a replayed message arrives as a new one with a fresh budget.
- * Measured — one message, always requeued, through one redrive cycle: eight
- * deliveries and two arrivals on the dead-letter queue, both
+ * It composes with `REDRIVE_ON_CLOSE` by resetting: a redrive republishes the
+ * body, so a replayed message arrives as a new one with a fresh budget.
+ * Measured through one redrive cycle — eight deliveries, two parkings, both
  * `reason "delivery_limit"`. Three attempts per outage, not three ever.
  */
 export const WORK_DELIVERY_LIMIT = 3;
 
+/**
+ * Which queues survive a broker restart, decided here so producer and daemons
+ * cannot disagree — a durability mismatch is a redeclare conflict exactly like
+ * a mismatched argument. Measured in both directions: the broker answers
+ * `409 "inequivalent arg 'durable'"` when the flag differs from the existing
+ * queue, so flipping it on a broker that already holds the queues means
+ * deleting them first.
+ *
+ * The split is about what a restarting consumer can rebuild for itself. A
+ * control queue is a live subscription — a daemon that comes back learns the
+ * state from the aggregator's next snapshot — so keeping those events buys
+ * nothing and risks a queue growing behind a daemon that never returns. It
+ * stays classic and transient, one per daemon, and dies with it.
+ *
+ * Everything else is `quorum`, the second half of the same question: `durable`
+ * decides what survives the broker process, `x-queue-type` what survives
+ * losing the node the queue lives on. A quorum queue cannot be transient
+ * (measured: `400 "invalid property 'non-durable'"`), so the two are one
+ * decision. Work and dead-letter queues hold work nothing can reconstruct; the
+ * election queues are always empty, which makes quorum free for them.
+ */
 export const workQueueOptions = (apiId: string) => ({
   args: {
     ...workQueueArgs(apiId),
@@ -179,7 +177,7 @@ export const encodeCircuitEvent = (event: CircuitEvent): string => JSON.stringif
 
 const decode = Schema.decodeUnknownOption(CircuitEvent);
 
-/** Same decode path @egress/subscriber uses — the control plane and the HTTP/SSE path never disagree on what a valid event looks like. */
+/** The decode path @egress/subscriber uses, so the control plane and the HTTP/SSE path cannot disagree on what a valid event is. */
 export const decodeCircuitEvent = (body: string) => {
   try {
     return decode(JSON.parse(body));

@@ -113,6 +113,10 @@ export const makeRedrive = (opts: RedriveOptions) => {
       // 5000 before this was reordered.
       if (moved >= opts.maxPerPass) return "requeue";
       moved++;
+      // Publish, then accept — never the reverse. A crash between the two
+      // redelivers a message that was already replayed, which is a duplicate;
+      // accepting first would lose it outright. Duplicates are recoverable and
+      // losses are not, and the premise of this queue is that the work matters.
       try {
         await Effect.runPromise(conn.send(into, body));
       } catch {

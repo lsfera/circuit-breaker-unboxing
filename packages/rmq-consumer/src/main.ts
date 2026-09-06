@@ -112,10 +112,10 @@ const MetricsRoute = HttpRouter.use((router) =>
  * hence `orDie`, and hence the restart policy on these containers rather
  * than a process sitting there half-wired.
  */
-const RoleDaemon = Layer.effectDiscard(Effect.forkScoped(Effect.orDie(program)));
+const Daemon = Layer.effectDiscard(Effect.forkScoped(Effect.orDie(program)));
 
 const MainLayer = HttpRouter.serve(
-  Layer.provideMerge(RoleDaemon, MetricsRoute).pipe(Layer.provide(RmqLive(connect))),
+  Layer.provideMerge(Daemon, MetricsRoute).pipe(Layer.provide(RmqLive(connect))),
 ).pipe(Layer.provide(NodeHttpServer.layer(createServer, { port: METRICS_PORT })));
 
 NodeRuntime.runMain(Layer.launch(MainLayer));
