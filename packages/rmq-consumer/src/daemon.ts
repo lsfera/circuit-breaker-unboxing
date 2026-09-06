@@ -18,11 +18,11 @@ import {
 import { State, STATE_CODE } from "@egress/domain/Model.ts";
 import { initialContract, observe } from "./Contract.ts";
 import { makeRedrive } from "./Redrive.ts";
-import { activeIndices, initial, step } from "./DaemonPolicy.ts";
+import { desired, initialState, plan, reduce } from "./DaemonState.ts";
 import * as Telemetry from "./Telemetry.ts";
 import type { Consumer, RmqConnectOptions, Settlement } from "@egress/rmq/Client.ts";
 import type { ContractState } from "./Contract.ts";
-import type { DaemonPolicyState } from "./DaemonPolicy.ts";
+import type { Action, Command, DaemonState } from "./DaemonState.ts";
 
 /**
  * One competing-consumer daemon: one process, one index in a fleet of
@@ -181,17 +181,29 @@ export const runDaemon = (cfg: DaemonConfig) =>
     const controlQ = yield* control.declareQueue(controlQueue, controlQueueOptions(cfg.apiId));
     yield* control.bind(routingKeyFor(cfg.apiId), exchange, controlQ);
 
-    const circuit = yield* Ref.make<State>(State.CLOSED);
+    /**
+     * Everything this daemon decides, in one value — see DaemonState.ts. The
+     * circuit state, the policy, and the two dedupe sequences used to be four
+     * separate Refs with invariants between them and nothing saying so; the two
+     * sequences in particular were read-then-write across two operations, from
+     * handlers that run concurrently on AMQP callbacks. One `Ref.modify` over
+     * one value makes each transition atomic and each decision testable without
+     * a broker.
+     */
     const now = yield* Effect.clockWith((c) => c.currentTimeMillis);
-    const policy = yield* Ref.make<DaemonPolicyState>(initial(cfg.fleetSize, now));
-    /** The disposable work connection's scope — non-null exactly while this daemon is pulling work. */
+    const state = yield* Ref.make<DaemonState>(initialState(cfg.fleetSize, now));
+
+    /**
+     * The connections, which are resources rather than decisions: this is the
+     * "actual" side that `plan` compares the desired shape against. Kept as
+     * three handles because that is what they are, and because Redrive.ts owns
+     * one of them by contract.
+     *
+     * The work scope is non-null exactly while this daemon is pulling work.
+     */
     const workScope = yield* Ref.make<Scope.Closeable | null>(null);
     const probeScope = yield* Ref.make<Scope.Closeable | null>(null);
     const redriveScope = yield* Ref.make<Scope.Closeable | null>(null);
-    /** Highest circuit sequence this daemon has already probed for — see the trigger handler. */
-    const probedSequence = yield* Ref.make(-1);
-    /** Same idea for the redrive election: one replay per recovery, not one per trigger message. */
-    const redrivenSequence = yield* Ref.make(-1);
 
     let inFlight = 0;
     let queued = 0;
@@ -332,33 +344,26 @@ export const runDaemon = (cfg: DaemonConfig) =>
         Effect.flatMap((scope) => (scope === null ? Effect.void : Scope.close(scope, Exit.void))),
       );
 
+    /**
+     * Make the connections match the state, and nothing else.
+     *
+     * Which connections *should* exist is `desired`, and the difference between
+     * that and what does exist is `plan` — both pure, both in DaemonState.ts,
+     * both tested without a broker. What is left here is the part that can only
+     * happen here: opening and closing sockets, under the permit.
+     */
     const reconcile = gate.withPermit(
       Effect.gen(function* () {
-        const state = yield* Ref.get(circuit);
-        const { targetActive } = yield* Ref.get(policy);
-
-        // HALF_OPEN is the one state where a daemon must not act on its own
-        // index. targetActive is 1, so index 0 would otherwise self-activate
-        // and race whichever daemon SAC actually elected — two probes for a
-        // state whose entire contract is "exactly one call". The prober is
-        // chosen by the broker, below, not here.
-        const shouldWork =
-          state !== State.HALF_OPEN && activeIndices(targetActive, cfg.fleetSize).has(cfg.index);
-
-        const running = (yield* Ref.get(workScope)) !== null;
-        if (shouldWork && !running) yield* startWork;
-        if (!shouldWork && running) yield* stopScope(workScope);
-
-        // A probe connection only ever belongs to HALF_OPEN. Leaving the
-        // state for any reason retires it, so it can never overlap the work
-        // consumption CLOSED is about to start.
-        if (state !== State.HALF_OPEN) yield* stopScope(probeScope);
-
-        // A redrive belongs to CLOSED and nothing else. Leaving that state
-        // for any reason retires it immediately: replaying a backlog into an
-        // upstream that has just started failing again is the one thing this
-        // whole design exists to prevent.
-        if (state !== State.CLOSED) yield* stopScope(redriveScope);
+        const have = {
+          work: (yield* Ref.get(workScope)) !== null,
+          probe: (yield* Ref.get(probeScope)) !== null,
+          redrive: (yield* Ref.get(redriveScope)) !== null,
+        };
+        const actions = plan(desired(yield* Ref.get(state), cfg.index, cfg.fleetSize), have);
+        if (actions.startWork) yield* startWork;
+        if (actions.stopWork) yield* stopScope(workScope);
+        if (actions.stopProbe) yield* stopScope(probeScope);
+        if (actions.stopRedrive) yield* stopScope(redriveScope);
       }),
     );
 
@@ -435,7 +440,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
       workQueue,
       deadQueue,
       maxPerPass: cfg.redriveMax,
-      isClosed: Ref.get(circuit).pipe(Effect.map((s) => s === State.CLOSED)),
+      isClosed: Ref.get(state).pipe(Effect.map((s) => s.circuit === State.CLOSED)),
       onReplayed: () => {
         redriven++;
       },
@@ -450,36 +455,67 @@ export const runDaemon = (cfg: DaemonConfig) =>
     const trigger = yield* control.publisherToQueue(probeQueue);
     const redriveTrigger = yield* control.publisherToQueue(redriveQueue);
 
+    /**
+     * One command in, one atomic transition out, and the actions the pure
+     * reducer asked for.
+     *
+     * `Ref.modify` rather than get-then-set, which is the point: these are
+     * called from AMQP callbacks that run concurrently, and the two dedupe
+     * checks ("have I already probed for this sequence?") used to read and
+     * write across two operations. Now the decision and the record of it are
+     * the same step.
+     */
+    const dispatch = (command: Command) =>
+      Ref.modify(state, (prior) => {
+        const { next, actions } = reduce(prior, command, cfg.fleetSize, cfg.redriveOnClose);
+        return [{ prior, next, actions }, next] as const;
+      });
+
+    /** The shell half of the reducer: what an Action actually does. */
+    const perform = (action: Action) => {
+      switch (action._tag) {
+        case "PublishProbeTrigger":
+          return control.send(trigger, JSON.stringify({ sequence: action.sequence }));
+        case "PublishRedriveTrigger":
+          return control.send(redriveTrigger, JSON.stringify({ sequence: action.sequence }));
+        case "Probe":
+          return probeOnce;
+        case "Redrive":
+          return redriveOnce;
+      }
+    };
+
+    const performAll = (actions: ReadonlyArray<Action>) =>
+      Effect.forEach(actions, perform, { discard: true });
+
     const describe = Effect.gen(function* () {
-      const state = yield* Ref.get(circuit);
-      const { targetActive } = yield* Ref.get(policy);
+      const { circuit, policy } = yield* Ref.get(state);
       const active = (yield* Ref.get(workScope)) !== null;
       return (
-        `${state} target=${targetActive}/${cfg.fleetSize} self=${active ? "ACTIVE" : "idle"} ` +
+        `${circuit} target=${policy.targetActive}/${cfg.fleetSize} self=${active ? "ACTIVE" : "idle"} ` +
         `calls ok=${ok} failed=${failed} inFlight=${inFlight} queued=${queued} ` +
         `control=${[...eventsByType.values()].reduce((a, b) => a + b, 0)} ` +
         `gaps=${contract.gaps} dup=${contract.duplicates}`
       );
     });
 
-    const applyEvent = (state: State, sequence: number, reason: string) =>
+    /**
+     * Order is preserved from when this was written out by hand: apply the
+     * transition, make the connections match it, say so, and only then publish
+     * whatever triggers the transition called for.
+     */
+    const applyEvent = (circuitState: State, sequence: number, reason: string) =>
       Effect.gen(function* () {
-        const prior = yield* Ref.get(policy);
-        const priorState = yield* Ref.get(circuit);
-        yield* Ref.set(circuit, state);
         const at = yield* Effect.clockWith((c) => c.currentTimeMillis);
-        yield* Ref.set(policy, step(prior, state, cfg.fleetSize, at));
+        const { actions } = yield* dispatch({
+          _tag: "CircuitChanged",
+          state: circuitState,
+          sequence,
+          at,
+        });
         yield* reconcile;
         yield* Effect.log(`${label}: seq=${sequence} (${reason}) ${yield* describe}`);
-        if (state === State.HALF_OPEN) {
-          yield* control.send(trigger, JSON.stringify({ sequence }));
-        }
-        // Only on the actual transition back into CLOSED — the aggregator's
-        // periodic snapshots repeat the current state, and a redrive per
-        // snapshot would replay the queue every fifteen seconds forever.
-        if (cfg.redriveOnClose && state === State.CLOSED && priorState !== State.CLOSED) {
-          yield* control.send(redriveTrigger, JSON.stringify({ sequence }));
-        }
+        yield* performAll(actions);
       });
 
     yield* control.consume(controlQueue, (body) => {
@@ -518,13 +554,11 @@ export const runDaemon = (cfg: DaemonConfig) =>
       } catch {
         return sampleUnreadable("malformed probe trigger");
       }
+      // A duplicate trigger for a transition already probed produces no
+      // actions, which is the reducer's job rather than this handler's.
       Effect.runFork(
-        Ref.get(probedSequence).pipe(
-          Effect.flatMap((last) =>
-            sequence <= last
-              ? Effect.void // a duplicate trigger for a transition already probed
-              : Ref.set(probedSequence, sequence).pipe(Effect.andThen(probeOnce)),
-          ),
+        dispatch({ _tag: "ProbeTriggered", sequence }).pipe(
+          Effect.flatMap(({ actions }) => performAll(actions)),
           Effect.catchCause((cause) => Effect.logError(`${label}: probe failed`, cause)),
         ),
       );
@@ -542,12 +576,8 @@ export const runDaemon = (cfg: DaemonConfig) =>
         return sampleUnreadable("malformed redrive trigger");
       }
       Effect.runFork(
-        Ref.get(redrivenSequence).pipe(
-          Effect.flatMap((last) =>
-            sequence <= last
-              ? Effect.void
-              : Ref.set(redrivenSequence, sequence).pipe(Effect.andThen(redriveOnce)),
-          ),
+        dispatch({ _tag: "RedriveTriggered", sequence }).pipe(
+          Effect.flatMap(({ actions }) => performAll(actions)),
           Effect.catchCause((cause) => Effect.logError(`${label}: redrive failed`, cause)),
         ),
       );
@@ -575,14 +605,13 @@ export const runDaemon = (cfg: DaemonConfig) =>
     let flushedEvents = new Map<string, number>();
 
     const flush = Effect.gen(function* () {
-      const state = yield* Ref.get(circuit);
-      const { targetActive } = yield* Ref.get(policy);
+      const { circuit, policy } = yield* Ref.get(state);
       const active = (yield* Ref.get(workScope)) !== null;
 
       yield* Effect.all(
         [
-          Metric.update(Metric.withAttributes(Telemetry.circuitState, attrs), STATE_CODE[state]),
-          Metric.update(Metric.withAttributes(Telemetry.targetActive, attrs), targetActive),
+          Metric.update(Metric.withAttributes(Telemetry.circuitState, attrs), STATE_CODE[circuit]),
+          Metric.update(Metric.withAttributes(Telemetry.targetActive, attrs), policy.targetActive),
           Metric.update(Metric.withAttributes(Telemetry.fleetSize, attrs), cfg.fleetSize),
           Metric.update(Metric.withAttributes(Telemetry.selfActive, attrs), active ? 1 : 0),
           Metric.update(Metric.withAttributes(Telemetry.inFlight, attrs), inFlight),
@@ -708,16 +737,15 @@ export const runDaemon = (cfg: DaemonConfig) =>
      * rebuild connections once a second for no reason.
      */
     const advanceRamp = Effect.gen(function* () {
-      const state = yield* Ref.get(circuit);
-      if (state !== State.CLOSED) return;
-      const prior = yield* Ref.get(policy);
       const at = yield* Effect.clockWith((c) => c.currentTimeMillis);
-      const next = step(prior, state, cfg.fleetSize, at);
-      if (next.targetActive === prior.targetActive) return;
-      yield* Ref.set(policy, next);
+      const { prior, next } = yield* dispatch({ _tag: "RampTick", at });
+      // Only when the answer changes: rebuilding connections once a second for
+      // an unchanged target would be its own kind of thundering herd.
+      if (next.policy.targetActive === prior.policy.targetActive) return;
       yield* reconcile;
       yield* Effect.log(
-        `${label}: ramp ${prior.targetActive} -> ${next.targetActive} ${yield* describe}`,
+        `${label}: ramp ${prior.policy.targetActive} -> ${next.policy.targetActive} ` +
+          `${yield* describe}`,
       );
     });
 
