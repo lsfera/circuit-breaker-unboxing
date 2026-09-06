@@ -358,6 +358,13 @@ export const AggregatorLayer = Layer.effect(
         Effect.gen(function* () {
           yield* demote;
           yield* Metric.update(Telemetry.coordinationErrors, 1);
+          // Say "not the leader" rather than saying nothing. `isLeader` is
+          // only updated after an acquire attempt returns, so an instance that
+          // has never reached the coordinator publishes no series at all —
+          // and an alert written as `max(egress_aggregator_is_leader) == 0`
+          // cannot fire on a metric that is absent. Found by partitioning one
+          // instance from Redis and watching the gauge vanish instead of drop.
+          yield* Metric.update(Telemetry.isLeader, 0);
           if (yield* Ref.get(coordinationOk)) {
             yield* Ref.set(coordinationOk, false);
             yield* Effect.logWarning(

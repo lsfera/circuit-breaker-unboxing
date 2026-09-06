@@ -1,4 +1,4 @@
-import { Context, Data, Effect, Layer, Option, Ref, Schema } from "effect";
+import { Context, Data, Duration, Effect, Layer, Option, Ref, Schema } from "effect";
 import { ReasonSchema, StateSchema } from "@egress/domain/Model.ts";
 import type { Reason, State } from "@egress/domain/Model.ts";
 
@@ -345,6 +345,23 @@ return ARGV[1]
 `;
 
 /** Every call to the store goes through this: a rejected promise is a failure, never a defect. */
+/**
+ * How long a single coordination call may take before it counts as
+ * unavailable.
+ *
+ * "The instance stands down and retries next tick" was only ever true if the
+ * call *returns*. It does not always: a one-sided partition — this instance
+ * cannot reach Redis, the other one can — had the client queueing the command
+ * against a connection it kept failing to establish, so the promise simply did
+ * not settle. Measured: the tick loop advanced twice in twenty-five seconds and
+ * then stopped, `/livez` went 503, and the instance neither led nor stood down.
+ * It hung.
+ *
+ * Well under `leaseTtlMs` on purpose: a leader has to be able to fail a call,
+ * notice, and still renew inside its lease.
+ */
+export const COORDINATION_TIMEOUT_MS = 1000;
+
 const evalGuarded = (
   redis: RedisLike,
   operation: string,
@@ -354,7 +371,17 @@ const evalGuarded = (
   Effect.tryPromise({
     try: () => redis.eval(script, options),
     catch: (cause) => new CoordinationUnavailable({ operation, cause: String(cause) }),
-  });
+  }).pipe(
+    Effect.timeout(Duration.millis(COORDINATION_TIMEOUT_MS)),
+    Effect.catchTag("TimeoutError", () =>
+      Effect.fail(
+        new CoordinationUnavailable({
+          operation,
+          cause: `no answer within ${COORDINATION_TIMEOUT_MS}ms`,
+        }),
+      ),
+    ),
+  );
 
 export const RedisCoordinationLayer = (
   redis: RedisLike,

@@ -1011,6 +1011,8 @@ packages/
 infra/
   envoy/envoy.yaml           egress config: per-API clusters, outlier detection
   traffic-generator.mjs      keeps requests flowing through Envoy so /__fail means something
+  scale-probe.mjs            what one instance costs at N APIs — ticks, poll, series, payloads
+  chaos.mjs                  kill the leader, kill the elected prober; assertions, not a story
   monitoring/                Prometheus scrape config + provisioned Grafana dashboard
 
 Dockerfile                   one image for every process here; deps at build time, no compile step
@@ -1185,6 +1187,30 @@ reading it afterwards:
   skipping a stuck event to deliver the ones behind it would manufacture
   exactly the gap this system exists to prevent, and it would look like
   progress.
+- **"Stands down and retries next tick" was only true if the call came back.**
+  The aggregator's answer to an unreachable coordinator — demote, count it, try
+  again — had only ever been tested by stopping Redis for everyone. Pointing
+  *one* instance's `redis` at a black hole while the other kept working
+  produced something else entirely: the client queues commands against a
+  connection it cannot establish and retries a request across twenty
+  reconnection attempts, so the promise never settled and the tick that was
+  supposed to fail fast simply blocked. Measured: **two ticks in twenty-five
+  seconds and then nothing**, a single coordination error, and the instance
+  neither leading nor standing down. `/livez` was right about it — 503, a
+  control loop that has stopped — which is the Phase 4 endpoint earning itself
+  inside a week. Coordination calls are bounded at 1s now, well under
+  `leaseTtlMs` so a leader can fail a call and still renew in time, and the
+  Redis client is configured to fail rather than queue. Same partition
+  afterwards: 4 ticks/s sustained, one error per tick, and the other instance
+  holding the lease throughout.
+- **The gauge that says who leads was *absent* on the instance that could not
+  lead, rather than zero.** `egress_aggregator_is_leader` is only written after
+  an acquire attempt returns, so an instance that has never reached the
+  coordinator publishes no series at all — and `max(egress_aggregator_is_leader)
+  == 0`, which is how anyone would write the "nobody is leading" alert, cannot
+  fire on a metric that does not exist. Found while watching the partitioned
+  instance above: the gauge did not drop, it vanished. The stand-down path sets
+  it to 0 explicitly now.
 - **A lease that is only ever surrendered by expiring turns every deploy into
   an outage-shaped event.** `LeaderElection.release` was written in the first
   version of `Coordination.ts` and never called from anywhere — grepping the
@@ -1508,6 +1534,95 @@ faster than they finish.
 HTTP subscriber that refuses, then recovers, then falls over again mid-drain:
 five events kept while it was down, five replayed in order when it came back,
 each committed exactly once.
+
+## Measured limits
+
+Every number in this repo before this section came from three APIs and three
+replicas, which is enough to demonstrate the properties and useless for
+predicting anything. `--apis=N` replaces the named APIs with N synthetic ones
+(`--source=sim` only) and [`infra/scale-probe.mjs`](infra/scale-probe.mjs)
+samples a running instance:
+
+```bash
+node --experimental-strip-types packages/aggregator/src/main.ts \
+  --source=sim --apis=1000 --replicas=10 --port=8098 --no-webhook &
+node infra/scale-probe.mjs http://127.0.0.1:8098 15
+```
+
+| APIs × replicas | ticks/s | mean poll | Prometheus series | `/metrics` | `/api/state` | RSS |
+| --- | --- | --- | --- | --- | --- | --- |
+| 3 × 3 | 4.00 | 0.04 ms | 88 | 7.5 KB in 1.9 ms | 1.8 KB in 2.7 ms | — |
+| 50 × 10 | 3.93 | 0.12 ms | 840 | 50 KB in 3.5 ms | 55 KB in 1.5 ms | 199 MB |
+| 200 × 10 | 3.93 | 0.54 ms | 3,240 | 186 KB in 5.8 ms | 221 KB in 2.2 ms | 272 MB |
+| 1000 × 10 | 3.73 | 2.42 ms | 16,040 | 911 KB in 22.6 ms | 1.1 MB in 5.3 ms | 462 MB |
+
+**The control loop is not the thing that breaks.** A 333× increase in APIs
+costs the tick loop 7% of its cadence (4.00 → 3.73 ticks/s) and the poll 2.4ms.
+Stepping a thousand breakers is arithmetic on small objects, and it shows.
+
+**What grows is the observability surface**, which is a cost paid in someone
+else's system. Sixteen thousand series per instance at 1000 APIs, and a 911 KB
+scrape — against this repo's own 2s Prometheus interval, roughly 455 KB/s per
+instance, doubled because there are two. Sixteen series per API is the number
+to plan with.
+
+**The console breaks first, and by a distance.** `/api/stream` re-sends the
+whole state frame every 400ms, so at 1000 APIs each connected browser costs
+about **2.75 MB/s** — an order of magnitude more than everything else here put
+together. Nothing in the control path notices, which is exactly why it would
+be found late. A production console at this size sends diffs, or a page of
+APIs, not the fleet.
+
+None of this was measured beyond one process on one machine: no multi-hour
+soak, no memory profile over days, and RSS at 1000 APIs is a single reading
+rather than a curve.
+
+### Chaos, on demand rather than by hand
+
+The two adversarial tests this README describes were each performed once,
+watched in the logs, and written up — which is a claim with a date on it
+rather than a proof, because nothing re-runs it.
+[`infra/chaos.mjs`](infra/chaos.mjs) is the same two experiments with
+assertions and an exit code:
+
+```bash
+node infra/chaos.mjs leader   # kill the publishing leader mid-incident
+node infra/chaos.mjs prober   # kill the daemon the broker elected to probe
+```
+
+Run against the compose stack on 2026-09-06:
+
+- **leader** — circuit opened in 2.5s, leader killed at `sequence=18`, standby
+  took over in **5063 ms** (the crash path: a killed process hands nothing
+  back, so this is the full `leaseTtlMs`, and it is the number
+  [releasing the lease on shutdown](#high-availability) improves on for
+  *planned* stops), rehydrated the API from its checkpoint, resumed at 19, and
+  the surviving subscriber saw **0 duplicates and 0 gaps** across the kill.
+- **prober** — `rmq-daemon-0` was elected by the broker and killed;
+  `rmq-daemon-3` was promoted **7099 ms** later, and the circuit reached
+  `CLOSED` **16719 ms** after the kill with its original prober gone.
+
+The harness needed its own correction first, and it is a good example of why
+absolute counters lie: the first version summed gaps and duplicates across
+both instances, and the run after a kill reported duplicates falling 4 → 0 and
+`-535` events delivered. That is not a contract violation, it is a restarted
+process with fresh in-memory counters. It reads the surviving instance, before
+and after, now.
+
+### The partition nobody had tried
+
+Every previous coordinator test stopped Redis for *everyone*, which is the
+easy case: nobody leads, and the whole fleet stands down together. The
+asymmetric one — this instance cannot reach Redis, the other one can — is
+where a lease-based design actually goes wrong, and it had never been run.
+`extra_hosts: ["redis:127.0.0.1"]` on one instance produces it exactly: one
+process's coordinator is a black hole, everything else is untouched.
+
+What it found is in [What the build surfaced](#what-the-build-surfaced): the
+tick did not stand down, it hung. After the fix, the same partition gives 4
+ticks/s sustained on the partitioned instance, one coordination error per tick,
+`is_leader` reading 0, and the healthy instance holding the lease throughout —
+no split brain, and no silence either.
 
 ## The fork this defers
 

@@ -34,11 +34,32 @@ const PORT = Number(args.get("port") ?? 8088);
 const MODE = args.get("source") ?? "sim";
 const REPLICAS = Number(args.get("replicas") ?? 5);
 
-const APIS: ReadonlyArray<ApiSpec> = [
+const NAMED_APIS: ReadonlyArray<ApiSpec> = [
   { apiId: "payments-provider", endpoints: 6, rps: 900, failureRate: 0 },
   { apiId: "shipping-rates", endpoints: 4, rps: 300, failureRate: 0 },
   { apiId: "tax-calc", endpoints: 3, rps: 120, failureRate: 0 },
 ];
+
+/**
+ * `--apis=N` replaces the three named APIs with N synthetic ones, for finding
+ * out what this costs at a size nobody has run it at.
+ *
+ * Synthetic rather than N more real Envoy clusters on purpose: the question is
+ * what the *aggregator* costs per API per tick — polling or decoding, stepping
+ * N breakers, publishing, checkpointing, and the metric cardinality that comes
+ * with it — and standing up two hundred real upstreams to ask it would measure
+ * the load generator instead. Only meaningful with `--source=sim`.
+ */
+const syntheticApis = (count: number): ReadonlyArray<ApiSpec> =>
+  Array.from({ length: count }, (_, i) => ({
+    apiId: `synthetic-${String(i).padStart(3, "0")}`,
+    endpoints: 6,
+    rps: 300,
+    failureRate: 0,
+  }));
+
+const API_COUNT = args.has("apis") ? Number(args.get("apis")) : 0;
+const APIS: ReadonlyArray<ApiSpec> = API_COUNT > 0 ? syntheticApis(API_COUNT) : NAMED_APIS;
 
 /**
  * Three ingestion layers, one interface.
@@ -127,7 +148,22 @@ const CoordinationLayer =
   args.get("ha") === "redis"
     ? Layer.unwrap(
         Effect.acquireRelease(
-          Effect.sync(() => new Redis(args.get("redis") ?? "redis://127.0.0.1:6379")),
+          Effect.sync(
+            () =>
+              new Redis(args.get("redis") ?? "redis://127.0.0.1:6379", {
+                // Fail fast rather than queue. ioredis defaults to holding
+                // commands in an offline queue and retrying a request across
+                // twenty reconnection attempts, which turns "the coordinator
+                // is unreachable" from an error into a hang — and a tick that
+                // hangs is a control loop that has stopped without saying so.
+                // Coordination.ts bounds this too, because the port must not
+                // depend on which client is behind it; this is the same
+                // decision made where the client actually is.
+                maxRetriesPerRequest: 1,
+                enableOfflineQueue: false,
+                connectTimeout: 1000,
+              }),
+          ),
           (redis) => Effect.promise(() => redis.quit().then(() => {}, () => {})),
         ).pipe(
           Effect.map((redis) => {

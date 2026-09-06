@@ -376,7 +376,7 @@ time or a success count as an argument, do not read a clock inside it.
 
 ---
 
-## Phase 8 — Scale and resilience, measured
+## Phase 8 — Scale and resilience, measured  ✅ done
 
 **What to implement.**
 
