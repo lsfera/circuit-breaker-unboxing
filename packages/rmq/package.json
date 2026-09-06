@@ -2,7 +2,7 @@
   "name": "@egress/rmq",
   "private": true,
   "type": "module",
-  "description": "Effect wrapper over amqplib (AMQP 0-9-1) plus the circuit.control exchange helpers \u2014 shared by @egress/aggregator's AmqpControlPlaneSink and @egress/rmq-consumer's daemon fleet.",
+  "description": "Effect wrapper over amqplib (AMQP 0-9-1) plus the circuit.control exchange helpers — shared by @egress/aggregator's AmqpControlPlaneSink and @egress/rmq-consumer's daemon fleet.",
   "exports": {
     "./Client.ts": "./src/Client.ts",
     "./ControlPlane.ts": "./src/ControlPlane.ts"
