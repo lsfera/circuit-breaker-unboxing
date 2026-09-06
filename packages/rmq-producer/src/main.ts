@@ -35,24 +35,6 @@ const program = runProducer({
   ratePerSecond: Number(env("RATE_PER_SECOND", "200")),
 });
 
-/**
- * The same narrowly filtered guard the daemon carries, for the same library
- * race: rhea throws `transfer after detach` synchronously from inside a socket
- * callback when frames arrive for a link that has just gone away, and the
- * throw is unreachable from here because the client keeps its rhea container
- * private. This process holds a connection too, so it can meet the same race.
- *
- * Everything else stays fatal on purpose, which only works because the
- * container restarts — see `restart: unless-stopped` on the rmq-* services.
- */
-process.on("uncaughtException", (error) => {
-  if (error instanceof Error && error.message === "transfer after detach") {
-    console.warn("[producer] ignored rhea race: transfer after detach");
-    return;
-  }
-  throw error;
-});
-
 const METRICS_PORT = Number(env("METRICS_PORT", "9464"));
 
 /**

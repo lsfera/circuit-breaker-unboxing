@@ -1,76 +1,70 @@
-import { Context, Data, Effect, Layer, Scope, Semaphore } from "effect";
-import { createEnvironment } from "rabbitmq-amqp-js-client";
-import type { Connection, Consumer, Publisher } from "rabbitmq-amqp-js-client";
-
-/** Re-exported so downstream packages (@egress/aggregator, @egress/rmq-consumer) never need their own direct dependency on the underlying client library. */
-export type { Consumer, Publisher };
+import { Context, Data, Effect, Layer, Scope } from "effect";
+import * as amqp from "amqplib";
+import type { Channel, ChannelModel, ConsumeMessage } from "amqplib";
 
 /**
- * Opaque handles: rabbitmq-amqp-js-client's `Exchange`/`Queue` types exist
- * internally (src/exchange.ts, src/queue.ts) but are not part of its public
- * `dist/index.d.ts` export surface, so they can't be named here. Every
- * caller only ever passes these straight back into `bind`, never inspects
- * their shape, so opacity costs nothing.
+ * Opaque handles. `declareQueue`/`declareTopicExchange` hand these straight
+ * back to `bind`, and nothing else ever inspects them, so their shape is not
+ * part of the contract.
  */
 export type RmqExchange = unknown;
 export type RmqQueue = unknown;
 
 /**
- * Effect wrapper over rabbitmq-amqp-js-client (AMQP 1.0, RabbitMQ 4.x
- * native — not the AMQP 0-9-1 a library like amqplib speaks), in the same
- * Context.Service / Layer.effect / Data.TaggedError shape as
- * @egress/aggregator's FleetSource.ts and Coordination.ts. Every claim this
- * module leans on (x-single-active-consumer election and promotion, a
- * closed consumer stopping delivery without touching the connection, a
- * fixed exchange+routingKey publisher landing on the correctly topic-bound
- * queue) was verified against a real RabbitMQ 4.x container before being
- * written here — see docs/rmq-control-plane.md.
+ * A consumer is a channel plus the tag the broker gave it. One channel per
+ * consumer on purpose — see the module doc.
+ */
+export type Consumer = { readonly channel: Channel; readonly consumerTag: string };
+
+/**
+ * A publisher is an address, not a link. In AMQP 0-9-1 publishing takes the
+ * exchange and routing key per call, so there is nothing to open, nothing to
+ * fail halfway, and nothing to race.
+ */
+export type Publisher = { readonly exchange: string; readonly routingKey: string };
+
+/**
+ * Effect wrapper over amqplib (AMQP 0-9-1), in the same Context.Service /
+ * Layer.effect / Data.TaggedError shape as @egress/aggregator's FleetSource.ts
+ * and Coordination.ts.
  *
- * ## Why every operation is serialized
+ * ## Why 0-9-1, having started on 1.0
  *
- * Opening links concurrently on one connection is broken in this client,
- * verified two ways against a real broker:
+ * This was `rabbitmq-amqp-js-client` (AMQP 1.0, RabbitMQ 4 native) and the
+ * decision to keep it was made on measurement — see
+ * docs/decisions/001-amqp-client.md. What changed is the evidence, not the
+ * taste:
  *
- * - Three `createPublisher` calls in flight at once, each for a different
- *   (exchange, routingKey): every message published afterwards landed on
- *   the *first* publisher's queue.
- * - Three `createConsumer` calls in flight at once, each for a different
- *   queue: all three consumers received the *first* queue's messages.
+ *  - That client had no commit upstream after 2026-06-25, and its issue #96 —
+ *    concurrent `createPublisher` calls resolving with crossed links, ~20,000
+ *    misrouted messages for the reporter in production — was still open. It is
+ *    the same defect this module used to serialize every operation to avoid.
+ *  - Three separate workarounds here were calibrated to that exact build: a
+ *    connection-wide semaphore, a two-connection topology per daemon, and an
+ *    `uncaughtException` filter for a rhea throw with no reachable listener.
+ *  - It exposed no way to bound a consumer's unsettled deliveries. rhea's
+ *    default credit window is 1000, which is why closing a probe consumer
+ *    stranded so much: the probe wanted *one* message.
  *
- * Sequential creation is correct in both cases; only concurrency breaks it,
- * which points at a race in link setup on the shared connection rather than
- * anything about addresses or routing. That is easy to hit by accident —
- * the aggregator's very first tick reports on every API at once, and a
- * daemon fleet starts N consumers at once — and it fails *silently*, with
- * plausible-looking traffic going to the wrong place.
+ * All three are gone here rather than worked around, which is the point of the
+ * move. `prefetch` is a first-class argument, channels isolate failure, and
+ * publishing has no link to race. What it costs is RabbitMQ 4's native
+ * protocol; what it buys is a client with no dependencies, its own types, and
+ * an actual maintainer.
  *
- * So the guard lives here, in the one place that owns the connection,
- * rather than at each call site: a single permit serializing every
- * operation that touches it. Note this is not about sharing one connection
- * between separate daemons — each daemon is its own process with its own
- * connection, as it would be in production. It is about a *single* process
- * opening several links on its own connection concurrently, which is
- * ordinary: the aggregator creates a publisher per API on the same tick,
- * and one daemon opens a work-queue consumer, a control-plane consumer, a
- * SAC probe-trigger consumer and a trigger publisher. The cost is nil at
- * this repo's volumes, and correctness here is not the place to trade for
- * throughput.
+ * ## Channels, not connections
  *
- * ## Why a connection is not always process-lifetime
+ * The expensive lesson of the 1.0 client was that closing a consumer with
+ * deliveries in flight stranded them, and enough strandings stalled *every*
+ * link on that connection — so anything that churned consumers needed a
+ * connection it could afford to destroy.
  *
- * The second thing this client does silently: closing a consumer while the
- * broker still has deliveries in flight for it strands those deliveries, and
- * enough of them stall the whole *connection* — every link on it, not just
- * the one that was closed. Measured against a real broker: opening a
- * consumer on a 4000-message queue, taking one message and closing (the
- * HALF_OPEN probe, exactly) kills an unrelated long-lived consumer on the
- * same connection after seven cycles, with no error anywhere. The same loop
- * with each probe on its own throwaway connection ran clean.
- *
- * So `makeRmq` is exported alongside `RmqLive`: anything that closes
- * consumers with a backlog behind them gets a connection it can afford to
- * destroy, and the connection carrying the control plane only ever opens
- * links. See docs/rmq-control-plane.md.
+ * 0-9-1 has the isolation built in. Every consumer here gets its own channel;
+ * a channel that errors takes down nothing but itself, and cancelling a
+ * consumer leaves the channel able to settle the delivery it is holding.
+ * Declares get a throwaway channel each, so a `PRECONDITION_FAILED` from a
+ * redeclare with different arguments — an ordinary thing to hit while
+ * changing topology — cannot take the publish path with it.
  */
 
 export class RmqError extends Data.TaggedError("RmqError")<{
@@ -85,45 +79,42 @@ export type QueueArgs = Record<string, unknown>;
  *
  * - `accept` — done with it, drop it from the queue (the default; a handler
  *   that returns nothing gets this).
- * - `requeue` — released, back onto the queue for another consumer or
- *   another attempt. Nothing about it is delayed, so an unbounded requeue on
- *   a failing dependency is a hot loop; bound it.
- * - `discard` — rejected. On a queue declared with `x-dead-letter-exchange`
- *   that routes the message to the dead-letter queue; on one without, it is
- *   simply dropped. This is how a failure becomes visible and drainable
- *   instead of silent.
+ * - `requeue` — back onto the queue for another consumer or another attempt.
+ *   Nothing about it is delayed, so an unbounded requeue on a failing
+ *   dependency is a hot loop; bound it.
+ * - `discard` — rejected without requeue. On a queue declared with
+ *   `x-dead-letter-exchange` that routes the message to the dead-letter queue;
+ *   on one without, it is dropped.
  */
 export type Settlement = "accept" | "requeue" | "discard";
 
-/**
- * What the broker knows about this particular delivery.
- *
- * `deliveryCount` is AMQP 1.0's header field of the same name, as RabbitMQ
- * reports it — 0 on a first delivery. It is the only thing that makes a
- * redelivery budget possible across *different* consumers: an in-process
- * attempt counter is lost the moment the message goes back to the queue and
- * is picked up by another daemon.
- */
+/** What the broker knows about this particular delivery. */
 export type DeliveryInfo = {
+  /**
+   * How many times this message has been delivered and returned, as the broker
+   * counts it — the `x-delivery-count` header a quorum queue stamps, 0 on a
+   * first delivery.
+   *
+   * The 1.0 client reported 0 unconditionally, which is why the redelivery
+   * budget had to be the queue's job (`x-delivery-limit`). It still is, and
+   * should stay so: an in-process counter dies when the message moves to
+   * another daemon. This is now honest for anything that wants to *look*.
+   */
   readonly deliveryCount: number;
   /**
-   * Where this message was dead-lettered from, when it was — RabbitMQ 4
-   * reports it as AMQP 1.0 message annotations (`x-first-death-queue`,
-   * `x-first-death-reason`, and the fuller `x-opt-deaths` array). `null` for
-   * a message that arrived normally.
+   * Where this message was dead-lettered from, when it was — RabbitMQ 4 stamps
+   * `x-first-death-queue` and `x-first-death-reason` as headers. `null` for a
+   * message that arrived normally.
    *
-   * Computed on first access rather than on arrival, and cached: the
-   * high-rate handlers never read it.
+   * Computed on first access and cached: the high-rate handlers never read it.
    *
-   * This is what makes one canonical dead-letter queue workable rather than
-   * a bin of unrelated things: anything consuming it can tell a work message
-   * that failed its third-party call from a control message that failed to
-   * decode, and treat them differently. Verified against a live broker
-   * rather than read off the spec.
+   * This is what makes one canonical dead-letter queue workable rather than a
+   * bin of unrelated things — anything draining it can tell work that failed
+   * its third-party call from a control message that failed to decode.
    */
   readonly deadLetter: { readonly queue: string; readonly reason: string } | null;
   /**
-   * Application properties carried on the message, as strings.
+   * Headers carried on the message, as strings.
    *
    * The broker's death annotations are lost the moment anything republishes a
    * message, so a consumer that moves messages around inside the dead-letter
@@ -131,6 +122,21 @@ export type DeliveryInfo = {
    */
   readonly properties: Readonly<Record<string, string>>;
 };
+
+/**
+ * How many deliveries a consumer may hold unsettled.
+ *
+ * There was no equivalent lever on the 1.0 client: rhea's credit window was a
+ * fixed 1000, so a consumer opened on a deep queue immediately owed the broker
+ * an answer for a thousand messages. Every caller here wants far fewer, and
+ * the probe wants exactly one.
+ *
+ * The default is deliberately above the daemon's `maxInFlight` (32) rather
+ * than equal to it: the concurrency gate should be what limits calls, with
+ * prefetch as the outer bound that keeps a stalled consumer from holding an
+ * unbounded slice of the queue.
+ */
+export const DEFAULT_PREFETCH = 100;
 
 export interface RmqService {
   /**
@@ -156,20 +162,18 @@ export interface RmqService {
     destination: RmqQueue,
   ) => Effect.Effect<void, RmqError>;
   /**
-   * The message is settled only once `onMessage` settles. Returning a
-   * promise is therefore the flow-control lever this client otherwise
-   * doesn't give you: AMQP 1.0 credit is replenished on settlement, so a
-   * handler that waits for its own work keeps the broker from pushing more
-   * than the consumer can absorb. A synchronous handler settles immediately
-   * and gets no backpressure at all.
+   * The message is settled only once `onMessage` settles. Returning a promise
+   * is therefore the flow-control lever: a handler that waits for its own work
+   * holds its delivery unacked, and with `prefetch` bounding how many a
+   * consumer may hold, the broker stops pushing before the consumer is
+   * swamped. A synchronous handler settles immediately and gets no
+   * backpressure at all.
    *
    * The returned value chooses the outcome, synchronously or from a promise;
    * returning nothing accepts, which is what every handler that cannot fail
-   * wants. A synchronous outcome matters for the handlers that decide
-   * immediately — a message that fails to decode is rejected on the spot,
-   * with no work to await. A handler that *rejects* accepts anyway: the
-   * alternative is an unbounded redelivery loop driven by a bug, which is
-   * worse than a lost message and much harder to see.
+   * wants. A handler that *throws* accepts anyway: the alternative is an
+   * unbounded redelivery loop driven by a bug, which is worse than a lost
+   * message and much harder to see.
    */
   readonly consume: (
     queue: string,
@@ -177,29 +181,37 @@ export interface RmqService {
       body: string,
       delivery: DeliveryInfo,
     ) => void | Settlement | Promise<void | Settlement>,
+    options?: { readonly prefetch?: number },
   ) => Effect.Effect<Consumer, RmqError>;
-  /** One publisher per fixed (exchange, routingKey) or (queue) target — see Client.ts's module doc for why this is a publisher-per-target library, not per-message addressing. */
+  /** One publisher per fixed (exchange, routingKey) or (queue) target. */
   readonly publisherToExchange: (
     exchange: string,
     routingKey: string,
   ) => Effect.Effect<Publisher, RmqError>;
   readonly publisherToQueue: (queue: string) => Effect.Effect<Publisher, RmqError>;
   /**
-   * `properties` become AMQP application properties on the message — see
-   * `DeliveryInfo.properties` for why anything republishing needs them.
+   * `properties` become message headers — see `DeliveryInfo.properties` for
+   * why anything republishing needs them.
    *
-   * Every message is published with the durable header set. There is no flag
-   * for it because there is no case here for publishing otherwise: on a
-   * transient queue the broker ignores it, and on a durable one it is the
-   * difference between keeping the message across a restart and only
-   * appearing to. A per-call flag would be one more thing to get wrong in the
-   * one place where getting it wrong is silent.
+   * Every message is published persistent. There is no flag for it because
+   * there is no case here for publishing otherwise: on a transient queue the
+   * broker ignores it, and on a durable one it is the difference between
+   * keeping the message across a restart and only appearing to.
    */
   readonly send: (
     pub: Publisher,
     body: string,
     properties?: Record<string, string>,
   ) => Effect.Effect<void, RmqError>;
+  /**
+   * Stop delivery to this consumer, leaving its channel able to settle
+   * whatever it is still holding.
+   *
+   * Cancelling rather than closing is what the HALF_OPEN probe needs: it takes
+   * one message, stops the flow from inside the handler, and then settles that
+   * message from the call's outcome. Closing the channel first would make the
+   * settlement moot and hand the message back to the queue.
+   */
   readonly closeConsumer: (c: Consumer) => Effect.Effect<void>;
 }
 
@@ -209,28 +221,20 @@ const wrap = <A>(operation: string, promise: () => Promise<A>) =>
   Effect.tryPromise({ try: promise, catch: (cause) => new RmqError({ operation, cause }) });
 
 /**
- * Accepting a delivery whose link has since closed throws `Receiver link is
- * closed`, and with a deferred accept that is not an edge case — it is what
- * happens every time a consumer is retired while calls are still in flight,
- * which is exactly what `OPEN` does to @egress/rmq-consumer's daemons. The
- * settlement is genuinely moot at that point (the broker requeues an
- * unsettled delivery when the link goes), so swallowing it is correct rather
- * than merely convenient. Thrown from inside a socket callback, it would
- * otherwise take the process down.
+ * Settling a delivery whose channel has since closed throws
+ * `IllegalOperationError`, and with a deferred ack that is not an edge case —
+ * it is what happens whenever a consumer is retired while calls are still in
+ * flight, which is exactly what `OPEN` does to @egress/rmq-consumer's daemons.
+ * The settlement is genuinely moot at that point, because the broker requeues
+ * every unacked delivery when the channel goes.
  */
-type DeliveryContext = {
-  accept: () => void;
-  discard: (annotations?: unknown) => void;
-  requeue: (annotations?: unknown) => void;
-};
-
-const settle = (ctx: DeliveryContext, outcome: Settlement) => {
+const settle = (channel: Channel, message: ConsumeMessage, outcome: Settlement) => {
   try {
-    if (outcome === "discard") ctx.discard();
-    else if (outcome === "requeue") ctx.requeue();
-    else ctx.accept();
+    if (outcome === "discard") channel.nack(message, false, false);
+    else if (outcome === "requeue") channel.nack(message, false, true);
+    else channel.ack(message);
   } catch {
-    // link already gone; the delivery goes back to the queue
+    // channel already gone; the broker has the delivery back
   }
 };
 
@@ -241,159 +245,186 @@ export type RmqConnectOptions = {
   readonly password?: string;
 };
 
+const describe = (delivery: ConsumeMessage): DeliveryInfo => {
+  const headers = delivery.properties.headers ?? {};
+  let deadLetter: DeliveryInfo["deadLetter"] | undefined;
+  let properties: Readonly<Record<string, string>> | undefined;
+  return {
+    deliveryCount: Number(headers["x-delivery-count"] ?? 0),
+    get deadLetter() {
+      if (deadLetter === undefined) {
+        const queue = headers["x-first-death-queue"];
+        const reason = headers["x-first-death-reason"];
+        deadLetter =
+          typeof queue === "string"
+            ? { queue, reason: typeof reason === "string" ? reason : "unknown" }
+            : null;
+      }
+      return deadLetter;
+    },
+    get properties() {
+      if (properties === undefined) {
+        properties = Object.fromEntries(
+          Object.entries(headers).map(([k, v]) => [k, String(v)]),
+        );
+      }
+      return properties;
+    },
+  };
+};
+
 /**
- * One real AMQP 1.0 connection, released when the surrounding scope closes.
+ * One real AMQP connection, released when the surrounding scope closes.
  *
  * Exposed separately from `RmqLive` because a connection is not always a
- * process-lifetime thing here: `@egress/rmq-consumer`'s daemon deliberately
- * runs its *work* consumers on a second, disposable connection it opens and
- * closes as the circuit moves, precisely so that churn can never damage the
- * control-plane connection. See `closing a consumer with deliveries in
- * flight` in docs/rmq-control-plane.md for why that separation is load
- * bearing rather than tidiness.
+ * process-lifetime thing here: @egress/rmq-consumer's daemon opens one per
+ * redrive pass and per probe, so that work can be abandoned wholesale.
  */
 export const makeRmq = (
   opts: RmqConnectOptions,
 ): Effect.Effect<RmqService, RmqError, Scope.Scope> =>
   Effect.gen(function* () {
-      const env = createEnvironment({
-        host: opts.host,
-        port: opts.port,
-        username: opts.username ?? "guest",
-        password: opts.password ?? "guest",
-      });
-      const connection: Connection = yield* Effect.acquireRelease(
-        wrap("connect", () => env.createConnection()),
-        // Swallowed deliberately: this runs on every scope close, and the
-        // daemon closes connections constantly (a probe, a redrive pass, the
-        // work connection on every transition). A broker that has already
-        // gone makes `close` reject, and `Effect.promise` turns a rejection
-        // into a defect — so without this, tearing down a connection to a
-        // broker that died first would fail the teardown rather than
-        // complete it.
-        () => Effect.promise(() => env.close().then(() => {}, () => {})),
-      );
-      const management = connection.management();
+    const connection: ChannelModel = yield* Effect.acquireRelease(
+      wrap("connect", () =>
+        amqp.connect({
+          protocol: "amqp",
+          hostname: opts.host,
+          port: opts.port,
+          username: opts.username ?? "guest",
+          password: opts.password ?? "guest",
+        }),
+      ),
+      // Swallowed deliberately: this runs on every scope close, and the daemon
+      // closes connections constantly. A broker that has already gone makes
+      // `close` reject, and a rejection here would fail the teardown rather
+      // than complete it.
+      (conn) => Effect.promise(() => conn.close().then(() => {}, () => {})),
+    );
 
-      // The one permit guarding this connection. See the module doc above:
-      // concurrent link creation on a shared connection silently misroutes
-      // in this client, for consumers as well as publishers.
-      const gate = yield* Semaphore.make(1);
-      const guarded = <A>(operation: string, promise: () => Promise<A>) =>
-        gate.withPermit(wrap(operation, promise));
-
-      return {
-        declareQueue: (name, options = {}) =>
-          guarded("declareQueue", () =>
-            management.declareQueue(name, {
-              exclusive: false,
-              durable: options.durable ?? false,
-              // The library's own type narrows `arguments` to
-              // Record<string,string>, but it only ever spreads this object
-              // verbatim into the AMQP declare body — non-string values
-              // (e.g. x-single-active-consumer: true) pass through fine at
-              // runtime. Checked directly against a live broker, not
-              // assumed — see docs/rmq-control-plane.md.
-              arguments: (options.args ?? {}) as Record<string, string>,
-            } as never),
-          ),
-        declareTopicExchange: (name, options = {}) =>
-          guarded("declareExchange", () =>
-            management.declareExchange(name, {
-              type: "topic",
-              durable: options.durable ?? false,
-            }),
-          ),
-        bind: (routingKey, source, destination) =>
-          guarded("bind", () => management.bind(routingKey, { source, destination } as never)).pipe(
-            Effect.asVoid,
-          ),
-        consume: (queue, onMessage) =>
-          guarded("consume", async () => {
-            const consumer = await connection.createConsumer({
-              queue: { name: queue },
-              messageHandler: (ctx, message) => {
-                // `deadLetter` and `properties` are computed on access, not
-                // on arrival. Only the dead-letter redrive ever reads them,
-                // and the handler that runs hundreds of times a second is the
-                // one that ignores the delivery entirely — so building two
-                // objects per message to hand it something it never looks at
-                // is the wrong default. Each is cached after the first read,
-                // so a handler that does use them pays once.
-                let deadLetter: DeliveryInfo["deadLetter"] | undefined;
-                let properties: Readonly<Record<string, string>> | undefined;
-                const delivery: DeliveryInfo = {
-                  deliveryCount: Number(
-                    (message as { delivery_count?: number }).delivery_count ?? 0,
-                  ),
-                  get deadLetter() {
-                    if (deadLetter === undefined) {
-                      const annotations =
-                        (message as { message_annotations?: Record<string, unknown> })
-                          .message_annotations ?? {};
-                      const queue = annotations["x-first-death-queue"];
-                      const reason = annotations["x-first-death-reason"];
-                      deadLetter =
-                        typeof queue === "string"
-                          ? { queue, reason: typeof reason === "string" ? reason : "unknown" }
-                          : null;
-                    }
-                    return deadLetter;
-                  },
-                  get properties() {
-                    if (properties === undefined) {
-                      properties = Object.fromEntries(
-                        Object.entries(
-                          (message as { application_properties?: Record<string, unknown> })
-                            .application_properties ?? {},
-                        ).map(([k, v]) => [k, String(v)]),
-                      );
-                    }
-                    return properties;
-                  },
-                };
-                // A handler that throws *synchronously* would escape into
-                // rhea's socket callback, where nothing can catch it — the
-                // client keeps its container private, so there is no error
-                // listener to attach and the process dies. Every handler in
-                // this repo is careful, which is exactly the kind of thing
-                // that stops being true later.
-                let done: void | Settlement | Promise<void | Settlement>;
-                try {
-                  done = onMessage(String(message.body), delivery);
-                } catch {
-                  return settle(ctx as DeliveryContext, "accept");
-                }
-                if (done === undefined) return settle(ctx as DeliveryContext, "accept");
-                // A synchronous outcome is a string, not a thenable — calling
-                // .then() on it would throw from the same unreachable place.
-                if (typeof done === "string") return settle(ctx as DeliveryContext, done);
-                void done.then(
-                  (outcome) => settle(ctx as DeliveryContext, outcome ?? "accept"),
-                  () => settle(ctx as DeliveryContext, "accept"),
-                );
-              },
-            });
-            consumer.start();
-            return consumer;
-          }),
-        publisherToExchange: (exchange, routingKey) =>
-          guarded("publisherToExchange", () =>
-            connection.createPublisher({ exchange: { name: exchange, routingKey } }),
-          ),
-        publisherToQueue: (queue) =>
-          guarded("publisherToQueue", () => connection.createPublisher({ queue: { name: queue } })),
-        send: (pub, body, properties) =>
-          guarded("send", () =>
-            pub.publish(
-              (properties === undefined
-                ? { body, durable: true }
-                : { body, durable: true, application_properties: properties }) as never,
-            ),
-          ).pipe(Effect.asVoid),
-        closeConsumer: (c) => Effect.sync(() => c.close()),
-      };
+    // amqplib emits 'error' on the connection and on every channel. An
+    // EventEmitter 'error' with no listener is rethrown by Node, from inside a
+    // socket callback where nothing can catch it — which is precisely how the
+    // previous client used to take the process down. One listener per emitter
+    // is what makes a broken connection an observable event instead.
+    connection.on("error", (error) => {
+      console.warn(`[rmq] connection error: ${error.message}`);
     });
+
+    /**
+     * Publishing shares one channel. Ordering per (exchange, routingKey) is
+     * what the event contract needs, and a single channel gives exactly that;
+     * a channel per publisher would interleave.
+     */
+    const out = yield* wrap("createChannel", () => connection.createChannel());
+    out.on("error", (error) => {
+      console.warn(`[rmq] publish channel error: ${error.message}`);
+    });
+
+    /**
+     * Declares run on a throwaway channel each. They happen at startup, so the
+     * extra round trip costs nothing, and it means a redeclare whose arguments
+     * disagree with the existing queue — `PRECONDITION_FAILED`, which closes
+     * the channel it arrives on — cannot take the publish path down with it.
+     */
+    const onFreshChannel = <A>(operation: string, use: (ch: Channel) => Promise<A>) =>
+      wrap(operation, async () => {
+        const ch = await connection.createChannel();
+        ch.on("error", () => {});
+        try {
+          return await use(ch);
+        } finally {
+          await ch.close().catch(() => {});
+        }
+      });
+
+    /**
+     * `publish` returns false when the socket's write buffer is full. Ignoring
+     * that is how a producer outruns its own connection and grows an unbounded
+     * buffer in process memory; waiting for 'drain' is the backpressure the
+     * write side is supposed to have.
+     */
+    const publish = (pub: Publisher, content: Buffer, options: amqp.Options.Publish) =>
+      new Promise<void>((resolve) => {
+        if (out.publish(pub.exchange, pub.routingKey, content, options)) return resolve();
+        out.once("drain", () => resolve());
+      });
+
+    return {
+      declareQueue: (name, options = {}) =>
+        onFreshChannel("declareQueue", async (ch) => {
+          await ch.assertQueue(name, {
+            durable: options.durable ?? false,
+            exclusive: false,
+            arguments: options.args ?? {},
+          });
+          return name as RmqQueue;
+        }),
+      declareTopicExchange: (name, options = {}) =>
+        onFreshChannel("declareExchange", async (ch) => {
+          await ch.assertExchange(name, "topic", { durable: options.durable ?? false });
+          return name as RmqExchange;
+        }),
+      bind: (routingKey, source, destination) =>
+        onFreshChannel("bind", async (ch) => {
+          await ch.bindQueue(destination as string, source as string, routingKey);
+        }).pipe(Effect.asVoid),
+      consume: (queue, onMessage, options = {}) =>
+        wrap("consume", async () => {
+          // Its own channel: a consumer that errors, or one that is cancelled
+          // with deliveries outstanding, must not touch any other.
+          const ch = await connection.createChannel();
+          ch.on("error", (error) => {
+            console.warn(`[rmq] consumer channel error on ${queue}: ${error.message}`);
+          });
+          await ch.prefetch(options.prefetch ?? DEFAULT_PREFETCH);
+          const { consumerTag } = await ch.consume(
+            queue,
+            (message) => {
+              // null means the consumer was cancelled by the broker (the queue
+              // was deleted underneath it). There is no delivery to settle.
+              if (message === null) return;
+              // A handler that throws synchronously would escape into
+              // amqplib's delivery callback. Every handler in this repo is
+              // careful, which is exactly the kind of thing that stops being
+              // true later.
+              let done: void | Settlement | Promise<void | Settlement>;
+              try {
+                done = onMessage(message.content.toString("utf8"), describe(message));
+              } catch {
+                return settle(ch, message, "accept");
+              }
+              if (done === undefined) return settle(ch, message, "accept");
+              // A synchronous outcome is a string, not a thenable.
+              if (typeof done === "string") return settle(ch, message, done);
+              void done.then(
+                (outcome) => settle(ch, message, outcome ?? "accept"),
+                () => settle(ch, message, "accept"),
+              );
+            },
+            { noAck: false },
+          );
+          return { channel: ch, consumerTag };
+        }),
+      publisherToExchange: (exchange, routingKey) =>
+        Effect.succeed({ exchange, routingKey }),
+      publisherToQueue: (queue) =>
+        // The default exchange routes by queue name, which is the same path
+        // `deadLetterArgs` uses for dead-lettering.
+        Effect.succeed({ exchange: "", routingKey: queue }),
+      send: (pub, body, properties) =>
+        wrap("send", () =>
+          publish(
+            pub,
+            Buffer.from(body, "utf8"),
+            properties === undefined
+              ? { persistent: true }
+              : { persistent: true, headers: properties },
+          ),
+        ),
+      closeConsumer: (c) =>
+        Effect.promise(() => c.channel.cancel(c.consumerTag).then(() => {}, () => {})),
+    };
+  });
 
 /** The process-lifetime connection: one per layer instance, closed with the layer's scope. */
 export const RmqLive = (opts: RmqConnectOptions) => Layer.effect(Rmq, makeRmq(opts));

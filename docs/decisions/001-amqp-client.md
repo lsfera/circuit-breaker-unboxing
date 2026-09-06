@@ -1,6 +1,9 @@
 # 001 — Which AMQP client the daemon fleet uses
 
-**Status**: decided — keep `rabbitmq-amqp-js-client` (AMQP 1.0).
+**Status**: **superseded by [004](004-downgrade-to-amqp-0-9-1.md)** on
+2026-09-06 — the repo now uses `amqplib` (AMQP 0-9-1). The reasoning below
+stands as it was written; what changed is the evidence, and 004 says which.
+Originally: decided — keep `rabbitmq-amqp-js-client` (AMQP 1.0).
 **Date**: 2026-09-05.
 **Context**: Phase 1 of `.claude/plans/production-readiness.md`.
 

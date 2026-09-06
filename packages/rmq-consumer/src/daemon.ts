@@ -37,20 +37,28 @@ import type { Action, Command, DaemonState } from "./DaemonState.ts";
  * the same events with no leader and no shared state — the aggregator already
  * did the hard part of turning divergent replica views into one state.
  *
- * ## Two connections, on purpose
+ * ## Two connections
  *
- * The control connection only ever *opens* links: the control consumer, the
- * two SAC consumers and the trigger publishers live for the life of the
- * process. Everything that churns — the work consumer, opened and closed on
- * every transition, and the one-message HALF_OPEN probe — runs on a second
+ * The control connection carries the control consumer, the two SAC consumers
+ * and the trigger publishers, all of which live for the life of the process.
+ * Everything that churns — the work consumer, opened and closed on every
+ * transition, and the one-message HALF_OPEN probe — runs on a second
  * connection this module opens and destroys itself.
  *
- * That is not tidiness. Closing a consumer while the broker still has
- * deliveries in flight strands them, and enough stranded deliveries stall
- * every link on that connection (measured — see Client.ts's module doc). A
- * daemon whose work consumer shared the control connection went deaf to
- * `circuit.control` after a handful of transitions and sat there looking
- * healthy. Throwing the work connection away is what returns the capacity.
+ * This used to be damage control. On the AMQP 1.0 client, closing a consumer
+ * with deliveries in flight stranded them and enough strandings stalled every
+ * link on the connection: a daemon whose work consumer shared the control
+ * connection went deaf to `circuit.control` after a handful of transitions
+ * while still looking healthy. Under amqplib that cannot happen — each
+ * consumer holds its own channel, and the integration test that used to pin
+ * the stall now pins its absence.
+ *
+ * The split stays because it is still the cheapest way to abandon work
+ * wholesale: dropping the connection is how a probe or a redrive pass returns
+ * everything it was holding without walking its own deliveries. It could now
+ * be collapsed onto one connection with two channels, and that is worth doing
+ * on its own rather than folded into a client migration, where a regression
+ * would be impossible to attribute.
  *
  * ## Egress stays transparent
  *
@@ -342,24 +350,30 @@ export const runDaemon = (cfg: DaemonConfig) =>
         const scope = yield* Scope.make();
         const probe = yield* Effect.provideService(makeRmq(cfg.connect), Scope.Scope, scope);
 
-        // Two closes, and the order is not interchangeable. Closing the
-        // *consumer* from inside the handler is what stops delivery at the
-        // first message; closing the *connection* is what returns the
-        // deliveries that closing stranded. The connection close has to
-        // happen outside the handler — tearing the connection down while
-        // rhea is mid-way through a batch of transfer frames leaves the
-        // remaining frames addressing a link that no longer exists, and it
-        // throws `transfer after detach` from inside a socket callback. So
-        // the connection is retired by `reconcile` when the state leaves
-        // HALF_OPEN, never from here.
+        // Cancel the consumer from inside the handler — that is what stops
+        // delivery at the first message — and let `reconcile` retire the
+        // connection later, when the state leaves HALF_OPEN. Cancelling
+        // rather than closing matters: the channel stays open long enough to
+        // settle the message this probe is still holding, so the call's
+        // outcome decides its fate rather than the teardown doing it.
         let self: Consumer | null = null;
         let taken = false;
-        const consumer = yield* probe.consume(workQueue, () => {
-          if (taken || self === null) return;
-          taken = true;
-          Effect.runFork(probe.closeConsumer(self));
-          return callEgress();
-        });
+        const consumer = yield* probe.consume(
+          workQueue,
+          () => {
+            if (taken || self === null) return;
+            taken = true;
+            Effect.runFork(probe.closeConsumer(self));
+            return callEgress();
+          },
+          // The one state whose contract is "exactly one call" should ask the
+          // broker for exactly one message. The AMQP 1.0 client had no such
+          // lever — its credit window was a fixed 1000, so a probe against a
+          // deep queue was handed a thousand deliveries and stranded them all
+          // on close. That is what made a throwaway connection per probe
+          // necessary rather than merely tidy.
+          { prefetch: 1 },
+        );
         self = consumer;
 
         probed++;

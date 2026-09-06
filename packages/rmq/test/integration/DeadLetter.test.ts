@@ -87,28 +87,23 @@ const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   );
 
 /**
- * The third thing this client settles quietly, and the reason
- * @egress/rmq-consumer's daemons dead-letter a failed call rather than
- * retrying it.
+ * Why the work queue is a quorum queue, stated as a property rather than a
+ * preference.
  *
- * `discard()` sends `modified{delivery_failed: true, undeliverable_here:
- * true}`, which RabbitMQ routes to the queue's `x-dead-letter-exchange` —
- * that half works, and it is what turns a failed third-party call from a
- * silently dropped message into one you can count and replay.
+ * Rejecting without requeue routes the message to the queue's
+ * `x-dead-letter-exchange` — that is what turns a failed third-party call from
+ * a silently dropped message into one you can count and replay, and it works
+ * on any queue type.
  *
- * `requeue()` sends `modified{delivery_failed: false}`, and RabbitMQ only
- * increments AMQP 1.0's `delivery-count` for a delivery marked *failed*. So
- * a released message comes back looking brand new, forever. The client
- * exposes no outcome in between — there is no "this attempt failed, let
- * someone else try" — so a redelivery budget that survives the message
- * moving to another daemon is not implementable here, and one attempt then
- * dead-letter is the honest policy rather than a lazy one.
- *
- * Same shape of finding as link credit, and pinned for the same reason: if
- * a future client release exposes `modified{delivery_failed: true}`, the
- * second half of this test fails and tells us a real budget became possible.
+ * Counting the attempts does not. This queue is deliberately *classic*, and on
+ * a classic queue there is no `x-delivery-count` at all: a requeued message
+ * comes back indistinguishable from a new one, forever, so nothing here could
+ * enforce a budget and an unbounded requeue against a dead upstream would be a
+ * hot loop with no counter to stop it. The budget lives on the work queue
+ * instead, as `x-delivery-limit` on a quorum queue — see the delivery-limit
+ * test at the bottom of this file for the other half.
  */
-test("a rejected delivery dead-letters, and a released one is never counted as an attempt", async (t) => {
+test("a rejected delivery dead-letters, and a classic queue counts no attempts", async (t) => {
   if (skipIfNoDocker(t)) return;
 
   const work = "dl.work";
@@ -153,9 +148,9 @@ test("a rejected delivery dead-letters, and a released one is never counted as a
   assert.deepEqual(
     counts.slice(0, 3),
     [0, 0, 0],
-    "released deliveries are not counted as attempts by this client — if this " +
-      "now increments, the client can express modified{delivery_failed: true} " +
-      "and a real cross-consumer redelivery budget has become possible",
+    "a classic queue exposes no x-delivery-count, so every redelivery looks " +
+      "like a first one — which is exactly why WORK_DELIVERY_LIMIT needs a " +
+      "quorum queue to mean anything",
   );
 });
 
@@ -389,8 +384,14 @@ test("the work queue parks a message at the delivery limit, and a redrive republ
     (WORK_DELIVERY_LIMIT + 1) * 2,
     `one delivery plus ${WORK_DELIVERY_LIMIT} redeliveries, twice — the redrive resets the budget`,
   );
-  assert.ok(
-    attempts.every((count) => count === 0),
-    "the client reports deliveryCount 0 throughout: the counting is the broker's, which is the whole point",
+  // The 1.0 client reported 0 on every delivery, so this used to assert
+  // blindness — the counting was the broker's and the daemon could not see it.
+  // The counting is still the broker's, which is what makes it survive a
+  // message moving between daemons; what changed is that the header is now
+  // readable, so the reset is visible rather than inferred from the parkings.
+  assert.deepEqual(
+    attempts,
+    [0, 1, 2, 3, 0, 1, 2, 3],
+    "x-delivery-count climbs to the limit, then starts again from 0 for the republished message",
   );
 });

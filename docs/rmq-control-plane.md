@@ -10,7 +10,19 @@ producer flooding `payments-provider.work`, five daemon containers draining
 it through the egress listener, and the aggregator publishing every
 transition to `circuit.control`. The live run is written up under
 [Verified end to end](#verified-end-to-end) below, including the two silent
-client bugs it exposed.
+client bugs it exposed — see the amendment immediately below on which of
+those findings are now history.
+
+> **Amendment, 2026-09-06 — the client changed.** Everything below was written
+> against `rabbitmq-amqp-js-client` (AMQP 1.0), and the sections about *client*
+> behaviour are now history rather than current fact: the repo runs on `amqplib`
+> (AMQP 0-9-1). Concurrent link creation, the stranded-delivery stall, the two
+> ways the client took the process down, and the missing redelivery signal are
+> all gone — not worked around, absent. What survives unchanged is everything
+> about the *broker*: quorum queues, `x-delivery-limit`, single-active-consumer
+> election, dead-lettering and `x-first-death-*`, durability. That split is the
+> point, and it is why the migration touched no call site. See
+> [decisions/004](decisions/004-downgrade-to-amqp-0-9-1.md).
 
 ## The scenario
 

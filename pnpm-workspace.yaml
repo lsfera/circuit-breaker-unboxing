@@ -1,17 +1,6 @@
 packages:
   - "packages/*"
 
-# rabbitmq-amqp-js-client's own package.json pins its rhea dependency to
-# github:amqp/rhea directly rather than a registry range. That git-hosted
-# copy needs a "prepare" build step (lint + tsc) which, run inside pnpm's
-# build sandbox for a git dependency, re-triggers a full workspace install
-# from within itself and never terminates cleanly — reproduced live, not
-# assumed. rhea's registry release (3.0.5) is the exact same version with a
-# prebuilt dist already published, so redirecting to it here sidesteps the
-# git build path entirely rather than trying to allowlist it.
-overrides:
-  rhea: "^3.0.5"
-
 catalog:
   effect: 4.0.0-rc.112
   "@effect/platform-node": 4.0.0-rc.112

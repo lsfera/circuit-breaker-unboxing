@@ -288,9 +288,10 @@ parked on one canonical dead-letter queue; when the circuit closes again, one
 daemon replays it.
 
 **The discovery that changed the design.** The budget could not live in the
-daemon. The pinned AMQP client reports `deliveryCount: 0` on every delivery —
-so the daemon cannot know how many times a message has been tried — and an
-in-process counter is lost the moment the message moves to another daemon,
+daemon. The AMQP 1.0 client in use at the time reported `deliveryCount: 0` on
+every delivery — so the daemon could not know how many times a message had been
+tried — and an in-process counter is lost the moment the message moves to
+another daemon,
 which is exactly what happens during the outage. This had been written down
 as "there is no way to say *this attempt failed, try again*", and the
 write-up was wrong. The budget belongs to the *queue*: a quorum queue with
@@ -377,7 +378,7 @@ measurements.
 | --- | --- |
 | **The client creates links unsafely, silently** | Concurrent link creation in the pinned AMQP client corrupts state with no error. Fixed in the client wrapper, not at the call sites — see [decisions/001](decisions/001-amqp-client.md). |
 | **Closing a consumer with deliveries in flight kills the connection** | Which is what "stop consuming" does on every `OPEN`. The daemon's connection lifetimes are built around this. |
-| **`transfer after detach`** | Thrown synchronously from inside a socket callback, unreachable from application code. A narrowly filtered `uncaughtException` guard, and nothing broader — everything else stays fatal because the container restarts. |
+| **`transfer after detach`** | Thrown synchronously from inside a socket callback, unreachable from application code, because the AMQP 1.0 client kept its rhea container private. It needed a narrowly filtered `uncaughtException` guard until [the move to amqplib](decisions/004-downgrade-to-amqp-0-9-1.md) removed the throw and the guard together. |
 | **Queues were not durable, and nobody noticed** | A broker restart silently emptied the dead-letter queue, because the first daemon back redeclared it identically. `durable` and `x-queue-type` are one decision, not two. |
 | **The daemon fleet was invisible** | A daemon went deaf to the control plane while looking perfectly healthy. That was an *observability* bug before it was anything else; the fleet has its own `/metrics` now. |
 | **A control loop can die while the process serves 200s** | Found by a counter that stopped moving. `/livez` now fails on tick staleness — liveness is the loop, not the socket. |

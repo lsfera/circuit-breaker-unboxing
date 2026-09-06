@@ -94,6 +94,12 @@ reading it afterwards:
   client (measured: four deliveries, then `reason "delivery_limit"`). The
   lever was in the queue the whole time. See
   [docs/decisions/001-amqp-client.md](decisions/001-amqp-client.md).
+  **Amended again 2026-09-06**: the repo moved to `amqplib` (AMQP 0-9-1), where
+  `x-delivery-count` is simply readable — the same test now reads
+  `[0, 1, 2, 3, 0, 1, 2, 3]`, the budget and the redrive's reset. Enforcement
+  stays the broker's, because an in-process counter still dies when a message
+  moves to another daemon; what is gone is the blind spot. See
+  [decisions/004](decisions/004-downgrade-to-amqp-0-9-1.md).
 - **The check that proves the contract had no test, and a blind spot for the
   one bug most likely to break it.** `/api/subscriber` is what this README
   points at to claim the stream is gapless and non-repeating. It counted a

@@ -10,12 +10,16 @@ import { State } from "@egress/domain/Model.ts";
  *
  * The state -> action mapping is built entirely on two RabbitMQ primitives
  * verified live against a real broker (see docs/rmq-control-plane.md):
- * opening/closing a consumer, and x-single-active-consumer election. There
- * is deliberately no per-consumer credit/prefetch lever here — the pinned
- * client (rabbitmq-amqp-js-client) does not expose one, and AMQP 1.0 has no
- * "prefetch" to fall back to; see the doc's terminology note. DEGRADED is
- * therefore a fleet-size decision (how many daemons are active), not a
- * per-daemon one.
+ * opening/closing a consumer, and x-single-active-consumer election.
+ *
+ * DEGRADED is a fleet-size decision — how many daemons are active — rather
+ * than a per-daemon one. That began as a constraint: the AMQP 1.0 client had
+ * no prefetch lever at all. It is now a choice, since amqplib has one, and the
+ * choice holds for a better reason than the constraint did. Prefetch is set
+ * when a consumer is created, so lowering it live means cancelling and
+ * re-registering the consumer — which is the same operation as retiring a
+ * daemon, at more risk. Scaling whole daemons is the cheaper lever and the one
+ * every daemon can agree on without coordination.
  */
 
 /** How many daemons should be pulling from the work queue right now. */

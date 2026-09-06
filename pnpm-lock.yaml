@@ -13,9 +13,6 @@ catalogs:
       specifier: 4.0.0-rc.112
       version: 4.0.0-rc.112
 
-overrides:
-  rhea: ^3.0.5
-
 importers:
 
   .:
@@ -75,12 +72,12 @@ importers:
       '@egress/domain':
         specifier: workspace:*
         version: link:../domain
+      amqplib:
+        specifier: ^2.0.1
+        version: 2.0.1
       effect:
         specifier: 'catalog:'
         version: 4.0.0-rc.112
-      rabbitmq-amqp-js-client:
-        specifier: ^1.0.0
-        version: 1.0.0
     devDependencies:
       testcontainers:
         specifier: ^12.1.0
@@ -418,6 +415,10 @@ packages:
   abort-controller@3.0.0:
     resolution: {integrity: sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg==}
     engines: {node: '>=6.5'}
+
+  amqplib@2.0.1:
+    resolution: {integrity: sha512-a3P2MgfCf9nzVis12VxWEn0dS6hcqve7dlEAhXDtIWR27BlhtMkILOc+H9aeHjDi6i6r94dYKc2Kx2OFe3avvg==}
+    engines: {node: '>=18'}
 
   ansi-regex@5.0.1:
     resolution: {integrity: sha512-quJQXlTSUGL2LH9SUXo8VwsY4soanhgo6LNSm84E1LBcE8s3O0wpdiRzyR9z/ZZJMlMWv37qOOb9pdJlMUEKFQ==}
@@ -792,9 +793,6 @@ packages:
   pure-rand@8.4.2:
     resolution: {integrity: sha512-vvuOGgcuPJAirlHvuQw1TrOiw7ptaIXXmIbNuiNOY6lNGJJH49PQ1Kj4nd783nPdQhQdicgOjVI2yI/9BD6/Ng==}
 
-  rabbitmq-amqp-js-client@1.0.0:
-    resolution: {integrity: sha512-6P1l8B271DrX5WkBaQNfq5aE+Sa+Innr03s+DaYgkt1Zdg65RaPYPJvx8hO6d/X5GJd2LNT4OLft3CCULZK65A==}
-
   readable-stream@2.3.8:
     resolution: {integrity: sha512-8p0AUk4XODgIewSi0l8Epjs+EVnWiK7NoDIEGU0HhE7+ZyY8D1IMY7odu5lRrFXGg71L15KG8QrPmum45RTtdA==}
 
@@ -828,9 +826,6 @@ packages:
   retry@0.12.0:
     resolution: {integrity: sha512-9LkiTwjUh6rT555DtE9rTX+BKByPfrMzEAtnlEtdEwr3Nkffwiihqe2bWADg+OQRjt9gl6ICdmB/ZFDCGAtSow==}
     engines: {node: '>= 4'}
-
-  rhea@3.0.5:
-    resolution: {integrity: sha512-Ye1gzqH9DoCGMTaSfLfGmDdoderMshyVU5rdFES+D3N1U5PASZcNCKqhWJJUOOj8INtdrIPOfDALrRcoRRL7jw==}
 
   safe-buffer@5.1.2:
     resolution: {integrity: sha512-Gd2UZBJDkXlY7GbJxfsE8/nvKkUEU1G38c1siN6QP6a9PT9MmHB8GnpscSmMJSoF8LOIrt8ud/wPtojys4G6+g==}
@@ -1219,6 +1214,8 @@ snapshots:
     dependencies:
       event-target-shim: 5.0.1
 
+  amqplib@2.0.1: {}
+
   ansi-regex@5.0.1: {}
 
   ansi-regex@6.3.0: {}
@@ -1599,12 +1596,6 @@ snapshots:
 
   pure-rand@8.4.2: {}
 
-  rabbitmq-amqp-js-client@1.0.0:
-    dependencies:
-      rhea: 3.0.5
-    transitivePeerDependencies:
-      - supports-color
-
   readable-stream@2.3.8:
     dependencies:
       core-util-is: 1.0.3
@@ -1653,12 +1644,6 @@ snapshots:
   require-directory@2.1.1: {}
 
   retry@0.12.0: {}
-
-  rhea@3.0.5:
-    dependencies:
-      debug: 4.4.3
-    transitivePeerDependencies:
-      - supports-color
 
   safe-buffer@5.1.2: {}
 

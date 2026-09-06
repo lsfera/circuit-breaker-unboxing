@@ -53,31 +53,6 @@ const program = runDaemon({
   redriveMax: Number(env("REDRIVE_MAX", "5000")),
 });
 
-/**
- * Containment for exactly one library-level race, and nothing else.
- *
- * rhea throws `transfer after detach` synchronously from inside a socket
- * data callback when the broker's frames arrive for a link that has just
- * gone away. `daemon.ts` avoids provoking it (see the two-close comment in
- * `probeOnce`), but a connection torn down while frames are in flight can
- * still hit it, and the throw is unreachable from here: the client creates
- * a private rhea container per connection and never exposes it, so there is
- * no `error` listener to attach. Left alone it kills the process.
- *
- * Every other uncaught exception is still fatal, on purpose — a daemon that
- * swallows its own bugs is worse than one that restarts. That trade only
- * holds because the container actually does restart: see
- * `restart: unless-stopped` on the rmq-* services in docker-compose.yml,
- * without which "fatal" just means "gone".
- */
-process.on("uncaughtException", (error) => {
-  if (error instanceof Error && error.message === "transfer after detach") {
-    console.warn("[daemon] ignored rhea race: transfer after detach");
-    return;
-  }
-  throw error;
-});
-
 const METRICS_PORT = Number(env("METRICS_PORT", "9464"));
 
 /**

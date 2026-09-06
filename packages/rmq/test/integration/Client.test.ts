@@ -202,15 +202,21 @@ test("closing a consumer stops delivery without closing the connection", async (
  * message, close.
  *
  * Both halves are asserted together on purpose. The first pins the hazard as
- * a live property of the pinned client, so that if a future version fixes it
- * this test fails and tells us the workaround can go. The second pins that
- * the workaround actually works — a connection per probe survives the same
- * loop that kills the shared one.
+ * the property the daemon fleet depends on. It used to assert the opposite:
+ * on the AMQP 1.0 client this loop killed a shared connection within a dozen
+ * cycles, and that failure is what put a two-connection topology in daemon.ts.
+ * The move to amqplib is what changed it — every consumer gets its own
+ * channel, so a consumer cancelled with deliveries outstanding costs the
+ * broker a requeue and costs its neighbours nothing.
+ *
+ * Kept running both ways round because the daemon still opens a connection per
+ * probe and per redrive pass: that is now about being able to abandon work
+ * wholesale, not about damage control, and it must keep working either way.
  */
 const CYCLES = 12;
 const BACKLOG = 4000;
 
-test("closing a consumer with deliveries in flight stalls the whole connection", async (t) => {
+test("closing a consumer with deliveries in flight leaves the rest of the connection alone", async (t) => {
   if (skipIfNoDocker(t)) return;
 
   const probeCycles = (isolated: boolean) =>
@@ -237,11 +243,10 @@ test("closing a consumer with deliveries in flight stalls the whole connection",
             ? rmq
             : yield* Effect.provideService(makeRmq({ host, port }), Scope.Scope, scope);
 
-        // Exactly daemon.ts's ordering, and for its reason: the consumer is
-        // closed inline (that is what stops delivery at the first message),
-        // and the connection — when there is a separate one — is retired
-        // afterwards, outside the handler. Tearing a connection down from
-        // inside a message callback throws `transfer after detach`.
+        // Exactly daemon.ts's ordering: the consumer is cancelled inline,
+        // which is what stops delivery at the first message, and the
+        // connection — when there is a separate one — is retired afterwards
+        // from outside the handler.
         let self: Consumer | null = null;
         let taken = false;
         const consumer = yield* conn.consume(work, () => {
@@ -261,13 +266,13 @@ test("closing a consumer with deliveries in flight stalls the whole connection",
       return null;
     });
 
-  const wedgedAt = await run(probeCycles(false));
-  assert.notEqual(
-    wedgedAt,
+  const sharedWedgedAt = await run(probeCycles(false));
+  assert.equal(
+    sharedWedgedAt,
     null,
-    `expected the shared connection to stall within ${CYCLES} probe cycles; ` +
-      "if this now survives, the client may have fixed it and the daemon's " +
-      "two-connection split can be revisited",
+    `a consumer sharing the connection went deaf at cycle ${sharedWedgedAt}. ` +
+      "That was the AMQP 1.0 behaviour this fleet was built around; on a " +
+      "channel-per-consumer client it must not happen at all",
   );
 
   const isolatedWedgedAt = await run(probeCycles(true));

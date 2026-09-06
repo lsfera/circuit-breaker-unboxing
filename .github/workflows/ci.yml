@@ -54,10 +54,11 @@ jobs:
       # Leader election and fencing, executed by Redis's own Lua rather than
       # by the in-memory stand-in.
       - run: pnpm run test:redis
-      # The five AMQP 1.0 properties this repo depends on, including the two
-      # silent client bugs @egress/rmq works around. The stranding test
-      # deliberately asserts the bug still reproduces, so a client release
-      # that fixes it turns this job red and tells us the workaround can go.
+      # The broker properties this repo depends on — quorum delivery limits,
+      # single-active-consumer election, dead-letter provenance, durability —
+      # each pinned against a real RabbitMQ. These are what let the client
+      # change underneath without the design changing: they are the reason
+      # the move from AMQP 1.0 to amqplib touched no call site.
       - run: pnpm run test:rmq
 
   # An image that builds is not an image that runs, and the difference is not

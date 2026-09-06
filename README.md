@@ -441,7 +441,7 @@ packages/
   subscriber/                @egress/subscriber — depends on @egress/domain
     src/subscriber.ts        standalone consumer; decodes with the producer's Schema
 
-  rmq/                       @egress/rmq — Effect wrapper over AMQP 1.0 (RabbitMQ 4 native)
+  rmq/                       @egress/rmq — Effect wrapper over amqplib (AMQP 0-9-1)
     src/Client.ts            the Rmq service; two silent client bugs guarded here
     src/ControlPlane.ts      circuit.control naming, shared by publisher and consumers
     test/integration/        10 tests against a real broker, opt-in (`pnpm run test:rmq`)
@@ -536,17 +536,6 @@ general caveat — where it has been measured, the number is here.
   line each on what production would have to do. It was deliberately left as an
   inventory — a token check on one route while another accepts anonymous input
   moves the problem and leaves the next reader thinking the surface is secured.
-- **The AMQP client is a single unmaintained dependency with a known silent
-  failure.** `rabbitmq-amqp-js-client` 1.0.0 is the only AMQP 1.0 client for
-  Node, listed on rabbitmq.com but third-party rather than RabbitMQ-team
-  maintained. Upstream has had no commit since 2026-06-25, and its open issue
-  #96 — concurrent `createPublisher` calls resolving with crossed links, which
-  cost the reporter ~20,000 misrouted messages in production — is the same bug
-  `packages/rmq/src/Client.ts` serializes every operation to avoid. Three
-  workarounds here are calibrated to that exact build, which is an argument for
-  pinning it exactly rather than by the `^1.0.0` range the manifest carries.
-  [docs/decisions/001-amqp-client.md](docs/decisions/001-amqp-client.md) is why
-  it is still the right choice, and what would reopen that.
 - **HTTPS egress needs TLS interception** for any of the L7 signals to exist. If
   you proxy via `CONNECT` you get L4 only, `consecutive_5xx` is dead, and the
   breaker degrades to connection-level detection. Decide this early: it drives
@@ -588,9 +577,20 @@ general caveat — where it has been measured, the number is here.
   names the one path (message → egress call → Envoy stats → circuit event)
   that would earn one.
 
-### Three things that used to be on this list
+### Four things that used to be on this list
 
 Kept because a list of gaps is only trustworthy if you can see what leaves it.
+
+- **The AMQP client is no longer an unmaintained dependency.** This said so for
+  about a day: `rabbitmq-amqp-js-client` had no upstream commit since
+  2026-06-25, its open issue #96 was the same silent link-crossing bug this
+  repo serialized every operation to avoid, and three workarounds here were
+  calibrated to that one build. The fix was not to pin it harder. The client is
+  `amqplib` (AMQP 0-9-1) now — zero dependencies, its own types, maintained —
+  and all three workarounds are gone rather than tightened. Nothing this repo
+  depends on was ever an AMQP 1.0 feature: quorum queues, `x-delivery-limit`,
+  single-active-consumer and `x-first-death-*` are all broker features. See
+  [docs/decisions/004-downgrade-to-amqp-0-9-1.md](docs/decisions/004-downgrade-to-amqp-0-9-1.md).
 
 - **Ingestion is push, and polling is the peer it was measured against.** This
   said "swap it for the push-based `envoy.service.metrics.v3.MetricsService`

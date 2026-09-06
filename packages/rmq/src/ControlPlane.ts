@@ -103,10 +103,15 @@ export const sacQueueArgs = (apiId: string): Record<string, unknown> => ({
  * The budget is a queue property, not a client capability — which is why this
  * repo twice concluded it could not be expressed. A quorum queue with
  * `x-delivery-limit` counts the redeliveries itself and dead-letters at the
- * limit, through the same client that still reports `deliveryCount: 0` on
- * every delivery. Measured with the handler returning `requeue` every time:
- * four deliveries, then the dead-letter queue with `reason "delivery_limit"`.
- * See docs/decisions/001-amqp-client.md.
+ * limit. Measured with the handler returning `requeue` every time: four
+ * deliveries, then the dead-letter queue with `reason "delivery_limit"`.
+ *
+ * It has to be the queue's job rather than the daemon's for a reason that
+ * outlived the client that made it obvious: an in-process counter is lost the
+ * moment the message moves to another daemon, which is exactly what happens
+ * during an outage. The count is readable now (`x-delivery-count`, since the
+ * move to amqplib — see docs/decisions/004-downgrade-to-amqp-0-9-1.md); the
+ * enforcement still belongs to the broker.
  *
  * Three rather than more because RabbitMQ redelivers immediately with no
  * backoff, so every extra attempt is load on a third party that is already
