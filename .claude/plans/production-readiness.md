@@ -440,7 +440,7 @@ metrics that do not exist yet (Phase 5's outbox metrics land with Phase 5).
 
 ---
 
-## Phase 10 — Security: documented, not built
+## Phase 10 — Security: documented, not built  ✅ done
 
 **Explicitly no implementation.** No auth, no TLS, no secret store, no signing.
 Write `docs/security.md` and link it from `README.md`'s "What is a prototype,

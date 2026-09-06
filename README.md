@@ -990,6 +990,17 @@ belongs in the aggregator, off the request path.
   that must not be mistaken for clusters, and the `/metrics` endpoint and
   every metric in [Metrics & monitoring](#metrics--monitoring) are verified
   in-process too — belt and suspenders, not a substitute for the real run.
+- **There is no security here at all, and it is written down rather than
+  implied.** No authentication, no authorization, no TLS on any hop, and no
+  secret handling — plus two inputs that shape decisions and accept anything
+  that can reach them: the failure-injection route
+  ([Http.ts:288](packages/aggregator/src/Http.ts#L288)) and the gRPC metrics
+  sink ([EnvoyPushSource.ts:164](packages/aggregator/src/EnvoyPushSource.ts#L164)),
+  which will believe whichever node id a caller claims. [docs/security.md](docs/security.md)
+  is the full inventory: ten sections, every claim with a file and line, and one
+  line each on what production would have to do. It was deliberately left as an
+  inventory — a token check on one route while another accepts anonymous input
+  moves the problem and leaves the next reader thinking the surface is secured.
 - **HTTPS egress needs TLS interception** for any of the L7 signals to exist. If
   you proxy via `CONNECT` you get L4 only, `consecutive_5xx` is dead, and the
   breaker degrades to connection-level detection. Decide this early: it drives
@@ -1067,6 +1078,7 @@ Dockerfile                   one image for every process here; deps at build tim
 docs/rmq-control-plane.md    the RabbitMQ scenario: design, live run, and what it exposed
 docs/decisions/              decision records: what was chosen, and the measurement it rests on
 docs/runbooks/               one per alert — what fired, what to check, what to do about it
+docs/security.md             what is missing and what production must do, with line references
 docker-compose.yml           wires infra/ and the packages/ entrypoints together
 .github/workflows/ci.yml     `pnpm run check` on every push, and both Docker-backed
                              suites (`test:redis`, `test:rmq`) in a second job — they
