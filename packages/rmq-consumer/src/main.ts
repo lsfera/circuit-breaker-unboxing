@@ -6,28 +6,27 @@ import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { RmqLive } from "@egress/rmq/Client.ts";
 import { runDaemon } from "./daemon.ts";
-import { runProducer } from "./producer.ts";
 
 /**
- * Role dispatch for the RabbitMQ side of the scenario:
+ * One daemon, one process:
  *
- *   node --experimental-strip-types src/main.ts daemon
- *   node --experimental-strip-types src/main.ts producer
+ *   node --experimental-strip-types src/main.ts
  *
- * Everything else comes from the environment rather than flags, because in
- * this repo these are containers, not commands someone types — see the
- * rmq-daemon-* / rmq-producer services in docker-compose.yml. DAEMON_INDEX
- * is the one value that differs between the otherwise identical daemon
- * containers.
+ * This used to dispatch on argv between `daemon` and `producer`. The producer
+ * is its own component now (@egress/rmq-producer) because it shares nothing
+ * with this one — no control queue, no policy, no elections, and it never
+ * reads the circuit state, which is the entire point of the scenario.
  *
- * Either role also serves `/metrics` on METRICS_PORT, read from the same
- * in-process `effect` Metric registry @egress/aggregator uses, and scraped
- * by the same Prometheus. That is what puts the fleet's behaviour on the
- * same dashboard as the circuit it is reacting to, instead of in a second
- * tool on a second screen.
+ * Everything comes from the environment rather than flags, because in this
+ * repo these are containers rather than commands someone types — see the
+ * rmq-daemon-* services in docker-compose.yml. DAEMON_INDEX is the one value
+ * that differs between otherwise identical daemon containers.
+ *
+ * It also serves `/metrics` on METRICS_PORT from the same in-process `effect`
+ * registry @egress/aggregator uses, scraped by the same Prometheus. That is
+ * what puts the fleet's behaviour on the same dashboard as the circuit it is
+ * reacting to, instead of in a second tool on a second screen.
  */
-
-const role = process.argv[2] ?? "daemon";
 
 const env = (name: string, fallback: string) => process.env[name] ?? fallback;
 
@@ -37,33 +36,22 @@ const connect = { host: rmqHost ?? "127.0.0.1", port: Number(rmqPort ?? 5672) };
 
 const apiId = env("API_ID", "payments-provider");
 
-const program =
-  role === "producer"
-    ? runProducer({
-        apiId,
-        ratePerSecond: Number(env("RATE_PER_SECOND", "200")),
-      })
-    : runDaemon({
-        apiId,
-        index: Number(env("DAEMON_INDEX", "0")),
-        fleetSize: Number(env("FLEET_SIZE", "5")),
-        instanceId: env("INSTANCE_ID", randomUUID()),
-        connect,
-        // One address, no replica names — the same string a real client of
-        // this API would be configured with.
-        egressAddr: env("EGRESS_ADDR", "http://envoy:10000"),
-        apiPath: env("API_PATH", "/payments"),
-        maxInFlight: Number(env("MAX_IN_FLIGHT", "32")),
-        // Off unless asked for: replaying work that failed during an outage
-        // is a decision about this workload, not a property of the queue.
-        redriveOnClose: env("REDRIVE_ON_CLOSE", "false") === "true",
-        redriveMax: Number(env("REDRIVE_MAX", "5000")),
-      });
-
-if (role !== "producer" && role !== "daemon") {
-  console.error(`unknown role "${role}" — expected "daemon" or "producer"`);
-  process.exit(1);
-}
+const program = runDaemon({
+  apiId,
+  index: Number(env("DAEMON_INDEX", "0")),
+  fleetSize: Number(env("FLEET_SIZE", "5")),
+  instanceId: env("INSTANCE_ID", randomUUID()),
+  connect,
+  // One address, no replica names — the same string a real client of this API
+  // would be configured with.
+  egressAddr: env("EGRESS_ADDR", "http://envoy:10000"),
+  apiPath: env("API_PATH", "/payments"),
+  maxInFlight: Number(env("MAX_IN_FLIGHT", "32")),
+  // Off unless asked for: replaying work that failed during an outage is a
+  // decision about this workload, not a property of the queue.
+  redriveOnClose: env("REDRIVE_ON_CLOSE", "false") === "true",
+  redriveMax: Number(env("REDRIVE_MAX", "5000")),
+});
 
 /**
  * Containment for exactly one library-level race, and nothing else.
@@ -84,7 +72,7 @@ if (role !== "producer" && role !== "daemon") {
  */
 process.on("uncaughtException", (error) => {
   if (error instanceof Error && error.message === "transfer after detach") {
-    console.warn(`[${role}] ignored rhea race: transfer after detach`);
+    console.warn("[daemon] ignored rhea race: transfer after detach");
     return;
   }
   throw error;
@@ -117,7 +105,7 @@ const MetricsRoute = HttpRouter.use((router) =>
 );
 
 /**
- * The role runs as a scoped fiber for the lifetime of the server, the same
+ * The daemon runs as a scoped fiber for the lifetime of the server, the same
  * shape the aggregator's tick loop uses: interruption is structural, and
  * failing setup (a broker that never comes up, a queue redeclared with
  * different arguments) is a defect rather than something to recover from —

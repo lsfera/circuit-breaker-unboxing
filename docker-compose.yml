@@ -209,7 +209,7 @@ services:
     image: *app-image
     build: *app-build
     command: >
-      node --experimental-strip-types packages/rmq-consumer/src/main.ts producer
+      node --experimental-strip-types packages/rmq-producer/src/main.ts
     environment:
       RMQ: rabbitmq:5672
       API_ID: payments-provider
@@ -228,7 +228,7 @@ services:
   rmq-daemon-0: &rmq-daemon
     <<: *rmq-node
     command: >
-      node --experimental-strip-types packages/rmq-consumer/src/main.ts daemon
+      node --experimental-strip-types packages/rmq-consumer/src/main.ts
     environment:
       <<: *daemon-env
       DAEMON_INDEX: "0"

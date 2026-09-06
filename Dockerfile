@@ -30,6 +30,7 @@ COPY packages/demo/package.json packages/demo/
 COPY packages/domain/package.json packages/domain/
 COPY packages/rmq/package.json packages/rmq/
 COPY packages/rmq-consumer/package.json packages/rmq-consumer/
+COPY packages/rmq-producer/package.json packages/rmq-producer/
 COPY packages/subscriber/package.json packages/subscriber/
 # --prod drops typescript and testcontainers, which exist for `pnpm run check`
 # and the opt-in integration suites and have no business in a runtime image.

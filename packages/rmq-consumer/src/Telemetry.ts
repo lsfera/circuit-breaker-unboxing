@@ -100,6 +100,3 @@ export const controlDuplicates = Metric.counter("egress_daemon_control_duplicate
   description: "Repeated sequences observed in the state_changed stream on circuit.control.",
 });
 
-export const published = Metric.counter("egress_producer_published_total", {
-  description: "Work messages published onto the work queue, by API.",
-});

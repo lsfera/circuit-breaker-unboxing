@@ -3,8 +3,9 @@
 **Status: built and running end to end.** `packages/rmq` (the Effect client
 + `circuit.control` helpers), `packages/aggregator/src/
 AmqpControlPlaneSink.ts` (the publisher side, mounted via `main.ts
---rmq=<host>:<port>`) and `packages/rmq-consumer` (the producer and the
-daemon fleet) all exist, and `docker compose up` runs the whole scenario: one
+--rmq=<host>:<port>`) and `packages/rmq-consumer` (the
+daemon fleet) and `packages/rmq-producer` (the load that fills their queue,
+kept a separate component because it never reads the circuit state) all exist, and `docker compose up` runs the whole scenario: one
 producer flooding `payments-provider.work`, five daemon containers draining
 it through the egress listener, and the aggregator publishing every
 transition to `circuit.control`. The live run is written up under

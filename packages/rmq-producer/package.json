@@ -1,0 +1,14 @@
+{
+  "name": "@egress/rmq-producer",
+  "private": true,
+  "type": "module",
+  "description": "The load half of the RabbitMQ scenario: a steady stream of work onto <apiId>.work for the daemon fleet to drain. Deliberately its own component — it never reads the circuit state, and keeping it out of @egress/rmq-consumer is what makes that visible.",
+  "scripts": {
+    "start": "node --experimental-strip-types src/main.ts"
+  },
+  "dependencies": {
+    "@egress/rmq": "workspace:*",
+    "@effect/platform-node": "catalog:",
+    "effect": "catalog:"
+  }
+}
