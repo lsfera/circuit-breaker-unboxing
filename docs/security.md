@@ -45,10 +45,10 @@ make a broken stream look intact.
 | --- | --- | --- | --- |
 | Envoy admin ×3 | 19001-19003 | [docker-compose.yml:79](../docker-compose.yml#L79), [envoy.yaml:19](../infra/envoy/envoy.yaml#L19) | Admin binds `0.0.0.0:9901`; carries `/quitquitquit`, a full config dump, and runtime modification. |
 | RabbitMQ | 5672, 15672, 15692 | [docker-compose.yml:127](../docker-compose.yml#L127) | Management UI, `guest`/`guest`. |
-| Prometheus | 9090 | [docker-compose.yml:328](../docker-compose.yml#L328) | Query API, unauthenticated. |
-| Alertmanager | 9093 | [docker-compose.yml:340](../docker-compose.yml#L340) | Can silence alerts, unauthenticated. |
-| Grafana | 3000 | [docker-compose.yml:369](../docker-compose.yml#L369) | Anonymous access on ([:357](../docker-compose.yml#L357)), Viewer role. |
-| Aggregators | 8088, 8089 | [docker-compose.yml:190](../docker-compose.yml#L190), [:197](../docker-compose.yml#L197) | Section 1. |
+| Prometheus | 9090 | [docker-compose.yml:330](../docker-compose.yml#L330) | Query API, unauthenticated. |
+| Alertmanager | 9093 | [docker-compose.yml:342](../docker-compose.yml#L342) | Can silence alerts, unauthenticated. |
+| Grafana | 3000 | [docker-compose.yml:371](../docker-compose.yml#L371) | Anonymous access on ([:359](../docker-compose.yml#L359)), Viewer role. |
+| Aggregators | 8088, 8089 | [docker-compose.yml:192](../docker-compose.yml#L192), [:199](../docker-compose.yml#L199) | Section 1. |
 
 `/quitquitquit` deserves being said out loud: it is an unauthenticated HTTP
 endpoint that stops the proxy every request in this system goes through.
@@ -66,7 +66,7 @@ Every connection in this stack is plaintext:
 - **AMQP** to RabbitMQ ([docker-compose.yml:21](../docker-compose.yml#L21)) —
   no TLS, and `guest`/`guest` credentials in the clear.
 - **Redis**, which carries the lease, the checkpoints and the outbox
-  ([docker-compose.yml:179](../docker-compose.yml#L179)) — no `AUTH`, no TLS.
+  ([docker-compose.yml:181](../docker-compose.yml#L181)) — no `AUTH`, no TLS.
 - **gRPC**, where Envoy pushes its stats:
   `ServerCredentials.createInsecure()` at
   [EnvoyPushSource.ts:166](../packages/aggregator/src/EnvoyPushSource.ts#L166).

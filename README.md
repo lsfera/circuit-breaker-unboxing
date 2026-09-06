@@ -522,62 +522,9 @@ tested exhaustively with plain `assert`.
 
 ## What is a prototype, not production
 
-- **Ingestion is push now, and polling is the peer it was measured against.**
-  This bullet used to say "swap it for the push-based
-  `envoy.service.metrics.v3.MetricsService` sink in production". That swap is
-  done — see [Ingestion](docs/architecture.md#ingestion-push-or-poll-decided-by-measurement) — and
-  the premise that made it a *later* problem, that a gRPC server needs
-  generated stubs and therefore a build step, turned out to be false.
-  `EnvoyFleetLayer` (polling) remains a first-class layer: it is what runs when
-  you cannot reconfigure Envoy, and it is the control the push path was
-  compared against.
-- **Aggregator state is not a database, but leader election, failover and the
-  Redis backend are real, deployed, and watched working.** `docker compose up`
-  runs two aggregator instances against a shared Redis; killing the leader
-  mid-incident is [an assertion now, not an anecdote](docs/measurements.md#chaos-on-demand-rather-than-by-hand).
-  Redis runs with AOF and a named volume, so a restart no longer starts the
-  next leader from nothing. **What is still prototype is replication: one Redis
-  is one Redis.** Losing it costs the checkpoints — a new leader resumes from
-  nothing rather than from where the last one stopped — but no longer costs
-  correctness, because the fencing token carries an epoch and a coordinator
-  that lost its state cannot hand a stale leader a token that outranks the live
-  one. A real deployment wants Redis with replication, or a different backing
-  store entirely (etcd, a Postgres advisory lock) behind the unchanged
-  `LeaderElection`/`CheckpointStore` interfaces — those interfaces, not this
-  Redis config, are the part meant to carry over.
-- **One broker is a quorum of one.** The work and dead-letter queues are
-  durable quorum queues with a delivery limit, and the broker has a volume, so
-  messages survive a restart — [measured, 6,628 in and 6,628 out](docs/rmq-control-plane.md).
-  Tolerating the loss of a *node* is what quorum queues are actually for, and
-  that needs three of them. This repo runs one.
-- **Enforcement is observational, and that is now a decision rather than an
-  open question.** The aggregator publishes and never pushes config — see
-  [docs/decisions/002-enforcement-authority.md](docs/decisions/002-enforcement-authority.md)
-  for why, and the three conditions that would supersede it.
-- **The console does not scale the way the control loop does.** `/api/stream`
-  re-sends the whole state frame every 400ms, which is about 2.75 MB/s per
-  connected browser at a thousand APIs while the tick loop itself barely
-  notices the size — see [Measured limits](docs/measurements.md). A production
-  console sends diffs or a page, and nothing in the control path would ever
-  tell you it needed to.
-- **No distributed tracing.** `@effect/opentelemetry` publishes the exact
-  version this repo pins, so this is a choice:
-  [docs/decisions/003-tracing.md](docs/decisions/003-tracing.md) records that
-  every failure here has been state-over-time rather than trace-shaped, and
-  names the one path (message → egress call → Envoy stats → circuit event)
-  that would earn one.
-- **The Envoy and monitoring stack *is* run end to end now — the earlier
-  "Docker cannot bind-mount here" note was a false assumption, corrected by
-  actually running it.** `docker compose up` boots three real Envoy
-  replicas, a real aggregator pair, and drives a real incident through them
-  (see the section linked above); what looked like a sandbox limitation was
-  one environment variable pointing at the wrong path (see
-  [Running against real Envoy](docs/operations.md#running-against-real-envoy) for the exact
-  failure mode and fix). `parseStats` is still additionally covered by a
-  pure unit test against realistic admin output, including the noise stats
-  that must not be mistaken for clusters, and the `/metrics` endpoint and
-  every metric in [Metrics & monitoring](docs/operations.md#metrics--monitoring) are verified
-  in-process too — belt and suspenders, not a substitute for the real run.
+Ordered by what would stop you first. Each one is a gap in this repo, not a
+general caveat — where it has been measured, the number is here.
+
 - **There is no security here at all, and it is written down rather than
   implied.** No authentication, no authorization, no TLS on any hop, and no
   secret handling — plus two inputs that shape decisions and accept anything
@@ -589,10 +536,85 @@ tested exhaustively with plain `assert`.
   line each on what production would have to do. It was deliberately left as an
   inventory — a token check on one route while another accepts anonymous input
   moves the problem and leaves the next reader thinking the surface is secured.
+- **The AMQP client is a single unmaintained dependency with a known silent
+  failure.** `rabbitmq-amqp-js-client` 1.0.0 is the only AMQP 1.0 client for
+  Node, listed on rabbitmq.com but third-party rather than RabbitMQ-team
+  maintained. Upstream has had no commit since 2026-06-25, and its open issue
+  #96 — concurrent `createPublisher` calls resolving with crossed links, which
+  cost the reporter ~20,000 misrouted messages in production — is the same bug
+  `packages/rmq/src/Client.ts` serializes every operation to avoid. Three
+  workarounds here are calibrated to that exact build, which is an argument for
+  pinning it exactly rather than by the `^1.0.0` range the manifest carries.
+  [docs/decisions/001-amqp-client.md](docs/decisions/001-amqp-client.md) is why
+  it is still the right choice, and what would reopen that.
 - **HTTPS egress needs TLS interception** for any of the L7 signals to exist. If
   you proxy via `CONNECT` you get L4 only, `consecutive_5xx` is dead, and the
   breaker degrades to connection-level detection. Decide this early: it drives
   the whole certificate story.
+- **One Redis is one Redis.** Leader election, failover and the Redis backend
+  are real, deployed and watched working — `docker compose up` runs two
+  aggregator instances against a shared Redis, killing the leader mid-incident
+  is [an assertion now, not an anecdote](docs/measurements.md#chaos-on-demand-rather-than-by-hand),
+  and AOF plus a named volume means a restart no longer starts the next leader
+  from nothing. What is still prototype is *replication*. Losing that one
+  instance costs the checkpoints — a new leader resumes from nothing rather
+  than from where the last one stopped — but no longer costs correctness,
+  because the fencing token carries an epoch and a coordinator that lost its
+  state cannot hand a stale leader a token that outranks the live one. A real
+  deployment wants Redis with replication, or a different backing store
+  entirely (etcd, a Postgres advisory lock) behind the unchanged
+  `LeaderElection`/`CheckpointStore` interfaces — those interfaces, not this
+  Redis config, are the part meant to carry over.
+- **One broker is a quorum of one.** The work and dead-letter queues are
+  durable quorum queues with a delivery limit, and the broker has a volume, so
+  messages survive a restart — [measured, 6,628 in and 6,628 out](docs/rmq-control-plane.md).
+  Tolerating the loss of a *node* is what quorum queues are actually for, and
+  that needs three of them. This repo runs one.
+- **The console does not scale the way the control loop does.** `/api/stream`
+  re-sends the whole state frame every 400ms, which is about 2.75 MB/s per
+  connected browser at a thousand APIs while the tick loop itself barely
+  notices the size — see [Measured limits](docs/measurements.md). A production
+  console sends diffs or a page, and nothing in the control path would ever
+  tell you it needed to.
+- **Nothing here has run for longer than half an hour.** The soak is 27
+  minutes, deliberately disrupted, and it rules out a fast leak and nothing
+  more — RSS moved about 5 MiB. There is no multi-hour run, no run at 1000
+  APIs beyond a sampling window, and RSS at that size is one reading rather
+  than a curve.
+- **No distributed tracing.** `@effect/opentelemetry` publishes the exact
+  version this repo pins, so this is a choice:
+  [docs/decisions/003-tracing.md](docs/decisions/003-tracing.md) records that
+  every failure here has been state-over-time rather than trace-shaped, and
+  names the one path (message → egress call → Envoy stats → circuit event)
+  that would earn one.
+
+### Three things that used to be on this list
+
+Kept because a list of gaps is only trustworthy if you can see what leaves it.
+
+- **Ingestion is push, and polling is the peer it was measured against.** This
+  said "swap it for the push-based `envoy.service.metrics.v3.MetricsService`
+  sink in production". That swap is done — see
+  [Ingestion](docs/architecture.md#ingestion-push-or-poll-decided-by-measurement)
+  — and the premise that made it a *later* problem, that a gRPC server needs
+  generated stubs and therefore a build step, turned out to be false.
+  `EnvoyFleetLayer` (polling) remains a first-class layer: it is what runs when
+  you cannot reconfigure Envoy, and it is the control the push path was
+  compared against.
+- **Enforcement is observational, which is now a decision rather than an open
+  question.** The aggregator publishes and never pushes config — see
+  [docs/decisions/002-enforcement-authority.md](docs/decisions/002-enforcement-authority.md)
+  for why, and the three conditions that would supersede it.
+- **The Envoy and monitoring stack runs end to end.** "Docker cannot bind-mount
+  the project directory here" had been true every time it was checked, and it
+  was a false assumption: one environment variable pointing at a
+  container-internal path, silently shadowing the correct one. `docker compose
+  up` boots three real Envoy replicas, a real aggregator pair and a real
+  broker, and drives a real incident through them — see
+  [Running against real Envoy](docs/operations.md#running-against-real-envoy)
+  for the exact failure mode and fix. `parseStats` still additionally has a
+  pure unit test against realistic admin output, including the noise stats that
+  must not be mistaken for clusters.
 
 ## Where to read next
 
