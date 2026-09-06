@@ -150,6 +150,121 @@ If the elected daemon dies mid-probe, RabbitMQ's own SAC promotion hands the
 role to a different registered consumer — no heartbeat, no hand-rolled
 election, confirmed below.
 
+## The fleet as it runs
+
+`docker compose up` also brings up the scenario in
+the scenario above: a `rabbitmq` broker,
+one `rmq-producer` publishing 200 messages/second onto
+`payments-provider.work`, and five `rmq-daemon-*` containers draining it —
+one third-party call per message, through the same egress listener, with no
+knowledge of Envoy's topology. The aggregator publishes every transition to
+the `circuit.control` exchange (`--rmq=rabbitmq:5672`), and each daemon
+decides *for itself* whether to keep consuming, from its own index and the
+agreed state alone.
+
+Five separate containers rather than one process simulating five, for the
+same reason there are three real Envoy replicas: the daemons have to be
+independently killable, and the `HALF_OPEN` prober is elected by RabbitMQ's
+`x-single-active-consumer` across real connections.
+
+Work whose third-party call fails is **retried three times and then parked on
+`<apiId>.work.dead`** — and then, when the circuit closes again, replayed.
+The budget is the broker's, not the daemon's: the work queue is a quorum queue
+carrying `x-delivery-limit`, so RabbitMQ counts the redeliveries and
+dead-letters the message itself with `reason "delivery_limit"`. That matters
+because the client cannot count — it reports `deliveryCount: 0` on every
+delivery, and an in-process counter would be lost the moment the message moved
+to another daemon. Three rather than more because RabbitMQ redelivers
+immediately, with no backoff, so each extra attempt is more load on a third
+party that is already failing; what ends the amplification is the circuit
+opening, which stops the daemons consuming at all. The budget resets on
+redrive, since a replayed message is a new message — three attempts per
+outage, not three ever. Measured, pinned by a test, and written up in
+[docs/decisions/001-amqp-client.md](decisions/001-amqp-client.md).
+
+**Every queue in the fleet dead-letters to that one canonical queue** — the
+work queue, both SAC election queues, and each daemon's own control queue.
+The dead-letter queue itself is the only exception, because a queue that
+dead-letters to itself is a cycle. This closes a second silent-loss path that
+looked nothing like the first: a control event that failed the published
+schema used to be logged and accepted, so the only trace of a version skew
+between the aggregator and the fleet was a line in `docker logs`. It is now
+rejected, which means the message that could not be read is still in your
+hands. `egress_daemon_undecodable_total` counts them.
+
+Preserving one unreadable message is right; preserving every one is not, and
+the arithmetic is unkind. Control events fan out to *every* daemon's own
+queue, so a schema mismatch between publisher and fleet is not one bad
+message — it is every message multiplied by the fleet size, arriving on one
+queue at the full event rate. Each daemon therefore preserves a bounded
+sample (20) and accepts the rest, saying so once in its log;
+`egress_daemon_undecodable_total` keeps counting past the bound, so the rate
+stays visible after the samples stop. Measured: 25 malformed events in, 20
+on the dead-letter queue, all 25 in the metric.
+
+One canonical queue only works if whatever drains it can tell the messages
+apart, and RabbitMQ 4 supplies exactly that: a dead-lettered message arrives
+annotated with `x-first-death-queue` and `x-first-death-reason`. The redrive
+below replays only what was dead-lettered from the *work* queue and leaves
+everything else, so a poison control message is never replayed as work.
+
+**Replayable is not the same as replayed**, though, and a dead-letter queue
+nobody drains is a slower way of losing things. So `REDRIVE_ON_CLOSE` turns
+on self-healing: on the transition back to `CLOSED`, one daemon replays the
+dead-lettered messages onto the work queue in bounded passes until it is
+empty. Which daemon is the broker's decision, on a second
+`x-single-active-consumer` queue — the same mechanism as the prober election
+and separate from it, because five daemons each replaying the same backlog
+would turn a recovery into a fivefold burst at a third party that has just
+come back. A pass stops on whichever comes first: the per-pass cap, the queue
+running dry, the circuit leaving `CLOSED`, or a hard deadline.
+
+It is off by default in code and on in `docker-compose.yml`, and that split is
+deliberate: whether a two-minute-old payment attempt is still worth making is
+a question about the workload, not about the transport. Observed on the
+running stack — a 2,070-message dead-letter backlog, drained in one pass three
+seconds after recovery:
+
+```
+daemon-2: redriving payments-provider.work.dead (max 5000 per pass)
+daemon-2: redrive finished — 2070 replayed (drained)
+```
+
+Everything but the per-daemon control queue is a **durable quorum queue**, and
+neither half of that was true to begin with: a broker restart used to empty
+the dead-letter queue silently, because the first daemon back redeclares it
+with the same name and arguments. `durable` decides what survives the broker
+process; `x-queue-type` decides what survives losing the node the queue lives
+on, and a quorum queue cannot be transient, so the two are one decision. The
+control queue stays a classic transient queue on purpose — it is one daemon's
+live subscription, and a daemon that comes back relearns the circuit state
+from the aggregator's next snapshot, so keeping those events buys nothing
+while a queue outliving its daemon costs something. The election queues are
+always empty, which makes quorum free for them and means an election survives
+a node loss rather than vanishing with it.
+
+The broker now has a volume too, so the data directory outlives the container
+and not just the process. What this stack still cannot demonstrate is the
+part quorum queues are actually for: **one broker is a quorum of one.** The
+durability and the delivery limit are real on a single node; tolerating the
+loss of a node needs three of them, and that is a deployment topology this
+repo does not run.
+
+```bash
+# watch the fleet react — target=<k>/5 is the agreed active count
+docker compose logs -f rmq-daemon-0 rmq-daemon-3
+
+# take the upstream down; the queue depth is the story
+curl -X POST localhost:8080/__fail -d '{"rate":1.0}'
+open http://localhost:15672        # guest / guest
+
+# kill whichever daemon the broker elected as prober, mid-incident
+docker kill workspace-rmq-daemon-1-1
+
+# every daemon serves the same /metrics route the aggregator does
+docker compose exec prometheus wget -qO- http://rmq-daemon-0:9464/metrics
+```
+
 ## What's actually verified, and how
 
 **Client**: [`rabbitmq-amqp-js-client`](https://github.com/coders51/rabbitmq-amqp-js-client)

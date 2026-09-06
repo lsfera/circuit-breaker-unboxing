@@ -105,6 +105,12 @@ to confront them.
 
 ## 2. Where "the service is down" gets decided
 
+The same question, cut by *what you would have to build* rather than by where
+detection happens, is in the README's
+[Approaches, and where each one runs out](../README.md#approaches-and-where-each-one-runs-out)
+— including the two options that do not arise here, publishing straight from
+the proxy and a batteries-included gateway.
+
 **The options.**
 
 *A breaker library in every daemon* — Resilience4j, Polly, opossum,
@@ -363,7 +369,9 @@ question it did not have before — noted in [security.md](security.md) §7.
 
 ## 10. What only appeared once it ran
 
-None of these is in the design. All of them changed it.
+None of these is in the design. All of them changed it. Each row is the short
+form; [findings.md](findings.md) is the full write-up of every one, with the
+measurements.
 
 | Discovered | What it was |
 | --- | --- |
