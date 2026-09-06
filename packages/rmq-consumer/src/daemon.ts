@@ -1,5 +1,5 @@
-import { Effect, Exit, Metric, Option, Ref, Scope, Semaphore } from "effect";
-import { makeRmq, Rmq } from "@egress/rmq/Client.ts";
+import { Effect, Metric, Option, Ref, Semaphore } from "effect";
+import { Rmq } from "@egress/rmq/Client.ts";
 import {
   CONTROL_EXCHANGE,
   CONTROL_EXCHANGE_OPTIONS,
@@ -20,7 +20,7 @@ import { initialContract, observe } from "./Contract.ts";
 import { makeRedrive } from "./Redrive.ts";
 import { desired, initialState, plan, reduce } from "./DaemonState.ts";
 import * as Telemetry from "./Telemetry.ts";
-import type { Consumer, RmqConnectOptions, Settlement } from "@egress/rmq/Client.ts";
+import type { Consumer, Settlement } from "@egress/rmq/Client.ts";
 import type { ContractState } from "./Contract.ts";
 import type { Action, Command, DaemonState } from "./DaemonState.ts";
 
@@ -37,28 +37,28 @@ import type { Action, Command, DaemonState } from "./DaemonState.ts";
  * the same events with no leader and no shared state — the aggregator already
  * did the hard part of turning divergent replica views into one state.
  *
- * ## Two connections
+ * ## One connection, and channels that come and go
  *
- * The control connection carries the control consumer, the two SAC consumers
- * and the trigger publishers, all of which live for the life of the process.
- * Everything that churns — the work consumer, opened and closed on every
- * transition, and the one-message HALF_OPEN probe — runs on a second
- * connection this module opens and destroys itself.
+ * A daemon holds exactly one AMQP connection. On it, two classes of channel:
  *
- * This used to be damage control. On the AMQP 1.0 client, closing a consumer
- * with deliveries in flight stranded them and enough strandings stalled every
- * link on the connection: a daemon whose work consumer shared the control
- * connection went deaf to `circuit.control` after a handful of transitions
- * while still looking healthy. Under amqplib that cannot happen — each
- * consumer holds its own channel, and the integration test that used to pin
- * the stall now pins its absence.
+ *  - The ones that live for the process — the control consumer, the two SAC
+ *    election consumers, and the channel every publish goes out on.
+ *  - The ones that churn. The work consumer, opened and closed on every
+ *    transition; the one-message HALF_OPEN probe; the redrive pass. At most
+ *    two of these exist at once, because a probe excludes work and redrive,
+ *    and work and redrive only overlap while CLOSED.
  *
- * The split stays because it is still the cheapest way to abandon work
- * wholesale: dropping the connection is how a probe or a redrive pass returns
- * everything it was holding without walking its own deliveries. It could now
- * be collapsed onto one connection with two channels, and that is worth doing
- * on its own rather than folded into a client migration, where a regression
- * would be impossible to attribute.
+ * This was four connections until it did not need to be. On the AMQP 1.0
+ * client, closing a consumer with deliveries in flight stranded them, and
+ * enough strandings stalled *every* link on that connection — so anything
+ * that churned consumers needed a connection of its own to destroy. A daemon
+ * that shared one went deaf to `circuit.control` after a handful of
+ * transitions while still looking perfectly healthy.
+ *
+ * A channel is the right unit for that, and always was: closing one requeues
+ * everything it held unacked and touches nothing else on the connection. That
+ * is the whole reason the split existed, so the split is gone — one socket,
+ * one heartbeat, one thing to lose.
  *
  * ## Egress stays transparent
  *
@@ -98,8 +98,6 @@ export type DaemonConfig = {
   readonly index: number;
   readonly fleetSize: number;
   readonly instanceId: string;
-  /** Where to open the disposable work connection — the same broker as the control one. */
-  readonly connect: RmqConnectOptions;
   /** The single egress address, exactly as a real client would be given it. */
   readonly egressAddr: string;
   /** The route on that address for this API — /payments for payments-provider. */
@@ -165,16 +163,16 @@ export const runDaemon = (cfg: DaemonConfig) =>
     const state = yield* Ref.make<DaemonState>(initialState(cfg.fleetSize, now));
 
     /**
-     * The connections, which are resources rather than decisions: this is the
-     * "actual" side that `plan` compares the desired shape against. Kept as
-     * three handles because that is what they are, and because Redrive.ts owns
+     * The churning channels, which are resources rather than decisions: this
+     * is the "actual" side that `plan` compares the desired shape against.
+     * Three handles because that is what they are, and because Redrive.ts owns
      * one of them by contract.
      *
-     * The work scope is non-null exactly while this daemon is pulling work.
+     * `workConsumer` is non-null exactly while this daemon is pulling work.
      */
-    const workScope = yield* Ref.make<Scope.Closeable | null>(null);
-    const probeScope = yield* Ref.make<Scope.Closeable | null>(null);
-    const redriveScope = yield* Ref.make<Scope.Closeable | null>(null);
+    const workConsumer = yield* Ref.make<Consumer | null>(null);
+    const probeConsumer = yield* Ref.make<Consumer | null>(null);
+    const redriveConsumer = yield* Ref.make<Consumer | null>(null);
 
     let inFlight = 0;
     let queued = 0;
@@ -246,9 +244,9 @@ export const runDaemon = (cfg: DaemonConfig) =>
         // `x-delivery-limit`, so the broker counts the attempts and parks the
         // message on the dead-letter queue itself once the budget is spent
         // (WORK_DELIVERY_LIMIT in @egress/rmq/ControlPlane.ts). The daemon
-        // does not count, and could not — the client reports deliveryCount 0
-        // on every delivery — which is exactly why this had to be the
-        // broker's job. `failed` therefore counts *attempts* now, not
+        // does not count, and should not: an in-process counter dies when the
+        // message moves to another daemon, which is exactly what an outage
+        // makes happen. `failed` therefore counts *attempts*, not
         // messages: a message that fails its whole budget increments it once
         // per try, which is what a rate of failing calls should measure.
         failed++;
@@ -297,102 +295,103 @@ export const runDaemon = (cfg: DaemonConfig) =>
     /**
      * Serializes reconciliation against itself. Control events and probe
      * triggers both land on AMQP callbacks that fork into the runtime, so
-     * without a permit two of them could each observe "no work connection" and
+     * without a permit two of them could each observe "no work consumer" and
      * both open one.
      */
     const gate = yield* Semaphore.make(1);
 
-    /** Open a throwaway connection and consume the work queue on it. */
+    /** Open a work-queue consumer on its own channel. */
     const startWork = Effect.gen(function* () {
-      const scope = yield* Scope.make();
-      const work = yield* Effect.provideService(makeRmq(cfg.connect), Scope.Scope, scope);
-      yield* work.consume(workQueue, () => callEgress());
-      yield* Ref.set(workScope, scope);
+      const consumer = yield* control.consume(workQueue, () => callEgress());
+      yield* Ref.set(workConsumer, consumer);
     });
 
-    const stopScope = (ref: Ref.Ref<Scope.Closeable | null>) =>
+    /**
+     * Retire a consumer and the channel under it. Everything it was holding
+     * unacked goes back to the queue — which is exactly what `OPEN` wants,
+     * since the work behind those deliveries has not been done.
+     */
+    const retire = (ref: Ref.Ref<Consumer | null>) =>
       Ref.getAndSet(ref, null).pipe(
-        Effect.flatMap((scope) => (scope === null ? Effect.void : Scope.close(scope, Exit.void))),
+        Effect.flatMap((consumer) =>
+          consumer === null ? Effect.void : control.closeConsumer(consumer),
+        ),
       );
 
     /**
-     * Make the connections match the state, and nothing else.
+     * Make the channels match the state, and nothing else.
      *
-     * Which connections *should* exist is `desired`, and the difference between
+     * Which consumers *should* exist is `desired`, and the difference between
      * that and what does exist is `plan` — both pure, both in DaemonState.ts,
      * both tested without a broker. What is left here is the part that can only
-     * happen here: opening and closing sockets, under the permit.
+     * happen here: opening and closing channels, under the permit.
      */
     const reconcile = gate.withPermit(
       Effect.gen(function* () {
         const have = {
-          work: (yield* Ref.get(workScope)) !== null,
-          probe: (yield* Ref.get(probeScope)) !== null,
-          redrive: (yield* Ref.get(redriveScope)) !== null,
+          work: (yield* Ref.get(workConsumer)) !== null,
+          probe: (yield* Ref.get(probeConsumer)) !== null,
+          redrive: (yield* Ref.get(redriveConsumer)) !== null,
         };
         const actions = plan(desired(yield* Ref.get(state), cfg.index, cfg.fleetSize), have);
         if (actions.startWork) yield* startWork;
-        if (actions.stopWork) yield* stopScope(workScope);
-        if (actions.stopProbe) yield* stopScope(probeScope);
-        if (actions.stopRedrive) yield* stopScope(redriveScope);
+        if (actions.stopWork) yield* retire(workConsumer);
+        if (actions.stopProbe) yield* retire(probeConsumer);
+        if (actions.stopRedrive) yield* retire(redriveConsumer);
       }),
     );
 
     /**
-     * Take exactly one message and make one real call, on a connection that
-     * exists only for this probe. Opened only by the SAC-elected daemon;
-     * closed as soon as the first message arrives, so the "one probe"
-     * contract holds even with a backlog ready to deliver.
+     * Take exactly one message and make one real call, on a channel that
+     * exists only for this probe. Opened only by the SAC-elected daemon, and
+     * retired by `reconcile` when the state leaves HALF_OPEN.
      */
     const probeOnce = gate.withPermit(
       Effect.gen(function* () {
-        if ((yield* Ref.get(probeScope)) !== null) return;
-        const scope = yield* Scope.make();
-        const probe = yield* Effect.provideService(makeRmq(cfg.connect), Scope.Scope, scope);
+        if ((yield* Ref.get(probeConsumer)) !== null) return;
 
-        // Cancel the consumer from inside the handler — that is what stops
-        // delivery at the first message — and let `reconcile` retire the
-        // connection later, when the state leaves HALF_OPEN. Cancelling
-        // rather than closing matters: the channel stays open long enough to
-        // settle the message this probe is still holding, so the call's
-        // outcome decides its fate rather than the teardown doing it.
+        // Cancel from inside the handler — that is what stops delivery at the
+        // first message — and cancel rather than close, because the channel
+        // has to outlive the cancellation long enough to settle the message
+        // this probe is holding. The call's outcome decides that message's
+        // fate; the teardown must not.
         let self: Consumer | null = null;
         let taken = false;
-        const consumer = yield* probe.consume(
+        const consumer = yield* control.consume(
           workQueue,
           () => {
             if (taken || self === null) return;
             taken = true;
-            Effect.runFork(probe.closeConsumer(self));
+            Effect.runFork(control.cancelConsumer(self));
             return callEgress();
           },
-          // The one state whose contract is "exactly one call" should ask the
-          // broker for exactly one message. The AMQP 1.0 client had no such
-          // lever — its credit window was a fixed 1000, so a probe against a
-          // deep queue was handed a thousand deliveries and stranded them all
-          // on close. That is what made a throwaway connection per probe
-          // necessary rather than merely tidy.
+          // The one state whose contract is "exactly one call" asks the broker
+          // for exactly one message. The AMQP 1.0 client had no such lever —
+          // its credit window was a fixed 1000, so a probe against a deep
+          // queue was handed a thousand deliveries and stranded every one of
+          // them on close. That is what used to make a whole throwaway
+          // connection per probe necessary rather than merely tidy.
           { prefetch: 1 },
         );
         self = consumer;
 
         probed++;
-        yield* Ref.set(probeScope, scope);
+        yield* Ref.set(probeConsumer, consumer);
         yield* Effect.log(`${label}: elected prober, taking one message`);
       }),
     );
 
     /**
      * Dead-letter recovery lives in its own module — see Redrive.ts. What is
-     * passed here is the coupling, made explicit: a connection it can destroy,
-     * the two queue names, the circuit state it must stop on, and this
-     * daemon's scope Ref and permit, because `reconcile` retires the
-     * connection from the other side when the state changes.
+     * passed here is the coupling, made explicit: the daemon's connection, the
+     * two queue names, the circuit state it must stop on, and this daemon's
+     * consumer Ref and permit, because `reconcile` retires the channel from
+     * the other side when the state changes.
      */
     const redriveOnce = makeRedrive({
       label,
       enabled: cfg.redriveOnClose,
-      connect: cfg.connect,
+      rmq: control,
       workQueue,
       deadQueue,
       maxPerPass: cfg.redriveMax,
@@ -400,7 +399,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
       onReplayed: () => {
         redriven++;
       },
-      scope: redriveScope,
+      consumer: redriveConsumer,
       gate,
     });
 
@@ -446,7 +445,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
 
     const describe = Effect.gen(function* () {
       const { circuit, policy } = yield* Ref.get(state);
-      const active = (yield* Ref.get(workScope)) !== null;
+      const active = (yield* Ref.get(workConsumer)) !== null;
       return (
         `${circuit} target=${policy.targetActive}/${cfg.fleetSize} self=${active ? "ACTIVE" : "idle"} ` +
         `calls ok=${ok} failed=${failed} inFlight=${inFlight} queued=${queued} ` +
@@ -457,7 +456,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
 
     /**
      * Order is preserved from when this was written out by hand: apply the
-     * transition, make the connections match it, say so, and only then publish
+     * transition, make the channels match it, say so, and only then publish
      * whatever triggers the transition called for.
      */
     const applyEvent = (circuitState: State, sequence: number, reason: string) =>
@@ -562,7 +561,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
 
     const flush = Effect.gen(function* () {
       const { circuit, policy } = yield* Ref.get(state);
-      const active = (yield* Ref.get(workScope)) !== null;
+      const active = (yield* Ref.get(workConsumer)) !== null;
 
       yield* Effect.all(
         [
@@ -604,7 +603,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
       if (delta.failed > 0) {
         // Published together because the gap between them is informative.
         // Every failed call rejects its message, but a rejection whose link
-        // has already gone (OPEN tearing down the work connection with calls
+        // has already gone (OPEN closing the work channel with calls
         // still in flight) is swallowed by the client's guarded settle, and
         // the broker requeues that delivery instead of dead-lettering it —
         // so dead_lettered trailing calls{failed} slightly is work that was
@@ -690,7 +689,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
      *
      * Only while CLOSED, and only when the answer changes: every other state
      * is a level, not a ramp, and re-reconciling an unchanged target would
-     * rebuild connections once a second for no reason.
+     * rebuild the work channel once a second for no reason.
      */
     const advanceRamp = Effect.gen(function* () {
       const at = yield* Effect.clockWith((c) => c.currentTimeMillis);

@@ -94,13 +94,21 @@ to be built wrong on a first pass:
   `infra/traffic-generator.mjs` in the main repo: one configured egress
   address, no replica names, no admin ports. Replica-level detail stays
   exactly where it already lives — the aggregator's `FleetSource.ts`.
-- **Each daemon holds two connections, not one.** The control plane sits on
-  a connection that only ever opens links; the work consumer and the probe
-  sit on a second one the daemon destroys and rebuilds as the circuit moves.
-  That looked like an implementation detail until a live run proved it is
-  the difference between a daemon that survives an incident and one that
-  goes silently deaf — see
-  [closing a consumer with deliveries in flight](#closing-a-consumer-with-deliveries-in-flight-kills-the-connection).
+- **Each daemon holds one connection, and a channel per consumer.** Four
+  channels live for the process — the control-queue consumer, the two SAC
+  election consumers, and the one every publish goes out on. The rest churn:
+  the work consumer, rebuilt on every transition, the one-message probe, and a
+  redrive pass. Closing a channel hands back everything it was holding unacked
+  and touches nothing else on the connection.
+
+  This was two connections per daemon until the client changed. Under AMQP 1.0
+  a stranded delivery could stall every link sharing a connection, so anything
+  that churned needed one of its own to destroy — the difference between a
+  daemon that survives an incident and one that goes silently deaf. See
+  [closing a consumer with deliveries in flight](#closing-a-consumer-with-deliveries-in-flight-kills-the-connection)
+  for the run that proved it, and
+  [decisions/004](decisions/004-downgrade-to-amqp-0-9-1.md) for why a channel
+  is the right unit for the same job.
 
 ## State → action mapping
 
@@ -378,17 +386,22 @@ consumer on an unrelated queue on the same connection goes deaf on the
 seventh cycle. No error, no close event, nothing in any log. The identical
 loop with each probe on its own throwaway connection ran clean.
 
-**Fix**: the daemon uses **two connections**, and which links live on which
-is the whole point.
+**Fix at the time**: the daemon used **two connections**, and which links
+lived on which was the whole point.
 
-- The connection from the `Rmq` layer carries the control plane, and only
-  ever *opens* links — the control-queue consumer, the SAC probe-trigger
+- The connection from the `Rmq` layer carried the control plane, and only
+  ever *opened* links — the control-queue consumer, the SAC probe-trigger
   consumer, the trigger publisher — all created at startup and never closed.
-  Nothing that can strand a delivery ever happens on it.
-- Everything that churns gets a second connection that `daemon.ts` opens and
-  destroys itself: the work consumer, torn down and rebuilt on every
-  transition, and the one-message probe. Destroying the connection is what
-  returns the stranded capacity, so the damage never accumulates.
+  Nothing that could strand a delivery ever happened on it.
+- Everything that churned got a second connection that `daemon.ts` opened and
+  destroyed itself. Destroying the connection returned the stranded capacity,
+  so the damage never accumulated.
+
+**Fix now**: none needed. The stall was a property of that client, and the
+test that used to reproduce it asserts its absence — twelve probe cycles on a
+*shared* connection with a canary consumer that stays live throughout. A
+channel is the unit that was wanted all along: closing one requeues what it
+held and leaves its neighbours alone, so the daemon is back to one connection.
 
 `makeRmq` is exported from `Client.ts` alongside `RmqLive` for exactly this:
 a connection is a scoped resource here, not a process-lifetime one. The test
@@ -649,9 +662,9 @@ on a second `x-single-active-consumer` queue (`<apiId>.redrive-trigger`),
 deliberately separate from `probe-trigger`: the two elections are
 independent, and coupling them would let one daemon's failure take out both.
 
-Each pass is bounded and runs on its own throwaway connection — it closes a
-consumer with a backlog behind it, which is the stranding hazard this
-document is largely about. Passes repeat while the cap keeps being hit, so a
+Each pass is bounded and runs on its own throwaway channel — it closes a
+consumer with a backlog behind it, which is the stranding hazard this document
+is largely about, and closing the channel is what hands that backlog back. Passes repeat while the cap keeps being hit, so a
 backlog larger than one cap does not need one outage per `REDRIVE_MAX`
 messages to recover. A pass ends on the cap, an empty queue, the circuit
 leaving `CLOSED`, or a hard deadline, whichever comes first.

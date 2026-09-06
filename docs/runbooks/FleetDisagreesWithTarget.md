@@ -28,7 +28,8 @@ has stopped rising is the deaf case.
 
 - The AMQP consumer bug this repo works around: closing a consumer with
   deliveries in flight strands them, and enough strandings stall every link on
-  that connection. The fleet runs two connections per daemon for this reason —
+  that connection. That was an AMQP 1.0 failure mode; the fleet now runs one
+  connection per daemon with a channel per consumer, which isolates it —
   the control plane never closes a link.
 - A daemon mid-ramp. During recovery the target rises one rung at a time, so a
   brief disagreement is expected; two minutes of it is not.

@@ -146,7 +146,7 @@ test("x-single-active-consumer elects one consumer and promotes another when it 
       // Closing the active one must hand the role to a different consumer,
       // with no election code of our own.
       const activeId = active[0]!;
-      yield* rmq.closeConsumer(consumers[activeId] as never);
+      yield* rmq.cancelConsumer(consumers[activeId] as never);
       received.length = 0;
       yield* Effect.promise(() => new Promise((r) => setTimeout(r, 800)));
       for (let i = 4; i < 8; i++) yield* rmq.send(pub, `trigger-${i}`);
@@ -177,7 +177,7 @@ test("closing a consumer stops delivery without closing the connection", async (
       assert.equal(received.length, 3, "consumer receives while open");
 
       // This is what OPEN does: stop pulling, keep the connection.
-      yield* rmq.closeConsumer(consumer);
+      yield* rmq.cancelConsumer(consumer);
       for (let i = 0; i < 3; i++) yield* rmq.send(pub, `during-${i}`);
       yield* Effect.promise(() => new Promise((r) => setTimeout(r, 800)));
       assert.equal(received.length, 3, "nothing is delivered while cancelled");
@@ -252,7 +252,7 @@ test("closing a consumer with deliveries in flight leaves the rest of the connec
         const consumer = yield* conn.consume(work, () => {
           if (taken || self === null) return;
           taken = true;
-          Effect.runFork(conn.closeConsumer(self));
+          Effect.runFork(conn.cancelConsumer(self));
         });
         self = consumer;
         yield* Effect.promise(() => new Promise((r) => setTimeout(r, 600)));

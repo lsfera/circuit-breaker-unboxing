@@ -83,7 +83,8 @@ gives up RabbitMQ 4's native protocol, and invalidates every property in
 
 ## Consequences
 
-- The daemons keep AMQP 1.0 and the two-connection topology.
+- The daemons keep AMQP 1.0 and the two-connection topology. *(Both reversed
+  by [004](004-downgrade-to-amqp-0-9-1.md): amqplib, one connection.)*
 - `test/integration/Client.test.ts`'s stranding test stays as the upgrade
   gate: a client release that fixes the bug turns CI red and tells us the
   workaround can go.

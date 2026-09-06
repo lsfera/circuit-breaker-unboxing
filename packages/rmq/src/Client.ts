@@ -207,10 +207,20 @@ export interface RmqService {
    * Stop delivery to this consumer, leaving its channel able to settle
    * whatever it is still holding.
    *
-   * Cancelling rather than closing is what the HALF_OPEN probe needs: it takes
-   * one message, stops the flow from inside the handler, and then settles that
-   * message from the call's outcome. Closing the channel first would make the
-   * settlement moot and hand the message back to the queue.
+   * What the HALF_OPEN probe needs: it takes one message, stops the flow from
+   * inside the handler, and then settles that message from the call's outcome.
+   * Closing the channel instead would make the settlement moot and hand the
+   * message back to the queue.
+   */
+  readonly cancelConsumer: (c: Consumer) => Effect.Effect<void>;
+  /**
+   * Retire the consumer and its channel outright.
+   *
+   * Everything the channel is still holding unacked goes back to the queue,
+   * which is the point: this is how a daemon abandons work wholesale when the
+   * circuit moves under it. It is the operation that used to require dropping
+   * a whole connection, back when a stranded delivery could stall every link
+   * sharing one.
    */
   readonly closeConsumer: (c: Consumer) => Effect.Effect<void>;
 }
@@ -421,8 +431,14 @@ export const makeRmq = (
               : { persistent: true, headers: properties },
           ),
         ),
-      closeConsumer: (c) =>
+      cancelConsumer: (c) =>
         Effect.promise(() => c.channel.cancel(c.consumerTag).then(() => {}, () => {})),
+      // Closing is enough on its own — the broker cancels the consumer and
+      // requeues every unacked delivery on the channel. Swallowed because a
+      // channel whose connection has already gone rejects here, and a teardown
+      // that fails to tear down is worse than one that finds nothing to do.
+      closeConsumer: (c) =>
+        Effect.promise(() => c.channel.close().then(() => {}, () => {})),
     };
   });
 

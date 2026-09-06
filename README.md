@@ -451,7 +451,7 @@ packages/
     src/DaemonState.ts       pure: the daemon's whole decision — one state, one reducer,
                              plus which connections should exist and what to do about it
     src/Contract.ts          pure: the per-API sequence guarantee, checked on the AMQP side
-    src/daemon.ts            one daemon, one process; two connections, two SAC elections
+    src/daemon.ts            one daemon, one process; one connection, two SAC elections
     src/Redrive.ts           dead-letter recovery: bounded passes, own connection per pass
     src/Telemetry.ts         every metric the fleet emits, in one place
     src/main.ts              one daemon, one process, plus /metrics

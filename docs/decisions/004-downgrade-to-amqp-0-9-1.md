@@ -117,11 +117,25 @@ here was ever an AMQP 1.0 feature.
 - `deliveryCount` is real. The budget stays the broker's — an in-process
   counter still dies when a message moves to another daemon — but it is now
   observable rather than a blind spot.
-- **The daemon's two-connection topology is now optional.** It stays because
-  dropping a connection is still the cheapest way for a probe or redrive pass
-  to abandon everything it holds, but the reason it was *necessary* is gone.
-  Collapsing it onto one connection with two channels is a separate change, so
-  that a regression is attributable to it.
+- **The daemon's two-connection topology is gone**, in a follow-up change made
+  immediately after this one so that a regression would be attributable to it.
+  A daemon now holds one connection: four channels that live for the process
+  (control consumer, two SAC election consumers, one publish channel) and up to
+  two that churn — work, probe and redrive, of which at most two can coexist,
+  because a probe excludes the other two and work and redrive only overlap
+  while CLOSED. Closing a channel requeues everything it held, which is the
+  property dropping a connection was being used for.
+
+  Measured on the compose stack: **13 broker connections before, 8 after** —
+  five daemons each losing one — with each daemon's connection carrying five
+  channels at rest. Through a full incident (three HALF_OPEN probes, two
+  failed, 539 messages redriven) the channel count returned to its steady
+  value, so the churn leaks nothing.
+
+  This is also what made `cancelConsumer` and `closeConsumer` separate
+  operations: the probe cancels, because its channel has to outlive the
+  cancellation long enough to settle the message it is holding, while
+  `reconcile` closes, because the point there is to hand everything back.
 
 ## What would change this
 

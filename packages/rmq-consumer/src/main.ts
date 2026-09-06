@@ -41,7 +41,6 @@ const program = runDaemon({
   index: Number(env("DAEMON_INDEX", "0")),
   fleetSize: Number(env("FLEET_SIZE", "5")),
   instanceId: env("INSTANCE_ID", randomUUID()),
-  connect,
   // One address, no replica names — the same string a real client of this API
   // would be configured with.
   egressAddr: env("EGRESS_ADDR", "http://envoy:10000"),

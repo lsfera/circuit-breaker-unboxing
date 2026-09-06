@@ -1,7 +1,6 @@
-import { Effect, Exit, Ref, Scope } from "effect";
+import { Effect, Ref } from "effect";
 import { randomUUID } from "node:crypto";
-import { makeRmq } from "@egress/rmq/Client.ts";
-import type { RmqConnectOptions, Settlement } from "@egress/rmq/Client.ts";
+import type { Consumer, RmqService, Settlement } from "@egress/rmq/Client.ts";
 import type { Semaphore } from "effect/Semaphore";
 
 /**
@@ -12,10 +11,10 @@ import type { Semaphore } from "effect/Semaphore";
  * Its own module because daemon.ts had grown to eight hundred lines holding
  * eight separate concerns, and this is the largest and most self-contained of
  * them. The options below are not ceremony — they are the coupling, written
- * down: a redrive needs a connection it can destroy, the two queue names, the
+ * down: a redrive needs the daemon's connection, the two queue names, the
  * circuit state (it must stop the moment the circuit reopens), and the
- * daemon's own scope Ref and permit, because `reconcile` retires the
- * connection from the other side when the state changes.
+ * daemon's own consumer Ref and permit, because `reconcile` retires the
+ * channel from the other side when the state changes.
  *
  * Elected to exactly one daemon by the broker — see the SAC redrive-trigger
  * queue in daemon.ts. Five daemons replaying the same backlog would turn a
@@ -24,7 +23,8 @@ import type { Semaphore } from "effect/Semaphore";
 export type RedriveOptions = {
   readonly label: string;
   readonly enabled: boolean;
-  readonly connect: RmqConnectOptions;
+  /** The daemon's one connection. A pass opens a channel on it and closes that. */
+  readonly rmq: RmqService;
   readonly workQueue: string;
   readonly deadQueue: string;
   /** Ceiling on messages moved in a single pass, so a huge backlog is recovered in bounded bites. */
@@ -33,8 +33,8 @@ export type RedriveOptions = {
   readonly isClosed: Effect.Effect<boolean>;
   /** Bumped per replayed message, for the daemon's metrics flush. */
   readonly onReplayed: () => void;
-  /** Shared with `reconcile`, which retires the connection when the state changes. */
-  readonly scope: Ref.Ref<Scope.Closeable | null>;
+  /** Shared with `reconcile`, which retires the channel when the state changes. */
+  readonly consumer: Ref.Ref<Consumer | null>;
   readonly gate: Semaphore;
 };
 
@@ -45,8 +45,7 @@ export const makeRedrive = (opts: RedriveOptions) => {
   const ORIGIN_PASS_PROPERTY = "x-egress-redrive-pass";
 
   const redrivePass = Effect.gen(function* () {
-    const scope = yield* Scope.make();
-    const conn = yield* Effect.provideService(makeRmq(opts.connect), Scope.Scope, scope);
+    const conn = opts.rmq;
     const into = yield* conn.publisherToQueue(opts.workQueue);
     const back = yield* conn.publisherToQueue(opts.deadQueue);
 
@@ -55,7 +54,7 @@ export const makeRedrive = (opts: RedriveOptions) => {
     let parked = 0;
     let cycled = false;
     let lastReplayAt = Date.now();
-    yield* conn.consume(opts.deadQueue, async (body, delivery): Promise<Settlement> => {
+    const consumer = yield* conn.consume(opts.deadQueue, async (body, delivery): Promise<Settlement> => {
       // One canonical dead-letter queue means this one holds more than
       // failed work: a control event that would not decode lands here too,
       // and replaying *that* onto the work queue would be nonsense. The
@@ -130,7 +129,7 @@ export const makeRedrive = (opts: RedriveOptions) => {
       return "accept";
     });
 
-    yield* opts.gate.withPermit(Ref.set(opts.scope, scope));
+    yield* opts.gate.withPermit(Ref.set(opts.consumer, consumer));
 
     const deadline = Date.now() + 60_000;
     let reason = "deadline";
@@ -157,13 +156,13 @@ export const makeRedrive = (opts: RedriveOptions) => {
       if (Date.now() > deadline) break;
     }
 
-    // Close *this pass's* scope, and only clear the Ref if it still points
-    // at it. Closing whatever the Ref happens to hold is not the same
-    // thing: reconcile retires the scope on any state change, so a pass
-    // whose scope had already been retired and replaced by a newer one
-    // would tear down the newer pass's live connection on its way out.
-    yield* opts.gate.withPermit(Ref.update(opts.scope, (s) => (s === scope ? null : s)));
-    yield* Scope.close(scope, Exit.void);
+    // Close *this pass's* channel, and only clear the Ref if it still points
+    // at it. Closing whatever the Ref happens to hold is not the same thing:
+    // reconcile retires the consumer on any state change, so a pass whose
+    // channel had already been retired and replaced by a newer one would tear
+    // down the newer pass's live consumer on its way out.
+    yield* opts.gate.withPermit(Ref.update(opts.consumer, (c) => (c === consumer ? null : c)));
+    yield* conn.closeConsumer(consumer);
 
     if (parked > 0) {
       yield* Effect.logWarning(
@@ -178,16 +177,17 @@ export const makeRedrive = (opts: RedriveOptions) => {
    * something says stop. Runs on exactly one daemon — the broker elects it
    * on a second SAC queue, below — and only while the circuit is CLOSED.
    *
-   * Passes rather than one long drain because each pass is a fresh
-   * connection it can afford to destroy, and because `redriveMax` is there
-   * to keep any single burst onto the work queue bounded. Looping until
+   * Passes rather than one long drain because each pass is a fresh channel it
+   * can afford to destroy — closing it hands back everything it was holding —
+   * and because `redriveMax` is there to keep any single burst onto the work
+   * queue bounded. Looping until
    * drained is what makes this actually self-healing: a backlog larger than
    * the cap would otherwise need one outage per 5,000 messages to recover.
    */
   const REDRIVE_MAX_PASSES = 20;
   const redriveOnce = Effect.gen(function* () {
     if (!opts.enabled) return;
-    if ((yield* opts.gate.withPermit(Ref.get(opts.scope))) !== null) return;
+    if ((yield* opts.gate.withPermit(Ref.get(opts.consumer))) !== null) return;
 
     yield* Effect.log(`${opts.label}: redriving ${opts.deadQueue} (max ${opts.maxPerPass} per pass)`);
     let total = 0;
