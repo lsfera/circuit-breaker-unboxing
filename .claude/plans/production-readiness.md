@@ -476,7 +476,7 @@ skim past.
 
 ---
 
-## Phase 11 — Final verification
+## Phase 11 — Final verification  ✅ done
 
 1. `pnpm run check` (typecheck + 49 unit tests), `pnpm run test:redis`,
    `pnpm run test:rmq` — all green, with the new tests from Phases 2, 4 and 5

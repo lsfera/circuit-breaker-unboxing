@@ -954,30 +954,41 @@ belongs in the aggregator, off the request path.
   `EnvoyFleetLayer` (polling) remains a first-class layer: it is what runs when
   you cannot reconfigure Envoy, and it is the control the push path was
   compared against.
-- **Aggregator state is not a database — but leader election, failover, and
-  the Redis backend are all real, deployed, and watched working, not just
-  tested in isolation.** See
-  [Two real aggregator instances, one shared Redis](#two-real-aggregator-instances-one-shared-redis):
-  `docker compose up` runs two aggregator containers against a shared Redis,
-  and a hard `docker kill` of the leader mid-incident was used to confirm
-  the standby takes over and continues the sequence rather than resetting
-  it. What's still fair to call a prototype is durability of the checkpoint
-  store itself — one `redis:7-alpine` container with no persistence
-  configured is a second single point of failure, just moved one level
-  down. A real deployment wants Redis with AOF/replication, or a stronger
-  backing store entirely (etcd, a Postgres advisory lock) behind the same
-  `LeaderElection`/`CheckpointStore` interfaces — those interfaces, not the
-  demo's Redis config, are the part meant to carry over. Redis now runs with
-  AOF and a named volume, so a restart no longer starts the next leader from
-  nothing; what is still missing is replication, which is why one Redis
-  remains one Redis. What losing it costs is bounded to the checkpoints
-  themselves — a new leader
-  resumes from nothing rather than from where the last one stopped — and no
-  longer extends to correctness: because the fencing token carries an epoch
-  (see [High availability](#high-availability)), a coordinator that has lost
-  its state cannot hand a stale leader a token that outranks the live one.
-- **Enforcement is observational here.** The aggregator publishes but does not
-  push config — see [the fork this defers](#the-fork-this-defers).
+- **Aggregator state is not a database, but leader election, failover and the
+  Redis backend are real, deployed, and watched working.** `docker compose up`
+  runs two aggregator instances against a shared Redis; killing the leader
+  mid-incident is [an assertion now, not an anecdote](#chaos-on-demand-rather-than-by-hand).
+  Redis runs with AOF and a named volume, so a restart no longer starts the
+  next leader from nothing. **What is still prototype is replication: one Redis
+  is one Redis.** Losing it costs the checkpoints — a new leader resumes from
+  nothing rather than from where the last one stopped — but no longer costs
+  correctness, because the fencing token carries an epoch and a coordinator
+  that lost its state cannot hand a stale leader a token that outranks the live
+  one. A real deployment wants Redis with replication, or a different backing
+  store entirely (etcd, a Postgres advisory lock) behind the unchanged
+  `LeaderElection`/`CheckpointStore` interfaces — those interfaces, not this
+  Redis config, are the part meant to carry over.
+- **One broker is a quorum of one.** The work and dead-letter queues are
+  durable quorum queues with a delivery limit, and the broker has a volume, so
+  messages survive a restart — [measured, 6,628 in and 6,628 out](docs/rmq-control-plane.md).
+  Tolerating the loss of a *node* is what quorum queues are actually for, and
+  that needs three of them. This repo runs one.
+- **Enforcement is observational, and that is now a decision rather than an
+  open question.** The aggregator publishes and never pushes config — see
+  [docs/decisions/002-enforcement-authority.md](docs/decisions/002-enforcement-authority.md)
+  for why, and the three conditions that would supersede it.
+- **The console does not scale the way the control loop does.** `/api/stream`
+  re-sends the whole state frame every 400ms, which is about 2.75 MB/s per
+  connected browser at a thousand APIs while the tick loop itself barely
+  notices the size — see [Measured limits](#measured-limits). A production
+  console sends diffs or a page, and nothing in the control path would ever
+  tell you it needed to.
+- **No distributed tracing.** `@effect/opentelemetry` publishes the exact
+  version this repo pins, so this is a choice:
+  [docs/decisions/003-tracing.md](docs/decisions/003-tracing.md) records that
+  every failure here has been state-over-time rather than trace-shaped, and
+  names the one path (message → egress call → Envoy stats → circuit event)
+  that would earn one.
 - **The Envoy and monitoring stack *is* run end to end now — the earlier
   "Docker cannot bind-mount here" note was a false assumption, corrected by
   actually running it.** `docker compose up` boots three real Envoy
@@ -1035,10 +1046,11 @@ packages/
     public/index.html        operator console (unchanged — plain HTML/CSS/JS)
     test/Aggregator.test.ts   14 tests — full pipeline under TestClock, stats parsing,
                               and the delivery-integrity tracker as a pure function
-    test/Coordination.test.ts  7 tests — fencing primitives, a real two-instance failover, a
-                              re-promotion, and a clean shutdown handing the lease back
+    test/Coordination.test.ts  8 tests — fencing primitives, a real two-instance failover, a
+                              re-promotion, a coordination outage, and a clean shutdown
+                              handing the lease back
     test/Outbox.test.ts        3 tests, pure — ordering, partial commit, and which end the bound drops
-    test/integration/          Redis-backed HA and the durable outbox, opt-in
+    test/integration/          8 tests: Redis-backed HA and the durable outbox, opt-in
                                (`pnpm run test:redis`) — needs Docker
 
   subscriber/                @egress/subscriber — depends on @egress/domain
