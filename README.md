@@ -51,6 +51,11 @@ flowchart LR
   u2 -.->|"ejects failing hosts"| third
 ```
 
+If you would rather read how this was arrived at than what it is,
+[docs/journey.md](docs/journey.md) tells it as the sequence of forks —
+starting from a producer, a queue and a fleet of daemons calling one flaky
+third party, which is where it did start.
+
 Red is enforcement, in the request path and immediate. Teal is publication,
 off the request path and seconds later. Amber is what a *consumer* of those
 events does with them — and it is a first-class actor here, not an
@@ -1094,6 +1099,7 @@ infra/
 
 Dockerfile                   one image for every process here; deps at build time, no compile step
 .dockerignore                keeps the host's node_modules (absolute symlinks) out of the build context
+docs/journey.md              how this design was arrived at: each fork, the options, what was chosen
 docs/rmq-control-plane.md    the RabbitMQ scenario: design, live run, and what it exposed
 docs/decisions/              decision records: what was chosen, and the measurement it rests on
 docs/runbooks/               one per alert — what fired, what to check, what to do about it
