@@ -46,9 +46,21 @@ export const runProducer = (cfg: ProducerConfig) =>
     yield* Effect.log(`${cfg.apiId}/producer: up — ${cfg.ratePerSecond}/s onto ${queue}`);
 
     yield* Effect.gen(function* () {
-      for (let i = 0; i < perTick; i++) {
-        yield* rmq.send(publisher, JSON.stringify({ apiId: cfg.apiId, n: sent++ }));
-      }
+      // Concurrently, because `send` waits for the broker to confirm each
+      // message and a sequential batch would pay that round trip twenty times
+      // inside a 100ms tick — measured at 165/s against a target of 200. AMQP
+      // pipelines confirms, so having the whole batch in flight at once is the
+      // ordinary way to use them. Nothing downstream cares in what order these
+      // particular messages arrive: they are independent units of work, and
+      // the ordering this repo does guarantee is per-API on circuit.control,
+      // which the aggregator publishes one at a time.
+      const batch = Array.from({ length: perTick }, () =>
+        JSON.stringify({ apiId: cfg.apiId, n: sent++ }),
+      );
+      yield* Effect.forEach(batch, (body) => rmq.send(publisher, body), {
+        concurrency: "unbounded",
+        discard: true,
+      });
       // Scraped alongside the daemons' call counters: arrival rate against
       // completion rate is the queue's depth, expressed as two lines that
       // separate during an outage and converge again on the ramp back.

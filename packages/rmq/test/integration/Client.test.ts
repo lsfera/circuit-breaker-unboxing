@@ -7,12 +7,14 @@ import { makeRmq, Rmq, RmqLive } from "../../src/Client.ts";
 import type { Consumer } from "../../src/Client.ts";
 
 /**
- * Regression coverage for the one thing about this client that is actively
- * dangerous: creating links concurrently on a shared connection silently
- * misroutes. Both halves below fail without the semaphore inside `RmqLive`
- * — publishers all deliver to the first publisher's target, and consumers
- * all receive the first consumer's queue — with no error raised either
- * time, which is what makes it worth a permanent test rather than a note.
+ * The broker- and channel-level properties the daemon fleet is built on,
+ * each pinned against a real RabbitMQ.
+ *
+ * The first two are inherited from the AMQP 1.0 client, where creating links
+ * concurrently on a shared connection silently misrouted every message — a
+ * defect that needed a connection-wide semaphore to avoid. On amqplib there
+ * are no publisher links to race, so they pass by construction; they stay
+ * because "by construction" is a claim, and this is the thing that checks it.
  *
  * Opt-in (`pnpm run test:rmq`), same shape as @egress/aggregator's
  * Redis integration test: needs Docker, uses a real
@@ -50,6 +52,14 @@ const skipIfNoDocker = (t: { skip: (reason: string) => void }): boolean => {
   t.skip("Docker is not available in this environment");
   return true;
 };
+
+const waitFor = (done: () => boolean, timeoutMs = 15_000) =>
+  Effect.promise(async () => {
+    const deadline = Date.now() + timeoutMs;
+    while (!done() && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  });
 
 const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(
@@ -118,6 +128,55 @@ test("concurrent consumer creation binds each consumer to its own queue", async 
   for (const q of queues) {
     assert.deepEqual(received[q], [`msg-${q}`], `${q} should receive exactly its own message`);
   }
+});
+
+/**
+ * A publish channel with no way back is a single point of failure, and a quiet
+ * one. amqplib closes a channel on any channel-level error, and publishing to
+ * an exchange that does not exist is enough to cause one — RabbitMQ replies
+ * 404 NOT_FOUND and closes it. The send that caused it does not fail, because
+ * a plain publish is fire-and-forget, so nothing at the call site notices.
+ *
+ * Before the channel could reopen, that one bad publish ended publishing for
+ * the entire connection: every later send threw on a dead channel while the
+ * process stayed up and every other signal stayed green. For a daemon that
+ * would mean no probe triggers, no redrive triggers and no replayed work, with
+ * a heartbeat still saying it was fine.
+ */
+test("a poisoned publish channel reopens rather than ending publishing", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const queue = `reopen.${Date.now()}`;
+
+  const seen = await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(queue);
+      const good = yield* rmq.publisherToQueue(queue);
+
+      // Prove the connection works, so a failure below is about the reopen and
+      // not about the setup.
+      yield* rmq.send(good, "before the error");
+
+      const poison = yield* rmq.publisherToExchange("no.such.exchange", "irrelevant");
+      yield* Effect.ignore(rmq.send(poison, "into the void"));
+      // The channel dies asynchronously, after the broker's reply arrives.
+      yield* Effect.promise(() => new Promise((r) => setTimeout(r, 500)));
+
+      yield* rmq.send(good, "after the error");
+
+      const received: string[] = [];
+      yield* rmq.consume(queue, (body) => void received.push(body));
+      yield* waitFor(() => received.length >= 2);
+      return received;
+    }),
+  );
+
+  assert.deepEqual(
+    seen,
+    ["before the error", "after the error"],
+    "the send after the channel error must still arrive — on a reopened channel",
+  );
 });
 
 test("x-single-active-consumer elects one consumer and promotes another when it closes", async (t) => {

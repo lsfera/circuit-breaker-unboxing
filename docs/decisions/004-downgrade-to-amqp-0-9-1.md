@@ -137,6 +137,41 @@ here was ever an AMQP 1.0 feature.
   cancellation long enough to settle the message it is holding, while
   `reconcile` closes, because the point there is to hand everything back.
 
+### Publishing, after the fact
+
+Two defects in the publish path turned up once the connection collapse put
+every publish on one channel, and both are fixed here rather than left:
+
+- **A channel with no recovery is a single point of failure.** amqplib closes a
+  channel on any channel-level error, and publishing to an exchange that does
+  not exist is enough. Without a reopen, one such error ended publishing from
+  the whole process for good, silently — the send that caused it does not fail,
+  because a plain publish is fire-and-forget. For a daemon that means no probe
+  triggers, no redrive triggers and no replayed work, with a heartbeat still
+  reporting health. The channel is now reopened on demand, one reopen at a
+  time, and a test pins it.
+
+- **`send` did not mean what the rest of the repo assumed.** It resolved when
+  the frame reached a socket, not when the broker had the message.
+  `Redrive.ts` publishes work back onto the work queue and only then acks it
+  off the dead-letter queue, and calls that ordering a guarantee against loss —
+  which it was not. The publish channel is a *confirm* channel now, so `send`
+  waits for the broker.
+
+  That surfaced as a flaky test rather than as an outage: the durability test
+  publishes, restarts the broker, and expects the messages back. At HEAD it
+  passed 4 runs out of 4; with the reopen in place it failed 3 in 5. The
+  reopen did not break it — it perturbed the timing of a race that was always
+  there, because nothing had ever waited for the broker to accept a message.
+  With confirms it is 5 out of 5.
+
+  Confirms cost a round trip per publish, and the producer paid it twenty times
+  inside each 100ms tick: **195/s before, 165/s after**. Publishing the batch
+  concurrently gets it back to **190/s**, which is what confirms are designed
+  for — AMQP pipelines them, and a batch in flight at once is the ordinary way
+  to use them. The ordering this repo actually guarantees is per-API on
+  `circuit.control`, which the aggregator publishes one event at a time.
+
 ## What would change this
 
 - amqplib going the way of the 1.0 client. It is one dependency and the same

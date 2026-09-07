@@ -1,6 +1,6 @@
 import { Context, Data, Effect, Layer, Scope } from "effect";
 import * as amqp from "amqplib";
-import type { Channel, ChannelModel, ConsumeMessage } from "amqplib";
+import type { ChannelModel, ConfirmChannel, ConsumeMessage, Channel } from "amqplib";
 
 /**
  * Opaque handles. `declareQueue`/`declareTopicExchange` hand these straight
@@ -324,11 +324,60 @@ export const makeRmq = (
      * Publishing shares one channel. Ordering per (exchange, routingKey) is
      * what the event contract needs, and a single channel gives exactly that;
      * a channel per publisher would interleave.
+     *
+     * It is a *confirm* channel, which is what makes `send` mean "the broker
+     * has this" rather than "this reached a socket". Without confirms an
+     * amqplib publish resolves as soon as the frame is written, so a broker
+     * that dropped the message would look identical to one that stored it —
+     * and `Redrive.ts` leans on the difference: it publishes work back onto
+     * the work queue and only then acks it off the dead-letter queue, which is
+     * a guarantee about losses, not about socket writes.
+     *
+     * Recreated on demand, because one channel with no recovery is a single
+     * point of failure. amqplib closes a channel on any channel-level error —
+     * publishing to an exchange that does not exist is enough — so without
+     * this, one such error ends publishing from this process for good while
+     * every other health signal stays green, which is this repo's least
+     * favourite shape of failure. Opened eagerly all the same, so a broker
+     * that cannot give us a channel fails the layer at startup rather than at
+     * the first publish.
      */
-    const out = yield* wrap("createChannel", () => connection.createChannel());
-    out.on("error", (error) => {
-      console.warn(`[rmq] publish channel error: ${error.message}`);
-    });
+    let out: ConfirmChannel | null = yield* wrap("createChannel", () =>
+      connection.createConfirmChannel(),
+    );
+    let opening: Promise<ConfirmChannel> | null = null;
+
+    const watchPublishChannel = (ch: ConfirmChannel) => {
+      ch.on("error", (error) => {
+        console.warn(`[rmq] publish channel error: ${error.message}`);
+      });
+      // 'close' follows 'error', and also fires on a close nothing here asked
+      // for. Dropping the reference is what makes the next publish reopen.
+      ch.on("close", () => {
+        if (out === ch) out = null;
+      });
+      return ch;
+    };
+    watchPublishChannel(out);
+
+    /** The live publish channel, opening one if the last was closed under us. */
+    const publishChannel = (): Promise<ConfirmChannel> => {
+      if (out !== null) return Promise.resolve(out);
+      // One reopen at a time. Several sends racing here must not each open a
+      // channel and leave all but one orphaned on the broker.
+      opening ??= connection.createConfirmChannel().then(
+        (ch) => {
+          out = watchPublishChannel(ch);
+          opening = null;
+          return ch;
+        },
+        (error) => {
+          opening = null;
+          throw error;
+        },
+      );
+      return opening;
+    };
 
     /**
      * Declares run on a throwaway channel each. They happen at startup, so the
@@ -348,16 +397,33 @@ export const makeRmq = (
       });
 
     /**
-     * `publish` returns false when the socket's write buffer is full. Ignoring
-     * that is how a producer outruns its own connection and grows an unbounded
-     * buffer in process memory; waiting for 'drain' is the backpressure the
-     * write side is supposed to have.
+     * Resolves when the broker has confirmed the message, and not before.
+     *
+     * This is also the backpressure: a caller that awaits its own confirm
+     * cannot outrun the broker, which is a better bound than watching for
+     * 'drain' and a good deal simpler — there is no wait to leave parked.
+     *
+     * The wait still has to end if the channel dies, because a channel that
+     * closes will never confirm, and this promise is awaited from inside
+     * message handlers: a send that never settles is a delivery that never
+     * settles.
      */
     const publish = (pub: Publisher, content: Buffer, options: amqp.Options.Publish) =>
-      new Promise<void>((resolve) => {
-        if (out.publish(pub.exchange, pub.routingKey, content, options)) return resolve();
-        out.once("drain", () => resolve());
-      });
+      publishChannel().then(
+        (ch) =>
+          new Promise<void>((resolve, reject) => {
+            const finish = (outcome: () => void) => {
+              ch.removeListener("close", onClose);
+              outcome();
+            };
+            const onClose = () =>
+              finish(() => reject(new Error("publish channel closed before the broker confirmed")));
+            ch.once("close", onClose);
+            ch.publish(pub.exchange, pub.routingKey, content, options, (error) =>
+              error ? finish(() => reject(error)) : finish(resolve),
+            );
+          }),
+      );
 
     return {
       declareQueue: (name, options = {}) =>
