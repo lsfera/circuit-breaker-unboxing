@@ -28,6 +28,7 @@ The `reason` label says how it went:
 | `unreachable` | The polling path could not reach a replica's admin port, or the poll timed out. |
 | `went-quiet` | The push path heard nothing from a replica for `staleMs`, so its last stats expired. |
 | `no-node-id` | An Envoy is pushing stats with no node identifier — almost always a replica started without `--service-node`. Its stats cannot be attributed, so it is not in the fleet at all. |
+| `incomplete-stats` | A replica reported a cluster without both `membership_healthy` and `membership_total`. It does not vote on that API — deliberately, because the pair is what a vote is computed from, and filling in a missing one with zero reads as "every host is gone". Usually a `stats_config` inclusion/exclusion list on that Envoy, or a cluster that has not finished warming. |
 
 ## Check first
 
@@ -58,6 +59,11 @@ it has never been told about is indistinguishable from one that does not exist.
   deliberately.
 - **The aggregator lost network reachability to the admin ports** (polling
   path only). The circuit itself may be perfectly healthy.
+- **A stats filter on the Envoy side.** `incomplete-stats` names the cluster in
+  its log line. Envoy's `stats_config` matchers are a normal way to cut metric
+  cardinality, and dropping `membership_healthy` is an easy thing to do by
+  accident — it used to be the most dangerous thing you could do to this
+  system, and is now merely a replica that abstains.
 
 ## Resolution
 

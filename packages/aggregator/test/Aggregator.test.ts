@@ -7,6 +7,7 @@ import { InMemoryCoordinationLayer } from "../src/Coordination.ts";
 import { EventBus, EventBusLayer, EventSink } from "../src/Events.ts";
 import { FleetSource, SimFleetLayer, parseStats } from "../src/FleetSource.ts";
 import { emptyIntegrity, record } from "../src/Http.ts";
+import * as Breaker from "@egress/domain/Breaker.ts";
 import { Config, defaultConfig, State } from "@egress/domain/Model.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 
@@ -219,7 +220,7 @@ const STATS = {
 };
 
 test("parses envoy admin stats, summing the three overflow counters", () => {
-  const reports = parseStats("envoy-00", STATS, 1000, () => true);
+  const { reports } = parseStats("envoy-00", STATS, 1000, () => true);
   assert.equal(reports.length, 2, "one report per cluster, noise excluded");
 
   const pay = reports.find((r) => r.apiId === "payments-provider");
@@ -232,23 +233,84 @@ test("parses envoy admin stats, summing the three overflow counters", () => {
 });
 
 test("cluster filter drops clusters that are not tracked APIs", () => {
-  const reports = parseStats("envoy-00", STATS, 1000, (c) => c === "tax-calc");
+  const { reports } = parseStats("envoy-00", STATS, 1000, (c) => c === "tax-calc");
   assert.deepEqual(
     reports.map((r) => r.apiId),
     ["tax-calc"],
   );
 });
 
-test("missing stats default to zero rather than NaN", () => {
-  const reports = parseStats(
+/**
+ * This test used to assert the opposite, under the name "missing stats default
+ * to zero rather than NaN". Avoiding the `NaN` was the right instinct; the
+ * zero it chose instead was not, because zero is not a neutral value here.
+ * `{ healthy: 0, total: 6 }` is precisely how Envoy says *every host in this
+ * cluster is gone*, so the absence of one gauge was decoded as the most
+ * consequential reading in the domain — see the next test for what that did.
+ */
+test("a cluster missing either membership gauge is not reported at all", () => {
+  const { reports, incomplete } = parseStats(
     "envoy-00",
     { stats: [{ name: "cluster.x.membership_total", value: 4 }] },
     1000,
     () => true,
   );
-  assert.equal(reports[0]?.healthy, 0);
+  assert.deepEqual(reports, [], "no vote can be computed, so no vote is cast");
+  assert.deepEqual(incomplete, ["x"], "and the caller is told, rather than left short a replica");
+
+  // The mirror case: healthy without total would have voted OK, which hides a
+  // problem rather than inventing one — still a reading nobody reported.
+  assert.deepEqual(
+    parseStats("envoy-00", { stats: [{ name: "cluster.x.membership_healthy", value: 4 }] }, 1000, () => true)
+      .reports,
+    [],
+  );
+
+  // A matched stat carrying no value at all is absent, not zero.
+  assert.deepEqual(
+    parseStats(
+      "envoy-00",
+      { stats: [{ name: "cluster.x.membership_total", value: 4 }, { name: "cluster.x.membership_healthy" }] },
+      1000,
+      () => true,
+    ).reports,
+    [],
+  );
+});
+
+/**
+ * What the old default actually decided, kept as a test because the number it
+ * produced was not obviously wrong until you followed it through the breaker.
+ */
+test("an incomplete stat set can no longer publish a total outage", () => {
+  const partial = { stats: [{ name: "cluster.payments-provider.membership_total", value: 6 }] };
+  let breaker = Breaker.initial("payments-provider", defaultConfig, 1000);
+  for (const id of ["envoy-00", "envoy-01", "envoy-02"]) {
+    for (const report of parseStats(id, partial, 1000, () => true).reports) {
+      breaker = Breaker.ingest(breaker, report);
+    }
+  }
+  const [stepped, change] = Breaker.step(breaker, 1000, defaultConfig);
+  assert.equal(stepped.lastVotes.DOWN, 0, "nobody said the cluster was down, so nobody votes DOWN");
+  assert.ok(O.isNone(change), "and nothing is published");
+  // Before the fix this run produced three DOWN votes and published
+  // CLOSED -> OPEN with reason ALL_ENDPOINTS_EJECTED.
+});
+
+test("the three overflow counters still default to zero, which is their identity", () => {
+  const { reports } = parseStats(
+    "envoy-00",
+    {
+      stats: [
+        { name: "cluster.x.membership_healthy", value: 3 },
+        { name: "cluster.x.membership_total", value: 3 },
+      ],
+    },
+    1000,
+    () => true,
+  );
   assert.equal(reports[0]?.overflowTotal, 0);
-  assert.equal(reports[0]?.total, 4);
+  assert.equal(reports[0]?.ejectionsActive, 0);
 });
 
 // ---------------------------------------------------------------------------

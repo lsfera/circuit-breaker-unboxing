@@ -281,4 +281,24 @@ it is one more pair of things that have to agree.
   receiving pushes all along (it logged the same departure once on promotion and
   reported the two survivors immediately), confirming the one-sink-per-aggregator
   claim live.
+- **A missing gauge was decoded as "every host is gone".** `parseStats` read
+  Envoy's two membership gauges with `?? 0`, and a test pinned that as correct
+  under the name "missing stats default to zero rather than NaN". Avoiding the
+  `NaN` was the right instinct; the zero was not, because zero is not a neutral
+  value in this domain. `Breaker.voteOf` reads `total > 0 && healthy === 0` as
+  `DOWN` — so a stat set that arrived carrying `membership_total: 6` and no
+  `membership_healthy` did not degrade gracefully, it voted for a total
+  outage. Measured against the real pure code with that stat set from three
+  replicas: three DOWN votes, candidate OPEN, and `CLOSED -> OPEN` published
+  with reason `ALL_ENDPOINTS_EJECTED` — a fleet-wide outage declared for an
+  upstream about which nothing had actually been reported. It is the exact
+  mirror of this document's first entry, where averaging endpoint counts made
+  "all endpoints gone" silently *false*; here the absence of a number made it
+  silently *true*. A cluster missing either gauge is now not reported at all,
+  which is not the same as reporting it healthy — the replica abstains on that
+  API, the caller is told which cluster and why, and it is counted as one more
+  way of leaving a quorum (`reason="incomplete-stats"`). The four remaining
+  `?? 0` defaults stay: ejections are surfaced rather than voted on, and the
+  overflow counters are edge-detected as deltas, where zero reads as "nothing
+  new" rather than as a state.
 

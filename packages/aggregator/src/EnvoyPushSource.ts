@@ -3,7 +3,7 @@ import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { FleetSource, parseStats } from "./FleetSource.ts";
+import { FleetSource, makeIncompleteReporter, parseStats } from "./FleetSource.ts";
 import * as Telemetry from "./Telemetry.ts";
 import type { ApiSpec } from "./FleetSource.ts";
 import type { ReplicaReport } from "@egress/domain/Model.ts";
@@ -133,6 +133,8 @@ export const EnvoyPushFleetLayer = (
        */
       let anonymous = 0;
 
+      const noteIncomplete = makeIncompleteReporter();
+
       const packageDefinition = protoLoader.loadSync(
         "envoy/service/metrics/v3/metrics_service.proto",
         {
@@ -241,7 +243,9 @@ export const EnvoyPushFleetLayer = (
           // reason the polling layer uses it: downstream ages a report against
           // the loop's own time, and mixing the two would make a report look
           // fresher or staler than the loop can justify.
-          reports.push(...parseStats(replicaId, snapshot, now, (c) => known.has(c)));
+          const parsed = parseStats(replicaId, snapshot, now, (c) => known.has(c));
+          yield* noteIncomplete(replicaId, parsed.incomplete);
+          reports.push(...parsed.reports);
         }
         return reports;
       });

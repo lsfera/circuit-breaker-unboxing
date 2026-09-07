@@ -240,12 +240,42 @@ const PATTERN = new RegExp(
 
 export type EnvoyReplica = { readonly replicaId: string; readonly adminUrl: string };
 
+/**
+ * What one replica's stats say, and which clusters it did not say enough
+ * about.
+ *
+ * The second half exists because the first used to lie. `membership_healthy`
+ * and `membership_total` are the only two stats a vote is computed from, and
+ * they used to be read with `?? 0` — so a stat set that arrived carrying
+ * `membership_total: 6` and no `membership_healthy` produced
+ * `{ healthy: 0, total: 6 }`, which `Breaker.voteOf` reads as `DOWN`: *every
+ * host in this cluster is gone*. Absence was decoded as the most consequential
+ * value in the domain.
+ *
+ * Measured against the real pure code, with that stat set from three replicas:
+ * three DOWN votes, candidate OPEN, and `CLOSED -> OPEN` published with reason
+ * `ALL_ENDPOINTS_EJECTED` — a total outage declared for an upstream nobody had
+ * said anything about. The mirror image of this repo's first finding, where a
+ * mean over endpoint counts made "all endpoints gone" silently *false*.
+ *
+ * A cluster missing either number is therefore not reported at all. That is
+ * not the same as reporting it healthy: this replica simply does not vote on
+ * that API this tick, which is a case the quorum already handles — and, since
+ * [009](../../../docs/decisions/009-what-the-quorum-is-a-quorum-of.md), one
+ * that is counted rather than silent.
+ */
+export type ParsedStats = {
+  readonly reports: ReadonlyArray<ReplicaReport>;
+  /** Clusters seen in the stat set but not reported, because a vote could not be computed. */
+  readonly incomplete: ReadonlyArray<string>;
+};
+
 export const parseStats = (
   replicaId: string,
   body: { stats?: ReadonlyArray<{ name: string; value?: number }> },
   now: number,
   keep: (cluster: string) => boolean,
-): ReplicaReport[] => {
+): ParsedStats => {
   const byCluster = new Map<string, Record<string, number>>();
   for (const stat of body.stats ?? []) {
     const m = PATTERN.exec(stat.name);
@@ -255,21 +285,73 @@ export const parseStats = (
     if (cluster === undefined || suffix === undefined) continue;
     if (!keep(cluster)) continue;
     const slot = byCluster.get(cluster) ?? {};
-    slot[suffix] = stat.value ?? 0;
+    // A stat that matched the pattern but carried no value is the same as one
+    // that never arrived — it is not a zero.
+    if (stat.value !== undefined) slot[suffix] = stat.value;
     byCluster.set(cluster, slot);
   }
-  return [...byCluster].map(([apiId, s]) => ({
-    replicaId,
-    apiId,
-    healthy: s["membership_healthy"] ?? 0,
-    total: s["membership_total"] ?? 0,
-    ejectionsActive: s["outlier_detection.ejections_active"] ?? 0,
-    overflowTotal:
-      (s["upstream_rq_pending_overflow"] ?? 0) +
-      (s["upstream_cx_overflow"] ?? 0) +
-      (s["upstream_rq_retry_overflow"] ?? 0),
-    observedAt: now,
-  }));
+
+  const reports: ReplicaReport[] = [];
+  const incomplete: string[] = [];
+  for (const [apiId, s] of byCluster) {
+    const healthy = s["membership_healthy"];
+    const total = s["membership_total"];
+    if (healthy === undefined || total === undefined) {
+      incomplete.push(apiId);
+      continue;
+    }
+    reports.push({
+      replicaId,
+      apiId,
+      healthy,
+      total,
+      // These four keep their zero default, and it is safe where the two
+      // above were not: `ejectionsActive` is surfaced rather than voted on,
+      // and the overflow counters are edge-detected as a delta, so a zero
+      // reads as "nothing new" instead of as a state. They cannot reach here
+      // without the membership pair anyway, which is the point of the guard.
+      ejectionsActive: s["outlier_detection.ejections_active"] ?? 0,
+      overflowTotal:
+        (s["upstream_rq_pending_overflow"] ?? 0) +
+        (s["upstream_cx_overflow"] ?? 0) +
+        (s["upstream_rq_retry_overflow"] ?? 0),
+      observedAt: now,
+    });
+  }
+  return { reports, incomplete };
+};
+
+/**
+ * Reporting for clusters `parseStats` refused, shared by both ingestion
+ * layers.
+ *
+ * Once per replica and cluster, not once per tick: an Envoy whose stats config
+ * filters `membership_healthy` is a permanent condition, and `tickMs` is
+ * 250ms. The counter is the same one every other way of leaving a quorum is
+ * counted on, because this is that — a replica not voting on an API — arriving
+ * by a different route.
+ */
+export const makeIncompleteReporter = () => {
+  const warned = new Set<string>();
+  return (replicaId: string, clusters: ReadonlyArray<string>) =>
+    Effect.forEach(
+      clusters.filter((c) => !warned.has(`${replicaId}/${c}`)),
+      (cluster) => {
+        warned.add(`${replicaId}/${cluster}`);
+        return Effect.andThen(
+          Effect.logWarning(
+            `fleet: ${replicaId} reported cluster ${cluster} without ` +
+              `membership_healthy/membership_total — not counted toward this API's ` +
+              `quorum, because a missing count is not a count of zero`,
+          ),
+          Metric.update(
+            Metric.withAttributes(Telemetry.replicasLost, { reason: "incomplete-stats" }),
+            1,
+          ),
+        );
+      },
+      { discard: true },
+    );
 };
 
 /**
@@ -300,6 +382,7 @@ export const EnvoyFleetLayer = (
       const answering = new Map<string, boolean>(
         replicas.map((r) => [r.replicaId, true] as const),
       );
+      const noteIncomplete = makeIncompleteReporter();
 
       const departed = (replica: EnvoyReplica, cause: unknown) =>
         Effect.gen(function* () {
@@ -344,7 +427,9 @@ export const EnvoyFleetLayer = (
               }),
           });
           yield* returned(replica);
-          return parseStats(replica.replicaId, body, now, (c) => known.has(c));
+          const parsed = parseStats(replica.replicaId, body, now, (c) => known.has(c));
+          yield* noteIncomplete(replica.replicaId, parsed.incomplete);
+          return parsed.reports as ReplicaReport[];
         }).pipe(
           Effect.timeout("2 seconds"),
           // One unreachable replica must not fail the whole poll — the quorum
