@@ -103,6 +103,28 @@ groups:
             circuit.control keeps working (or keeps idling) while the rest of
             the fleet moves on.
 
+      # A quorum is a fraction, and this is the denominator moving. Every
+      # verdict this system publishes is `votes.DOWN / live.length` over the
+      # replicas that are still reporting — so a replica leaving does not
+      # weaken the number, it silently changes what the number *means*. One
+      # replica left reporting makes a 0.6 quorum unanimous by itself.
+      #
+      # Counted on the departure rather than per failed poll, so this fires
+      # once per replica that goes rather than four times a second while it is
+      # gone.
+      - alert: FleetShrunk
+        expr: increase(egress_fleet_replica_lost_total[10m]) > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          runbook_url: "docs/runbooks/FleetShrunk.md"
+          summary: "A replica stopped contributing to the fleet quorum"
+          description: >-
+            {{ $value }} replica(s) left the fleet in the last 10 minutes
+            ({{ $labels.reason }}). The breaker still decides by quorum, but
+            over a smaller fleet — check egress_circuit_reporting_replicas
+            before trusting the next transition.
+
       - alert: DeadLetterQueueGrowing
         expr: increase(rabbitmq_detailed_queue_messages{queue=~".*work.dead"}[15m]) > 0
         for: 15m

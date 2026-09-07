@@ -1,5 +1,6 @@
-import { Context, Effect, Layer, Ref } from "effect";
+import { Context, Effect, Layer, Metric, Ref } from "effect";
 import { StatsUnavailable } from "@egress/domain/Model.ts";
+import * as Telemetry from "./Telemetry.ts";
 import type { ReplicaReport } from "@egress/domain/Model.ts";
 
 export type ApiSpec = {
@@ -285,6 +286,43 @@ export const EnvoyFleetLayer = (
     Effect.gen(function* () {
       const known = new Set(specs.map((s) => s.apiId));
 
+      /**
+       * Which replicas answered last tick.
+       *
+       * A replica that stops answering leaves the fleet, and every quorum in
+       * @egress/domain is a fraction of whoever is left — so a departure is
+       * worth one line and one increment. The state is here rather than a
+       * counter per failed poll because `tickMs` is 250ms: without it, one
+       * unreachable replica would be four log lines a second saying the same
+       * thing, which is how the line that matters gets lost. See
+       * docs/decisions/009-what-the-quorum-is-a-quorum-of.md.
+       */
+      const answering = new Map<string, boolean>(
+        replicas.map((r) => [r.replicaId, true] as const),
+      );
+
+      const departed = (replica: EnvoyReplica, cause: unknown) =>
+        Effect.gen(function* () {
+          if (answering.get(replica.replicaId) === false) return;
+          answering.set(replica.replicaId, false);
+          yield* Effect.logWarning(
+            `fleet: ${replica.replicaId} stopped answering (${String(cause)}) and no ` +
+              `longer counts toward any quorum`,
+          );
+          yield* Metric.update(
+            Metric.withAttributes(Telemetry.replicasLost, { reason: "unreachable" }),
+            1,
+          );
+        });
+
+      const returned = (replica: EnvoyReplica) =>
+        answering.get(replica.replicaId) === false
+          ? Effect.andThen(
+              Effect.sync(() => answering.set(replica.replicaId, true)),
+              Effect.logInfo(`fleet: ${replica.replicaId} is answering again`),
+            )
+          : Effect.void;
+
       const pollOne = (replica: EnvoyReplica) =>
         Effect.gen(function* () {
           const now = yield* Effect.clockWith((c) => c.currentTimeMillis);
@@ -305,6 +343,7 @@ export const EnvoyFleetLayer = (
                 cause: String(cause),
               }),
           });
+          yield* returned(replica);
           return parseStats(replica.replicaId, body, now, (c) => known.has(c));
         }).pipe(
           Effect.timeout("2 seconds"),
@@ -318,7 +357,13 @@ export const EnvoyFleetLayer = (
           // an unreachable replica would turn a crash into a fleet that
           // quietly reports fewer members, which is far harder to notice.
           // (`Effect.catch` is v4's failure-only catch; v3's `catchAll` is gone.)
-          Effect.catch(() => Effect.succeed([] as ReplicaReport[])),
+          //
+          // Tolerated, but no longer unremarked: the poll continues without
+          // this replica, and `departed` says so once so the shrinking
+          // denominator is visible rather than merely survivable.
+          Effect.catch((cause) =>
+            Effect.as(departed(replica, cause), [] as ReplicaReport[]),
+          ),
         );
 
       return {

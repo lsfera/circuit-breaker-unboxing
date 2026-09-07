@@ -1,9 +1,10 @@
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Metric } from "effect";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FleetSource, parseStats } from "./FleetSource.ts";
+import * as Telemetry from "./Telemetry.ts";
 import type { ApiSpec } from "./FleetSource.ts";
 import type { ReplicaReport } from "@egress/domain/Model.ts";
 
@@ -15,7 +16,7 @@ import type { ReplicaReport } from "@egress/domain/Model.ts";
  * the transport differs, which is the claim the interface was written to make
  * good on. Nothing downstream knows which layer it is talking to.
  *
- * Three things about this are worth knowing before reading the code.
+ * Four things about this are worth knowing before reading the code.
  *
  * **There is no build step, and there did not have to be.** The reason
  * polling was chosen originally was that a gRPC server implies generated
@@ -34,6 +35,16 @@ import type { ReplicaReport } from "@egress/domain/Model.ts";
  * each instance sees *some* replicas — a quorum computed from a partial fleet,
  * which is worse than no data because it looks like data. The Envoy config
  * therefore declares one sink per aggregator, and each pushes the whole set.
+ *
+ * **A replica can leave without anyone noticing, and this is where that was
+ * possible.** The paragraph above names the hazard exactly, and the fix it
+ * describes only closes one cause of it. Two others lived here: a stream
+ * pushing with no node id was dropped message by message in silence, and a
+ * replica that stopped pushing expired out of the fleet with nothing said and
+ * its entry left behind. Both quietly shrink the denominator every quorum in
+ * @egress/domain is a fraction of. They are counted and logged now — see
+ * docs/decisions/009-what-the-quorum-is-a-quorum-of.md for why the arithmetic
+ * itself is deliberately not changed.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -111,6 +122,17 @@ export const EnvoyPushFleetLayer = (
        */
       const latest = new Map<string, Snapshot>();
 
+      /**
+       * Pushes discarded for want of a node id, since the last poll.
+       *
+       * Accumulated as a plain number for the same reason `latest` is a plain
+       * Map: the write happens in a socket callback with no fiber to run an
+       * Effect in. `poll` reads and zeroes it in one synchronous step and
+       * publishes the difference — the shape @egress/rmq-consumer's Tally.ts
+       * exists to make safe.
+       */
+      let anonymous = 0;
+
       const packageDefinition = protoLoader.loadSync(
         "envoy/service/metrics/v3/metrics_service.proto",
         {
@@ -139,7 +161,16 @@ export const EnvoyPushFleetLayer = (
           call.on("data", (message: StreamMetricsMessage) => {
             const id = message.identifier?.node?.id;
             if (id !== undefined && id !== "") replicaId = id;
-            if (replicaId === null) return;
+            if (replicaId === null) {
+              // An Envoy started without `--service-node` pushes stats it
+              // cannot be credited with. Dropping the message is right — a
+              // report with no replica identity would be counted as a second
+              // vote from whoever wrote it last — but dropping it *quietly*
+              // is how a replica goes missing from a quorum with nothing
+              // said. Recorded here and reported by `poll`, on the fiber.
+              anonymous++;
+              return;
+            }
             // `Date.now()` rather than the Effect clock, because this is not
             // running on a fiber. `poll` compares it against the loop's clock,
             // which is the same wall clock in every configuration this layer
@@ -173,9 +204,39 @@ export const EnvoyPushFleetLayer = (
 
       const poll = Effect.gen(function* () {
         const now = yield* Effect.clockWith((c) => c.currentTimeMillis);
+
+        const unidentified = anonymous;
+        anonymous = 0;
+        if (unidentified > 0) {
+          yield* Effect.logWarning(
+            `envoy metrics: discarded ${unidentified} push(es) carrying no node id — ` +
+              `a replica started without --service-node reports stats nobody can ` +
+              `attribute, and is therefore absent from this API's quorum`,
+          );
+          yield* Metric.update(
+            Metric.withAttributes(Telemetry.replicasLost, { reason: "no-node-id" }),
+            1,
+          );
+        }
+
         const reports: ReplicaReport[] = [];
         for (const [replicaId, snapshot] of latest) {
-          if (now - snapshot.receivedAt > staleMs) continue;
+          if (now - snapshot.receivedAt > staleMs) {
+            // Removed rather than skipped, so the departure is announced once
+            // instead of being re-discovered every tick — and so a replica
+            // that comes back registers as an arrival rather than as an entry
+            // that was quietly there all along.
+            latest.delete(replicaId);
+            yield* Effect.logWarning(
+              `envoy metrics: ${replicaId} stopped pushing ${staleMs}ms ago and no ` +
+                `longer counts toward any quorum`,
+            );
+            yield* Metric.update(
+              Metric.withAttributes(Telemetry.replicasLost, { reason: "went-quiet" }),
+              1,
+            );
+            continue;
+          }
           // `observedAt` is the tick's clock, not the push's, for the same
           // reason the polling layer uses it: downstream ages a report against
           // the loop's own time, and mixing the two would make a report look

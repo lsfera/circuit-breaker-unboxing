@@ -252,3 +252,33 @@ it is one more pair of things that have to agree.
   Checked against a real incident afterwards — every daemon's published
   `egress_daemon_control_events_total` now equals the count it keeps
   independently for its own heartbeat line, exactly.
+- **A quorum is a fraction, and nothing was watching the denominator.** Every
+  state this system publishes comes from `votes.DOWN / live.length`, where
+  `live.length` is however many replicas reported inside `replicaTimeoutMs`.
+  There is no floor, so a replica leaving does not make the verdict smaller —
+  it changes what the verdict *means* at the same value. Three replicas
+  reporting means a 0.6 quorum needs two to agree; one replica reporting means
+  that replica is unanimous by itself, and a fleet-wide guarantee has quietly
+  become one instance's opinion, published with the same confidence and the
+  same event contract. `EnvoyPushSource.ts` already named this hazard in its
+  own module doc — "a quorum computed from a partial fleet, which is worse than
+  no data because it looks like data" — and the fix it describes closes exactly
+  one cause of it. Three others were found by reading the ingestion path, all
+  silent: a replica pushing with no node id was discarded message by message
+  (up and connected, absent from the fleet, nothing said); a stream that
+  stopped expired with nothing said and its entry left in the map; and the
+  polling path's `Effect.catch(() => [])` dropped an unreachable replica
+  without a word. All three are counted on
+  `egress_fleet_replica_lost_total{reason}` now and logged once per departure —
+  once, not per failed poll, because at `tickMs` of 250ms the honest version of
+  this is four identical lines a second. The arithmetic is deliberately
+  unchanged, and
+  [decisions/009](decisions/009-what-the-quorum-is-a-quorum-of.md) says why:
+  enlarging the denominator would suppress a legitimate `OPEN` when replicas
+  genuinely die, which hides the failure the system exists to catch. Verified by
+  stopping a real Envoy replica: one warning, the counter at 1, the gauge 3 → 2
+  — and then by killing the *leader*, which showed the standby had been
+  receiving pushes all along (it logged the same departure once on promotion and
+  reported the two survivors immediately), confirming the one-sink-per-aggregator
+  claim live.
+

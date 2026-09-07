@@ -49,6 +49,25 @@ export const circuitReportingReplicas = Metric.gauge(
   { description: "Replicas currently reporting for this API (within replicaTimeoutMs)." },
 );
 
+/**
+ * Replicas that stopped contributing to the fleet's verdict, by how they went.
+ *
+ * The gauge above is the *denominator* every quorum here is computed against —
+ * `votes.DOWN / live.length` — and until this counter existed it could change
+ * without anything saying so. A replica pushing without a node id, a stream
+ * that died, an admin port that stopped answering: all three removed a replica
+ * from the fleet in silence, and a fraction over a smaller denominator is a
+ * weaker claim wearing the same number.
+ *
+ * Counted on the *departure*, not per failed poll, so one unreachable replica
+ * is one increment rather than four a second. See
+ * docs/decisions/009-what-the-quorum-is-a-quorum-of.md.
+ */
+export const replicasLost = Metric.counter("egress_fleet_replica_lost_total", {
+  description:
+    "Replicas that stopped contributing to a fleet quorum, by reason (no-node-id, went-quiet, unreachable).",
+});
+
 export const circuitSequence = Metric.gauge("egress_circuit_sequence", {
   description: "Last published sequence number per API.",
 });
