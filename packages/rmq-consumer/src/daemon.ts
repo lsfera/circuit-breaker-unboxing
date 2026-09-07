@@ -174,9 +174,9 @@ export const runDaemon = (cfg: DaemonConfig) =>
      *
      * `workConsumer` is non-null exactly while this daemon is pulling work.
      */
-    const workConsumer = yield* Ref.make<Consumer | null>(null);
-    const probeConsumer = yield* Ref.make<Consumer | null>(null);
-    const redriveConsumer = yield* Ref.make<Consumer | null>(null);
+    const workConsumer = yield* Ref.make(O.none<Consumer>());
+    const probeConsumer = yield* Ref.make(O.none<Consumer>());
+    const redriveConsumer = yield* Ref.make(O.none<Consumer>());
 
     let inFlight = 0;
     let queued = 0;
@@ -352,7 +352,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
       const consumer = yield* control.consume(workQueue, (_body, delivery) =>
         callEgress(delivery.parent),
       );
-      yield* Ref.set(workConsumer, consumer);
+      yield* Ref.set(workConsumer, O.some(consumer));
     });
 
     /**
@@ -360,10 +360,10 @@ export const runDaemon = (cfg: DaemonConfig) =>
      * unacked goes back to the queue — which is exactly what `OPEN` wants,
      * since the work behind those deliveries has not been done.
      */
-    const retire = (ref: Ref.Ref<Consumer | null>) =>
-      Ref.getAndSet(ref, null).pipe(
-        Effect.flatMap((consumer) =>
-          consumer === null ? Effect.void : control.closeConsumer(consumer),
+    const retire = (ref: Ref.Ref<O.Option<Consumer>>) =>
+      Ref.getAndSet(ref, O.none<Consumer>()).pipe(
+        Effect.flatMap(
+          O.match({ onNone: () => Effect.void, onSome: control.closeConsumer }),
         ),
       );
 
@@ -378,9 +378,9 @@ export const runDaemon = (cfg: DaemonConfig) =>
     const reconcile = gate.withPermit(
       Effect.gen(function* () {
         const have = {
-          work: (yield* Ref.get(workConsumer)) !== null,
-          probe: (yield* Ref.get(probeConsumer)) !== null,
-          redrive: (yield* Ref.get(redriveConsumer)) !== null,
+          work: O.isSome(yield* Ref.get(workConsumer)),
+          probe: O.isSome(yield* Ref.get(probeConsumer)),
+          redrive: O.isSome(yield* Ref.get(redriveConsumer)),
         };
         const actions = plan(desired(yield* Ref.get(state), cfg.index, cfg.fleetSize), have);
         if (actions.startWork) yield* startWork;
@@ -397,7 +397,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
      */
     const probeOnce = gate.withPermit(
       Effect.gen(function* () {
-        if ((yield* Ref.get(probeConsumer)) !== null) return;
+        if (O.isSome(yield* Ref.get(probeConsumer))) return;
 
         // Cancel from inside the handler — that is what stops delivery at the
         // first message — and cancel rather than close, because the channel
@@ -425,7 +425,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
         self = consumer;
 
         probed++;
-        yield* Ref.set(probeConsumer, consumer);
+        yield* Ref.set(probeConsumer, O.some(consumer));
         yield* Effect.log(`${label}: elected prober, taking one message`);
       }),
     );
@@ -494,7 +494,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
 
     const describe = Effect.gen(function* () {
       const { circuit, policy } = yield* Ref.get(state);
-      const active = (yield* Ref.get(workConsumer)) !== null;
+      const active = O.isSome(yield* Ref.get(workConsumer));
       return (
         `${circuit} target=${policy.targetActive}/${cfg.fleetSize} self=${active ? "ACTIVE" : "idle"} ` +
         `calls ok=${ok} failed=${failed} inFlight=${inFlight} queued=${queued} ` +
@@ -610,7 +610,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
 
     const flush = Effect.gen(function* () {
       const { circuit, policy } = yield* Ref.get(state);
-      const active = (yield* Ref.get(workConsumer)) !== null;
+      const active = O.isSome(yield* Ref.get(workConsumer));
 
       yield* Effect.all(
         [

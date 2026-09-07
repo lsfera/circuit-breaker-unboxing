@@ -24,6 +24,43 @@ Not ceremony — four concrete things:
 The state machine itself is *not* written in Effect, and that is the point.
 Effect earns its place at the boundaries.
 
+## Option, and where absence is allowed to be a `null`
+
+The rule and the full inventory are in
+[decisions/006](decisions/006-representing-absence.md); this is the practical
+half — what it looks like in the source, and what the RC's API does not have.
+
+The line is between absence as a *result* and absence as *structure*:
+
+- **`Option`** when a caller has to ask "is there one?" — return types, values
+  in a `Ref`, fields of a domain record. `Breaker.step` returns
+  `[BreakerState, O.Option<Transition>]`, and the daemon holds
+  `Ref<O.Option<Consumer>>` for each of its three churning channels.
+- **`undefined`** when absence is structural rather than semantic: `Map.get`,
+  memoisation sentinels (`let cached: T | undefined` means *not computed yet*,
+  which is not the same as *computed and empty*), and optional fields in an
+  options bag, where the caller omits a value rather than constructing an
+  absence.
+- **`null`** only where something outside the repo insists — `Schema.NullOr` on
+  the published event, ioredis's `eval` signature, amqplib's `ConsumeMessage |
+  null`, gRPC's `ServiceError | null`. Converted at the boundary, never carried
+  further in.
+
+Three things worth knowing before writing any of it:
+
+- **There is no `Option.fromNullable`.** This version has `fromNullishOr`,
+  `fromUndefinedOr` and `fromNullOr`. `O.fromUndefinedOr(map.get(k)?.field)` is
+  the usual shape at a lookup boundary.
+- **`O.toArray` is the filter-map.** `xs.flatMap((x) => O.toArray(parse(x)))`
+  drops what did not parse, with no `.filter` and no type predicate to keep in
+  step with it.
+- **`O.match` reads better than `isSome` in a pipeline**, and `O.isSome` reads
+  better than `O.match` in a guard. Both are used here, on that basis.
+
+`Option` is imported as `O` everywhere. It is a value *and* a type
+(`O.Option<T>`), and both spellings existed in this repo before they were made
+one.
+
 ## Effect 4 RC, read from the `.d.ts` files
 
 The published migration write-ups describe beta.5 and the API has moved since,

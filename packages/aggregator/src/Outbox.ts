@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Ref } from "effect";
+import { Context, Effect, Layer, Ref, Option as O} from "effect";
 import { CoordinationUnavailable } from "./Coordination.ts";
 import type { RedisLike } from "./Coordination.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
@@ -160,15 +160,15 @@ const evalGuarded = (
  * delivering it to a subscriber that trusts the schema is worse than losing
  * it. Only the shape the publisher guarantees is let through.
  */
-const parseEvent = (raw: unknown): CircuitEvent | null => {
-  if (typeof raw !== "string") return null;
+const parseEvent = (raw: unknown): O.Option<CircuitEvent> => {
+  if (typeof raw !== "string") return O.none();
   try {
     const parsed = JSON.parse(raw) as CircuitEvent;
     return typeof parsed?.data?.apiId === "string" && typeof parsed?.data?.sequence === "number"
-      ? parsed
-      : null;
+      ? O.some(parsed)
+      : O.none();
   } catch {
-    return null;
+    return O.none();
   }
 };
 
@@ -195,11 +195,10 @@ export const RedisOutboxLayer = (redis: RedisLike, keyPrefix = "egress:aggregato
         keys: [`${keyPrefix}:outbox:${apiId}`],
         args: [String(limit)],
       }).pipe(
-        Effect.map((result) =>
-          parseList(result)
-            .map(parseEvent)
-            .filter((e): e is CircuitEvent => e !== null),
-        ),
+        // `O.toArray` on each is the filterMap: an event that did not parse
+        // contributes nothing rather than a hole someone has to remember to
+        // filter out.
+        Effect.map((result) => parseList(result).flatMap((raw) => O.toArray(parseEvent(raw)))),
       ),
 
     commit: (apiId, count) =>

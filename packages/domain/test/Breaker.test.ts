@@ -1,3 +1,4 @@
+import { Option as O } from "effect";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as Breaker from "../src/Breaker.ts";
@@ -41,7 +42,7 @@ const drive = (
     for (const r of reports(t, healthy)) s = Breaker.ingest(s, r);
     const [next, move] = Breaker.step(s, t, CFG);
     s = next;
-    if (move) moves.push(move);
+    if (O.isSome(move)) moves.push(move.value);
   }
   return [s, moves];
 };

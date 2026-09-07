@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Duration, Effect, Layer, Ref } from "effect";
+import { Duration, Effect, Layer, Ref, Option as O} from "effect";
 import { TestClock } from "effect/testing";
 import { Aggregator, AggregatorLayer } from "../src/Aggregator.ts";
 import { InMemoryCoordinationLayer } from "../src/Coordination.ts";
@@ -97,7 +97,7 @@ test("healthy fleet publishes no transitions", async () => {
       return yield* agg.stateOf("payments");
     }),
   );
-  assert.equal(state, State.CLOSED);
+  assert.deepEqual(state, O.some(State.CLOSED));
 });
 
 test("total outage opens, restoration closes, delivered in order", async () => {
@@ -121,9 +121,9 @@ test("total outage opens, restoration closes, delivered in order", async () => {
     }),
   );
 
-  assert.equal(result.opened, State.OPEN);
-  assert.equal(result.closed, State.CLOSED);
-  assert.equal(result.other, State.CLOSED, "other APIs are unaffected");
+  assert.deepEqual(result.opened, O.some(State.OPEN));
+  assert.deepEqual(result.closed, O.some(State.CLOSED));
+  assert.deepEqual(result.other, O.some(State.CLOSED), "other APIs are unaffected");
 
   const transitions = result.events.filter(
     (e) => e.type === "egress.circuit.state_changed" && e.data.apiId === "payments",

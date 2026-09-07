@@ -19,7 +19,7 @@ export class Aggregator extends Context.Service<
     /** One pass: poll the fleet, advance every breaker, publish what changed. */
     readonly tick: Effect.Effect<ReadonlyArray<CircuitEvent>>;
     readonly snapshots: Effect.Effect<ReadonlyArray<ApiSnapshot>>;
-    readonly stateOf: (apiId: string) => Effect.Effect<State | null>;
+    readonly stateOf: (apiId: string) => Effect.Effect<O.Option<State>>;
     /** Whether this instance currently holds the publishing lease. */
     readonly isLeader: Effect.Effect<boolean>;
     /**
@@ -88,9 +88,12 @@ export const AggregatorLayer = Layer.effect(
       breakers: new Map(),
       lastSnapshotAt: new Map(),
     });
-    const leadership = yield* Ref.make<{ isLeader: boolean; token: LeaseToken | null }>({
+    const leadership = yield* Ref.make<{
+      readonly isLeader: boolean;
+      readonly token: O.Option<LeaseToken>;
+    }>({
       isLeader: false,
-      token: null,
+      token: O.none(),
     });
 
     /**
@@ -113,7 +116,7 @@ export const AggregatorLayer = Layer.effect(
      */
     const demote = Effect.all(
       [
-        Ref.set(leadership, { isLeader: false, token: null }),
+        Ref.set(leadership, { isLeader: false, token: O.none() }),
         Ref.set(registry, { breakers: new Map(), lastSnapshotAt: new Map() }),
       ],
       { discard: true },
@@ -151,8 +154,8 @@ export const AggregatorLayer = Layer.effect(
         }
         const token = tokenOpt.value;
         const prior = yield* Ref.get(leadership);
-        const justAcquired = !prior.isLeader || prior.token !== token;
-        yield* Ref.set(leadership, { isLeader: true, token });
+        const justAcquired = !prior.isLeader || O.getOrUndefined(prior.token) !== token;
+        yield* Ref.set(leadership, { isLeader: true, token: O.some(token) });
 
         const [pollDuration, reports] = yield* Effect.timed(fleet.poll);
         yield* Metric.update(Telemetry.fleetPollDuration, pollDuration);
@@ -191,8 +194,8 @@ export const AggregatorLayer = Layer.effect(
             const [after, change] = Breaker.step(before, now, cfg);
             breakers.set(apiId, after);
 
-            if (change) {
-              out.push(stateChanged(Breaker.snapshot(after), change.from));
+            if (O.isSome(change)) {
+              out.push(stateChanged(Breaker.snapshot(after), change.value.from));
               lastSnapshotAt.set(apiId, now);
               continue;
             }
@@ -387,7 +390,7 @@ export const AggregatorLayer = Layer.effect(
 
     const stateOf = (apiId: string) =>
       Ref.get(registry).pipe(
-        Effect.map((reg) => reg.breakers.get(apiId)?.state ?? null),
+        Effect.map((reg) => O.fromUndefinedOr(reg.breakers.get(apiId)?.state)),
       );
 
     const isLeader = Ref.get(leadership).pipe(Effect.map((l) => l.isLeader));

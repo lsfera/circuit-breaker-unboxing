@@ -405,6 +405,10 @@ export const makeRmq = (
     };
     const live = new Set<Live>();
 
+    // `null` rather than `Option` on purpose: these are private mutable
+    // interop state — "no channel open right now" and "no reopen in flight" —
+    // not a value anyone outside this closure branches on. See
+    // docs/decisions/006-representing-absence.md.
     let out: ConfirmChannel | null = null;
     let opening: Promise<ConfirmChannel> | null = null;
 

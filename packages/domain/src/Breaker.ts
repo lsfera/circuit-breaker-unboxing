@@ -1,3 +1,4 @@
+import { Option as O } from "effect";
 import { Reason, State, Vote } from "./Model.ts";
 import type { AggregatorConfig, ApiSnapshot, ReplicaReport } from "./Model.ts";
 
@@ -97,7 +98,7 @@ const transition = (
   now: number,
   to: State,
   reason: Reason,
-): [BreakerState, Transition] => [
+): [BreakerState, O.Option<Transition>] => [
   {
     ...self,
     state: to,
@@ -106,7 +107,7 @@ const transition = (
     changedAt: now,
     probeStreak: to === State.HALF_OPEN ? self.probeStreak : 0,
   },
-  { from: self.state, to, reason },
+  O.some({ from: self.state, to, reason }),
 ];
 
 /**
@@ -117,7 +118,7 @@ export const step = (
   self: BreakerState,
   now: number,
   cfg: AggregatorConfig,
-): [BreakerState, Transition | null] => {
+): [BreakerState, O.Option<Transition>] => {
   const replicas = new Map<string, ReplicaSlot>();
   const live: ReplicaSlot[] = [];
   for (const [id, slot] of self.replicas) {
@@ -125,7 +126,7 @@ export const step = (
     live.push(slot);
     replicas.set(id, slot);
   }
-  if (live.length === 0) return [{ ...self, replicas }, null];
+  if (live.length === 0) return [{ ...self, replicas }, O.none()];
 
   const votes: Record<Vote, number> = { OK: 0, DEGRADED: 0, DOWN: 0 };
   let healthy = 0;
@@ -170,7 +171,7 @@ export const step = (
   if (next.state === State.OPEN) {
     return now - next.changedAt >= next.openBackoffMs
       ? transition(next, now, State.HALF_OPEN, Reason.OPEN_TIMEOUT_ELAPSED)
-      : [next, null];
+      : [next, O.none()];
   }
 
   // --- HALF_OPEN: exactly one owner probes. ------------------------------
@@ -190,13 +191,13 @@ export const step = (
         next = { ...next, openBackoffMs: cfg.openMs };
         return transition(next, now, State.CLOSED, Reason.PROBE_SUCCEEDED);
       }
-      return [next, null];
+      return [next, O.none()];
     }
-    return [{ ...next, probeStreak: 0 }, null];
+    return [{ ...next, probeStreak: 0 }, O.none()];
   }
 
   // --- CLOSED / DEGRADED -------------------------------------------------
-  if (candidate === next.state || !dwelled || !settled) return [next, null];
+  if (candidate === next.state || !dwelled || !settled) return [next, O.none()];
 
   if (candidate === State.OPEN) {
     // Unanimous, not merely quorate: every reporting replica sees zero hosts.

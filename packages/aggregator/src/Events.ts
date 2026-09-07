@@ -51,6 +51,10 @@ const build = (
   },
 });
 
+// `null`, not `Option`: this feeds `Schema.NullOr(StateSchema)` on the
+// published event. JSON has null, subscribers parse null, and the first event
+// for an API genuinely has no predecessor — see
+// docs/decisions/006-representing-absence.md.
 export const stateChanged = (snap: ApiSnapshot, previous: State | null) =>
   build("egress.circuit.state_changed", snap, previous);
 

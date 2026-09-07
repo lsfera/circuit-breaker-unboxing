@@ -2,6 +2,7 @@
 // imports @opentelemetry/sdk-trace-web — a browser package that has no place
 // in a Node image, and whose absence is a crash at import time rather than a
 // missing feature.
+import { Option as O } from "effect";
 import * as NodeSdk from "@effect/opentelemetry/NodeSdk";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import {
@@ -62,9 +63,9 @@ import {
  * the empty string rather than omitting it, so a `=== undefined` check here
  * would enable an exporter pointed at nowhere.
  */
-const endpoint = () => {
-  const raw = process.env["OTEL_EXPORTER_OTLP_ENDPOINT"];
-  return raw === undefined || raw.trim() === "" ? undefined : raw.trim();
+const endpoint = (): O.Option<string> => {
+  const raw = process.env["OTEL_EXPORTER_OTLP_ENDPOINT"]?.trim();
+  return raw === undefined || raw === "" ? O.none() : O.some(raw);
 };
 
 /**
@@ -85,20 +86,23 @@ const ratio = () => {
  * span rather than a different service, and a fleet that renames itself per
  * replica is unreadable at ten.
  */
-export const TracingLive = (serviceName: string) => {
-  const url = endpoint();
-  // `layerEmpty` provides the resource and installs no tracer, so Effect's
-  // default no-op one stays and `Effect.withSpan` costs nothing. Both branches
-  // have the same type on purpose — a caller should not have to know which one
-  // it got.
-  if (url === undefined) return NodeSdk.layerEmpty;
-  return NodeSdk.layer(() => ({
-    resource: { serviceName },
-    // Batched rather than simple: a span per message at this rate would put an
-    // HTTP round trip on the path this is supposed to be measuring.
-    spanProcessor: new BatchSpanProcessor(new OTLPTraceExporter({ url: `${url}/v1/traces` })),
-    tracerConfig: {
-      sampler: new ParentBasedSampler({ root: new TraceIdRatioBasedSampler(ratio()) }),
-    },
-  }));
-};
+export const TracingLive = (serviceName: string) =>
+  O.match(endpoint(), {
+    // `layerEmpty` provides the resource and installs no tracer, so Effect's
+    // default no-op one stays and `Effect.withSpan` costs nothing. Both
+    // branches have the same type on purpose — a caller should not have to
+    // know which one it got.
+    onNone: () => NodeSdk.layerEmpty,
+    onSome: (url) =>
+      NodeSdk.layer(() => ({
+        resource: { serviceName },
+        // Batched rather than simple: a span per message at this rate would
+        // put an HTTP round trip on the path this is supposed to be measuring.
+        spanProcessor: new BatchSpanProcessor(
+          new OTLPTraceExporter({ url: `${url}/v1/traces` }),
+        ),
+        tracerConfig: {
+          sampler: new ParentBasedSampler({ root: new TraceIdRatioBasedSampler(ratio()) }),
+        },
+      })),
+  });

@@ -161,18 +161,28 @@ export class CheckpointStore extends Context.Service<
 >()("CheckpointStore") {}
 
 // ---------------------------------------------------------------------------
-// In-memory implementation — correct for a single process, and what lets a
-// test run two independent "aggregator instances" against one shared
-// coordinator to exercise real failover/fencing without a second process.
-// LeaderElection and CheckpointStore are built together from one shared
-// token Ref for exactly the reason in the CheckpointStore doc comment above.
+// In-memory implementation. Not a stub, and not a leftover — it is load
+// bearing three ways:
+//
+//  - It is the *default* runtime path. `pnpm start` passes no `--ha`, so the
+//    console, the sim fleet and everything in the README's quickstart run on
+//    this. Solo is not a special case of the HA machinery; it is what that
+//    machinery does when only one instance is running.
+//  - It is what lets a test run two independent "aggregator instances" against
+//    one shared coordinator, so failover, re-promotion and fencing are
+//    exercised for real without a second process or a container.
+//  - It is the reference the Redis implementation has to match. Two layers,
+//    one set of semantics, and the same tests pointed at both.
+//
+// LeaderElection and CheckpointStore are built together from one shared token
+// Ref for exactly the reason in the CheckpointStore doc comment above.
 // ---------------------------------------------------------------------------
 
-type LockState = {
+type Lock = {
   readonly holderId: string;
   readonly counter: number;
   readonly expiresAt: number;
-} | null;
+};
 
 export const makeInMemoryCoordination = Effect.gen(function* () {
   // One coordinator, one epoch: an in-memory store cannot lose its state
@@ -180,38 +190,41 @@ export const makeInMemoryCoordination = Effect.gen(function* () {
   // exists so this layer and the Redis one have the same shape rather than
   // two notions of what a token is.
   const epoch = newEpoch();
-  const lock = yield* Ref.make<LockState>(null);
+  const lock = yield* Ref.make<O.Option<Lock>>(O.none());
   const checkpoints = yield* Ref.make(new Map<string, Checkpoint>());
 
   const tryAcquireOrRenew = (holderId: string, ttlMs: number) =>
     Effect.clockWith((c) => c.currentTimeMillis).pipe(
       Effect.flatMap((now) =>
         Ref.modify(lock, (current) => {
-          if (current && current.expiresAt > now && current.holderId !== holderId) {
+          const held = O.getOrUndefined(current);
+          if (held !== undefined && held.expiresAt > now && held.holderId !== holderId) {
             return [O.none<LeaseToken>(), current]; // someone else holds a live lease
           }
-          if (current && current.holderId === holderId && current.expiresAt > now) {
+          if (held !== undefined && held.holderId === holderId && held.expiresAt > now) {
             // Renewal: same token, extended TTL.
             return [
-              O.some(`${epoch}:${current.counter}`),
-              { ...current, expiresAt: now + ttlMs },
+              O.some<LeaseToken>(`${epoch}:${held.counter}`),
+              O.some({ ...held, expiresAt: now + ttlMs }),
             ];
           }
           // Expired or never held: a genuine handoff, counter strictly increases.
-          const next = (current?.counter ?? 0) + 1;
+          const next = (held?.counter ?? 0) + 1;
           return [
-            O.some(`${epoch}:${next}`),
-            { holderId, counter: next, expiresAt: now + ttlMs },
+            O.some<LeaseToken>(`${epoch}:${next}`),
+            O.some({ holderId, counter: next, expiresAt: now + ttlMs }),
           ];
         }),
       ),
     );
 
   const release = (holderId: string) =>
-    Ref.update(lock, (current) => (current?.holderId === holderId ? null : current));
+    Ref.update(lock, (current) =>
+      O.getOrUndefined(current)?.holderId === holderId ? O.none() : current,
+    );
 
   const currentToken = Ref.get(lock).pipe(
-    Effect.map((l): LeaseToken => `${epoch}:${l?.counter ?? 0}`),
+    Effect.map((l): LeaseToken => `${epoch}:${O.getOrUndefined(l)?.counter ?? 0}`),
   );
 
   const save = (apiId: string, token: LeaseToken, checkpoint: Checkpoint) =>

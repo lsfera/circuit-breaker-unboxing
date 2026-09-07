@@ -34,7 +34,7 @@ export type RedriveOptions = {
   /** Bumped per replayed message, for the daemon's metrics flush. */
   readonly onReplayed: () => void;
   /** Shared with `reconcile`, which retires the channel when the state changes. */
-  readonly consumer: Ref.Ref<Consumer | null>;
+  readonly consumer: Ref.Ref<O.Option<Consumer>>;
   readonly gate: Semaphore;
 };
 
@@ -129,7 +129,7 @@ export const makeRedrive = (opts: RedriveOptions) => {
       return "accept";
     });
 
-    yield* opts.gate.withPermit(Ref.set(opts.consumer, consumer));
+    yield* opts.gate.withPermit(Ref.set(opts.consumer, O.some(consumer)));
 
     const deadline = Date.now() + 60_000;
     let reason = "deadline";
@@ -161,7 +161,9 @@ export const makeRedrive = (opts: RedriveOptions) => {
     // reconcile retires the consumer on any state change, so a pass whose
     // channel had already been retired and replaced by a newer one would tear
     // down the newer pass's live consumer on its way out.
-    yield* opts.gate.withPermit(Ref.update(opts.consumer, (c) => (c === consumer ? null : c)));
+    yield* opts.gate.withPermit(
+      Ref.update(opts.consumer, (c) => (O.getOrUndefined(c) === consumer ? O.none() : c)),
+    );
     yield* conn.closeConsumer(consumer);
 
     if (parked > 0) {
@@ -187,7 +189,7 @@ export const makeRedrive = (opts: RedriveOptions) => {
   const REDRIVE_MAX_PASSES = 20;
   const redriveOnce = Effect.gen(function* () {
     if (!opts.enabled) return;
-    if ((yield* opts.gate.withPermit(Ref.get(opts.consumer))) !== null) return;
+    if (O.isSome(yield* opts.gate.withPermit(Ref.get(opts.consumer)))) return;
 
     yield* Effect.log(`${opts.label}: redriving ${opts.deadQueue} (max ${opts.maxPerPass} per pass)`);
     let total = 0;
