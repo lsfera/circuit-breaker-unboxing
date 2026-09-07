@@ -23,6 +23,7 @@ import { State, STATE_CODE } from "@egress/domain/Model.ts";
 import { initialContract, observe } from "./Contract.ts";
 import { makeRedrive } from "./Redrive.ts";
 import { desired, initialState, plan, reduce } from "./DaemonState.ts";
+import * as Tally from "./Tally.ts";
 import * as Telemetry from "./Telemetry.ts";
 import type { Consumer, Settlement } from "@egress/rmq/Client.ts";
 
@@ -180,18 +181,19 @@ export const runDaemon = (cfg: DaemonConfig) =>
     const probeConsumer = yield* Ref.make(O.none<Consumer>());
     const redriveConsumer = yield* Ref.make(O.none<Consumer>());
 
+    /**
+     * The gate's own state, and the only two numbers here that are read for a
+     * decision rather than for a graph — which is why they stay out of the
+     * tally with the rest.
+     */
     let inFlight = 0;
     let queued = 0;
-    let ok = 0;
-    let failed = 0;
-    let probed = 0;
-    let redriven = 0;
-    /** Messages this daemon could not read at all, on any of its queues. */
-    let undecodable = 0;
+
+    /** Everything counted for the metrics registry — see Tally.ts. */
+    const counts = Tally.zero();
 
     /** The delivery contract, observed from this side of the broker — see Contract.ts. */
     let contract: ContractState = initialContract;
-    const eventsByType = new Map<string, number>();
 
     /**
      * A plain concurrency gate, and the reason it can *wait* rather than
@@ -236,10 +238,10 @@ export const runDaemon = (cfg: DaemonConfig) =>
         // mean the response actually arrived, rather than just its headers.
         await res.text().catch(() => {});
         if (res.ok) {
-          ok++;
+          counts.ok++;
           return "accept";
         }
-        failed++;
+        counts.failed++;
         return "requeue";
       } catch {
         // Connection refused / timeout once the cluster is fully ejected is
@@ -255,7 +257,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
         // makes happen. `failed` therefore counts *attempts*, not
         // messages: a message that fails its whole budget increments it once
         // per try, which is what a rate of failing calls should measure.
-        failed++;
+        counts.failed++;
         return "requeue";
       } finally {
         release();
@@ -324,12 +326,12 @@ export const runDaemon = (cfg: DaemonConfig) =>
 
     /** Preserve this one if we are still sampling; otherwise let it go, loudly, once. */
     const sampleUnreadable = (what: string): Settlement => {
-      undecodable++;
-      if (undecodable <= UNDECODABLE_SAMPLE) {
+      counts.undecodable++;
+      if (counts.undecodable <= UNDECODABLE_SAMPLE) {
         Effect.runFork(Effect.logWarning(`${label}: ${what}, dead-lettered`));
         return "discard";
       }
-      if (undecodable === UNDECODABLE_SAMPLE + 1) {
+      if (counts.undecodable === UNDECODABLE_SAMPLE + 1) {
         Effect.runFork(
           Effect.logWarning(
             `${label}: ${UNDECODABLE_SAMPLE} unreadable messages already preserved on ` +
@@ -426,7 +428,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
         );
         self = consumer;
 
-        probed++;
+        counts.probed++;
         yield* Ref.set(probeConsumer, O.some(consumer));
         yield* Effect.log(`${label}: elected prober, taking one message`);
       }),
@@ -448,7 +450,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
       maxPerPass: cfg.redriveMax,
       isClosed: Ref.get(state).pipe(Effect.map((s) => s.circuit === State.CLOSED)),
       onReplayed: () => {
-        redriven++;
+        counts.redriven++;
       },
       consumer: redriveConsumer,
       gate,
@@ -502,8 +504,8 @@ export const runDaemon = (cfg: DaemonConfig) =>
       const active = O.isSome(yield* Ref.get(workConsumer));
       return (
         `${circuit} target=${policy.targetActive}/${cfg.fleetSize} self=${active ? "ACTIVE" : "idle"} ` +
-        `calls ok=${ok} failed=${failed} inFlight=${inFlight} queued=${queued} ` +
-        `control=${[...eventsByType.values()].reduce((a, b) => a + b, 0)} ` +
+        `calls ok=${counts.ok} failed=${counts.failed} inFlight=${inFlight} queued=${queued} ` +
+        `control=${[...counts.byType.values()].reduce((a, b) => a + b, 0)} ` +
         `gaps=${contract.gaps} dup=${contract.duplicates}`
       );
     });
@@ -550,7 +552,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
       }
       const { data, type } = decoded.success;
       if (data.apiId !== cfg.apiId) return; // belt and braces; the binding already filters
-      eventsByType.set(type, (eventsByType.get(type) ?? 0) + 1);
+      Tally.observed(counts, type);
 
       contract = observe(contract, type, data.sequence);
 
@@ -635,13 +637,22 @@ export const runDaemon = (cfg: DaemonConfig) =>
      * just set.
      */
     const attrs = { apiId: cfg.apiId };
-    let flushed = { ok: 0, failed: 0, probed: 0, redriven: 0, undecodable: 0, gaps: 0, duplicates: 0 };
-    let flushedEvents = new Map<string, number>();
+
+    /**
+     * The high-water mark: everything already published to the registry.
+     *
+     * Advanced from the same snapshot the delta was computed from, and never
+     * by re-reading the counters — see Tally.ts for the leak that came of
+     * reading them twice with a suspension in between.
+     */
+    let published = Tally.nothing;
 
     const flush = Effect.gen(function* () {
       const { circuit, policy } = yield* Ref.get(state);
       const active = O.isSome(yield* Ref.get(workConsumer));
 
+      // Gauges are "whatever it is now" by definition, so these are read live
+      // rather than from the snapshot below.
       yield* Effect.all(
         [
           Metric.update(Metric.withAttributes(Telemetry.circuitState, attrs), STATE_CODE[circuit]),
@@ -654,24 +665,12 @@ export const runDaemon = (cfg: DaemonConfig) =>
         { discard: true },
       );
 
-      const delta = {
-        ok: ok - flushed.ok,
-        failed: failed - flushed.failed,
-        probed: probed - flushed.probed,
-        redriven: redriven - flushed.redriven,
-        undecodable: undecodable - flushed.undecodable,
-        gaps: contract.gaps - flushed.gaps,
-        duplicates: contract.duplicates - flushed.duplicates,
-      };
-      flushed = {
-        ok,
-        failed,
-        probed,
-        redriven,
-        undecodable,
-        gaps: contract.gaps,
-        duplicates: contract.duplicates,
-      };
+      // One reading, both uses. Everything below may suspend freely: a
+      // message counted while it does lands in the next delta rather than
+      // disappearing into a mark that moved without it.
+      const current = Tally.snapshot(counts, contract);
+      const delta = Tally.since(published, current);
+      published = current;
 
       if (delta.ok > 0) {
         yield* Metric.update(
@@ -720,16 +719,12 @@ export const runDaemon = (cfg: DaemonConfig) =>
           delta.duplicates,
         );
       }
-      for (const [type, count] of eventsByType) {
-        const seen = count - (flushedEvents.get(type) ?? 0);
-        if (seen > 0) {
-          yield* Metric.update(
-            Metric.withAttributes(Telemetry.controlEvents, { ...attrs, type }),
-            seen,
-          );
-        }
+      for (const [type, seen] of delta.byType) {
+        yield* Metric.update(
+          Metric.withAttributes(Telemetry.controlEvents, { ...attrs, type }),
+          seen,
+        );
       }
-      flushedEvents = new Map(eventsByType);
     });
 
     /**

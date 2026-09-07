@@ -455,12 +455,14 @@ packages/
     src/Contract.ts          pure: the per-API sequence guarantee, checked on the AMQP side
     src/daemon.ts            one daemon, one process; one connection, two SAC elections
     src/Redrive.ts           dead-letter recovery: bounded passes, own connection per pass
+    src/Tally.ts             pure: what has been counted, and what the registry is still owed
     src/Telemetry.ts         every metric the fleet emits, in one place
     src/main.ts              one daemon, one process, plus /metrics
     test/DaemonPolicy.test.ts  11 tests, pure — no runtime, no broker; the ramp is gated on
                               elapsed time, so they pass the clock in rather than mock one
     test/DaemonState.test.ts   12 tests, pure — the reducer, the dedupes, and the plan
     test/Contract.test.ts      7 tests, pure — including the backwards-sequence case
+    test/Tally.test.ts         5 tests, pure — including the counted-during-a-flush case
 
   rmq-producer/              @egress/rmq-producer — the load, on purpose not part of the fleet
     src/producer.ts          floods the work queue; never backs off, and never reads the circuit

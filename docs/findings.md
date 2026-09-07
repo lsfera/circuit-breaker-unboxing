@@ -4,8 +4,10 @@ The long form of every finding this repo produced. [journey.md](journey.md)
 tells the story these belong to and summarises them in a table; this is the
 detail behind each row.
 
-Thirteen things worth knowing — twelve found by running the thing, one by
-reading it afterwards:
+Nearly every one of these was found by *running* the thing rather than by
+reading it — and the handful that were not were confirmed by running it
+afterwards. No count here, deliberately: the list grows, and a number beside
+it is one more pair of things that have to agree.
 
 - **A reason code cannot be derived from averaged endpoint counts.** With four of
   five replicas seeing zero healthy hosts, the mean rounds to 1, so "all
@@ -230,3 +232,23 @@ reading it afterwards:
   restart inside an epoch that stale leaders still recognise, which is the
   same bug wearing a disguise. Pinned against a real Redis by deleting its
   keys mid-test.
+- **A counter that reads its source twice loses whatever happens in
+  between.** Each daemon counts control-plane events in a plain map, and a
+  flush loop publishes the difference to Prometheus once a second — counting
+  cheaply on the hot path and paying for the metric elsewhere, which is the
+  right shape. But publishing *suspends*: `Metric.update` is an Effect, and
+  the loop then recorded what it had sent by re-reading the live map
+  afterwards (`flushedEvents = new Map(eventsByType)`). Anything counted
+  during those suspensions landed in the second read but not the first, so it
+  was marked as published without being published — and because the mark had
+  moved, no later flush would ever pick it up. Reproduced with a single
+  control event arriving mid-flush: observed 2, published 1, lost for good.
+  The numeric counters beside it escaped the same bug by accident, their two
+  reads sitting in adjacent *synchronous* statements where nothing can
+  interleave. The fix is structural rather than careful: take one immutable
+  snapshot, derive both the delta and the new high-water mark from that single
+  reading, and let publishing suspend as much as it likes
+  ([Tally.ts](../packages/rmq-consumer/src/Tally.ts), pure and tested).
+  Checked against a real incident afterwards — every daemon's published
+  `egress_daemon_control_events_total` now equals the count it keeps
+  independently for its own heartbeat line, exactly.
