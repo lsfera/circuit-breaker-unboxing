@@ -172,6 +172,17 @@ every publish on one channel, and both are fixed here rather than left:
   to use them. The ordering this repo actually guarantees is per-API on
   `circuit.control`, which the aggregator publishes one event at a time.
 
+### The zombie, and what replaced the fix
+
+The review after this migration found that restarting the broker left every
+process up, healthy and consuming nothing — amqplib does not reconnect, and the
+`connection.on("error")` handler added here swallowed the throw that used to
+kill the process. The first fix was to make an unexpected close fatal and let
+`restart: unless-stopped` rebuild it.
+
+[005](005-connection-recovery.md) replaced that with real recovery, and kept
+the fatality as the backstop for when recovery gives up.
+
 ## What would change this
 
 - amqplib going the way of the 1.0 client. It is one dependency and the same

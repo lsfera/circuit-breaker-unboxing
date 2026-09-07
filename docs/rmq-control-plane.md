@@ -298,11 +298,12 @@ Everything this design leans on is pinned by
 `pnpm run test:rmq` (opt-in, needs Docker; not part of `pnpm test`). It
 drives the real `@egress/rmq` service against a real
 `rabbitmq:4.0-management-alpine` container via Testcontainers, and covers
-six things:
+seven things:
 
 ```
 ✔ concurrent publisher creation routes each message to its own binding
 ✔ concurrent consumer creation binds each consumer to its own queue
+✔ a killed connection comes back with its consumers still registered
 ✔ a poisoned publish channel reopens rather than ending publishing
 ✔ x-single-active-consumer elects one consumer and promotes another when it closes
 ✔ closing a consumer stops delivery without closing the connection

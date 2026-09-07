@@ -131,6 +131,57 @@ test("concurrent consumer creation binds each consumer to its own queue", async 
 });
 
 /**
+ * Recovery, and the half of it amqplib does not do.
+ *
+ * `recovery` reopens the socket and stops there: channels are not recreated
+ * and consumers are not re-registered, so a client that leaned on it alone
+ * would come back connected and consuming nothing — the same zombie as no
+ * recovery, only harder to spot. `@egress/rmq` records what it was asked to
+ * build and rebuilds it in amqplib's `setup` hook.
+ *
+ * The connection is killed from the broker side rather than by restarting the
+ * container, because that is the failure this is about — the socket going away
+ * under a process that is otherwise fine — and because it leaves the mapped
+ * port alone, so the test is measuring recovery rather than Docker.
+ */
+test("a killed connection comes back with its consumers still registered", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const queue = `recover.${Date.now()}`;
+  const seen: string[] = [];
+
+  await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(queue, { durable: true });
+      const pub = yield* rmq.publisherToQueue(queue);
+      yield* rmq.consume(queue, (body) => void seen.push(body));
+
+      yield* rmq.send(pub, "before");
+      yield* waitFor(() => seen.length >= 1);
+
+      // Severs every connection the broker holds, ours included.
+      yield* Effect.promise(() =>
+        container!.exec(["rabbitmqctl", "close_all_connections", "recovery test"]),
+      );
+
+      // Publishing is what proves it: `send` opens a publish channel on the
+      // recovered connection, and the consumer that receives it was rebuilt by
+      // the setup hook rather than by anything in this test.
+      yield* waitFor(() => false, 3000);
+      yield* rmq.send(pub, "after");
+      yield* waitFor(() => seen.length >= 2);
+    }),
+  );
+
+  assert.deepEqual(
+    seen,
+    ["before", "after"],
+    "the consumer registered before the connection died must still be delivering after it",
+  );
+});
+
+/**
  * A publish channel with no way back is a single point of failure, and a quiet
  * one. amqplib closes a channel on any channel-level error, and publishing to
  * an exchange that does not exist is enough to cause one — RabbitMQ replies

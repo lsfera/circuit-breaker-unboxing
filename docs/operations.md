@@ -47,10 +47,18 @@ RabbitMQ, Redis, Prometheus and Grafana. An image that moves is an image
 nobody can reproduce.
 
 Every long-running service also carries `restart: unless-stopped`, which is
-what makes the crash-fast stance in `rmq-consumer/src/main.ts` coherent —
-letting exactly one library race through an `uncaughtException` handler and
-treating everything else as fatal only makes sense if "fatal" means "comes
-back", and without a policy it meant "stays dead".
+what makes the crash-fast stance coherent: treating a failure as fatal only
+makes sense if "fatal" means "comes back", and without a policy it meant "stays
+dead".
+
+Less of the failure surface reaches that policy than it used to. The AMQP
+client reconnects and rebuilds its own topology and consumers
+([decisions/005](decisions/005-connection-recovery.md)), so a broker restart is
+no longer a fleet restart — measured on this stack, every container stayed up
+and resumed its counters rather than resetting them. The policy still covers
+what recovery cannot: if the client cannot reach the broker for about five
+minutes it exits deliberately, and an unhandled defect anywhere else is still
+fatal on purpose.
 
 Worth knowing exactly what that does and does not cover, because the demo
 depends on the distinction: Docker treats an operator `docker kill` as a

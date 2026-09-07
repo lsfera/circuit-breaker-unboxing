@@ -13,8 +13,15 @@ export type RmqQueue = unknown;
 /**
  * A consumer is a channel plus the tag the broker gave it. One channel per
  * consumer on purpose — see the module doc.
+ *
+ * Deliberately mutable, and it is the one piece of mutability in this file
+ * that earns its place: on a recovery the client rebuilds the consumer on a
+ * new channel and points this same object at it, so a caller holding the
+ * handle across an outage still holds a working one. @egress/rmq-consumer
+ * keeps these in `Ref`s and compares them by identity, which only works
+ * because the identity survives.
  */
-export type Consumer = { readonly channel: Channel; readonly consumerTag: string };
+export type Consumer = { channel: Channel; consumerTag: string };
 
 /**
  * A publisher is an address, not a link. In AMQP 0-9-1 publishing takes the
@@ -314,78 +321,72 @@ const describe = (delivery: ConsumeMessage): DeliveryInfo => {
 };
 
 /**
- * One real AMQP connection, released when the surrounding scope closes.
+ * One AMQP connection that repairs itself, released when the surrounding scope
+ * closes.
  *
  * Exposed separately from `RmqLive` because a connection is not always a
  * process-lifetime thing here: @egress/rmq-consumer's daemon opens one per
  * redrive pass and per probe, so that work can be abandoned wholesale.
+ *
+ * ## Recovery, and why the client has to own it
+ *
+ * amqplib will reconnect for you (`recovery`), and that is all it does: it
+ * reopens the socket and hands you a fresh connection. Channels are not
+ * recreated, consumers are not re-registered, and a `Channel` you are holding
+ * belongs to the connection that died. Left there, "recovery" would mean a
+ * process that is connected and consuming nothing — which is the same zombie
+ * as no recovery at all, only harder to see.
+ *
+ * So this records what it was asked to build — every queue, exchange and
+ * binding, and every live consumer — and rebuilds it from the `setup` hook,
+ * which amqplib runs after each successful connect and before it hands the
+ * connection to anyone. Topology first, because a transient queue does not
+ * survive a broker restart and its consumer would fail with NOT_FOUND;
+ * publish channel next; consumers last.
+ *
+ * `Consumer` handles are mutated in place rather than replaced, so callers
+ * holding one across a recovery keep a valid handle — `@egress/rmq-consumer`
+ * stores them in `Ref`s and compares them by identity.
+ *
+ * Recovery is bounded. If it cannot get back within `maxRetries`, the process
+ * exits and the restart policy takes over: a daemon that has been retrying for
+ * five minutes has nothing a restart would lose, and something the platform
+ * should know about.
  */
 export const makeRmq = (
   opts: RmqConnectOptions,
 ): Effect.Effect<RmqService, RmqError, Scope.Scope> =>
   Effect.gen(function* () {
-    // Distinguishes a teardown this process asked for from one it suffered.
-    let closingDeliberately = false;
+    type OnMessage = Parameters<RmqService["consume"]>[1];
 
-    const connection: ChannelModel = yield* Effect.acquireRelease(
-      wrap("connect", () =>
-        amqp.connect({
-          protocol: "amqp",
-          hostname: opts.host,
-          port: opts.port,
-          username: opts.username ?? "guest",
-          password: opts.password ?? "guest",
-        }),
-      ),
-      // Swallowed deliberately: this runs on every scope close, and the daemon
-      // closes connections constantly. A broker that has already gone makes
-      // `close` reject, and a rejection here would fail the teardown rather
-      // than complete it.
-      (conn) =>
-        Effect.promise(() => {
-          closingDeliberately = true;
-          return conn.close().then(() => {}, () => {});
-        }),
-    );
+    /** Everything this connection was told to create, so it can be created again. */
+    type Topology =
+      | { readonly kind: "queue"; readonly name: string; readonly durable: boolean; readonly args: QueueArgs }
+      | { readonly kind: "exchange"; readonly name: string; readonly durable: boolean }
+      | {
+          readonly kind: "bind";
+          readonly routingKey: string;
+          readonly source: string;
+          readonly destination: string;
+        };
+    const topology: Topology[] = [];
+    const recorded = new Set<string>();
+    const record = (key: string, entry: Topology) => {
+      if (recorded.has(key)) return;
+      recorded.add(key);
+      topology.push(entry);
+    };
 
-    // amqplib emits 'error' on the connection and on every channel. An
-    // EventEmitter 'error' with no listener is rethrown by Node, from inside a
-    // socket callback where nothing can catch it — which is precisely how the
-    // previous client used to take the process down. One listener per emitter
-    // is what makes a broken connection an observable event instead.
-    connection.on("error", (error) => {
-      console.warn(`[rmq] connection error: ${error.message}`);
-    });
-    connection.on("close", () => {
-      if (closingDeliberately) return;
-      (opts.onLost ?? connectionLost)("closed by peer");
-    });
+    /** A live consumer, and enough about it to build it again. */
+    type Live = {
+      readonly handle: Consumer;
+      readonly queue: string;
+      readonly onMessage: OnMessage;
+      readonly prefetch: number;
+    };
+    const live = new Set<Live>();
 
-    /**
-     * Publishing shares one channel. Ordering per (exchange, routingKey) is
-     * what the event contract needs, and a single channel gives exactly that;
-     * a channel per publisher would interleave.
-     *
-     * It is a *confirm* channel, which is what makes `send` mean "the broker
-     * has this" rather than "this reached a socket". Without confirms an
-     * amqplib publish resolves as soon as the frame is written, so a broker
-     * that dropped the message would look identical to one that stored it —
-     * and `Redrive.ts` leans on the difference: it publishes work back onto
-     * the work queue and only then acks it off the dead-letter queue, which is
-     * a guarantee about losses, not about socket writes.
-     *
-     * Recreated on demand, because one channel with no recovery is a single
-     * point of failure. amqplib closes a channel on any channel-level error —
-     * publishing to an exchange that does not exist is enough — so without
-     * this, one such error ends publishing from this process for good while
-     * every other health signal stays green, which is this repo's least
-     * favourite shape of failure. Opened eagerly all the same, so a broker
-     * that cannot give us a channel fails the layer at startup rather than at
-     * the first publish.
-     */
-    let out: ConfirmChannel | null = yield* wrap("createChannel", () =>
-      connection.createConfirmChannel(),
-    );
+    let out: ConfirmChannel | null = null;
     let opening: Promise<ConfirmChannel> | null = null;
 
     /**
@@ -405,8 +406,6 @@ export const makeRmq = (
       ch.on("error", (error) => {
         console.warn(`[rmq] publish channel error: ${error.message}`);
       });
-      // 'close' follows 'error', and also fires on a close nothing here asked
-      // for. Dropping the reference is what makes the next publish reopen.
       ch.on("close", () => {
         if (out === ch) out = null;
         const closed = new Error("publish channel closed before the broker confirmed");
@@ -414,7 +413,135 @@ export const makeRmq = (
       });
       return ch;
     };
-    watchPublishChannel(out);
+
+    /** The delivery callback, shared by the first registration and every rebuild. */
+    const deliver =
+      (ch: Channel, onMessage: OnMessage) =>
+      (message: ConsumeMessage | null): void => {
+        // null means the broker cancelled the consumer — the queue was deleted
+        // underneath it. There is no delivery to settle.
+        if (message === null) return;
+        // A handler that throws synchronously would escape into amqplib's
+        // delivery callback. Every handler in this repo is careful, which is
+        // exactly the kind of thing that stops being true later.
+        let done: void | Settlement | Promise<void | Settlement>;
+        try {
+          done = onMessage(message.content.toString("utf8"), describe(message));
+        } catch {
+          return settle(ch, message, "accept");
+        }
+        if (done === undefined) return settle(ch, message, "accept");
+        // A synchronous outcome is a string, not a thenable.
+        if (typeof done === "string") return settle(ch, message, done);
+        void done.then(
+          (outcome) => settle(ch, message, outcome ?? "accept"),
+          () => settle(ch, message, "accept"),
+        );
+      };
+
+    /** Register one consumer on its own channel, and point its handle at it. */
+    const attach = async (open: () => Promise<Channel>, entry: Live) => {
+      const ch = await open();
+      ch.on("error", (error) => {
+        console.warn(`[rmq] consumer channel error on ${entry.queue}: ${error.message}`);
+      });
+      await ch.prefetch(entry.prefetch);
+      const { consumerTag } = await ch.consume(entry.queue, deliver(ch, entry.onMessage), {
+        noAck: false,
+      });
+      entry.handle.channel = ch;
+      entry.handle.consumerTag = consumerTag;
+    };
+
+    /** Replay every declare and binding, in the order they were first made. */
+    const applyTopology = async (open: () => Promise<Channel>) => {
+      if (topology.length === 0) return;
+      const ch = await open();
+      ch.on("error", () => {});
+      try {
+        for (const t of topology) {
+          if (t.kind === "queue") {
+            await ch.assertQueue(t.name, {
+              durable: t.durable,
+              exclusive: false,
+              arguments: t.args,
+            });
+          } else if (t.kind === "exchange") {
+            await ch.assertExchange(t.name, "topic", { durable: t.durable });
+          } else {
+            await ch.bindQueue(t.destination, t.source, t.routingKey);
+          }
+        }
+      } finally {
+        await ch.close().catch(() => {});
+      }
+    };
+
+    /**
+     * Run after every successful connect, including the first, and before the
+     * connection is handed to anyone. On the first pass there is nothing
+     * recorded and this only opens the publish channel; on a recovery it is
+     * what puts the process back to work.
+     *
+     * It uses the model it is given rather than the recovering wrapper, which
+     * is not serving connections yet — asking the wrapper here would wait for
+     * the connection this function is part of establishing.
+     */
+    const setup = async (model: ChannelModel) => {
+      await applyTopology(() => model.createChannel());
+      out = watchPublishChannel(await model.createConfirmChannel());
+      for (const entry of live) await attach(() => model.createChannel(), entry);
+    };
+
+    const connection = yield* Effect.acquireRelease(
+      wrap("connect", () =>
+        amqp.connect(
+          {
+            protocol: "amqp",
+            hostname: opts.host,
+            port: opts.port,
+            username: opts.username ?? "guest",
+            password: opts.password ?? "guest",
+          },
+          {
+            recovery: {
+              initialDelay: 200,
+              maxDelay: 5000,
+              // About five minutes of trying before the process gives up.
+              maxRetries: 60,
+              setup,
+            },
+          },
+        ),
+      ),
+      // Swallowed deliberately: this runs on every scope close, and the daemon
+      // closes connections constantly. A broker that has already gone makes
+      // `close` reject, and a rejection here would fail the teardown rather
+      // than complete it. Closing also stops recovery, which is what a
+      // deliberate teardown should do.
+      (conn) => Effect.promise(() => conn.close().then(() => {}, () => {})),
+    );
+
+    connection.on("error", (error) => {
+      console.warn(`[rmq] connection error: ${error.message}`);
+    });
+    connection.on("disconnect", (error) => {
+      console.warn(`[rmq] disconnected (${error?.message ?? "no reason given"}) — recovering`);
+    });
+    connection.on("reconnect-scheduled", ({ attempt, delay }) => {
+      console.warn(`[rmq] reconnect attempt ${attempt} in ${delay}ms`);
+    });
+    connection.on("connect", () => {
+      console.warn(
+        `[rmq] reconnected — ${topology.length} topology entries and ${live.size} consumer(s) restored`,
+      );
+    });
+    // Recovery has given up. Everything below this line is the old crash-fast
+    // stance, unchanged: a process that cannot reach its broker is no use, and
+    // the restart policy is what gets it looked at.
+    connection.on("reconnect-failed", (error) => {
+      (opts.onLost ?? connectionLost)(`recovery gave up: ${error.message}`);
+    });
 
     /** The live publish channel, opening one if the last was closed under us. */
     const publishChannel = (): Promise<ConfirmChannel> => {
@@ -458,11 +585,6 @@ export const makeRmq = (
      * This is also the backpressure: a caller that awaits its own confirm
      * cannot outrun the broker, which is a better bound than watching for
      * 'drain' and a good deal simpler — there is no wait to leave parked.
-     *
-     * The wait still has to end if the channel dies, because a channel that
-     * closes will never confirm, and this promise is awaited from inside
-     * message handlers: a send that never settles is a delivery that never
-     * settles.
      */
     const publish = (pub: Publisher, content: Buffer, options: amqp.Options.Publish) =>
       publishChannel().then(
@@ -481,64 +603,59 @@ export const makeRmq = (
           }),
       );
 
+    /** Forget a consumer, so a recovery does not bring back one we retired. */
+    const forget = (c: Consumer) => {
+      for (const entry of live) {
+        if (entry.handle === c) {
+          live.delete(entry);
+          return;
+        }
+      }
+    };
+
     return {
-      declareQueue: (name, options = {}) =>
-        onFreshChannel("declareQueue", async (ch) => {
-          await ch.assertQueue(name, {
-            durable: options.durable ?? false,
-            exclusive: false,
-            arguments: options.args ?? {},
-          });
+      declareQueue: (name, options = {}) => {
+        const durable = options.durable ?? false;
+        const args = options.args ?? {};
+        record(`q:${name}`, { kind: "queue", name, durable, args });
+        return onFreshChannel("declareQueue", async (ch) => {
+          await ch.assertQueue(name, { durable, exclusive: false, arguments: args });
           return name as RmqQueue;
-        }),
-      declareTopicExchange: (name, options = {}) =>
-        onFreshChannel("declareExchange", async (ch) => {
-          await ch.assertExchange(name, "topic", { durable: options.durable ?? false });
+        });
+      },
+      declareTopicExchange: (name, options = {}) => {
+        const durable = options.durable ?? false;
+        record(`x:${name}`, { kind: "exchange", name, durable });
+        return onFreshChannel("declareExchange", async (ch) => {
+          await ch.assertExchange(name, "topic", { durable });
           return name as RmqExchange;
-        }),
-      bind: (routingKey, source, destination) =>
-        onFreshChannel("bind", async (ch) => {
+        });
+      },
+      bind: (routingKey, source, destination) => {
+        record(`b:${String(source)}:${routingKey}:${String(destination)}`, {
+          kind: "bind",
+          routingKey,
+          source: source as string,
+          destination: destination as string,
+        });
+        return onFreshChannel("bind", async (ch) => {
           await ch.bindQueue(destination as string, source as string, routingKey);
-        }).pipe(Effect.asVoid),
+        }).pipe(Effect.asVoid);
+      },
       consume: (queue, onMessage, options = {}) =>
         wrap("consume", async () => {
-          // Its own channel: a consumer that errors, or one that is cancelled
-          // with deliveries outstanding, must not touch any other.
-          const ch = await connection.createChannel();
-          ch.on("error", (error) => {
-            console.warn(`[rmq] consumer channel error on ${queue}: ${error.message}`);
-          });
-          await ch.prefetch(options.prefetch ?? DEFAULT_PREFETCH);
-          const { consumerTag } = await ch.consume(
+          const handle = { channel: undefined, consumerTag: "" } as unknown as Consumer;
+          const entry: Live = {
+            handle,
             queue,
-            (message) => {
-              // null means the consumer was cancelled by the broker (the queue
-              // was deleted underneath it). There is no delivery to settle.
-              if (message === null) return;
-              // A handler that throws synchronously would escape into
-              // amqplib's delivery callback. Every handler in this repo is
-              // careful, which is exactly the kind of thing that stops being
-              // true later.
-              let done: void | Settlement | Promise<void | Settlement>;
-              try {
-                done = onMessage(message.content.toString("utf8"), describe(message));
-              } catch {
-                return settle(ch, message, "accept");
-              }
-              if (done === undefined) return settle(ch, message, "accept");
-              // A synchronous outcome is a string, not a thenable.
-              if (typeof done === "string") return settle(ch, message, done);
-              void done.then(
-                (outcome) => settle(ch, message, outcome ?? "accept"),
-                () => settle(ch, message, "accept"),
-              );
-            },
-            { noAck: false },
-          );
-          return { channel: ch, consumerTag };
+            onMessage,
+            prefetch: options.prefetch ?? DEFAULT_PREFETCH,
+          };
+          await attach(() => connection.createChannel(), entry);
+          live.add(entry);
+          return handle;
         }),
-      publisherToExchange: (exchange, routingKey) =>
-        Effect.succeed({ exchange, routingKey }),
+      publisherToExchange: (exchange, routingKey) => Effect.succeed({ exchange, routingKey }),
       publisherToQueue: (queue) =>
         // The default exchange routes by queue name, which is the same path
         // `deadLetterArgs` uses for dead-lettering.
@@ -554,13 +671,15 @@ export const makeRmq = (
           ),
         ),
       cancelConsumer: (c) =>
-        Effect.promise(() => c.channel.cancel(c.consumerTag).then(() => {}, () => {})),
-      // Closing is enough on its own — the broker cancels the consumer and
-      // requeues every unacked delivery on the channel. Swallowed because a
-      // channel whose connection has already gone rejects here, and a teardown
-      // that fails to tear down is worse than one that finds nothing to do.
+        Effect.promise(() => {
+          forget(c);
+          return c.channel.cancel(c.consumerTag).then(() => {}, () => {});
+        }),
       closeConsumer: (c) =>
-        Effect.promise(() => c.channel.close().then(() => {}, () => {})),
+        Effect.promise(() => {
+          forget(c);
+          return c.channel.close().then(() => {}, () => {});
+        }),
     };
   });
 
