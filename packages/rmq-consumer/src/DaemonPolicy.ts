@@ -1,25 +1,14 @@
 import { State } from "@egress/domain/Model.ts";
 
 /**
- * Pure decision logic for the daemon fleet — no Effect, no RabbitMQ, no
- * clock, same philosophy as @egress/domain's Breaker.step: a total function
- * of (prior, circuitState, fleetSize), testable exhaustively with plain
- * assert. Everything hard to reason about (the actual AMQP connections,
- * which physical daemon is active, SAC election) lives in daemon.ts, above
- * this.
+ * Pure decision logic for the fleet: a total function of (prior, circuitState,
+ * fleetSize, now), with the AMQP lifetimes and the SAC election left to
+ * daemon.ts above it.
  *
- * The state -> action mapping is built entirely on two RabbitMQ primitives
- * verified live against a real broker (see docs/rmq-control-plane.md):
- * opening/closing a consumer, and x-single-active-consumer election.
- *
- * DEGRADED is a fleet-size decision — how many daemons are active — rather
- * than a per-daemon one. That began as a constraint: the AMQP 1.0 client had
- * no prefetch lever at all. It is now a choice, since amqplib has one, and the
- * choice holds for a better reason than the constraint did. Prefetch is set
- * when a consumer is created, so lowering it live means cancelling and
- * re-registering the consumer — which is the same operation as retiring a
- * daemon, at more risk. Scaling whole daemons is the cheaper lever and the one
- * every daemon can agree on without coordination.
+ * DEGRADED scales whole daemons rather than each daemon's prefetch. Prefetch is
+ * fixed when a consumer is created, so changing it live means cancelling and
+ * re-registering — the same operation as retiring a daemon, at more risk — and
+ * a daemon count is something every daemon can agree on without coordination.
  */
 
 /** How many daemons should be pulling from the work queue right now. */
@@ -49,21 +38,12 @@ export const initial = (fleetSize: number, now: number): DaemonPolicyState => ({
 export const RAMP_SCHEDULE: ReadonlyArray<number> = [1, 4, 16];
 
 /**
- * How long a rung is held before the next one is allowed.
+ * How long a rung is held before the next is allowed.
  *
- * The ramp used to advance one rung per *control message*, which made its pace
- * an accident of the aggregator's `snapshotMs` rather than a decision: a
- * recovering third party got more load because a snapshot happened to arrive,
- * not because the current rung was working. Measured on the running stack, it
- * produced `1 -> 4 -> 5` in about fifteen seconds — a ramp in shape and barely
- * one in duration.
- *
- * Time, specifically, and not "N successful calls at this rung", which is the
- * more principled-sounding alternative. Every daemon has to derive the *same*
- * target from the same inputs — that is what lets five of them converge with
- * no coordination at all — and a success count is per daemon: the busy ones
- * would ramp while the idle ones held, and the fleet would disagree about its
- * own size. A clock is the only input they all share.
+ * Elapsed time, not "N successful calls at this rung": every daemon must derive
+ * the same target from the same inputs, and a success count is per daemon — the
+ * busy ones would ramp while the idle ones held. A clock is the only input they
+ * all share.
  */
 export const RAMP_DWELL_MS = 5000;
 

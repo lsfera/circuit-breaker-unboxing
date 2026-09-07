@@ -6,12 +6,8 @@ import { SOURCE } from "../src/Events.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 
 /**
- * The outbox on its own, with no Redis and no HTTP: ordering, the bound, and
- * what `commit` is allowed to remove.
- *
- * The Redis implementation of the same interface is exercised against a real
- * container in test/integration/Outbox.test.ts, together with a subscriber
- * that refuses and then recovers. This file is about the rules; that one is
+ * The outbox with no Redis and no HTTP: ordering, the bound, and what `commit`
+ * may remove. This file is about the rules; test/integration/Outbox.test.ts is
  * about whether Lua and a socket obey them.
  */
 
@@ -75,13 +71,8 @@ test("commit removes only what was delivered, and leaves the rest at the head", 
 });
 
 /**
- * The bound, and the direction it drops in.
- *
- * Dropping the oldest is a deliberate choice over dropping the newest: a
- * subscriber that comes back wants the truth, and the truth is the most recent
- * events. What it loses is history it can see it lost — its own
- * delivery-integrity check counts the gap — where dropping the newest would
- * leave it confidently stale instead.
+ * Dropping the oldest is deliberate: a returning subscriber loses history it can
+ * see it lost, where dropping the newest would leave it confidently stale.
  */
 test("the bound drops the oldest entries and says how many", async () => {
   const { dropped, first, depth } = await Effect.runPromise(

@@ -1,24 +1,15 @@
 import { Metric } from "effect";
 
 /**
- * Everything the daemon fleet exposes to Prometheus, in one place — the peer
- * of @egress/aggregator's Telemetry.ts, and deliberately the same shape.
+ * Everything the daemon fleet exposes to Prometheus — the peer of
+ * @egress/aggregator's Telemetry.ts, deliberately the same shape.
  *
- * Until this existed the fleet was the one half of the system with no
- * metrics at all: its counters lived in closure variables and reached the
- * outside world only through `docker logs`. That is not a cosmetic gap. The
- * bug that cost the most time here was a daemon that went *deaf* — container
- * up, CPU idle, everything looking normal — and it hid because the only
- * evidence a daemon was alive was a log line it emitted while handling an
- * event, so "gone deaf" and "nothing happened" looked identical. A heartbeat
- * log made it findable; `egress_daemon_target_active` next to
- * `egress_daemon_self_active` makes it a five-second read on a dashboard.
+ * `egress_daemon_target_active` next to `egress_daemon_self_active` is the pair
+ * that makes a daemon which has gone deaf to the control plane obvious; on its
+ * own, that failure looks exactly like a circuit that has not moved.
  *
- * Values are published by a flush loop in daemon.ts rather than at each call
- * site, because the message path is a plain async function running a few
- * hundred times a second and a fiber per metric write would be the most
- * expensive thing in it. Counters are updated by delta, which is exactly
- * what a Prometheus counter is.
+ * Published by a flush loop in daemon.ts rather than at each call site — see
+ * Tally.ts.
  */
 
 export const circuitState = Metric.gauge("egress_daemon_circuit_state", {

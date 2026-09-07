@@ -241,12 +241,8 @@ test("cluster filter drops clusters that are not tracked APIs", () => {
 });
 
 /**
- * This test used to assert the opposite, under the name "missing stats default
- * to zero rather than NaN". Avoiding the `NaN` was the right instinct; the
- * zero it chose instead was not, because zero is not a neutral value here.
- * `{ healthy: 0, total: 6 }` is precisely how Envoy says *every host in this
- * cluster is gone*, so the absence of one gauge was decoded as the most
- * consequential reading in the domain — see the next test for what that did.
+ * Zero is not a neutral default here: `{ healthy: 0, total: 6 }` is how Envoy
+ * says every host in this cluster is gone.
  */
 test("a cluster missing either membership gauge is not reported at all", () => {
   const { reports, incomplete } = parseStats(
@@ -278,10 +274,7 @@ test("a cluster missing either membership gauge is not reported at all", () => {
   );
 });
 
-/**
- * What the old default actually decided, kept as a test because the number it
- * produced was not obviously wrong until you followed it through the breaker.
- */
+/** The consequence, which is not visible until the number reaches the breaker. */
 test("an incomplete stat set can no longer publish a total outage", () => {
   const partial = { stats: [{ name: "cluster.payments-provider.membership_total", value: 6 }] };
   let breaker = Breaker.initial("payments-provider", defaultConfig, 1000);

@@ -36,15 +36,10 @@ for (const arg of process.argv.slice(2)) {
 }
 
 /**
- * Every flag this process takes, declared once and decoded before anything is
- * built — the same rule @egress/config applies to the daemons' environment,
- * over the argv record parsed above.
- *
- * The mode literals matter more here than the numbers do. This file has a
- * scar from a flag that never reached argv at all: the aggregator ran in `sim`
- * mode against real Envoy replicas and reported nothing wrong, because
- * anything that was not a recognised mode silently *was* the default. A
- * misspelled `--source=envoy-push` now stops the process and says so.
+ * Every flag this process takes, decoded before anything is built. The mode
+ * literals matter more than the numbers: anything unrecognised would otherwise
+ * silently *be* the default, and a misspelled `--source` would run in `sim`
+ * against real Envoy replicas without complaint.
  */
 const settings = load(
   "aggregator",
@@ -97,17 +92,12 @@ const APIS: ReadonlyArray<ApiSpec> =
   settings.apis > 0 ? syntheticApis(settings.apis) : NAMED_APIS;
 
 /**
- * Three ingestion layers, one interface.
+ * Three ingestion layers, one interface. `sim` simulates; `envoy` polls admin
+ * `/stats`; `envoy-push` receives the gRPC sink, so a replica this process was
+ * never told about still reports.
  *
- * `sim` is the simulator. `envoy` polls each replica's admin `/stats`.
- * `envoy-push` runs the gRPC sink Envoy pushes to, which inverts the
- * direction: no admin ports to reach, and a replica this process has never
- * been told about still reports, because it is the one doing the talking.
- *
- * Which is *better* is a measurement, not a preference — see the README. The
- * one thing worth knowing at the call site is that push latency is Envoy's
- * `stats_flush_interval` and poll latency is `tickMs`, so they are tuned in
- * different files.
+ * Their detection latencies are tuned in different files: push is Envoy's
+ * `stats_flush_interval`, poll is `tickMs`.
  */
 const FleetLayer =
   settings.source === "sim"

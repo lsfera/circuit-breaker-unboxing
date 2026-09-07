@@ -9,24 +9,12 @@ import { TracingLive } from "@egress/tracing/Tracing.ts";
 import { runProducer } from "./producer.ts";
 
 /**
- * The producer, as its own component rather than a role inside the daemon
- * fleet's process.
+ * The producer, its own component rather than a role inside the daemon process:
  *
  *   node --experimental-strip-types src/main.ts
  *
- * It used to be `rmq-consumer/src/main.ts producer`, dispatched by an argv
- * switch next to the daemon. Same binary, two things that share nothing: the
- * producer has no control queue, no policy, no elections, and — the point of
- * the whole scenario — it never reads the circuit state. Keeping it in the
- * consumer package made that invisible, and made "what does a daemon depend
- * on" a question you had to answer by reading past a role check.
- *
- * Configuration comes from the environment rather than flags, because these
- * are containers rather than commands someone types — see `rmq-producer` in
- * docker-compose.yml. It is declared once and decoded at boot: a rate that is
- * not a positive number stops this process instead of turning into
- * `Array.from({ length: NaN })`, which publishes nothing and says nothing.
- * See @egress/config.
+ * It shares nothing with the fleet — no control queue, no policy, no elections —
+ * and never reads the circuit state, which is the point of the scenario.
  */
 
 const settings = load(

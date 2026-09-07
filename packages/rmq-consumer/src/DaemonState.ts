@@ -3,27 +3,14 @@ import { activeIndices, initial as initialPolicy, step } from "./DaemonPolicy.ts
 import type { DaemonPolicyState } from "./DaemonPolicy.ts";
 
 /**
- * Everything one daemon decides, in one value, with one function that moves it.
+ * Everything one daemon decides, in one value, with one function that moves it:
+ * which state it is in, which sequences it has already probed and redriven, and
+ * which connections should therefore exist.
  *
- * `DaemonPolicy` answers "how many daemons should be pulling work". This
- * answers the questions around it: which state am I in, which sequences have I
- * already probed and redriven, and — given all that — which connections should
- * exist right now. Both are pure, for the same reason: the hard parts of this
- * fleet are AMQP lifetimes and elections, and keeping the decisions out of that
- * makes them testable with plain assertions and makes the shell small enough to
- * read.
- *
- * It replaces four separate `Ref`s in daemon.ts (circuit state, policy, and the
- * two dedupe sequences) that had invariants between them and no type saying so.
- * The two sequence checks in particular were read-then-write across two
- * `Ref` operations, in handlers that run concurrently from AMQP callbacks; here
- * they are one atomic transition, which is a small correctness improvement that
- * came free with the modelling.
- *
- * What is deliberately *not* in here: the three connection scopes. Those are
- * resources rather than decisions — the daemon holds them, `Redrive.ts` shares
- * one by contract — and they are the "actual" side that `plan` compares the
- * desired shape against.
+ * One value rather than four `Ref`s because the invariants between them are real
+ * and the handlers that touch them run concurrently from AMQP callbacks — here a
+ * transition is atomic. The connections themselves stay out: they are resources,
+ * and the "actual" side `plan` compares this against.
  */
 export type DaemonState = {
   readonly circuit: State;

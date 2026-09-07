@@ -21,76 +21,36 @@ export const controlQueueFor = (apiId: string, instanceId: string): string =>
 export const probeTriggerQueueFor = (apiId: string): string => `${apiId}.probe-trigger`;
 
 /**
- * The second SAC coordination queue, same shape as the prober election and
- * for the same reason: recovering the dead-letter queue is a job exactly one
- * daemon may do. Five daemons each replaying the same backlog would turn a
- * recovery into a fivefold burst at a third party that just came back.
- *
- * Separate from `probe-trigger` rather than reusing it, because the two
- * elections are independent — the daemon that happens to be the elected
- * prober has no particular claim on being the one that redrives, and
- * coupling them would mean a single daemon's failure took out both.
+ * The redrive election, deliberately a separate queue from `probe-trigger`: the
+ * two elections are independent, and sharing one would let a single daemon's
+ * failure take out both.
  */
 export const redriveTriggerQueueFor = (apiId: string): string => `${apiId}.redrive-trigger`;
 
 /** The primary competing-consumer work queue daemons drain. */
 export const workQueueFor = (apiId: string): string => `${apiId}.work`;
 
-/**
- * Where work that could not be completed ends up.
- *
- * The event side of this repo proves a delivery contract end to end; the
- * work side used to accept every message whether or not the call behind it
- * succeeded, which quietly threw the failures away. A dead-letter queue is
- * what makes the two halves comparable: a failed call is now a message you
- * can count, look at in the management UI, and replay, instead of an
- * increment in a counter nobody can act on.
- */
+/** Where work that could not be completed ends up. */
 export const deadLetterQueueFor = (apiId: string): string => `${apiId}.work.dead`;
 
 /**
- * The dead-letter target, for *every* queue this API's fleet declares rather
- * than only the work queue.
+ * One dead-letter destination for *every* queue this fleet declares, so anything
+ * unhandleable lands somewhere you can count and replay from.
  *
- * One canonical destination is the point. A control message that fails to
- * decode, a malformed election trigger, a work message whose call failed —
- * all of them are "something arrived that could not be handled", and all of
- * them should end up in one place you can look at, count, and replay from.
- * The alternative is what this repo had: the work queue dead-lettered
- * properly while every other queue silently dropped whatever it rejected,
- * which is the same silent loss the work queue was fixed to avoid, just in
- * the corner nobody looks at.
- *
- * Routing through the default exchange (`""`) with the dead-letter queue's
- * own name as the routing key is the plainest form of this: no extra
- * exchange to declare, no binding to keep in step.
- *
- * Declared identically by every process that touches a given queue —
- * producer and daemons alike — because RabbitMQ rejects a redeclare whose
- * arguments differ from the existing queue's, and there is no ordering
- * between those containers at startup.
+ * Must be declared identically by every process that touches a queue: RabbitMQ
+ * rejects a redeclare whose arguments differ, and container startup is unordered.
  */
 export const deadLetterArgs = (apiId: string): Record<string, unknown> => ({
   "x-dead-letter-exchange": "",
   "x-dead-letter-routing-key": deadLetterQueueFor(apiId),
 });
 
-/**
- * The work queue's arguments — identical to `deadLetterArgs` today, kept
- * separately named because here dead-lettering is designed behaviour rather
- * than a backstop.
- */
+/** Identical to `deadLetterArgs` today; named separately because here it is designed behaviour, not a backstop. */
 export const workQueueArgs = deadLetterArgs;
 
 /**
- * A single-active-consumer queue that also dead-letters. The SAC queues carry
- * election triggers, so nothing routine is ever rejected on them — but a
- * malformed trigger is exactly the kind of thing worth keeping rather than
- * dropping, and it costs one argument to say so.
- *
- * The dead-letter queue itself is deliberately not given a target: a queue
- * that dead-letters to itself is a cycle, and it is the end of the line by
- * definition.
+ * A single-active-consumer queue that also dead-letters, so a malformed trigger
+ * is kept. The dead-letter queue itself gets no target — that would be a cycle.
  */
 export const sacQueueArgs = (apiId: string): Record<string, unknown> => ({
   ...deadLetterArgs(apiId),
@@ -98,53 +58,25 @@ export const sacQueueArgs = (apiId: string): Record<string, unknown> => ({
 });
 
 /**
- * How many times a unit of work is attempted before the broker parks it.
+ * Attempts before the broker parks a message. The budget belongs to the queue,
+ * not the daemon: an in-process counter is lost the moment the message moves to
+ * another consumer, which is what an outage causes.
  *
- * The budget is a queue property, not a client capability — which is why this
- * repo twice concluded it could not be expressed. A quorum queue with
- * `x-delivery-limit` counts the redeliveries itself and dead-letters at the
- * limit. Measured with the handler returning `requeue` every time: four
- * deliveries, then the dead-letter queue with `reason "delivery_limit"`.
- *
- * It has to be the queue's job rather than the daemon's for a reason that
- * outlived the client that made it obvious: an in-process counter is lost the
- * moment the message moves to another daemon, which is exactly what happens
- * during an outage. The count is readable now (`x-delivery-count`, since the
- * move to amqplib — see docs/decisions/004-downgrade-to-amqp-0-9-1.md); the
- * enforcement still belongs to the broker.
- *
- * Three rather than more because RabbitMQ redelivers immediately with no
- * backoff, so every extra attempt is load on a third party that is already
- * failing. What ends the amplification is the circuit opening, which stops the
- * daemons consuming at all.
- *
- * It composes with `REDRIVE_ON_CLOSE` by resetting: a redrive republishes the
- * body, so a replayed message arrives as a new one with a fresh budget.
- * Measured through one redrive cycle — eight deliveries, two parkings, both
- * `reason "delivery_limit"`. Three attempts per outage, not three ever.
+ * Low because RabbitMQ redelivers with no backoff, so every extra attempt is
+ * load on a failing upstream. A redrive republishes the body, so a replayed
+ * message starts a fresh budget — three attempts per outage, not three ever.
  */
 export const WORK_DELIVERY_LIMIT = 3;
 
 /**
- * Which queues survive a broker restart, decided here so producer and daemons
- * cannot disagree — a durability mismatch is a redeclare conflict exactly like
- * a mismatched argument. Measured in both directions: the broker answers
- * `409 "inequivalent arg 'durable'"` when the flag differs from the existing
- * queue, so flipping it on a broker that already holds the queues means
- * deleting them first.
+ * Durability, decided here so producer and daemons cannot disagree — a mismatch
+ * is a redeclare conflict (`409 inequivalent arg 'durable'`), so changing a flag
+ * on a broker that already holds the queue means deleting it first.
  *
- * The split is about what a restarting consumer can rebuild for itself. A
- * control queue is a live subscription — a daemon that comes back learns the
- * state from the aggregator's next snapshot — so keeping those events buys
- * nothing and risks a queue growing behind a daemon that never returns. It
- * stays classic and transient, one per daemon, and dies with it.
- *
- * Everything else is `quorum`, the second half of the same question: `durable`
- * decides what survives the broker process, `x-queue-type` what survives
- * losing the node the queue lives on. A quorum queue cannot be transient
- * (measured: `400 "invalid property 'non-durable'"`), so the two are one
- * decision. Work and dead-letter queues hold work nothing can reconstruct; the
- * election queues are always empty, which makes quorum free for them.
+ * Control queues are live subscriptions a restarting daemon rebuilds from the
+ * next snapshot, so they stay transient and die with it. Everything else is a
+ * durable quorum queue; a quorum queue cannot be transient, so the two flags are
+ * one decision.
  */
 export const workQueueOptions = (apiId: string) => ({
   args: {
@@ -155,11 +87,7 @@ export const workQueueOptions = (apiId: string) => ({
   durable: true,
 });
 
-/**
- * No delivery limit of its own: this queue is the end of the line, nothing
- * requeues on it, and a message dropped here would be the silent loss the
- * dead-letter queue exists to prevent.
- */
+/** No delivery limit: this queue is the end of the line. */
 export const deadLetterQueueOptions = () => ({
   args: { "x-queue-type": "quorum" },
   durable: true,
@@ -179,19 +107,10 @@ export const sacQueueOptions = (apiId: string) => ({
 export const CONTROL_EXCHANGE_OPTIONS = { durable: true };
 
 /**
- * ## What counts as a readable message
- *
- * Two kinds of message cross this control plane, and until recently only one
- * of them had a contract. The circuit event has been a `Schema` since it was
- * first published; the election trigger was `JSON.stringify({ sequence })` at
- * the publisher and `Number(JSON.parse(body).sequence ?? -1)` at each of the
- * two consumers — an encoder and two parsers kept in agreement by hand.
- *
- * Both are read the same way now: parse, decode through the one declaration,
- * and say which of the two steps failed. The reasons are worth keeping apart —
- * a schema mismatch is a version skew between whatever published and this
- * fleet, and something that is not JSON at all means the publisher is not who
- * we think it is.
+ * Every message here is read the same way: parse, decode through the one
+ * declaration, and say which step failed. The two reasons are kept apart because
+ * they call for different reactions — a schema mismatch is a version skew, and
+ * something that is not JSON means the publisher is not who we think it is.
  */
 export type DecodeFailure = "malformed-json" | "schema-mismatch";
 
@@ -210,41 +129,18 @@ const readerFor = <S extends Schema.ConstraintDecoder<unknown>>(schema: S) => {
 
 export const encodeCircuitEvent = (event: CircuitEvent): string => JSON.stringify(event);
 
-/**
- * The decode path @egress/subscriber uses, so the control plane and the
- * HTTP/SSE path cannot disagree on what a valid event is.
- *
- * `Result` rather than `Option` because the caller branches on the reason. A
- * pure computation that can fail *for a reason someone acts on* is what
- * `Result` is for — see docs/decisions/006-representing-absence.md.
- */
+/** Shared with @egress/subscriber, so the AMQP and SSE paths cannot disagree on what a valid event is. */
 export const decodeCircuitEvent: (body: string) => Result.Result<CircuitEvent, DecodeFailure> =
   readerFor(CircuitEvent);
 
 /**
- * What a daemon publishes to elect itself out of a job — the body on both SAC
- * queues, `probe-trigger` and `redrive-trigger`.
+ * The body on both SAC queues. Every daemon publishes one per transition so a
+ * trigger still arrives when some are down; the elected consumer dedupes on the
+ * sequence.
  *
- * It carries the circuit sequence and nothing else, because that is the whole
- * mechanism: every daemon publishes a trigger on the transition so one still
- * arrives when some are down, the broker delivers all of them to the one
- * elected consumer, and that consumer turns several triggers back into one
- * action by keeping the highest sequence it has already acted on.
- *
- * `Natural` rather than `Number` is the load-bearing part, and it is the same
- * hole this repo closed in the lease token: the dedupe is `sequence <=
- * probedSequence`, and *any* comparison against `NaN` is false. A trigger
- * whose sequence could not be ordered therefore read as new every time — and
- * `Number(JSON.parse(body).sequence)` produces exactly that from
- * `{"sequence":"7"}`, `{"sequence":{}}` or `{"sequence":[7]}`. A sequence that
- * cannot be ordered no longer decodes, so it cannot reach the reducer that
- * would have to order it.
- *
- * The `?? -1` the hand-written parser used had a quieter failure of its own: a
- * trigger with no `sequence` field at all became a valid-looking `-1`, which
- * every daemon silently ignores. Now it is a `schema-mismatch` like any other,
- * which means it is dead-lettered and counted rather than dropped in silence —
- * the one outcome this fleet consistently refuses.
+ * `Natural` is load-bearing: the dedupe is `sequence <= probedSequence`, and any
+ * comparison against `NaN` is false, so a sequence that cannot be ordered must
+ * not decode. See docs/decisions/007-message-contracts.md.
  */
 export const ElectionTrigger = Schema.Struct({ sequence: Schema.Natural });
 export type ElectionTrigger = typeof ElectionTrigger.Type;

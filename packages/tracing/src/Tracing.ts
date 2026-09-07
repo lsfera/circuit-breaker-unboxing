@@ -12,50 +12,17 @@ import {
 } from "@opentelemetry/sdk-trace-base";
 
 /**
- * Tracing for every process in this repo, in one place.
+ * Tracing for every process here — see docs/decisions/003-tracing.md.
  *
- * [docs/decisions/003-tracing.md](../../../docs/decisions/003-tracing.md)
- * deferred this deliberately, and named what doing it properly would take: an
- * exporter, a collector to send to, a sampling decision, and span naming that
- * survives the AMQP boundary. This is that, and the fourth item is the one
- * with any substance — see `@egress/rmq`'s `traceparent` handling.
+ * Opt-in, on `OTEL_EXPORTER_OTLP_ENDPOINT`. Without it no tracer is installed,
+ * Effect's no-op one stays, and `Effect.withSpan` costs nothing; a stack running
+ * without a collector must not degrade.
  *
- * ## Opt-in
- *
- * Tracing is opt-in, and the opt is `OTEL_EXPORTER_OTLP_ENDPOINT`. Without it
- * the layer installs no tracer, Effect's default no-op one stays, and
- * `Effect.withSpan` costs nothing because it does not make a span. That
- * matters more here than it usually would: every failure this repo has
- * actually had was a state-over-time failure that metrics and a heartbeat
- * surfaced, so tracing earns its place on one specific path rather than
- * everywhere — and a stack that has to run without a collector must not
- * degrade when there isn't one.
- *
- * ## Where the sampling decision belongs
- *
- * The fleet moves 200 messages a second and every one crosses four processes,
- * so something has to be dropped. The question is what, and *when* it is
- * decided.
- *
- * Deciding at the head — here, at the producer, on a ratio — is cheap and
- * blind. It keeps a random slice and throws the rest away before anything is
- * known about it, which is precisely wrong for the question
- * docs/decisions/003-tracing.md said tracing would exist to answer: "why did
- * *this* message take nine seconds". A head sampler answers that by luck, one
- * time in twenty.
- *
- * Deciding at the tail — in the collector, once the trace is complete — can
- * keep the traces that turned out to matter: the ones that errored, the ones
- * that were slow, a small sample of the ordinary. It costs more, because every
- * span has to be exported before it can be judged, and the collector has to
- * hold a trace until it is whole.
- *
- * So this exports everything by default and lets
- * [infra/otel-collector.yaml](../../../infra/otel-collector.yaml) decide, which
- * is the arrangement that answers the question. `OTEL_TRACES_SAMPLER_ARG` is
- * still here and still `ParentBased`, for a deployment that has no collector
- * and has to drop spans at the source instead — the cheap, blind option, kept
- * because it is sometimes the only one available.
+ * Sampling is decided at the *tail*, in infra/otel-collector.yaml: this exports
+ * everything, so the traces that turned out to be slow or failed can be the ones
+ * kept. A head sampler would answer "why did this message take nine seconds" by
+ * luck. `OTEL_TRACES_SAMPLER_ARG` stays for deployments with no collector, where
+ * dropping at the source is the only option.
  */
 
 /**

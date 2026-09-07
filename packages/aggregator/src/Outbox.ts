@@ -4,36 +4,24 @@ import type { RedisLike } from "./Coordination.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 
 /**
- * Where an event goes when the subscriber will not take it.
+ * Where an event goes when the subscriber will not take it — the durable half of
+ * the guarantee, which otherwise held everywhere except the last hop.
  *
- * The aggregator's guarantee — one gapless, strictly ordered sequence per API
- * — held everywhere except the last hop. A webhook that failed its three
- * retries landed in a 200-entry in-memory list that exists to be *looked at*,
- * not replayed, and that list dies with the process. So the contract the
- * README points at was intact inside the aggregator and best-effort at the
- * edge, which is the half a subscriber actually sees.
+ * Same shape as `CheckpointStore`: one `RedisLike` port, scripts that read and
+ * write in one round trip, and an in-memory implementation that solo mode
+ * genuinely uses rather than a mock.
  *
- * This is the durable half. It is deliberately the same shape as
- * `CheckpointStore`: one `RedisLike` port, one `eval`, scripts that do their
- * read and write in the same round trip, and an in-memory implementation that
- * is not a mock but what solo mode genuinely uses.
- *
- * What it is not: a queue with delivery semantics. There is exactly one
- * consumer — the leader's tick loop — and ordering is per API, which is the
- * only ordering the published contract claims.
+ * Not a queue with delivery semantics: one consumer, the leader's tick loop, and
+ * ordering per API, which is the only ordering the contract claims.
  */
 
 /**
- * Per-API bound. A subscriber that stays down does not get to consume the
- * aggregator's memory, or Redis's, on its way out.
+ * Per-API bound, so a subscriber that stays down cannot consume the aggregator's
+ * memory on its way out.
  *
- * Overflow drops the *oldest*, which is the choice worth explaining. Dropping
- * the newest would leave the subscriber's most recent knowledge permanently
- * stale while the outbox held ancient history; dropping the oldest means the
- * subscriber sees a gap — which its own delivery-integrity check is built to
- * detect and count — and then catches up to the truth. A gap you can see beats
- * a state you cannot trust, and the next snapshot republishes the current
- * state anyway.
+ * Overflow drops the *oldest*: the subscriber then sees a gap, which its
+ * delivery-integrity check detects, and catches up. Dropping the newest would
+ * leave it permanently stale while the outbox held ancient history.
  */
 export const OUTBOX_MAX_PER_API = 500;
 

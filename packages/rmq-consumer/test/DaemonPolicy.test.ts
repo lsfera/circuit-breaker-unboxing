@@ -64,15 +64,7 @@ test("recovery ramps one rung at a time, never snapping to full", () => {
   assert.equal(s.targetActive, 20, "stays at full strength once there");
 });
 
-/**
- * The point of the whole phase: a rung is earned by being held, not by a
- * message arriving.
- *
- * Before this, a rung advanced on any `circuit.control` message — so the pace
- * of the ramp was set by how chatty the aggregator happened to be, and a
- * recovering third party got more load because a snapshot was due rather than
- * because the current rung was working.
- */
+/** A rung is earned by being held, not by a control message arriving. */
 test("a rung is held until it has been held long enough, however many events arrive", () => {
   let s = DaemonPolicy.step({ targetActive: 0, rungSince: at(0) }, State.CLOSED, 20, at(0));
   assert.equal(s.targetActive, 1);
@@ -92,12 +84,9 @@ test("a rung is held until it has been held long enough, however many events arr
 });
 
 /**
- * Five daemons converge on the same number with no coordination at all, and
- * this is the property that makes that possible: the same inputs give the same
- * answer, so the fleet does not need to agree on anything except what it has
- * already seen. It is also why the gate is a clock and not a count of
- * successful calls — a success count is per daemon, so the busy ones would
- * ramp while the idle ones held, and the fleet would disagree about its size.
+ * What lets five daemons converge with no coordination: same inputs, same answer.
+ * Also why the ramp is gated on a clock and not on successful calls, which are
+ * per daemon and would have the busy ones ramping while the idle ones held.
  */
 test("the same inputs give the same target, which is what lets the fleet converge", () => {
   const busy = { targetActive: 1, rungSince: at(0) };

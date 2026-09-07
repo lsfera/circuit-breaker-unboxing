@@ -4,14 +4,7 @@ import { State } from "@egress/domain/Model.ts";
 import * as DaemonState from "../src/DaemonState.ts";
 import { RAMP_DWELL_MS } from "../src/DaemonPolicy.ts";
 
-/**
- * The daemon's decisions, with no broker, no connections and no runtime.
- *
- * These used to live in `daemon.ts` as four `Ref`s and a pile of `if`s around
- * AMQP callbacks, where the only way to exercise them was to run five
- * containers and provoke an outage. The behaviour is identical; what changed is
- * that it can now be asserted in a millisecond.
- */
+/** The daemon's decisions, with no broker, no connections and no runtime. */
 
 const FLEET = 5;
 const T0 = 1_700_000_000_000;

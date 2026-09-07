@@ -256,23 +256,13 @@ test("failover resumes sequence and previousState from the checkpoint, not from 
 });
 
 /**
- * The case the test above does not reach: an instance that led, *lost* the
- * lease, and is later promoted again — with its own breakers still warm in
- * memory from the first stint.
+ * An instance that led, lost the lease, and is promoted again with its breakers
+ * still warm. Rehydration only fires for APIs it has no breaker for, so a warm
+ * registry would resume from its own last sequence while the interim leader has
+ * published past it — two payloads under one sequence.
  *
- * Rehydration only fires for APIs the instance has no breaker for, so a warm
- * registry sails straight past it and resumes from whatever sequence this
- * instance last used itself — while whoever led in between has already
- * published past that number. Two different payloads under one sequence,
- * which is precisely the break `/api/subscriber` exists to detect. Losing
- * the lease therefore has to drop the registry, so that a re-promotion is
- * indistinguishable from the cold start the test above covers.
- *
- * The instance that leads in between is modelled by its effect on the shared
- * coordinator rather than as a second Aggregator: it takes the lease (which
- * is what demotes A) and moves the API on by five transitions. Whether it is
- * a whole instance is beside the point here — the failover test above
- * already covers that — and what matters is what A does when it comes back.
+ * The interim leader is modelled by its effect on the shared coordinator rather
+ * than as a second Aggregator; what matters here is what A does on return.
  */
 test("a re-promoted instance resumes from the checkpoint, not its own stale sequence", async () => {
   const { firstStint, secondStint, handoffSequence } = await Effect.runPromise(
@@ -359,19 +349,10 @@ test("a re-promoted instance resumes from the checkpoint, not its own stale sequ
 });
 
 /**
- * The failure this exists to prevent, reproduced in miniature.
- *
- * A coordinator that rejects used to arrive as a *defect* — the Redis layer
- * called `Effect.promise`, so an unreachable store was not a failure but a
- * bug — and a defect out of the tick terminates `Effect.repeat`. The control
- * loop was then gone for good in a process that stayed up and kept serving
- * 200s. Measured on the running stack before the fix: a 55-second Redis
- * outage stopped the loop after seven more ticks, it never restarted, and a
- * total upstream failure afterwards published nothing at all.
- *
- * The contract now: while the coordinator is unreachable the instance stands
- * down (it cannot confirm it holds the lease, so it must not act as leader),
- * and when the coordinator returns it picks up again with no intervention.
+ * The contract: while the coordinator is unreachable the instance stands down —
+ * it cannot confirm it holds the lease, so it must not act as leader — and picks
+ * up again on return with no intervention. As a *defect* rather than a typed
+ * failure, an outage would instead end the tick loop permanently.
  */
 test("an unreachable coordinator stands the instance down, and the loop recovers when it returns", async () => {
   const { duringOutage, afterRecovery, ticked } = await Effect.runPromise(
@@ -461,18 +442,9 @@ test("an unreachable coordinator stands the instance down, and the loop recovers
 });
 
 /**
- * A planned stop is not a crash, and the lease should know the difference.
- *
- * `LeaderElection.release` was defined from the first commit and never
- * called, so the only way a lease was ever surrendered was by expiring. On a
- * crash that is exactly right. On a rolling deploy it means every restart
- * costs the standby up to `leaseTtlMs` of waiting with nobody publishing —
- * paid on every deploy, forever, for a case that is not an emergency.
- *
- * The lease here is a minute long, deliberately. Nothing else can acquire it
- * within this test by waiting, so an acquire that succeeds succeeded because
- * the lease was handed back. Both halves are asserted: held while the loop
- * runs, free the moment it stops.
+ * A planned stop hands the lease back, so a deploy does not cost the standby
+ * `leaseTtlMs` of waiting. The lease is a minute long deliberately: nothing can
+ * acquire it here by waiting, so an acquire that succeeds proves it was released.
  */
 test("a clean shutdown hands the lease back rather than leaving it to expire", async () => {
   await Effect.runPromise(
@@ -515,17 +487,9 @@ test("a clean shutdown hands the lease back rather than leaving it to expire", a
 });
 
 /**
- * The hole that made `LeaseToken` a record instead of a string.
- *
- * It used to be `type LeaseToken = string`, compared with
- * `tokenCounter(a) < tokenCounter(b)` over `Number(slice(...))`. A counter
- * that did not parse became `NaN`, `NaN < 5` is `false`, and so a malformed
- * token carrying the *right* epoch was accepted — the exact thing fencing
- * exists to stop. Reproduced against the old helpers before the change:
- * `"abc123:abc"` against a current of `"abc123:5"` came back not fenced.
- *
- * The type change is the fix, and this is what says so: such a token cannot be
- * parsed at all now, so nothing downstream has to defend against it.
+ * A counter that cannot be ordered must not parse: `NaN < 5` is false, so a
+ * malformed token carrying the right epoch would otherwise be accepted — the
+ * exact write fencing exists to reject.
  */
 test("a token whose counter cannot be ordered does not parse", () => {
   for (const raw of ["abc123:abc", "abc123:", "abc123:-1", ":5", "garbage", ""]) {

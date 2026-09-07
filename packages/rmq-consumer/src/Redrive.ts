@@ -4,21 +4,13 @@ import type { Consumer, RmqService, Settlement } from "@egress/rmq/Client.ts";
 import type { Semaphore } from "effect/Semaphore";
 
 /**
- * Recovering the dead-letter queue: bounded passes that replay work back onto
- * the work queue, and leave anything that is not work where a human can find
- * it.
+ * Recovering the dead-letter queue: bounded passes that replay work back onto the
+ * work queue and leave anything that is not work where a human can find it.
  *
- * Its own module because daemon.ts had grown to eight hundred lines holding
- * eight separate concerns, and this is the largest and most self-contained of
- * them. The options below are not ceremony — they are the coupling, written
- * down: a redrive needs the daemon's connection, the two queue names, the
- * circuit state (it must stop the moment the circuit reopens), and the
- * daemon's own consumer Ref and permit, because `reconcile` retires the
- * channel from the other side when the state changes.
- *
- * Elected to exactly one daemon by the broker — see the SAC redrive-trigger
- * queue in daemon.ts. Five daemons replaying the same backlog would turn a
- * recovery into a fivefold burst at a third party that has just come back.
+ * Elected to one daemon by the broker — five replaying the same backlog would
+ * make a recovery a fivefold burst at an upstream that has just come back. The
+ * options are the coupling written down, including the daemon's consumer Ref and
+ * permit, because `reconcile` retires the channel from the other side.
  */
 export type RedriveOptions = {
   readonly label: string;
@@ -175,16 +167,12 @@ export const makeRedrive = (opts: RedriveOptions) => {
     return { moved, parked, reason };
   });
   /**
-   * Replay the dead-letter queue, in bounded passes, until it is empty or
-   * something says stop. Runs on exactly one daemon — the broker elects it
-   * on a second SAC queue, below — and only while the circuit is CLOSED.
+   * Replay in bounded passes until empty or told to stop, only while CLOSED.
    *
-   * Passes rather than one long drain because each pass is a fresh channel it
-   * can afford to destroy — closing it hands back everything it was holding —
-   * and because `redriveMax` is there to keep any single burst onto the work
-   * queue bounded. Looping until
-   * drained is what makes this actually self-healing: a backlog larger than
-   * the cap would otherwise need one outage per 5,000 messages to recover.
+   * Passes rather than one drain: each is a fresh channel it can afford to
+   * destroy, and `redriveMax` bounds any single burst onto the work queue.
+   * Looping until drained is what keeps a backlog larger than the cap from
+   * needing one outage per cap to recover.
    */
   const REDRIVE_MAX_PASSES = 20;
   const redriveOnce = Effect.gen(function* () {

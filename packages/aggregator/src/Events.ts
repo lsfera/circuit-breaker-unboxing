@@ -256,16 +256,11 @@ export const makeWebhookSink = (url: string): Effect.Effect<SinkImpl, never, Out
       /**
        * One pass over the outbox, oldest first, per API.
        *
-       * Strictly in order, and it stops that API at the first failure rather
-       * than skipping ahead: delivering event 8 while 7 is still stuck would
-       * hand the subscriber a gap that never closes, which is worse than
-       * arriving late. Nothing is committed until it has actually been
-       * delivered, so a crash mid-pass replays rather than loses — at-least-
-       * once, which the `idempotency-key` header is already there for.
-       *
-       * Bounded per pass, and per API, for the same reason the dead-letter
-       * redrive is: a subscriber coming back must not be met with everything
-       * at once.
+       * Stops that API at its first failure rather than skipping ahead: delivering
+       * 8 while 7 is stuck hands the subscriber a gap that never closes. Nothing
+       * is committed until delivered, so a crash mid-pass replays rather than
+       * loses. Bounded per pass, so a subscriber coming back is not met with
+       * everything at once.
        */
       const draining = yield* Ref.make(false);
       const drainPass = Effect.gen(function* () {

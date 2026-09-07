@@ -32,75 +32,29 @@ import type { Action, Command, DaemonState } from "./DaemonState.ts";
 
 /**
  * One competing-consumer daemon: one process, one index in a fleet of
- * `fleetSize`. docker-compose.yml runs N of these as N containers, so the SAC
- * elections below are contended by real separate processes rather than by
- * fibers that happen to share a runtime.
+ * `fleetSize`, coordinating with the others only through the events they all
+ * receive on `circuit.control`.
  *
- * Nothing here coordinates with the other daemons. Each one subscribes to its
- * own queue on `circuit.control`, feeds every event through the pure reducer
- * in DaemonState.ts, and starts or stops its own work consumption according to
- * whether its index falls under the agreed target. The fleet converges from
- * the same events with no leader and no shared state — the aggregator already
- * did the hard part of turning divergent replica views into one state.
+ * One AMQP connection, with two classes of channel on it. The control consumer,
+ * the two SAC election consumers and the publish channel live for the process;
+ * the work consumer, the one-message probe and the redrive pass churn. Closing a
+ * channel requeues everything it held unacked and touches nothing else.
  *
- * ## One connection, and channels that come and go
+ * Egress stays transparent: one configured address, no replica names. Envoy's
+ * topology is known to exactly one thing in this repo, the aggregator's
+ * FleetSource.
  *
- * A daemon holds exactly one AMQP connection. On it, two classes of channel:
+ * Backpressure is settlement timing. The work handler returns the egress call's
+ * promise and `@egress/rmq` settles only once it resolves, so with
+ * `prefetch: maxInFlight` the broker holds the next delivery until this daemon
+ * finishes one — see docs/decisions/011-the-ceiling-belongs-to-the-broker.md.
  *
- *  - The ones that live for the process — the control consumer, the two SAC
- *    election consumers, and the channel every publish goes out on.
- *  - The ones that churn. The work consumer, opened and closed on every
- *    transition; the one-message HALF_OPEN probe; the redrive pass. At most
- *    two of these exist at once, because a probe excludes work and redrive,
- *    and work and redrive only overlap while CLOSED.
- *
- * This was four connections until it did not need to be. On the AMQP 1.0
- * client, closing a consumer with deliveries in flight stranded them, and
- * enough strandings stalled *every* link on that connection — so anything
- * that churned consumers needed a connection of its own to destroy. A daemon
- * that shared one went deaf to `circuit.control` after a handful of
- * transitions while still looking perfectly healthy.
- *
- * A channel is the right unit for that, and always was: closing one requeues
- * everything it held unacked and touches nothing else on the connection. That
- * is the whole reason the split existed, so the split is gone — one socket,
- * one heartbeat, one thing to lose.
- *
- * ## Egress stays transparent
- *
- * One configured address, no replica names, no admin ports. A daemon calls
- * `${egressAddr}${apiPath}` and never learns Envoy is a fleet — that topology
- * is known to exactly one thing in this repo, the aggregator's FleetSource.
- *
- * ## Backpressure is settlement timing, and the ceiling is the broker's
- *
- * The work handler returns the egress call's promise, and `@egress/rmq`
- * settles only once it resolves. The work consumer's `prefetch` is
- * `maxInFlight`, so the broker will not push another delivery until this
- * daemon settles one — the backlog stays where it belongs, in the queue,
- * visible.
- * The first version of this file accepted every message on arrival and called
- * afterwards, which turned a 50k backlog into 50k concurrent calls from one
- * daemon: precisely the herd the fleet-level policy exists to prevent. The
- * second version fixed that with a concurrency gate in this process, which
- * was the same mistake one layer up: prefetch stayed at 100 while the gate
- * held 32, so the other sixty-eight sat in an array here instead of in the
- * queue. One limit, at the broker, is what both versions were reaching for.
- *
- * ## Work that fails
- *
- * A failed call requeues its message and the *broker* counts the attempts —
- * the work queue is a quorum queue carrying `x-delivery-limit`, so RabbitMQ
- * dead-letters the message itself once the budget is spent. The daemon does
- * not count and could not: this client reports `deliveryCount: 0` on every
- * delivery, and an in-process counter would be lost the moment the message
- * moved to another daemon. See WORK_DELIVERY_LIMIT in @egress/rmq.
- *
- * Preserving failed work is not recovering it, so `REDRIVE_ON_CLOSE` replays
- * `<apiId>.work.dead` onto the work queue when the circuit closes, from the
- * one daemon a second SAC election picks. Off by default: whether a
- * two-minute-old payment attempt is still worth making is a property of the
- * workload, not of the transport.
+ * Failed work is requeued and the *broker* counts the attempts
+ * (`x-delivery-limit`), because an in-process counter is lost the moment a
+ * message moves to another daemon. `REDRIVE_ON_CLOSE` replays the dead-letter
+ * queue on recovery, from the one daemon a second election picks; off by
+ * default, because whether stale work is still worth doing is a property of the
+ * workload.
  */
 
 export type DaemonConfig = {
@@ -113,22 +67,11 @@ export type DaemonConfig = {
   readonly egressAddr: string;
   /** The route on that address for this API — /payments for payments-provider. */
   readonly apiPath: string;
-  /**
-   * Ceiling on concurrent third-party calls from this one daemon, applied as
-   * the work consumer's prefetch. Without it a daemon draining a backlog fires
-   * one call per delivered message as fast as the broker can push, which is a
-   * thundering herd of its own making — the fleet-level policy would be
-   * scaling daemons down while each surviving daemon hammered harder.
-   */
+  /** Concurrent third-party calls, applied as the work consumer's prefetch. */
   readonly maxInFlight: number;
-  /**
-   * Replay `<apiId>.work.dead` onto the work queue when the circuit closes.
-   * Off by default: see the module doc — this is a statement about whether
-   * this workload's messages are still worth doing later, which only the
-   * workload's owner knows.
-   */
+  /** Replay `<apiId>.work.dead` onto the work queue when the circuit closes. */
   readonly redriveOnClose: boolean;
-  /** Ceiling on messages moved in a single redrive pass, so a huge backlog is recovered in bounded bites rather than one burst. */
+  /** Messages moved per redrive pass, so a large backlog is recovered in bounded bites. */
   readonly redriveMax: number;
 };
 
@@ -143,17 +86,12 @@ export const runDaemon = (cfg: DaemonConfig) =>
     const redriveQueue = redriveTriggerQueueFor(cfg.apiId);
     const controlQueue = controlQueueFor(cfg.apiId, cfg.instanceId);
 
-    // Every daemon declares the shared topology. These are all idempotent
-    // declares of the same arguments, so N daemons racing to start is fine —
-    // whoever gets there first wins and the rest are no-ops.
+    // Idempotent declares of identical arguments, so N daemons racing to start is fine.
     const exchange = yield* control.declareTopicExchange(
       CONTROL_EXCHANGE,
       CONTROL_EXCHANGE_OPTIONS,
     );
-    // Declared before the queue that points at it, so a rejection in the
-    // fleet's first seconds has somewhere to land. It is the only queue with
-    // no dead-letter target of its own — the end of the line, and pointing it
-    // at itself is a cycle. Everything else routes rejections here.
+    // Before the queues that point at it, so an early rejection has somewhere to land.
     yield* control.declareQueue(deadQueue, deadLetterQueueOptions());
     yield* control.declareQueue(workQueue, workQueueOptions(cfg.apiId));
     yield* control.declareQueue(probeQueue, sacQueueOptions(cfg.apiId));
@@ -162,25 +100,14 @@ export const runDaemon = (cfg: DaemonConfig) =>
     yield* control.bind(routingKeyFor(cfg.apiId), exchange, controlQ);
 
     /**
-     * Everything this daemon decides, in one value — see DaemonState.ts. The
-     * circuit state, the policy, and the two dedupe sequences used to be four
-     * separate Refs with invariants between them and nothing saying so; the two
-     * sequences in particular were read-then-write across two operations, from
-     * handlers that run concurrently on AMQP callbacks. One `Ref.modify` over
-     * one value makes each transition atomic and each decision testable without
-     * a broker.
+     * Everything this daemon decides, in one value — see DaemonState.ts. One
+     * `Ref.modify` over one value keeps each transition atomic against the
+     * concurrent AMQP callbacks that drive it.
      */
     const now = yield* Effect.clockWith((c) => c.currentTimeMillis);
     const state = yield* Ref.make<DaemonState>(initialState(cfg.fleetSize, now));
 
-    /**
-     * The churning channels, which are resources rather than decisions: this
-     * is the "actual" side that `plan` compares the desired shape against.
-     * Three handles because that is what they are, and because Redrive.ts owns
-     * one of them by contract.
-     *
-     * `workConsumer` is non-null exactly while this daemon is pulling work.
-     */
+    /** The churning channels — the "actual" side `plan` compares the desired shape against. */
     const workConsumer = yield* Ref.make(O.none<Consumer>());
     const probeConsumer = yield* Ref.make(O.none<Consumer>());
     const redriveConsumer = yield* Ref.make(O.none<Consumer>());
@@ -198,25 +125,8 @@ export const runDaemon = (cfg: DaemonConfig) =>
     let contract: ContractState = initialContract;
 
     /**
-     * One real call to the flaky third party, through the egress listener.
-     * Deliberately plain async: it is awaited by the AMQP message handler,
-     * and wrapping it in Effect would buy nothing here.
-     *
-     * There used to be a hand-rolled concurrency gate in front of this — a
-     * counter, a queue of pending resolvers, and a comment claiming it was
-     * "real backpressure all the way to the queue, not an in-process buffer
-     * pretending to be one". It was exactly the second thing. The client's
-     * default prefetch was 100 and `maxInFlight` was 32, chosen that way on
-     * purpose, so a saturated daemon held a hundred deliveries unacked with
-     * sixty-eight of them parked in an array inside this process — off the
-     * queue, invisible to the broker and to the management UI, and gone if
-     * the container died.
-     *
-     * The ceiling belongs to the broker, which already had a lever for it.
-     * The work consumer asks for `prefetch: maxInFlight`, so at most that many
-     * deliveries exist here at once and every one of them is a call actually
-     * in progress. The rest stay in the queue, where the backlog is something
-     * you can see, count, and let another daemon drain.
+     * One call to the third party through the egress listener. Plain async: it is
+     * awaited by the AMQP handler, and Effect would buy nothing here.
      */
     const rawCall = async (): Promise<Settlement> => {
       inFlight++;
@@ -224,11 +134,8 @@ export const runDaemon = (cfg: DaemonConfig) =>
         const res = await fetch(`${cfg.egressAddr}${cfg.apiPath}`, {
           signal: AbortSignal.timeout(2000),
         });
-        // Read the body even though nothing wants it. An unconsumed response
-        // holds its connection out of the pool until the GC gets to it, which
-        // is the standard way to leak sockets at rate — and this is the
-        // highest-rate call in the system. It also makes "the call finished"
-        // mean the response actually arrived, rather than just its headers.
+        // Drain the body even though nothing wants it: an unconsumed response holds
+        // its connection out of the pool, which at this rate leaks sockets.
         await res.text().catch(() => {});
         if (res.ok) {
           counts.ok++;
@@ -237,19 +144,10 @@ export const runDaemon = (cfg: DaemonConfig) =>
         counts.failed++;
         return "requeue";
       } catch {
-        // Connection refused / timeout once the cluster is fully ejected is
-        // the expected shape of an outage, not an error to report here — the
-        // aggregator is what judges the API's health, from Envoy's own view.
-        //
-        // `requeue`, not `discard`: the work queue is a quorum queue carrying
-        // `x-delivery-limit`, so the broker counts the attempts and parks the
-        // message on the dead-letter queue itself once the budget is spent
-        // (WORK_DELIVERY_LIMIT in @egress/rmq/ControlPlane.ts). The daemon
-        // does not count, and should not: an in-process counter dies when the
-        // message moves to another daemon, which is exactly what an outage
-        // makes happen. `failed` therefore counts *attempts*, not
-        // messages: a message that fails its whole budget increments it once
-        // per try, which is what a rate of failing calls should measure.
+        // Connection refused or timeout is the expected shape of an outage, not an
+        // error to report: the aggregator judges the API's health from Envoy's view.
+        // `requeue`, not `discard` — the broker counts attempts and parks the message
+        // itself at `x-delivery-limit`. `failed` therefore counts attempts, not messages.
         counts.failed++;
         return "requeue";
       } finally {
@@ -258,28 +156,16 @@ export const runDaemon = (cfg: DaemonConfig) =>
     };
 
     /**
-     * The services this daemon was built with, captured so work started from an
-     * AMQP callback can still reach them.
-     *
-     * `Effect.runPromise` builds a fresh runtime with default services every
-     * time, which for a span means the default no-op tracer: the span is
-     * created, costs something, and goes nowhere. That is exactly what happened
-     * the first time this was wired — the `traceparent` was on the wire and the
-     * daemon's spans simply never reached the collector.
+     * Captured so work started from an AMQP callback can still reach them.
+     * `Effect.runPromise` would build a fresh runtime with default services —
+     * for a span that means the no-op tracer, and it goes nowhere.
      */
     const services = yield* Effect.context<never>();
     const runInContext = Effect.runPromiseWith(services);
 
     /**
-     * The same call, inside a span when the message carried one.
-     *
-     * The path docs/decisions/003-tracing.md named as the one worth tracing —
-     * a message off the work queue, the third-party call it causes, and the
-     * circuit event that eventually comes back — starts here. It is also the
-     * hottest code in this process, which is why the untraced case is the
-     * original function called directly: no Effect runtime, no span, one null
-     * check. Only a message that arrived carrying a traceparent pays for a
-     * `runPromise`.
+     * The same call inside a span, only when the message carried a parent. This is
+     * the hottest path in the process, so the untraced case stays one null check.
      */
     const callEgress = (parent: O.Option<Tracer.ExternalSpan>): Promise<Settlement> =>
       O.isNone(parent)
@@ -301,19 +187,10 @@ export const runDaemon = (cfg: DaemonConfig) =>
           );
 
     /**
-     * How many unreadable messages this daemon preserves before it starts
-     * letting them go.
-     *
-     * Rejecting one is right: the evidence is worth more than the message.
-     * Rejecting every one is not, and the arithmetic is unkind — control
-     * events fan out to *every* daemon's own queue, so a schema mismatch
-     * between publisher and fleet is not one bad message, it is every message
-     * multiplied by the fleet size, all of it landing on one dead-letter
-     * queue at the full event rate. A bounded sample answers the question a
-     * human actually has ("what does the message look like?") without turning
-     * a version skew into a second incident. `egress_daemon_undecodable_total`
-     * keeps counting past the bound, so the *rate* stays visible even after
-     * the samples stop.
+     * Unreadable messages preserved before the rest are let go. Control events fan
+     * out to every daemon, so a version skew would otherwise flood one dead-letter
+     * queue at the full event rate. `egress_daemon_undecodable_total` counts past
+     * the bound, so the rate stays visible.
      */
     const UNDECODABLE_SAMPLE = 20;
 
@@ -336,12 +213,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
       return "accept";
     };
 
-    /**
-     * Serializes reconciliation against itself. Control events and probe
-     * triggers both land on AMQP callbacks that fork into the runtime, so
-     * without a permit two of them could each observe "no work consumer" and
-     * both open one.
-     */
+    /** Serializes reconciliation: two callbacks could otherwise both see "no work consumer". */
     const gate = yield* Semaphore.make(1);
 
     /** Open a work-queue consumer on its own channel. */
@@ -357,11 +229,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
       yield* Ref.set(workConsumer, O.some(consumer));
     });
 
-    /**
-     * Retire a consumer and the channel under it. Everything it was holding
-     * unacked goes back to the queue — which is exactly what `OPEN` wants,
-     * since the work behind those deliveries has not been done.
-     */
+    /** Retire a consumer and its channel; anything held unacked returns to the queue. */
     const retire = (ref: Ref.Ref<O.Option<Consumer>>) =>
       Ref.getAndSet(ref, O.none<Consumer>()).pipe(
         Effect.flatMap(
@@ -369,14 +237,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
         ),
       );
 
-    /**
-     * Make the channels match the state, and nothing else.
-     *
-     * Which consumers *should* exist is `desired`, and the difference between
-     * that and what does exist is `plan` — both pure, both in DaemonState.ts,
-     * both tested without a broker. What is left here is the part that can only
-     * happen here: opening and closing channels, under the permit.
-     */
+/** Make the channels match the state. `desired` and `plan` decide; this only acts. */
     const reconcile = gate.withPermit(
       Effect.gen(function* () {
         const have = {
@@ -392,20 +253,13 @@ export const runDaemon = (cfg: DaemonConfig) =>
       }),
     );
 
-    /**
-     * Take exactly one message and make one real call, on a channel that
-     * exists only for this probe. Opened only by the SAC-elected daemon, and
-     * retired by `reconcile` when the state leaves HALF_OPEN.
-     */
+    /** One message, one call, on a channel that exists only for this probe. */
     const probeOnce = gate.withPermit(
       Effect.gen(function* () {
         if (O.isSome(yield* Ref.get(probeConsumer))) return;
 
-        // Cancel from inside the handler — that is what stops delivery at the
-        // first message — and cancel rather than close, because the channel
-        // has to outlive the cancellation long enough to settle the message
-        // this probe is holding. The call's outcome decides that message's
-        // fate; the teardown must not.
+        // Cancel from inside the handler to stop at the first message, and cancel
+        // rather than close: the channel must outlive it long enough to settle.
         let self: Consumer | null = null;
         let taken = false;
         const consumer = yield* control.consume(
@@ -416,12 +270,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
             Effect.runFork(control.cancelConsumer(self));
             return callEgress(delivery.parent);
           },
-          // The one state whose contract is "exactly one call" asks the broker
-          // for exactly one message. The AMQP 1.0 client had no such lever —
-          // its credit window was a fixed 1000, so a probe against a deep
-          // queue was handed a thousand deliveries and stranded every one of
-          // them on close. That is what used to make a whole throwaway
-          // connection per probe necessary rather than merely tidy.
+          // The state whose contract is "exactly one call" asks for exactly one message.
           { prefetch: 1 },
         );
         self = consumer;
@@ -432,13 +281,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
       }),
     );
 
-    /**
-     * Dead-letter recovery lives in its own module — see Redrive.ts. What is
-     * passed here is the coupling, made explicit: the daemon's connection, the
-     * two queue names, the circuit state it must stop on, and this daemon's
-     * consumer Ref and permit, because `reconcile` retires the channel from
-     * the other side when the state changes.
-     */
+    /** Dead-letter recovery — see Redrive.ts. The options are the coupling, made explicit. */
     const redriveOnce = makeRedrive({
       label,
       enabled: cfg.redriveOnClose,
@@ -454,23 +297,11 @@ export const runDaemon = (cfg: DaemonConfig) =>
       gate,
     });
 
-    // Published by *every* daemon on entering HALF_OPEN, not just one, so the
-    // trigger still arrives when some daemons are down. SAC delivers all of
-    // them to the single elected consumer, which dedupes on the circuit
-    // sequence below — that is why the sequence travels in the body.
+    // Published by every daemon, so a trigger still arrives when some are down.
     const trigger = yield* control.publisherToQueue(probeQueue);
     const redriveTrigger = yield* control.publisherToQueue(redriveQueue);
 
-    /**
-     * One command in, one atomic transition out, and the actions the pure
-     * reducer asked for.
-     *
-     * `Ref.modify` rather than get-then-set, which is the point: these are
-     * called from AMQP callbacks that run concurrently, and the two dedupe
-     * checks ("have I already probed for this sequence?") used to read and
-     * write across two operations. Now the decision and the record of it are
-     * the same step.
-     */
+    /** One command in, one atomic transition out. `Ref.modify` because callers run concurrently. */
     const dispatch = (command: Command) =>
       Ref.modify(state, (prior) => {
         const { next, actions } = reduce(prior, command, cfg.fleetSize, cfg.redriveOnClose);
@@ -508,11 +339,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
       );
     });
 
-    /**
-     * Order is preserved from when this was written out by hand: apply the
-     * transition, make the channels match it, say so, and only then publish
-     * whatever triggers the transition called for.
-     */
+    /** Order matters: apply, reconcile, log, and only then publish the triggers. */
     const applyEvent = (circuitState: State, sequence: number, reason: string) =>
       Effect.gen(function* () {
         const at = yield* Effect.clockWith((c) => c.currentTimeMillis);
@@ -530,18 +357,8 @@ export const runDaemon = (cfg: DaemonConfig) =>
     yield* control.consume(controlQueue, (body) => {
       const decoded = decodeCircuitEvent(body);
       if (Result.isFailure(decoded)) {
-        // Same stance as @egress/subscriber: an event that does not match the
-        // published contract is never half-applied. It is rejected rather
-        // than accepted, so it lands on the canonical dead-letter queue
-        // instead of existing only as a log line nobody can act on — a
-        // control message the fleet could not read is precisely the thing
-        // you want to still have in your hands afterwards. Up to a point:
-        // see UNDECODABLE_SAMPLE for why that point exists.
-        //
-        // The two reasons are named separately because they call for different
-        // reactions: a schema mismatch is a version skew between this fleet and
-        // whatever is publishing, and something that is not JSON at all means
-        // the publisher is not the aggregator.
+        // Never half-applied: rejected, so it lands on the dead-letter queue rather
+        // than existing only as a log line. Bounded by UNDECODABLE_SAMPLE.
         return sampleUnreadable(
           decoded.failure === "malformed-json"
             ? "control message that is not JSON"
@@ -562,24 +379,9 @@ export const runDaemon = (cfg: DaemonConfig) =>
     });
 
     /**
-     * Both elections read their trigger the same way, and used not to: each
-     * had its own `Number(JSON.parse(body).sequence ?? -1)` — one encoder up
-     * in `perform` and two parsers kept in agreement by hand, for the only
-     * message on this control plane that had no declaration.
-     *
-     * It has one now (`ElectionTrigger` in @egress/rmq), which closes two
-     * holes that were invisible from here. A sequence that is not a number
-     * came through as `NaN`, and the dedupe below it is `sequence <=
-     * probedSequence` — every comparison against `NaN` is false, so a trigger
-     * that could not be ordered read as a *new* transition and probed again.
-     * And `?? -1` turned a trigger with no sequence at all into a
-     * valid-looking number that every daemon silently ignores, which is the
-     * one outcome this fleet refuses everywhere else: neither acted on nor
-     * preserved. Both are now `schema-mismatch`, dead-lettered and counted
-     * like any other unreadable message.
-     *
-     * A duplicate trigger for a transition already acted on still produces no
-     * actions — that is the reducer's job, not this handler's.
+     * Both elections read their trigger the same way, through `ElectionTrigger`.
+     * A duplicate for a transition already acted on produces no actions — that is
+     * the reducer's job, not this handler's.
      */
     const onTrigger =
       (what: string, command: (sequence: number) => Command) => (body: string) => {
@@ -599,27 +401,21 @@ export const runDaemon = (cfg: DaemonConfig) =>
         );
       };
 
-    // Registered for the whole life of the process and idle almost all of it.
-    // Being *registered* is the point: SAC promotion needs candidates already
-    // waiting when the active one dies, which is exactly the failover this
-    // fleet gets for free from the broker instead of hand-rolling.
+    // Registered for the life of the process and idle almost all of it: SAC promotion
+    // needs candidates already waiting when the active one dies.
     yield* control.consume(
       probeQueue,
       onTrigger("probe", (sequence) => ({ _tag: "ProbeTriggered", sequence })),
     );
 
-    // The second SAC election, identical in shape to the prober's: every
-    // daemon publishes the trigger so it still arrives when some are down,
-    // the broker delivers all of them to one consumer, and that consumer
-    // dedupes on the circuit sequence so one recovery means one replay.
+    // The second election, identical in shape: one recovery means one replay.
     yield* control.consume(
       redriveQueue,
       onTrigger("redrive", (sequence) => ({ _tag: "RedriveTriggered", sequence })),
     );
 
-    // CLOSED until told otherwise: a daemon that starts mid-incident learns
-    // the real state from the aggregator's next snapshot (snapshotMs), which
-    // is what those periodic republishes are for.
+    // CLOSED until told otherwise: a daemon starting mid-incident learns the real
+    // state from the aggregator's next snapshot.
     yield* reconcile;
     yield* Effect.log(
       `${label}: up — fleet=${cfg.fleetSize} maxInFlight=${cfg.maxInFlight} ` +
@@ -627,30 +423,20 @@ export const runDaemon = (cfg: DaemonConfig) =>
     );
 
     /**
-     * Metrics are published from here rather than from each call site: the
-     * message path is a plain async function running a few hundred times a
-     * second, and forking a fiber per metric write would be the most
-     * expensive thing in it. Counters go up by the delta since the last
-     * flush, which is precisely what a Prometheus counter is; gauges are
-     * just set.
+     * Published from here rather than each call site: the message path is a plain
+     * async function running a few hundred times a second, and a fiber per metric
+     * write would be the most expensive thing in it.
      */
     const attrs = { apiId: cfg.apiId };
 
-    /**
-     * The high-water mark: everything already published to the registry.
-     *
-     * Advanced from the same snapshot the delta was computed from, and never
-     * by re-reading the counters — see Tally.ts for the leak that came of
-     * reading them twice with a suspension in between.
-     */
+    /** Advanced from the same snapshot the delta came from, never by re-reading — see Tally.ts. */
     let published = Tally.nothing;
 
     const flush = Effect.gen(function* () {
       const { circuit, policy } = yield* Ref.get(state);
       const active = O.isSome(yield* Ref.get(workConsumer));
 
-      // Gauges are "whatever it is now" by definition, so these are read live
-      // rather than from the snapshot below.
+      // Gauges are whatever it is now, so these are read live.
       yield* Effect.all(
         [
           Metric.update(Metric.withAttributes(Telemetry.circuitState, attrs), STATE_CODE[circuit]),
@@ -662,9 +448,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
         { discard: true },
       );
 
-      // One reading, both uses. Everything below may suspend freely: a
-      // message counted while it does lands in the next delta rather than
-      // disappearing into a mark that moved without it.
+      // One reading, both uses, so everything below may suspend freely.
       const current = Tally.snapshot(counts, contract);
       const delta = Tally.since(published, current);
       published = current;
@@ -676,14 +460,9 @@ export const runDaemon = (cfg: DaemonConfig) =>
         );
       }
       if (delta.failed > 0) {
-        // Published together because the gap between them is informative.
-        // Every failed call rejects its message, but a rejection whose link
-        // has already gone (OPEN closing the work channel with calls
-        // still in flight) is swallowed by the client's guarded settle, and
-        // the broker requeues that delivery instead of dead-lettering it —
-        // so dead_lettered trailing calls{failed} slightly is work that was
-        // retried rather than work that was lost. The two diverging by a
-        // *lot* would mean something else, which is why both are here.
+        // Together, because the gap between them is informative: a rejection whose
+        // link has already gone is requeued rather than dead-lettered, so
+        // dead_lettered trailing calls{failed} slightly is work that was retried.
         yield* Effect.all(
           [
             Metric.update(
@@ -725,11 +504,8 @@ export const runDaemon = (cfg: DaemonConfig) =>
     });
 
     /**
-     * Zero every counter once at startup so its series exists before
-     * anything has happened to it. Without this the dashboard's
-     * delivery-contract tiles read "No data" until the first gap — and a
-     * tile whose entire job is to sit at zero through an incident is worse
-     * than useless if zero is indistinguishable from broken.
+     * Zero every counter at startup so its series exists before anything happens to
+     * it: a tile whose job is to sit at zero is useless if zero reads as "No data".
      */
     yield* Effect.all(
       [
@@ -750,17 +526,9 @@ export const runDaemon = (cfg: DaemonConfig) =>
     );
 
     /**
-     * The ramp advances on a clock, so something has to look at the clock.
-     *
-     * Gating rungs on elapsed time fixes half the problem; the other half is
-     * that `step` only ran when a control message arrived, so a quiet recovery
-     * — no transitions, one snapshot every `snapshotMs` — still advanced the
-     * ramp at the aggregator's pace rather than its own. This is the daemon
-     * asking the question on its own schedule.
-     *
-     * Only while CLOSED, and only when the answer changes: every other state
-     * is a level, not a ramp, and re-reconciling an unchanged target would
-     * rebuild the work channel once a second for no reason.
+     * The ramp advances on a clock, so something must look at the clock — otherwise
+     * it would advance at whatever pace control messages happen to arrive. Only
+     * while CLOSED, and only when the target actually changes.
      */
     const advanceRamp = Effect.gen(function* () {
       const at = yield* Effect.clockWith((c) => c.currentTimeMillis);
@@ -777,12 +545,8 @@ export const runDaemon = (cfg: DaemonConfig) =>
       Effect.forever(Effect.sleep("1 second").pipe(Effect.andThen(advanceRamp))),
     );
 
-    // A heartbeat independent of the control plane. Without it a daemon that
-    // has gone deaf is indistinguishable from one whose circuit simply has
-    // not moved — which is precisely how the stranded-delivery bug above hid
-    // for as long as it did. The metrics above are the same observation made
-    // scrapeable; this stays because a log line is what you actually have
-    // when you are looking at one container.
+    // Independent of the control plane: without it, a daemon that has gone deaf
+    // looks exactly like one whose circuit has not moved.
     yield* Effect.forever(
       Effect.sleep("15 seconds").pipe(
         Effect.andThen(describe),

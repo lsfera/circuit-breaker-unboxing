@@ -241,28 +241,13 @@ const PATTERN = new RegExp(
 export type EnvoyReplica = { readonly replicaId: string; readonly adminUrl: string };
 
 /**
- * What one replica's stats say, and which clusters it did not say enough
- * about.
+ * What one replica's stats say, and which clusters it did not say enough about.
  *
- * The second half exists because the first used to lie. `membership_healthy`
- * and `membership_total` are the only two stats a vote is computed from, and
- * they used to be read with `?? 0` — so a stat set that arrived carrying
- * `membership_total: 6` and no `membership_healthy` produced
- * `{ healthy: 0, total: 6 }`, which `Breaker.voteOf` reads as `DOWN`: *every
- * host in this cluster is gone*. Absence was decoded as the most consequential
- * value in the domain.
- *
- * Measured against the real pure code, with that stat set from three replicas:
- * three DOWN votes, candidate OPEN, and `CLOSED -> OPEN` published with reason
- * `ALL_ENDPOINTS_EJECTED` — a total outage declared for an upstream nobody had
- * said anything about. The mirror image of this repo's first finding, where a
- * mean over endpoint counts made "all endpoints gone" silently *false*.
- *
- * A cluster missing either number is therefore not reported at all. That is
- * not the same as reporting it healthy: this replica simply does not vote on
- * that API this tick, which is a case the quorum already handles — and, since
- * [009](../../../docs/decisions/009-what-the-quorum-is-a-quorum-of.md), one
- * that is counted rather than silent.
+ * `membership_healthy` and `membership_total` are the only two stats a vote is
+ * computed from, and neither may be defaulted: `{ healthy: 0, total: 6 }` is how
+ * Envoy says *every host is gone*, so a missing gauge would decode as the most
+ * consequential reading in the domain. A cluster missing either is not reported
+ * at all — the replica abstains, which the quorum already handles and 009 counts.
  */
 export type ParsedStats = {
   readonly reports: ReadonlyArray<ReplicaReport>;
@@ -322,14 +307,8 @@ export const parseStats = (
 };
 
 /**
- * Reporting for clusters `parseStats` refused, shared by both ingestion
- * layers.
- *
- * Once per replica and cluster, not once per tick: an Envoy whose stats config
- * filters `membership_healthy` is a permanent condition, and `tickMs` is
- * 250ms. The counter is the same one every other way of leaving a quorum is
- * counted on, because this is that — a replica not voting on an API — arriving
- * by a different route.
+ * Clusters `parseStats` refused, reported once per replica and cluster: a stats
+ * config that filters a gauge is a permanent condition, not a per-tick event.
  */
 export const makeIncompleteReporter = () => {
   const warned = new Set<string>();
@@ -369,15 +348,8 @@ export const EnvoyFleetLayer = (
       const known = new Set(specs.map((s) => s.apiId));
 
       /**
-       * Which replicas answered last tick.
-       *
-       * A replica that stops answering leaves the fleet, and every quorum in
-       * @egress/domain is a fraction of whoever is left — so a departure is
-       * worth one line and one increment. The state is here rather than a
-       * counter per failed poll because `tickMs` is 250ms: without it, one
-       * unreachable replica would be four log lines a second saying the same
-       * thing, which is how the line that matters gets lost. See
-       * docs/decisions/009-what-the-quorum-is-a-quorum-of.md.
+       * Which replicas answered last tick, so a departure is logged once rather
+       * than four times a second at `tickMs`.
        */
       const answering = new Map<string, boolean>(
         replicas.map((r) => [r.replicaId, true] as const),

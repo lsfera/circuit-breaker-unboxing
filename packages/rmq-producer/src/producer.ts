@@ -9,16 +9,11 @@ import {
 import * as Telemetry from "./Telemetry.ts";
 
 /**
- * The "high throughput of requests" half of the scenario: a steady stream of
- * work onto `<apiId>.work` for the daemon fleet to drain, one call to the
- * flaky third party per message.
+ * The load half of the scenario: a steady stream onto `<apiId>.work`.
  *
- * It publishes at a fixed rate and never looks at the circuit state — that
- * is deliberate. The whole problem this repo is about only exists because
- * the arrival rate does *not* drop when the third party degrades; a producer
- * that backed off on its own would hide the backlog the fleet has to survive.
- * Watch the queue depth climb through OPEN and drain back down as the ramp
- * brings daemons back — that gap is the thundering herd, made visible.
+ * Fixed rate, and it never looks at the circuit state. The problem this repo is
+ * about only exists because arrivals do not stop when a third party degrades; a
+ * producer that backed off would hide the backlog the fleet has to survive.
  */
 
 export type ProducerConfig = {

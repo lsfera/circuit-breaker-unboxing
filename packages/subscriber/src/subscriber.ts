@@ -4,22 +4,13 @@ import { CircuitEvent, State } from "@egress/domain/Model.ts";
 import type { State as StateType } from "@egress/domain/Model.ts";
 
 /**
- * A downstream consumer, written the way a real one should be.
+ * A downstream consumer (`npm run subscribe`), demonstrating the three properties
+ * the event contract is built for: it syncs from a single message, since every
+ * event carries full state; it detects loss, since per-API sequences are gapless;
+ * and it is idempotent, which is what lets delivery be at-least-once.
  *
- *   npm run subscribe
- *
- * It demonstrates the three properties the event contract is built for:
- *
- *  1. It syncs from a single message. Every event carries full state, so this
- *     can start mid-incident and still know payments-provider is OPEN without
- *     replaying history.
- *  2. It detects loss. Per-API sequence numbers are gapless, so a missing
- *     message is visible rather than silent.
- *  3. It is idempotent. Re-delivery of the same sequence changes nothing,
- *     which is what lets the producer be at-least-once.
- *
- * The payload is decoded through the same Schema the producer publishes with,
- * so contract drift fails loudly here instead of corrupting state silently.
+ * Decoded through the same Schema the aggregator publishes with, so contract
+ * drift fails here instead of corrupting state silently.
  */
 
 const ORIGIN = process.env["AGGREGATOR"] ?? "http://127.0.0.1:8088";

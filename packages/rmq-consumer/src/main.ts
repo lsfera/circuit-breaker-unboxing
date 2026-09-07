@@ -14,25 +14,11 @@ import { runDaemon } from "./daemon.ts";
  *
  *   node --experimental-strip-types src/main.ts
  *
- * This used to dispatch on argv between `daemon` and `producer`. The producer
- * is its own component now (@egress/rmq-producer) because it shares nothing
- * with this one — no control queue, no policy, no elections, and it never
- * reads the circuit state, which is the entire point of the scenario.
- *
- * Everything comes from the environment rather than flags, because in this
- * repo these are containers rather than commands someone types — see the
- * rmq-daemon-* services in docker-compose.yml. DAEMON_INDEX is the one value
- * that differs between otherwise identical daemon containers.
- *
- * Declared once and decoded at boot rather than read with `Number(env(...))`,
- * which is what this used to do. A daemon is the worst place in this repo for
- * a `NaN`: it does not crash, it idles. See @egress/config for what each
- * mistyped variable was measured doing.
- *
- * It also serves `/metrics` on METRICS_PORT from the same in-process `effect`
- * registry @egress/aggregator uses, scraped by the same Prometheus. That is
- * what puts the fleet's behaviour on the same dashboard as the circuit it is
- * reacting to, instead of in a second tool on a second screen.
+ * Settings come from the environment because these are containers rather than
+ * commands someone types; `DAEMON_INDEX` is the one value that differs between
+ * otherwise identical daemon containers. Also serves `/metrics` from the same
+ * in-process registry the aggregator uses, so the fleet and the circuit it
+ * reacts to land on one dashboard.
  */
 
 const settings = load(

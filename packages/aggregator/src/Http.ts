@@ -181,24 +181,13 @@ export const HttpLive = HttpRouter.use((router) =>
     yield* router.add("GET", "/api/state", stateFrame.pipe(Effect.map((f) => HttpServerResponse.jsonUnsafe(f))));
 
     /**
-     * Liveness and readiness, and the distinction between them is the whole
-     * point of having two routes.
+     * Liveness is "is the control loop still running" — a dead loop leaves a
+     * process serving 200s with every gauge frozen, which reads as a quiet system.
      *
-     * **Liveness** is "is the control loop still running". The failure this
-     * catches is the one that actually happened here: a defect out of the
-     * tick killed `Effect.repeat`, the loop was simply gone, and the process
-     * kept serving HTTP 200 with every gauge frozen at its last value — which
-     * is indistinguishable from a system where nothing is happening. Anything
-     * that restarts unhealthy containers should watch this.
-     *
-     * **Readiness** is "can this instance serve requests", and it is
-     * emphatically **not** leadership. A standby serves the same read-only
-     * API, keeps its own metrics, and is one lease away from leading. Marking
-     * it unready would take it out of rotation for doing its job, and during
-     * a rolling deploy it would take out the pair: the leader is stopping and
-     * the standby is "not ready", so nothing is left. What readiness waits
-     * for is one completed pass, so `/api/state` answers with the fleet
-     * rather than with an empty registry.
+     * Readiness is "can this instance serve requests", and emphatically not
+     * leadership: a standby serves the same read-only API and is one lease away
+     * from leading, so marking it unready would empty the rotation during a
+     * rolling deploy. It waits for one completed pass, no more.
      */
     const health = Effect.gen(function* () {
       const [now, last, leader] = yield* Effect.all([

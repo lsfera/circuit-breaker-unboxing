@@ -100,20 +100,11 @@ export const AggregatorLayer = Layer.effect(
     /**
      * Stop leading, and drop every breaker held in memory.
      *
-     * The second half is not housekeeping — it is what keeps the sequence
-     * guarantee intact across a demotion. Whoever leads next resumes from
-     * the checkpoint and advances `sequence` past whatever is in memory
-     * here; the rehydrate-on-acquire path in `tick` only fires for APIs
-     * this instance has no breaker for, so a *warm* registry would let a
-     * re-promoted instance silently resume from its own stale sequence and
-     * republish numbers the other leader already used. Discarding it makes
-     * re-promotion identical to a cold start, which is the path that is
-     * actually exercised by a test.
-     *
-     * Losing the per-replica history costs nothing: it repopulates from the
-     * next few polls, exactly as it does on a fresh start — see
-     * Checkpoint's doc comment for why that is the whole point of keeping
-     * checkpoints this small.
+     * Dropping them is what keeps the sequence guarantee across a demotion:
+     * rehydrate-on-acquire only fires for APIs this instance has no breaker for,
+     * so a warm registry would let a re-promoted instance resume from its own
+     * stale sequence and republish numbers another leader already used. The
+     * per-replica history costs nothing to lose; it repopulates in a few polls.
      */
     const demote = Effect.all(
       [
@@ -360,16 +351,12 @@ export const AggregatorLayer = Layer.effect(
 
     /**
      * A tick that cannot reach the coordinator is a *skipped* tick, not a dead
-     * loop. Standing down is the only safe reading — an instance that cannot
-     * confirm it still holds the lease must not act as leader — and the next
-     * tick tries again, so recovery needs no intervention.
+     * loop: stand down, because an instance that cannot confirm it holds the lease
+     * must not act as leader, and try again next tick.
      *
-     * The shape matters as much as the handling. This used to be an
-     * `Effect.promise` deep in the Redis layer, so an outage arrived as a
-     * defect, `Effect.repeat` terminated, and the loop was gone permanently in
-     * a process that stayed up and kept answering 200. Measured before the
-     * fix: 55 seconds without Redis ended the loop for good, and a total
-     * upstream failure afterwards published nothing.
+     * The shape matters as much as the handling — as a defect rather than a typed
+     * failure, an outage would terminate `Effect.repeat` and end the loop for good
+     * in a process that stays up and keeps answering 200.
      */
     const tick: Effect.Effect<ReadonlyArray<CircuitEvent>> = attemptTick.pipe(
       Effect.catchTag("CoordinationUnavailable", (err) =>
@@ -411,20 +398,13 @@ export const AggregatorLayer = Layer.effect(
     const isLeader = Ref.get(leadership).pipe(Effect.map((l) => l.isLeader));
 
     /**
-     * Hand the lease back on the way out.
+     * Hand the lease back on the way out, so a planned stop does not cost the
+     * standby `leaseTtlMs` of waiting with nobody publishing. `release` only
+     * removes the lease if this instance still holds it, so a demoted instance
+     * calling it cannot evict whoever took over.
      *
-     * `LeaderElection.release` existed from the start and nothing ever called
-     * it, so a lease was only ever surrendered by expiring. That is correct
-     * for a crash and wasteful for a planned stop: every rolling deploy cost
-     * the standby up to `leaseTtlMs` of waiting before it could acquire, with
-     * nobody publishing in between. `release` only removes the lease if this
-     * instance still holds it, so a demoted instance calling it is a no-op
-     * rather than a way to evict whoever took over.
-     *
-     * Best effort by construction. This runs while the process is going away:
-     * if the coordinator is unreachable, the lease expires the old way and
-     * the outcome is exactly what it was before this existed. Failing here
-     * would replace a clean shutdown with a noisy one and change nothing.
+     * Best effort: if the coordinator is unreachable the lease expires the old
+     * way, and failing here would only make a clean shutdown noisy.
      */
     const releaseOnShutdown = Effect.gen(function* () {
       if (!(yield* Ref.get(leadership)).isLeader) return;

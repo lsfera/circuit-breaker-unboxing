@@ -4,14 +4,7 @@ import * as Tally from "../src/Tally.ts";
 import { initialContract } from "../src/Contract.ts";
 import type { ContractState } from "../src/Contract.ts";
 
-/**
- * The arithmetic behind `egress_daemon_*`, with no registry and no broker.
- *
- * This used to be a dozen subtractions inline in daemon.ts, where the only way
- * to exercise them was to run five containers and provoke an outage — the same
- * position the delivery-contract check was in before Contract.ts, and it had
- * the bug that position invites. See Tally.ts for the reproduction.
- */
+/** The arithmetic behind `egress_daemon_*`, with no registry and no broker. */
 
 const contract = (over: Partial<ContractState> = {}): ContractState => ({
   ...initialContract,
@@ -46,16 +39,9 @@ test("publishing twice with nothing in between asks the registry for nothing", (
 });
 
 /**
- * The regression, and the reason this file exists.
- *
- * Publishing suspends, and the old flush read its counters again afterwards to
- * record what it had published — so anything counted *during* the publication
- * was marked as sent without being sent, and the mark having moved meant no
- * later flush would ever pick it up. Measured at one lost control event per
- * mid-flush arrival, permanently.
- *
- * A snapshot is a copy, so what happens after it is taken cannot be swallowed
- * by it. That is the whole fix, expressed as a type rather than as care.
+ * Publishing suspends. Anything counted during it must land in the next delta
+ * rather than in a mark that moved without it — which is what re-reading the
+ * counters after publishing would do.
  */
 test("what is counted after a snapshot is taken survives to the next delta", () => {
   const counts = Tally.zero();

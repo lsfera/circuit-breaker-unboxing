@@ -9,42 +9,23 @@ import type { ApiSpec } from "./FleetSource.ts";
 import type { ReplicaReport } from "@egress/domain/Model.ts";
 
 /**
- * The other half of the ingestion question: Envoy pushing its stats here,
- * instead of this process polling every replica's admin port.
+ * Envoy pushing its stats here, instead of this process polling admin ports.
+ * Same `FleetSource`, same `parseStats`, same `ReplicaReport`; only the
+ * transport differs.
  *
- * Same `FleetSource` interface, same `parseStats`, same `ReplicaReport` — only
- * the transport differs, which is the claim the interface was written to make
- * good on. Nothing downstream knows which layer it is talking to.
+ * Three things to know before changing it:
  *
- * Four things about this are worth knowing before reading the code.
+ * - No build step. `@grpc/proto-loader` reads the partial schemas in `proto/`
+ *   at runtime, and protobuf addresses fields by number, so Envoy's messages
+ *   decode without vendoring its api tree.
+ * - Only the *first* message on a stream carries the node identifier, so it is
+ *   remembered per call. Reading it per message loses every replica's identity.
+ * - Push does not fan out. A sink names one gRPC cluster, and pointing that at
+ *   two aggregators load-balances the stream, giving each a partial fleet to
+ *   compute a quorum from. Hence one sink per aggregator in the Envoy config.
  *
- * **There is no build step, and there did not have to be.** The reason
- * polling was chosen originally was that a gRPC server implies generated
- * stubs. It does not: `@grpc/proto-loader` reads `.proto` files at runtime,
- * and protobuf addresses fields by number, so the deliberately partial schemas
- * in `proto/` decode Envoy's real messages without vendoring Envoy's api tree.
- *
- * **Only the first message on a stream carries the node identifier.** Envoy
- * opens one stream per sink and pushes one message per flush interval;
- * `identifier` is set once, at the start. Reading it per message works
- * perfectly in a test with one message and loses every replica's identity in
- * production, so it is remembered per call.
- *
- * **Push does not fan out on its own.** A stats sink names one gRPC cluster.
- * Point that cluster at two aggregators and Envoy load-balances the stream, so
- * each instance sees *some* replicas — a quorum computed from a partial fleet,
- * which is worse than no data because it looks like data. The Envoy config
- * therefore declares one sink per aggregator, and each pushes the whole set.
- *
- * **A replica can leave without anyone noticing, and this is where that was
- * possible.** The paragraph above names the hazard exactly, and the fix it
- * describes only closes one cause of it. Two others lived here: a stream
- * pushing with no node id was dropped message by message in silence, and a
- * replica that stopped pushing expired out of the fleet with nothing said and
- * its entry left behind. Both quietly shrink the denominator every quorum in
- * @egress/domain is a fraction of. They are counted and logged now — see
- * docs/decisions/009-what-the-quorum-is-a-quorum-of.md for why the arithmetic
- * itself is deliberately not changed.
+ * A replica leaving is counted and logged rather than silent — see
+ * docs/decisions/009-what-the-quorum-is-a-quorum-of.md.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -64,15 +45,10 @@ type StreamMetricsMessage = {
 };
 
 /**
- * Envoy sends one `MetricFamily` per stat, each with a single unlabelled
- * entry, because `emit_tags_as_labels` is left off: the family name is the
- * full dotted stat name (`cluster.payments-provider.membership_healthy`),
- * exactly as the admin endpoint reports it.
- *
- * That is what lets `parseStats` be shared rather than reimplemented, and it
- * is the reason the sink must NOT be configured with `emit_tags_as_labels:
- * true` — that form extracts the tags into labels and shortens the name, and
- * the shared regex would match nothing at all.
+ * With `emit_tags_as_labels` off, each family name is the full dotted stat name,
+ * exactly as the admin endpoint reports it — which is what lets `parseStats` be
+ * shared. Turning that option on shortens the names and the shared regex then
+ * matches nothing at all.
  */
 const flatten = (families: ReadonlyArray<MetricFamily>) => {
   const stats: Array<{ name: string; value: number }> = [];
@@ -94,14 +70,10 @@ type Snapshot = {
 };
 
 /**
- * @param port     where Envoy pushes. One sink per aggregator instance, so
- *                 this is a normal listening port, not a shared one.
- * @param specs    the APIs this aggregator reconciles, same as the polling layer.
- * @param staleMs  how long a replica's last push stays usable. A replica that
- *                 has stopped pushing is a replica that is gone, and the
- *                 quorum rule already tolerates a missing one — but stats that
- *                 keep being counted long after they stopped arriving are the
- *                 push equivalent of a frozen gauge, so they expire.
+ * @param port     where Envoy pushes; one sink per aggregator instance.
+ * @param specs    the APIs this aggregator reconciles.
+ * @param staleMs  how long a replica's last push stays usable. Stats counted long
+ *                 after they stopped arriving are a frozen gauge, so they expire.
  */
 export const EnvoyPushFleetLayer = (
   port: number,
@@ -113,24 +85,13 @@ export const EnvoyPushFleetLayer = (
     Effect.gen(function* () {
       const known = new Set(specs.map((s) => s.apiId));
       /**
-       * A plain Map, not a Ref, and the reason is the boundary it lives on:
-       * writes happen inside a gRPC socket callback, which is ordinary
-       * JavaScript with no fiber to run an Effect in. Bridging one back into
-       * the runtime for a single map assignment would buy nothing but a
-       * runtime handle to keep alive. Reads happen in `poll`, on the loop's
-       * own fiber, and the only shared state is last-write-wins.
+       * A plain Map, not a Ref: writes happen in a gRPC socket callback with no
+       * fiber to run an Effect in, reads happen in `poll` on the loop's fiber, and
+       * the shared state is last-write-wins.
        */
       const latest = new Map<string, Snapshot>();
 
-      /**
-       * Pushes discarded for want of a node id, since the last poll.
-       *
-       * Accumulated as a plain number for the same reason `latest` is a plain
-       * Map: the write happens in a socket callback with no fiber to run an
-       * Effect in. `poll` reads and zeroes it in one synchronous step and
-       * publishes the difference — the shape @egress/rmq-consumer's Tally.ts
-       * exists to make safe.
-       */
+      /** Pushes discarded for want of a node id; `poll` reads and zeroes it in one step. */
       let anonymous = 0;
 
       const noteIncomplete = makeIncompleteReporter();
@@ -164,12 +125,9 @@ export const EnvoyPushFleetLayer = (
             const id = message.identifier?.node?.id;
             if (id !== undefined && id !== "") replicaId = id;
             if (replicaId === null) {
-              // An Envoy started without `--service-node` pushes stats it
-              // cannot be credited with. Dropping the message is right — a
-              // report with no replica identity would be counted as a second
-              // vote from whoever wrote it last — but dropping it *quietly*
-              // is how a replica goes missing from a quorum with nothing
-              // said. Recorded here and reported by `poll`, on the fiber.
+              // An Envoy started without `--service-node` pushes stats nothing can
+              // attribute; filing them under the last writer would be a second vote
+              // from one replica. Dropped, but counted — see `poll`.
               anonymous++;
               return;
             }
@@ -224,10 +182,8 @@ export const EnvoyPushFleetLayer = (
         const reports: ReplicaReport[] = [];
         for (const [replicaId, snapshot] of latest) {
           if (now - snapshot.receivedAt > staleMs) {
-            // Removed rather than skipped, so the departure is announced once
-            // instead of being re-discovered every tick — and so a replica
-            // that comes back registers as an arrival rather than as an entry
-            // that was quietly there all along.
+            // Removed rather than skipped, so the departure is announced once rather
+            // than re-discovered every tick.
             latest.delete(replicaId);
             yield* Effect.logWarning(
               `envoy metrics: ${replicaId} stopped pushing ${staleMs}ms ago and no ` +
@@ -239,10 +195,8 @@ export const EnvoyPushFleetLayer = (
             );
             continue;
           }
-          // `observedAt` is the tick's clock, not the push's, for the same
-          // reason the polling layer uses it: downstream ages a report against
-          // the loop's own time, and mixing the two would make a report look
-          // fresher or staler than the loop can justify.
+          // `observedAt` is the tick's clock, not the push's: downstream ages reports
+          // against the loop's own time.
           const parsed = parseStats(replicaId, snapshot, now, (c) => known.has(c));
           yield* noteIncomplete(replicaId, parsed.incomplete);
           reports.push(...parsed.reports);

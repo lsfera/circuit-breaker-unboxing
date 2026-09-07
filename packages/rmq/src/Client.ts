@@ -12,15 +12,9 @@ export type RmqExchange = unknown;
 export type RmqQueue = unknown;
 
 /**
- * A consumer is a channel plus the tag the broker gave it. One channel per
- * consumer on purpose — see the module doc.
- *
- * Deliberately mutable, and it is the one piece of mutability in this file
- * that earns its place: on a recovery the client rebuilds the consumer on a
- * new channel and points this same object at it, so a caller holding the
- * handle across an outage still holds a working one. @egress/rmq-consumer
- * keeps these in `Ref`s and compares them by identity, which only works
- * because the identity survives.
+ * A channel plus the tag the broker gave it. Mutable on purpose: recovery
+ * rebuilds the consumer on a new channel and repoints this same object, so a
+ * caller holding the handle — or comparing it by identity — keeps a valid one.
  */
 export type Consumer = { channel: Channel; consumerTag: string };
 
@@ -32,47 +26,14 @@ export type Consumer = { channel: Channel; consumerTag: string };
 export type Publisher = { readonly exchange: string; readonly routingKey: string };
 
 /**
- * Effect wrapper over amqplib (AMQP 0-9-1), in the same Context.Service /
- * Layer.effect / Data.TaggedError shape as @egress/aggregator's FleetSource.ts
- * and Coordination.ts.
+ * Effect wrapper over amqplib (AMQP 0-9-1). Why this protocol and not 1.0:
+ * docs/decisions/004-downgrade-to-amqp-0-9-1.md.
  *
- * ## Why 0-9-1, having started on 1.0
- *
- * This was `rabbitmq-amqp-js-client` (AMQP 1.0, RabbitMQ 4 native) and the
- * decision to keep it was made on measurement — see
- * docs/decisions/001-amqp-client.md. What changed is the evidence, not the
- * taste:
- *
- *  - That client had no commit upstream after 2026-06-25, and its issue #96 —
- *    concurrent `createPublisher` calls resolving with crossed links, ~20,000
- *    misrouted messages for the reporter in production — was still open. It is
- *    the same defect this module used to serialize every operation to avoid.
- *  - Three separate workarounds here were calibrated to that exact build: a
- *    connection-wide semaphore, a two-connection topology per daemon, and an
- *    `uncaughtException` filter for a rhea throw with no reachable listener.
- *  - It exposed no way to bound a consumer's unsettled deliveries. rhea's
- *    default credit window is 1000, which is why closing a probe consumer
- *    stranded so much: the probe wanted *one* message.
- *
- * All three are gone here rather than worked around, which is the point of the
- * move. `prefetch` is a first-class argument, channels isolate failure, and
- * publishing has no link to race. What it costs is RabbitMQ 4's native
- * protocol; what it buys is a client with no dependencies, its own types, and
- * an actual maintainer.
- *
- * ## Channels, not connections
- *
- * The expensive lesson of the 1.0 client was that closing a consumer with
- * deliveries in flight stranded them, and enough strandings stalled *every*
- * link on that connection — so anything that churned consumers needed a
- * connection it could afford to destroy.
- *
- * 0-9-1 has the isolation built in. Every consumer here gets its own channel;
- * a channel that errors takes down nothing but itself, and cancelling a
- * consumer leaves the channel able to settle the delivery it is holding.
- * Declares get a throwaway channel each, so a `PRECONDITION_FAILED` from a
- * redeclare with different arguments — an ordinary thing to hit while
- * changing topology — cannot take the publish path with it.
+ * Channels, not connections, are the unit of isolation. Every consumer gets its
+ * own channel, so a channel that errors takes down nothing else and cancelling a
+ * consumer leaves it able to settle the delivery it holds. Declares get a
+ * throwaway channel each, so a `PRECONDITION_FAILED` from a mismatched redeclare
+ * cannot take the publish path with it.
  */
 
 export class RmqError extends Data.TaggedError("RmqError")<{
@@ -83,42 +44,28 @@ export class RmqError extends Data.TaggedError("RmqError")<{
 export type QueueArgs = Record<string, unknown>;
 
 /**
- * What a handler asks the broker to do with the delivery it was given.
+ * What a handler asks the broker to do with its delivery.
  *
- * - `accept` — done with it, drop it from the queue (the default; a handler
- *   that returns nothing gets this).
- * - `requeue` — back onto the queue for another consumer or another attempt.
- *   Nothing about it is delayed, so an unbounded requeue on a failing
- *   dependency is a hot loop; bound it.
- * - `discard` — rejected without requeue. On a queue declared with
- *   `x-dead-letter-exchange` that routes the message to the dead-letter queue;
- *   on one without, it is dropped.
+ * - `accept` — drop it from the queue; the default when a handler returns nothing.
+ * - `requeue` — back on the queue, with no delay, so an unbounded requeue on a
+ *   failing dependency is a hot loop. Bound it.
+ * - `discard` — rejected without requeue: dead-lettered where a target is
+ *   declared, dropped where none is.
  */
 export type Settlement = "accept" | "requeue" | "discard";
 
 /** What the broker knows about this particular delivery. */
 export type DeliveryInfo = {
   /**
-   * How many times this message has been delivered and returned, as the broker
-   * counts it — the `x-delivery-count` header a quorum queue stamps, 0 on a
-   * first delivery.
-   *
-   * The 1.0 client reported 0 unconditionally, which is why the redelivery
-   * budget had to be the queue's job (`x-delivery-limit`). It still is, and
-   * should stay so: an in-process counter dies when the message moves to
-   * another daemon. This is now honest for anything that wants to *look*.
+   * The broker's own `x-delivery-count`, 0 on a first delivery. For looking at;
+   * enforcement stays the queue's job via `x-delivery-limit`, because an
+   * in-process counter dies when a message moves to another consumer.
    */
   readonly deliveryCount: number;
   /**
-   * Where this message was dead-lettered from, when it was — RabbitMQ 4 stamps
-   * `x-first-death-queue` and `x-first-death-reason` as headers. `None` for a
-   * message that arrived normally.
-   *
-   * Computed on first access and cached: the high-rate handlers never read it.
-   *
-   * This is what makes one canonical dead-letter queue workable rather than a
-   * bin of unrelated things — anything draining it can tell work that failed
-   * its third-party call from a control message that failed to decode.
+   * Where this message was dead-lettered from (`x-first-death-*`), `None` if it
+   * arrived normally. Computed lazily; the high-rate handlers never read it. It is
+   * what lets one dead-letter queue hold unrelated things and still be drainable.
    */
   readonly deadLetter: O.Option<{ readonly queue: string; readonly reason: string }>;
   /**
@@ -130,13 +77,8 @@ export type DeliveryInfo = {
    */
   readonly properties: Readonly<Record<string, string>>;
   /**
-   * The span that published this message, when it was published inside one.
-   *
-   * `None` for the overwhelming majority, because tracing is sampled at the
-   * root — so a handler that wraps its work in a span only pays for it on the
-   * messages someone decided to follow. Handed to the caller rather than
-   * applied here, because this client has no idea what the work around a
-   * delivery is or what the span should be called.
+   * The publishing span, when there was one. `None` for most messages, since
+   * tracing is sampled at the root. Handed to the caller rather than applied here.
    */
   readonly parent: O.Option<Tracer.ExternalSpan>;
 };
@@ -144,34 +86,18 @@ export type DeliveryInfo = {
 /**
  * How many deliveries a consumer may hold unsettled.
  *
- * There was no equivalent lever on the 1.0 client: rhea's credit window was a
- * fixed 1000, so a consumer opened on a deep queue immediately owed the broker
- * an answer for a thousand messages. Every caller here wants far fewer, and
- * the probe wants exactly one.
- *
- * This is only a default, for consumers whose work is bounded by something
- * other than how many messages they hold: the control queue, the two election
- * queues, a redrive pass. Anything whose prefetch *is* its concurrency limit
- * passes its own — the daemon's work consumer asks for `maxInFlight` and the
- * HALF_OPEN probe asks for exactly one.
- *
- * It used to be justified the other way round, as deliberately above the
- * daemon's `maxInFlight` so that an in-process gate could do the limiting.
- * That gate is gone: a prefetch above the concurrency limit does not add
- * headroom, it moves the difference out of the queue and into an array in the
- * consumer, where nothing can see it.
+ * A default, for consumers bounded by something other than how many messages
+ * they hold — the control queue, the elections, a redrive pass. Any consumer
+ * whose prefetch *is* its concurrency limit passes its own; see
+ * docs/decisions/011-the-ceiling-belongs-to-the-broker.md.
  */
 export const DEFAULT_PREFETCH = 100;
 
 export interface RmqService {
   /**
-   * `durable` decides whether the queue and its contents survive a broker
-   * restart, and it is a real decision rather than a default worth inheriting.
-   * A transient queue is right for a live subscription that a restarting
-   * consumer can rebuild from the next snapshot. It is badly wrong for a queue
-   * whose entire purpose is holding work you promised to keep: measured on
-   * this stack, a broker restart took a dead-letter queue from 24 preserved
-   * messages to zero.
+   * Whether the queue and its contents survive a broker restart. A real decision:
+   * transient suits a live subscription a consumer can rebuild, and is badly wrong
+   * for a queue holding work you promised to keep.
    */
   readonly declareQueue: (
     name: string,
@@ -187,18 +113,13 @@ export interface RmqService {
     destination: RmqQueue,
   ) => Effect.Effect<void, RmqError>;
   /**
-   * The message is settled only once `onMessage` settles. Returning a promise
-   * is therefore the flow-control lever: a handler that waits for its own work
-   * holds its delivery unacked, and with `prefetch` bounding how many a
-   * consumer may hold, the broker stops pushing before the consumer is
-   * swamped. A synchronous handler settles immediately and gets no
-   * backpressure at all.
+   * Settled only once `onMessage` settles, which is the flow-control lever: a
+   * handler that awaits its own work holds the delivery unacked, and `prefetch`
+   * bounds how many it may hold. A synchronous handler gets no backpressure.
    *
-   * The returned value chooses the outcome, synchronously or from a promise;
-   * returning nothing accepts, which is what every handler that cannot fail
-   * wants. A handler that *throws* accepts anyway: the alternative is an
-   * unbounded redelivery loop driven by a bug, which is worse than a lost
-   * message and much harder to see.
+   * The returned value chooses the outcome; returning nothing accepts. A handler
+   * that throws also accepts — an unbounded redelivery loop driven by a bug is
+   * worse than a lost message and much harder to see.
    */
   readonly consume: (
     queue: string,
@@ -215,13 +136,9 @@ export interface RmqService {
   ) => Effect.Effect<Publisher, RmqError>;
   readonly publisherToQueue: (queue: string) => Effect.Effect<Publisher, RmqError>;
   /**
-   * `properties` become message headers — see `DeliveryInfo.properties` for
-   * why anything republishing needs them.
-   *
-   * Every message is published persistent. There is no flag for it because
-   * there is no case here for publishing otherwise: on a transient queue the
-   * broker ignores it, and on a durable one it is the difference between
-   * keeping the message across a restart and only appearing to.
+   * `properties` become message headers. Everything is published persistent, with
+   * no flag: on a transient queue the broker ignores it, and on a durable one it is
+   * the difference between keeping a message across a restart and appearing to.
    */
   readonly send: (
     pub: Publisher,
@@ -229,23 +146,13 @@ export interface RmqService {
     properties?: Record<string, string>,
   ) => Effect.Effect<void, RmqError>;
   /**
-   * Stop delivery to this consumer, leaving its channel able to settle
-   * whatever it is still holding.
-   *
-   * What the HALF_OPEN probe needs: it takes one message, stops the flow from
-   * inside the handler, and then settles that message from the call's outcome.
-   * Closing the channel instead would make the settlement moot and hand the
-   * message back to the queue.
+   * Stop delivery, leaving the channel able to settle what it still holds — what
+   * the probe needs, since closing instead would hand its message back to the queue.
    */
   readonly cancelConsumer: (c: Consumer) => Effect.Effect<void>;
   /**
-   * Retire the consumer and its channel outright.
-   *
-   * Everything the channel is still holding unacked goes back to the queue,
-   * which is the point: this is how a daemon abandons work wholesale when the
-   * circuit moves under it. It is the operation that used to require dropping
-   * a whole connection, back when a stranded delivery could stall every link
-   * sharing one.
+   * Retire the consumer and its channel. Anything held unacked returns to the
+   * queue, which is how a daemon abandons work wholesale when the circuit moves.
    */
   readonly closeConsumer: (c: Consumer) => Effect.Effect<void>;
 }
@@ -289,19 +196,9 @@ export type RmqConnectOptions = {
 };
 
 /**
- * A lost connection is fatal by default.
- *
- * amqplib does not reconnect, and every consumer on a dead connection is
- * simply gone. Nothing in this process notices: the daemon's heartbeat reads
- * local state, so it goes on reporting `self=ACTIVE` while consuming nothing,
- * and the queue it was draining shows zero consumers. Measured, by restarting
- * the broker under the running fleet: five daemons up, five daemons idle, the
- * producer silent, and not one error line between them.
- *
- * That is the deaf-daemon failure this repo has an alert and a runbook for,
- * and surviving it quietly is worse than dying. Exiting hands the problem to
- * `restart: unless-stopped`, which is what the crash-fast stance in the
- * entrypoints has always assumed — see docker-compose.yml.
+ * A lost connection is fatal by default: every consumer on it is gone, and
+ * nothing in the process notices — it keeps reporting itself active while
+ * consuming nothing. Exiting hands that to `restart: unless-stopped`.
  */
 const connectionLost = (reason: string) => {
   console.error(
@@ -347,37 +244,19 @@ const describe = (delivery: ConsumeMessage): DeliveryInfo => {
 };
 
 /**
- * One AMQP connection that repairs itself, released when the surrounding scope
- * closes.
+ * One AMQP connection that repairs itself, released with the surrounding scope.
+ * Separate from `RmqLive` because a connection is not always process-lifetime
+ * here — a redrive pass and a probe each open their own.
  *
- * Exposed separately from `RmqLive` because a connection is not always a
- * process-lifetime thing here: @egress/rmq-consumer's daemon opens one per
- * redrive pass and per probe, so that work can be abandoned wholesale.
+ * amqplib's own `recovery` reopens the socket and nothing else: channels are not
+ * recreated and consumers are not re-registered, so a "recovered" process would
+ * be connected and consuming nothing. This records every queue, exchange,
+ * binding and live consumer and rebuilds them from the `setup` hook. Order
+ * matters — topology first, since a transient queue does not survive a broker
+ * restart and its consumer would fail NOT_FOUND; publish channel; consumers.
  *
- * ## Recovery, and why the client has to own it
- *
- * amqplib will reconnect for you (`recovery`), and that is all it does: it
- * reopens the socket and hands you a fresh connection. Channels are not
- * recreated, consumers are not re-registered, and a `Channel` you are holding
- * belongs to the connection that died. Left there, "recovery" would mean a
- * process that is connected and consuming nothing — which is the same zombie
- * as no recovery at all, only harder to see.
- *
- * So this records what it was asked to build — every queue, exchange and
- * binding, and every live consumer — and rebuilds it from the `setup` hook,
- * which amqplib runs after each successful connect and before it hands the
- * connection to anyone. Topology first, because a transient queue does not
- * survive a broker restart and its consumer would fail with NOT_FOUND;
- * publish channel next; consumers last.
- *
- * `Consumer` handles are mutated in place rather than replaced, so callers
- * holding one across a recovery keep a valid handle — `@egress/rmq-consumer`
- * stores them in `Ref`s and compares them by identity.
- *
- * Recovery is bounded. If it cannot get back within `maxRetries`, the process
- * exits and the restart policy takes over: a daemon that has been retrying for
- * five minutes has nothing a restart would lose, and something the platform
- * should know about.
+ * Bounded: past `maxRetries` the process exits and the restart policy takes over.
+ * See docs/decisions/005-connection-recovery.md.
  */
 export const makeRmq = (
   opts: RmqConnectOptions,
@@ -420,15 +299,9 @@ export const makeRmq = (
     let opening: Promise<ConfirmChannel> | null = null;
 
     /**
-     * Publishes still waiting for a confirm, so one 'close' listener per
-     * channel can fail all of them.
-     *
-     * A listener per in-flight publish is the obvious way to write this and
-     * the wrong one: the producer sends its whole batch at once, so Node
-     * started reporting a possible leak at eleven concurrent publishes. They
-     * were not leaking — each was removed on confirm — but a warning that
-     * cries leak in the logs of a system whose logs are the diagnostic is a
-     * cost of its own.
+     * Publishes awaiting a confirm, so one 'close' listener per channel can fail
+     * all of them. A listener per publish trips Node's leak warning at eleven
+     * concurrent, which the producer's batching reaches immediately.
      */
     const pending = new Set<(error: Error) => void>();
 
@@ -508,14 +381,9 @@ export const makeRmq = (
     };
 
     /**
-     * Run after every successful connect, including the first, and before the
-     * connection is handed to anyone. On the first pass there is nothing
-     * recorded and this only opens the publish channel; on a recovery it is
-     * what puts the process back to work.
-     *
-     * It uses the model it is given rather than the recovering wrapper, which
-     * is not serving connections yet — asking the wrapper here would wait for
-     * the connection this function is part of establishing.
+     * Runs after every successful connect, before the connection is handed out.
+     * Uses the model it is given rather than the recovering wrapper, which is not
+     * serving connections yet and would deadlock waiting for this one.
      */
     const setup = async (model: ChannelModel) => {
       await applyTopology(() => model.createChannel());

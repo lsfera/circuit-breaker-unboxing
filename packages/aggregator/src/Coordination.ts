@@ -3,59 +3,27 @@ import { ReasonSchema, StateSchema } from "@egress/domain/Model.ts";
 import type { Reason, State } from "@egress/domain/Model.ts";
 
 /**
- * What makes N aggregator instances safe to run at once. Two problems, one
- * module: exactly one instance may publish at a time (LeaderElection), and
- * whichever instance takes over next must continue the sequence rather than
- * restart it at zero (CheckpointStore). `Aggregator.ts` is the only caller;
- * everything else stays exactly as pure/testable as before.
+ * What makes N aggregator instances safe to run at once: exactly one may publish
+ * (LeaderElection), and whoever takes over continues the sequence rather than
+ * restarting at zero (CheckpointStore). `Aggregator.ts` is the only caller.
  *
- * The in-memory layer makes a single aggregator process behave correctly
- * (and is what main.ts wires by default — solo mode is just "one instance
- * that always wins the lease," not a special case). The `RedisLike` port
- * makes an actual multi-process deployment possible: hand a real Redis
- * client to `RedisCoordinationLayer` and the Lua scripts below give the same
- * fencing guarantee across processes.
- *
- * Both paths are run, not just reasoned about. `Coordination.test.ts` drives
- * two instances against the in-memory layer; `test/integration/
- * RedisCoordination.test.ts` drives the same properties against a real Redis
- * container; and `docker compose up` deploys it — two aggregator containers,
- * `--ha=redis`, one shared `redis` service. The README's "High availability"
- * section is the single place that tracks what has actually been observed;
- * this comment deliberately does not restate it.
+ * The in-memory layer is not a special case — solo mode is one instance that
+ * always wins its own lease. `RedisLike` is a one-method port so a real client
+ * plugs in without this module depending on one.
  */
 
 /**
- * `"<epoch>:<counter>"`.
- *
- * The counter alone was not enough, and the way it failed is worth keeping in
- * front of whoever reads this. It came from `INCR`, so a coordinator that lost
- * its state — a Redis restart without persistence, a failover to an empty
- * replica — started issuing from 1 again. A leader paused through that still
- * held token 5, and `attempted < current` then read `5 < 1`, which is false:
- * the stale leader was waved through and overwrote the new leader's
- * checkpoints. Split brain, reached by making the counter go backwards rather
- * than by any race. Verified against a real Redis before it was fixed.
- *
- * The epoch is generated once, when a coordinator finds itself with no state.
- * A token from a previous epoch is then not merely stale, it is
- * unrecognisable — which is the stronger and simpler property.
+ * `"<epoch>:<counter>"`. The counter alone is not enough: a coordinator that
+ * loses its state starts counting from 1 again, and a paused leader holding a
+ * higher token would then out-rank the live one. The epoch is minted when a
+ * coordinator finds no state to inherit, so a token from before that is not
+ * merely stale, it is unrecognisable.
  */
 /**
  * A fencing token: which coordinator issued it, and how many handoffs had
- * happened when it did.
- *
- * This was `type LeaseToken = string`, parsed with `slice(indexOf(":"))` at
- * every use. That is primitive obsession on the most safety-critical value in
- * the system, and it had the hole you would expect: a counter that did not
- * parse became `NaN`, and `NaN < current` is `false`, so a malformed token
- * with the right epoch was **not** fenced — the precise failure fencing exists
- * to prevent. Measured on the old helpers: `"abc123:abc"` against a current of
- * `"abc123:5"` came back accepted.
- *
- * As a record, that state cannot be built. The string form still exists,
- * because the coordinator stores one, but it lives at the boundary in
- * `formatToken`/`parseToken` rather than in every comparison.
+ * happened when it did. A record rather than the string the coordinator stores,
+ * so a counter that cannot be ordered cannot be built — the string form lives at
+ * the boundary in `formatToken`/`parseToken`, not in every comparison.
  */
 export type LeaseToken = {
   /** Which coordinator minted it. Tokens from different epochs are incomparable. */
@@ -68,14 +36,9 @@ export type LeaseToken = {
 const newEpoch = (): string => Math.random().toString(36).slice(2, 10);
 
 /**
- * The wire form, declared rather than hand-parsed.
- *
- * `Schema` for the same reason `CheckpointFromJson` is a schema: this value
- * crosses a boundary, and the rules about what a valid one looks like belong
- * in one declaration rather than spread across a parser and a formatter that
- * have to agree. `Natural` is what closes the original hole — `"abc:abc"` and
- * `"abc:-1"` do not decode at all, so a token whose counter cannot be ordered
- * cannot exist to be compared.
+ * The wire form, declared once rather than split across a parser and a formatter
+ * kept in agreement by hand. `Natural` is what makes an unorderable counter
+ * impossible to decode.
  */
 const LeaseTokenFromString = Schema.TemplateLiteralParser([
   Schema.NonEmptyString,
@@ -135,18 +98,11 @@ export class CheckpointFenced extends Data.TaggedError("CheckpointFenced")<{
 }> {}
 
 /**
- * The coordinator could not be reached.
+ * The coordinator could not be reached — a *failure*, not a defect. A defect
+ * escaping the tick terminates `Effect.repeat`, which ends the control loop for
+ * good in a process that stays up and keeps serving 200s.
  *
- * This is a *failure*, deliberately, and the distinction is the whole point.
- * These calls used to be `Effect.promise`, which turns a rejected promise into
- * a defect — and a defect propagating out of the tick means `Effect.repeat`
- * terminates and the aggregator's control loop is gone for good, in a process
- * that stays up and keeps serving 200s. Measured: a 55-second Redis outage
- * stopped the loop after seven more ticks and it never restarted, and a total
- * upstream failure afterwards published nothing at all.
- *
- * Typed, it is something the caller can reason about, and there is exactly one
- * safe reading of it: an instance that cannot confirm it still holds the lease
+ * There is one safe reading: an instance that cannot confirm it holds the lease
  * must not behave as leader.
  */
 export class CoordinationUnavailable extends Data.TaggedError("CoordinationUnavailable")<{
@@ -193,14 +149,10 @@ export class CheckpointStore extends Context.Service<
   CheckpointStore,
   {
     /**
-     * Rejects with CheckpointFenced if `token` is not the *current* lease
-     * token — checked against the same authoritative counter LeaderElection
-     * issues from, not a per-API "last write wins" value. That distinction
-     * is the whole point: fencing against a per-key value only stops a stale
-     * writer once someone else has already written that exact key, which
-     * leaves a real window open for an API the new leader hasn't touched
-     * yet. Fencing against the shared counter closes it immediately on
-     * handoff, for every key at once.
+     * Rejects with CheckpointFenced unless `token` is the current lease token,
+     * checked against the one counter LeaderElection issues from. Fencing per-key
+     * instead would only stop a stale writer after someone else had written that
+     * exact key, leaving every untouched API open.
      */
     readonly save: (
       apiId: string,
@@ -328,14 +280,9 @@ export const InMemoryCoordinationLayer: Layer.Layer<LeaderElection | CheckpointS
 // ---------------------------------------------------------------------------
 
 /**
- * A checkpoint read back out of Redis is untrusted input, whatever wrote it.
- * Decoding it rather than casting means a truncated write, a value left by an
- * older build, or anything else that does not match this shape is treated as
- * "no checkpoint" — a cold start, which the aggregator already handles
- * correctly — instead of seeding the breaker with a `sequence` of `undefined`
- * and publishing `NaN` to every subscriber. Same stance the daemons take on
- * an undecodable control event, applied to the one piece of state that
- * outlives the process.
+ * A checkpoint read back is untrusted input, whatever wrote it. Decoding rather
+ * than casting means anything malformed reads as "no checkpoint" — a cold start,
+ * which is handled — instead of seeding the breaker with `undefined`.
  */
 const CheckpointFromJson = Schema.Struct({
   state: StateSchema,
@@ -420,19 +367,13 @@ return ARGV[1]
 `;
 
 /**
- * How long a single coordination call may take before it counts as
- * unavailable.
+ * How long a coordination call may take before it counts as unavailable.
+ * "Stands down and retries next tick" is only true if the call *returns* — a
+ * one-sided partition can leave the client queueing against a connection it
+ * never establishes, and the promise never settles.
  *
- * "The instance stands down and retries next tick" was only ever true if the
- * call *returns*. It does not always: a one-sided partition — this instance
- * cannot reach Redis, the other one can — had the client queueing the command
- * against a connection it kept failing to establish, so the promise simply did
- * not settle. Measured: the tick loop advanced twice in twenty-five seconds and
- * then stopped, `/livez` went 503, and the instance neither led nor stood down.
- * It hung.
- *
- * Well under `leaseTtlMs` on purpose: a leader has to be able to fail a call,
- * notice, and still renew inside its lease.
+ * Well under `leaseTtlMs`: a leader must be able to fail a call, notice, and
+ * still renew inside its lease.
  */
 export const COORDINATION_TIMEOUT_MS = 1000;
 

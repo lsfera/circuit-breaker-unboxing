@@ -9,16 +9,7 @@ import {
 } from "../src/ControlPlane.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 
-/**
- * What this control plane will and will not read, with no broker.
- *
- * Both message kinds are declared here — the circuit event the aggregator
- * publishes, and the election trigger daemons publish to each other — so both
- * are readable the same way and testable the same way. The trigger only
- * recently became one of them: it was `JSON.stringify` at the publisher and
- * `Number(JSON.parse(body).sequence ?? -1)` at each of two consumers, which is
- * three places that had to agree and nothing making them.
- */
+/** What this control plane will and will not read, with no broker. */
 
 const event = (over: Partial<CircuitEvent["data"]> = {}): CircuitEvent => ({
   specversion: "1.0",
@@ -61,13 +52,9 @@ test("a trigger round-trips through the pair that publishes and reads it", () =>
 });
 
 /**
- * The hole this schema exists to close, and the same one the lease token had.
- *
- * The elected daemon dedupes triggers with `sequence <= probedSequence`, and
- * every comparison against `NaN` is false — so a trigger whose sequence could
- * not be ordered read as a new transition and probed again, on a state whose
- * entire contract is "exactly one call". `Number(...)` produced `NaN` from
- * every one of these.
+ * The dedupe is `sequence <= probedSequence` and every comparison against `NaN`
+ * is false, so a trigger that cannot be ordered would probe again — on the one
+ * state whose contract is "exactly one call".
  */
 test("a sequence that cannot be ordered does not decode", () => {
   for (const body of [
@@ -82,12 +69,7 @@ test("a sequence that cannot be ordered does not decode", () => {
   }
 });
 
-/**
- * The quieter half. `?? -1` turned a trigger with no usable sequence into a
- * number every daemon silently ignores — neither acted on nor preserved,
- * which is the one outcome this fleet refuses everywhere else. It is an
- * unreadable message now, so it is dead-lettered and counted.
- */
+/** Neither acted on nor preserved is the one outcome this fleet refuses. */
 test("a trigger with no sequence is a mismatch, not a silently ignored -1", () => {
   assert.equal(readTrigger("{}"), "schema-mismatch");
   assert.equal(readTrigger('{"sequence":null}'), "schema-mismatch");
@@ -95,11 +77,7 @@ test("a trigger with no sequence is a mismatch, not a silently ignored -1", () =
   assert.equal(readTrigger("null"), "schema-mismatch");
 });
 
-/**
- * Told apart because they call for different reactions: a mismatch is a
- * version skew between whatever published and this fleet, and something that
- * is not JSON at all means the publisher is not who we think it is.
- */
+/** Told apart because they call for different reactions. */
 test("not being JSON is a different failure from not matching the schema", () => {
   assert.equal(readTrigger("not json"), "malformed-json");
   assert.equal(readTrigger(""), "malformed-json");
@@ -113,13 +91,9 @@ test("a published event round-trips, and the two failures stay distinct", () => 
 });
 
 /**
- * `reason` was `Schema.String` while the vocabulary sat in the same file, and
- * the tell was the `as Reason` cast the aggregator needed to put a decoded
- * event's reason into a checkpoint. The checkpoint's own validator has always
- * been the strict one, so the write side was looser than the read side: a
- * reason outside the vocabulary could be checkpointed and then fail to decode
- * on rehydration, which reads as "no checkpoint" and cold-starts a new leader
- * at CLOSED.
+ * The checkpoint validator has always been strict, so a looser published contract
+ * would let a reason be written and then fail to decode on rehydration — read as
+ * "no checkpoint", cold-starting a new leader at CLOSED.
  */
 test("a reason outside the vocabulary is not a valid event", () => {
   assert.equal(
@@ -129,12 +103,7 @@ test("a reason outside the vocabulary is not a valid event", () => {
   assert.equal(readEvent(encodeCircuitEvent(event({ reason: "PROBE_FAILED" }))), 7);
 });
 
-/**
- * The same orderability rule as the trigger, on the value the whole delivery
- * contract is built from: `Contract.observe` counts gaps and duplicates by
- * comparing sequences, and a sequence that cannot be compared cannot be
- * checked.
- */
+/** The same rule on the value the delivery contract orders by. */
 test("an event whose sequence cannot be ordered is not a valid event", () => {
   for (const sequence of [-1, 2.5]) {
     assert.equal(
