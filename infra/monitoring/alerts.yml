@@ -125,6 +125,24 @@ groups:
             over a smaller fleet — check egress_circuit_reporting_replicas
             before trusting the next transition.
 
+      # A proxy manufacturing its own failures, which downstream is
+      # indistinguishable from the third party failing. Measured on a healthy
+      # fleet: every downstream 5xx these replicas had served was one of
+      # these, with the upstream at 47,807 requests and zero 5xx.
+      - alert: EgressSheddingLocally
+        expr: >-
+          increase(envoy_http_adaptive_concurrency_gradient_controller_rq_blocked[5m]) > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          runbook_url: "docs/runbooks/EgressSheddingLocally.md"
+          summary: "The egress proxy is rejecting requests itself"
+          description: >-
+            {{ $value }} request(s) shed by adaptive concurrency in the last 5
+            minutes. Daemons count these as third-party failures and can
+            dead-letter work over them while the circuit stays CLOSED — the
+            breaker is right, the failures are ours.
+
       - alert: DeadLetterQueueGrowing
         expr: increase(rabbitmq_detailed_queue_messages{queue=~".*work.dead"}[15m]) > 0
         for: 15m

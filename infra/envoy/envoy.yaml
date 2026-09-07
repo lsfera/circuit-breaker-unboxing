@@ -74,6 +74,46 @@ static_resources:
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                 stat_prefix: egress
+                # Errors only, and that is the whole design: at ~570 rps a full
+                # access log is noise nobody reads, while the responses worth
+                # keeping are rare enough to be free.
+                #
+                # It exists because of a measurement. On a fleet whose upstream
+                # had returned 47,807 requests and zero 5xx, all three replicas
+                # had returned 5xx downstream anyway — 19, 6 and 70 of them,
+                # each replica's count matching its adaptive_concurrency
+                # `rq_blocked` exactly. Those were generated *here*, by this
+                # proxy, and nothing recorded why: a locally generated response
+                # left no trace at all, because this listener had no access log.
+                #
+                # `%RESPONSE_CODE_DETAILS%` is the field that matters and the
+                # reason a header would not have done: Envoy reports
+                # `reached_concurrency_limit`, `no_healthy_upstream`,
+                # `route_not_found` and the rest only here, never on the
+                # response. A downstream caller genuinely cannot tell a shed
+                # request from a third-party failure — see
+                # docs/decisions/010-a-proxy-that-fails-on-its-own-behalf.md.
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    filter:
+                      status_code_filter:
+                        comparison:
+                          op: GE
+                          value: { default_value: 400, runtime_key: access_log.min_status }
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        json_format:
+                          time: "%START_TIME%"
+                          method: "%REQ(:METHOD)%"
+                          path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
+                          status: "%RESPONSE_CODE%"
+                          # Why *this* proxy produced this response.
+                          details: "%RESPONSE_CODE_DETAILS%"
+                          flags: "%RESPONSE_FLAGS%"
+                          cluster: "%UPSTREAM_CLUSTER%"
+                          upstream: "%UPSTREAM_HOST%"
+                          duration_ms: "%DURATION%"
                 route_config:
                   name: egress_routes
                   virtual_hosts:
