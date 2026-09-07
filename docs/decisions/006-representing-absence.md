@@ -1,11 +1,13 @@
-# 006 — How absence is represented
+# 006 — How absence and failure are represented
 
 **Status**: decided — applied across the codebase.
 **Date**: 2026-09-07.
 **Context**: the codebase had `Option`, `null` and `undefined` all meaning
 "there isn't one", chosen per-site by whoever wrote the line. That is three
 spellings of one idea, and the cost is not aesthetic — a reader has to work out
-which convention a given function follows before they can use it.
+which convention a given function follows before they can use it. The same
+question one level up — how a computation reports *failure* — had the same
+problem, and is answered in the second half.
 
 ## The rule
 
@@ -50,6 +52,7 @@ the boundary and never travels further.
 | `Trace.traceparent` | `Effect<string \| undefined>` | `Effect<O.Option<string>>` |
 | `Trace.parentFrom` | `→ ExternalSpan \| null` | `→ O.Option<ExternalSpan>` |
 | `Tracing.endpoint` | `→ string \| undefined` | `→ O.Option<string>` |
+| `decodeCircuitEvent` | `→ O.Option<CircuitEvent>` | `→ Result<CircuitEvent, DecodeFailure>` |
 
 `Option` is imported as `O` throughout. The codebase had both `Option.` and
 `O.`; one spelling is worth more than whichever spelling wins.
@@ -65,6 +68,56 @@ rather than worse:
 
 Note for anyone reaching for the usual names: this Effect version has
 `fromNullishOr` / `fromUndefinedOr` / `fromNullOr`, and no `fromNullable`.
+
+## Failure: `Result`, or the error channel
+
+The same question one level up — how does a computation say it *failed* — has
+the same shape of answer, and the dividing line is whether the code is
+effectful.
+
+**In `Effect`, use the error channel.** `Effect<A, E>` is already the
+either-with-effects, and this repo uses it well: `RmqError`,
+`CoordinationUnavailable`, `CheckpointFenced` are `Data.TaggedError`s in the
+error channel, recovered with `Effect.catchTag`. Reaching for a `Result`
+*inside* an `Effect` would be a second error channel next to the one that
+already exists, and combinators would stop composing.
+
+**In pure code, `Result` when the caller branches on why; `Option` when
+absence is the whole story.** That is the whole rule, and it is why most of
+this repo's pure fallible functions correctly return `Option`:
+`Trace.parentFrom` fails only one way (the header did not parse) and the
+caller's response is the same either way — skip the trace.
+
+One function did not fit. `decodeCircuitEvent` returned an `Option`, and its
+own comment admitted the collapse: *"malformed JSON decodes to None, same as a
+schema mismatch"*. Those mean different things to the fleet. A schema mismatch
+is a version skew between the aggregator and the daemons — the exact failure
+that dead-lettering undecodable messages exists to catch, and the one
+`egress_daemon_undecodable_total` counts. Something that is not JSON at all
+means the publisher is not the aggregator. It is now
+`Result<CircuitEvent, "malformed-json" | "schema-mismatch">`, and the daemon
+logs the two separately.
+
+### The case that looked like `Result` and is not
+
+The Redis `CheckpointStore.load` reads a checkpoint that may be absent,
+truncated, or valid JSON of the wrong shape, and returns `Option` for all
+three. That reads like a `Result` waiting to happen, and it should stay as it
+is:
+
+- `load` is effectful, so the candidate was never `Result` — it was the error
+  channel, `Effect<Option<Checkpoint>, CoordinationUnavailable | Unreadable>`.
+- Failing there takes the instance out of leadership over one corrupt key.
+  Resuming that one API from nothing costs it its sequence continuity, and
+  *that is detectable downstream* — a sequence starting over is precisely what
+  the delivery-contract check watches for. Trading a detectable anomaly for an
+  outage is the wrong way round.
+- `RedisCoordination.test.ts` already asserts all three read as absent, which
+  makes it a tested decision rather than an accident.
+
+What was wrong with it was not the type: it was **silent**. Both branches
+returned `None` with nothing written down. It logs which one now, and the
+`Option` stays.
 
 ## Consequences
 

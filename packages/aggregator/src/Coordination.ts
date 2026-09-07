@@ -444,13 +444,36 @@ export const RedisCoordinationLayer = (
           keys: [`${keyPrefix}:checkpoint:${apiId}`],
           args: [],
         }).pipe(
-          Effect.map((raw) => {
-            if (typeof raw !== "string") return O.none<Checkpoint>();
+          Effect.flatMap((raw) => {
+            // Absent is ordinary: an API nobody has checkpointed yet.
+            if (typeof raw !== "string") return Effect.succeed(O.none<Checkpoint>());
+
+            // Unreadable is not, and it stays an `Option` rather than becoming
+            // a failure on purpose. Failing here would take the instance out
+            // of leadership over one bad key, where resuming from nothing
+            // costs one API its sequence continuity — and *that* is caught
+            // downstream, because a sequence starting over is exactly what the
+            // delivery contract check is watching for. What it must not be is
+            // silent, which it was: both branches below returned `None` with
+            // no trace of the difference.
+            const unreadable = (why: string) =>
+              Effect.as(
+                Effect.logWarning(
+                  `checkpoint for ${apiId} ${why} — resuming that API from nothing`,
+                ),
+                O.none<Checkpoint>(),
+              );
+
+            let parsed: unknown;
             try {
-              return decodeCheckpoint(JSON.parse(raw));
+              parsed = JSON.parse(raw);
             } catch {
-              return O.none<Checkpoint>(); // not even JSON
+              return unreadable("is not JSON");
             }
+            const decoded = decodeCheckpoint(parsed);
+            return O.isNone(decoded)
+              ? unreadable("does not match the checkpoint schema")
+              : Effect.succeed(decoded);
           }),
         ),
     }),

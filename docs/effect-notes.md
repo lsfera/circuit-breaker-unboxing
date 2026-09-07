@@ -61,6 +61,24 @@ Three things worth knowing before writing any of it:
 (`O.Option<T>`), and both spellings existed in this repo before they were made
 one.
 
+## `Result`, and when not to reach for it
+
+`Result` is Effect 4's `Either`. The rule that keeps it from spreading:
+
+- **Inside `Effect`, use the error channel.** `Effect<A, E>` is the
+  either-with-effects already. A `Result` in there is a second error channel
+  beside the real one, and nothing composes with it.
+- **In pure code, `Result` only when the caller branches on *why*.** If every
+  failure leads to the same response, `Option` says exactly as much with less.
+  `Trace.parentFrom` is `Option` for that reason; `decodeCircuitEvent` is
+  `Result` because "not JSON" and "wrong shape" mean different things to a
+  daemon.
+
+Accessors are `.success` and `.failure` on the narrowed type, reached through
+`Result.isSuccess` / `Result.isFailure`, or `Result.match`. `Result.fromOption`
+takes the failure as a thunk, which is the usual bridge from a
+`Schema.decodeUnknownOption`.
+
 ## Effect 4 RC, read from the `.d.ts` files
 
 The published migration write-ups describe beta.5 and the API has moved since,

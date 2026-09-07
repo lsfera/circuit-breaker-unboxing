@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import { Result, Schema } from "effect";
 import { CircuitEvent } from "@egress/domain/Model.ts";
 
 /**
@@ -182,11 +182,33 @@ export const encodeCircuitEvent = (event: CircuitEvent): string => JSON.stringif
 
 const decode = Schema.decodeUnknownOption(CircuitEvent);
 
-/** The decode path @egress/subscriber uses, so the control plane and the HTTP/SSE path cannot disagree on what a valid event is. */
-export const decodeCircuitEvent = (body: string) => {
+/**
+ * Why a control message could not be read.
+ *
+ * The two are worth telling apart, and used not to be — this returned an
+ * `Option`, so "not JSON" and "JSON of the wrong shape" arrived as the same
+ * `None` and the fleet logged one message for both. They mean different
+ * things and want different reactions: a schema mismatch is a version skew
+ * between the aggregator and the fleet, which is the failure this repo
+ * dead-letters undecodable messages to catch; anything that is not JSON at all
+ * means something other than the aggregator is publishing to the exchange.
+ */
+export type DecodeFailure = "malformed-json" | "schema-mismatch";
+
+/**
+ * The decode path @egress/subscriber uses, so the control plane and the
+ * HTTP/SSE path cannot disagree on what a valid event is.
+ *
+ * `Result` rather than `Option` because the caller branches on the reason. A
+ * pure computation that can fail *for a reason someone acts on* is what
+ * `Result` is for — see docs/decisions/006-representing-absence.md.
+ */
+export const decodeCircuitEvent = (body: string): Result.Result<CircuitEvent, DecodeFailure> => {
+  let json: unknown;
   try {
-    return decode(JSON.parse(body));
+    json = JSON.parse(body);
   } catch {
-    return decode(undefined); // malformed JSON decodes to None, same as a schema mismatch
+    return Result.fail("malformed-json");
   }
+  return Result.fromOption(decode(json), (): DecodeFailure => "schema-mismatch");
 };

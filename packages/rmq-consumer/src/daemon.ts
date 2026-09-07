@@ -1,4 +1,4 @@
-import { Effect, Metric, Option as O, Ref, Semaphore } from "effect";
+import { Effect, Metric, Option as O, Ref, Result, Semaphore } from "effect";
 import type { Tracer } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
 import { withParent } from "@egress/rmq/Trace.ts";
@@ -524,7 +524,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
 
     yield* control.consume(controlQueue, (body) => {
       const decoded = decodeCircuitEvent(body);
-      if (O.isNone(decoded)) {
+      if (Result.isFailure(decoded)) {
         // Same stance as @egress/subscriber: an event that does not match the
         // published contract is never half-applied. It is rejected rather
         // than accepted, so it lands on the canonical dead-letter queue
@@ -532,9 +532,18 @@ export const runDaemon = (cfg: DaemonConfig) =>
         // control message the fleet could not read is precisely the thing
         // you want to still have in your hands afterwards. Up to a point:
         // see UNDECODABLE_SAMPLE for why that point exists.
-        return sampleUnreadable("undecodable control message");
+        //
+        // The two reasons are named separately because they call for different
+        // reactions: a schema mismatch is a version skew between this fleet and
+        // whatever is publishing, and something that is not JSON at all means
+        // the publisher is not the aggregator.
+        return sampleUnreadable(
+          decoded.failure === "malformed-json"
+            ? "control message that is not JSON"
+            : "control message that does not match the published schema",
+        );
       }
-      const { data, type } = decoded.value;
+      const { data, type } = decoded.success;
       if (data.apiId !== cfg.apiId) return; // belt and braces; the binding already filters
       eventsByType.set(type, (eventsByType.get(type) ?? 0) + 1);
 
