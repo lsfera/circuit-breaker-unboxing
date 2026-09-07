@@ -41,15 +41,74 @@ import type { Reason, State } from "@egress/domain/Model.ts";
  * A token from a previous epoch is then not merely stale, it is
  * unrecognisable — which is the stronger and simpler property.
  */
-export type LeaseToken = string;
-
-/** Tokens are only ordered within an epoch; across epochs they are incomparable by design. */
-export const tokenEpoch = (token: LeaseToken): string => token.slice(0, token.indexOf(":"));
-export const tokenCounter = (token: LeaseToken): number =>
-  Number(token.slice(token.indexOf(":") + 1));
+/**
+ * A fencing token: which coordinator issued it, and how many handoffs had
+ * happened when it did.
+ *
+ * This was `type LeaseToken = string`, parsed with `slice(indexOf(":"))` at
+ * every use. That is primitive obsession on the most safety-critical value in
+ * the system, and it had the hole you would expect: a counter that did not
+ * parse became `NaN`, and `NaN < current` is `false`, so a malformed token
+ * with the right epoch was **not** fenced — the precise failure fencing exists
+ * to prevent. Measured on the old helpers: `"abc123:abc"` against a current of
+ * `"abc123:5"` came back accepted.
+ *
+ * As a record, that state cannot be built. The string form still exists,
+ * because the coordinator stores one, but it lives at the boundary in
+ * `formatToken`/`parseToken` rather than in every comparison.
+ */
+export type LeaseToken = {
+  /** Which coordinator minted it. Tokens from different epochs are incomparable. */
+  readonly epoch: string;
+  /** Strictly increases within an epoch, once per genuine handoff. */
+  readonly counter: number;
+};
 
 /** Fresh identity for a coordinator that has no state to inherit. */
 const newEpoch = (): string => Math.random().toString(36).slice(2, 10);
+
+/**
+ * The wire form, declared rather than hand-parsed.
+ *
+ * `Schema` for the same reason `CheckpointFromJson` is a schema: this value
+ * crosses a boundary, and the rules about what a valid one looks like belong
+ * in one declaration rather than spread across a parser and a formatter that
+ * have to agree. `Natural` is what closes the original hole — `"abc:abc"` and
+ * `"abc:-1"` do not decode at all, so a token whose counter cannot be ordered
+ * cannot exist to be compared.
+ */
+const LeaseTokenFromString = Schema.TemplateLiteralParser([
+  Schema.NonEmptyString,
+  ":",
+  Schema.Natural,
+]);
+
+const decodeToken = Schema.decodeUnknownOption(LeaseTokenFromString);
+const encodeToken = Schema.encodeSync(LeaseTokenFromString);
+
+/** The wire form: the coordinator stores a string, so one is produced here and nowhere else. */
+export const formatToken = (token: LeaseToken): string =>
+  encodeToken([token.epoch, ":", token.counter] as never);
+
+/**
+ * Read a token back off the wire. `None` for anything that is not
+ * `<epoch>:<non-negative integer>`.
+ */
+export const parseToken = (raw: string): O.Option<LeaseToken> =>
+  O.map(decodeToken(raw), ([epoch, , counter]) => ({ epoch, counter }));
+
+/** Two tokens are the same handoff. Records need this said explicitly; strings got it for free. */
+export const sameToken = (a: LeaseToken, b: LeaseToken): boolean =>
+  a.epoch === b.epoch && a.counter === b.counter;
+
+/**
+ * Is `attempted` superseded by `current`?
+ *
+ * Total, and the only place the ordering rule lives: a different epoch is
+ * incomparable and therefore fenced, and within an epoch the counter decides.
+ */
+export const isFenced = (attempted: LeaseToken, current: LeaseToken): boolean =>
+  attempted.epoch !== current.epoch || attempted.counter < current.counter;
 
 /**
  * The minimum state needed to resume publishing for one API without
@@ -71,7 +130,8 @@ export type Checkpoint = {
 export class CheckpointFenced extends Data.TaggedError("CheckpointFenced")<{
   readonly apiId: string;
   readonly attempted: LeaseToken;
-  readonly current: LeaseToken;
+  /** `None` when the coordinator returned something that is not a token at all. */
+  readonly current: O.Option<LeaseToken>;
 }> {}
 
 /**
@@ -204,14 +264,14 @@ export const makeInMemoryCoordination = Effect.gen(function* () {
           if (held !== undefined && held.holderId === holderId && held.expiresAt > now) {
             // Renewal: same token, extended TTL.
             return [
-              O.some<LeaseToken>(`${epoch}:${held.counter}`),
+              O.some<LeaseToken>({ epoch, counter: held.counter }),
               O.some({ ...held, expiresAt: now + ttlMs }),
             ];
           }
           // Expired or never held: a genuine handoff, counter strictly increases.
           const next = (held?.counter ?? 0) + 1;
           return [
-            O.some<LeaseToken>(`${epoch}:${next}`),
+            O.some<LeaseToken>({ epoch, counter: next }),
             O.some({ holderId, counter: next, expiresAt: now + ttlMs }),
           ];
         }),
@@ -224,14 +284,16 @@ export const makeInMemoryCoordination = Effect.gen(function* () {
     );
 
   const currentToken = Ref.get(lock).pipe(
-    Effect.map((l): LeaseToken => `${epoch}:${O.getOrUndefined(l)?.counter ?? 0}`),
+    Effect.map((l): LeaseToken => ({ epoch, counter: O.getOrUndefined(l)?.counter ?? 0 })),
   );
 
   const save = (apiId: string, token: LeaseToken, checkpoint: Checkpoint) =>
     currentToken.pipe(
       Effect.flatMap((current) =>
-        tokenEpoch(token) !== epoch || tokenCounter(token) < tokenCounter(current)
-          ? Effect.fail(new CheckpointFenced({ apiId, attempted: token, current }))
+        isFenced(token, current)
+          ? Effect.fail(
+              new CheckpointFenced({ apiId, attempted: token, current: O.some(current) }),
+            )
           : Ref.update(checkpoints, (map) => new Map(map).set(apiId, checkpoint)),
       ),
     );
@@ -411,9 +473,13 @@ export const RedisCoordinationLayer = (
           ],
           args: [holderId, String(ttlMs), newEpoch()],
         }).pipe(
+          // Parsed at the boundary, once. "-1" is the script's way of saying
+          // someone else holds a live lease; anything else that will not parse
+          // is a coordinator returning something this code did not write, and
+          // is treated the same way — no token.
           Effect.map((result) => {
-            const token = String(result);
-            return token === "-1" ? O.none<LeaseToken>() : O.some(token);
+            const raw = String(result);
+            return raw === "-1" ? O.none<LeaseToken>() : parseToken(raw);
           }),
         ),
       release: (holderId) =>
@@ -430,14 +496,26 @@ export const RedisCoordinationLayer = (
             `${keyPrefix}:leader:token`,
             `${keyPrefix}:checkpoint:${apiId}`,
           ],
-          args: [token, JSON.stringify(checkpoint)],
+          args: [formatToken(token), JSON.stringify(checkpoint)],
         }).pipe(
-          Effect.flatMap((result) => {
-            const current = String(result);
-            return current === token
-              ? Effect.void
-              : Effect.fail(new CheckpointFenced({ apiId, attempted: token, current }));
-          }),
+          // The script echoes back the token it considers current. Anything
+          // other than the one we sent means we were fenced — including a
+          // value that will not parse, which is a coordinator that lost its
+          // state and is a stale writer's problem either way.
+          Effect.flatMap((result) =>
+            O.match(parseToken(String(result)), {
+              onNone: () =>
+                Effect.fail(
+                  new CheckpointFenced({ apiId, attempted: token, current: O.none() }),
+                ),
+              onSome: (current) =>
+                sameToken(current, token)
+                  ? Effect.void
+                  : Effect.fail(
+                      new CheckpointFenced({ apiId, attempted: token, current: O.some(current) }),
+                    ),
+            }),
+          ),
         ),
       load: (apiId) =>
         evalGuarded(redis, "load", "return redis.call('GET', KEYS[1])", {

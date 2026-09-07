@@ -1,4 +1,4 @@
-# 006 — How absence and failure are represented
+# 006 — How absence, failure and identity are represented
 
 **Status**: decided — applied across the codebase.
 **Date**: 2026-09-07.
@@ -118,6 +118,48 @@ is:
 What was wrong with it was not the type: it was **silent**. Both branches
 returned `None` with nothing written down. It logs which one now, and the
 `Option` stays.
+
+## Identity: primitive obsession, and the one that mattered
+
+A separate pass looked for domain concepts carried as raw primitives. Most of
+what turned up is fine — `apiId` is a string because it *is* a string, a key
+with no invariant to protect — and the pure-function-over-record shape of
+`@egress/domain` is FP working as intended, not an anemic model. Adding methods
+to those records would be the wrong direction.
+
+One was not fine, and it was the most safety-critical value in the system.
+
+`LeaseToken` was `type LeaseToken = string`, holding `"<epoch>:<counter>"` and
+picked apart with `slice(indexOf(":"))` wherever it was compared. Two problems,
+one of them a live hole:
+
+- Any string was a token. Nothing stopped `save(apiId, "hello", checkpoint)`.
+- `tokenCounter` returned `NaN` for a counter that did not parse, and
+  `NaN < current` is `false` — so **a malformed token carrying the right epoch
+  was not fenced**. Reproduced against the old helpers before changing them:
+  `"abc123:abc"` against a current of `"abc123:5"` came back accepted. That is
+  precisely the write fencing exists to reject.
+
+It is a record now — `{ epoch, counter }` — with the ordering rule in one total
+function, `isFenced`. The wire form is a `Schema`:
+
+```ts
+Schema.TemplateLiteralParser([Schema.NonEmptyString, ":", Schema.Natural])
+```
+
+`Schema` rather than a hand-written parser for the reason `CheckpointFromJson`
+is a schema: the value crosses a boundary, and what counts as a valid one
+belongs in one declaration instead of a parser and a formatter that have to be
+kept in agreement. `Natural` is what closes the hole — `"abc:abc"` and
+`"abc:-1"` do not decode at all, so a token whose counter cannot be ordered
+cannot be built, and nothing downstream has to defend against one.
+
+The change also forced a bug into the open that a type alias had been hiding:
+`justAcquired` compared tokens with `!==`. On strings that was value equality;
+on records it is identity, so every tick would have looked like a fresh
+acquisition and rehydrated the registry. `sameToken` says what was always
+meant. Nothing in the compiler would have caught that — it is the kind of thing
+a primitive lets you get away with until the day it doesn't.
 
 ## Consequences
 

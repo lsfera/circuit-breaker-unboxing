@@ -10,8 +10,9 @@ import {
   HaSettings,
   LeaderElection,
   makeInMemoryCoordination,
-  tokenCounter,
 } from "../src/Coordination.ts";
+import { isFenced, parseToken, sameToken } from "../src/Coordination.ts";
+import type { LeaseToken } from "../src/Coordination.ts";
 import { EventBusLayer, EventSink } from "../src/Events.ts";
 import { FleetSource, SimFleetLayer } from "../src/FleetSource.ts";
 import { Config, defaultConfig } from "@egress/domain/Model.ts";
@@ -51,8 +52,8 @@ test("renewal keeps the same token; a genuine handoff strictly increases it", as
         const handoff = yield* leaderElection.tryAcquireOrRenew("B", 1000);
         assert.ok(O.isSome(first) && O.isSome(handoff));
         assert.ok(
-          tokenCounter((handoff as O.Some<string>).value) >
-            tokenCounter((first as O.Some<string>).value),
+          (handoff as O.Some<{ counter: number }>).value.counter >
+            (first as O.Some<{ counter: number }>).value.counter,
           "a real handoff must produce a strictly higher token",
         );
       }),
@@ -92,7 +93,7 @@ test("a stale token is rejected even for an API no one has checkpointed yet", as
         // that was the bug. Fencing against the shared lease token closes it
         // for every key at once, the moment leadership actually changed.
         const staleWrite = yield* checkpointStore
-          .save("brand-new-api", (aToken as O.Some<string>).value, {
+          .save("brand-new-api", (aToken as O.Some<LeaseToken>).value, {
             state: "OPEN",
             reason: "ALL_ENDPOINTS_EJECTED",
             sequence: 1,
@@ -103,7 +104,7 @@ test("a stale token is rejected even for an API no one has checkpointed yet", as
         assert.equal(staleWrite, "fenced", "A's stale token must be rejected");
 
         const freshWrite = yield* checkpointStore
-          .save("brand-new-api", (bToken as O.Some<string>).value, {
+          .save("brand-new-api", (bToken as O.Some<LeaseToken>).value, {
             state: "OPEN",
             reason: "ALL_ENDPOINTS_EJECTED",
             sequence: 1,
@@ -511,4 +512,40 @@ test("a clean shutdown hands the lease back rather than leaving it to expire", a
       TestClock.layer(),
     ),
   );
+});
+
+/**
+ * The hole that made `LeaseToken` a record instead of a string.
+ *
+ * It used to be `type LeaseToken = string`, compared with
+ * `tokenCounter(a) < tokenCounter(b)` over `Number(slice(...))`. A counter
+ * that did not parse became `NaN`, `NaN < 5` is `false`, and so a malformed
+ * token carrying the *right* epoch was accepted — the exact thing fencing
+ * exists to stop. Reproduced against the old helpers before the change:
+ * `"abc123:abc"` against a current of `"abc123:5"` came back not fenced.
+ *
+ * The type change is the fix, and this is what says so: such a token cannot be
+ * parsed at all now, so nothing downstream has to defend against it.
+ */
+test("a token whose counter cannot be ordered does not parse", () => {
+  for (const raw of ["abc123:abc", "abc123:", "abc123:-1", ":5", "garbage", ""]) {
+    assert.ok(O.isNone(parseToken(raw)), `${JSON.stringify(raw)} must not parse as a token`);
+  }
+  const parsed = parseToken("abc123:5");
+  assert.deepEqual(parsed, O.some({ epoch: "abc123", counter: 5 }));
+});
+
+test("fencing orders within an epoch and refuses to order across them", () => {
+  const at = (epoch: string, counter: number): LeaseToken => ({ epoch, counter });
+
+  assert.equal(isFenced(at("e1", 3), at("e1", 5)), true, "an older counter is fenced");
+  assert.equal(isFenced(at("e1", 5), at("e1", 5)), false, "the same token is not");
+  assert.equal(isFenced(at("e1", 9), at("e1", 5)), false, "a newer counter is not");
+  // The property the epoch exists for: a coordinator that lost its state
+  // starts counting from 1 again, and a surviving leader's 5 must not lose to
+  // it just because 5 > 1 is false.
+  assert.equal(isFenced(at("e2", 99), at("e1", 5)), true, "another epoch is incomparable, so fenced");
+
+  assert.ok(sameToken(at("e1", 5), at("e1", 5)));
+  assert.ok(!sameToken(at("e1", 5), at("e2", 5)));
 });

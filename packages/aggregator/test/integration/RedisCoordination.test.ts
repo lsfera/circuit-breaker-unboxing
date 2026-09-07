@@ -9,8 +9,8 @@ import {
   CheckpointStore,
   LeaderElection,
   RedisCoordinationLayer,
-  tokenCounter,
 } from "../../src/Coordination.ts";
+import type { LeaseToken } from "../../src/Coordination.ts";
 import type { RedisLike } from "../../src/Coordination.ts";
 
 /**
@@ -107,8 +107,8 @@ test("acquire, renew keeps the token, real TTL expiry allows a strictly higher o
       const handoff = yield* leader.tryAcquireOrRenew("B", 200);
       assert.ok(O.isSome(handoff));
       assert.ok(
-        tokenCounter((handoff as O.Some<string>).value) >
-          tokenCounter((first as O.Some<string>).value),
+        (handoff as O.Some<{ counter: number }>).value.counter >
+          (first as O.Some<{ counter: number }>).value.counter,
         "a real handoff must produce a strictly higher token",
       );
     }),
@@ -146,7 +146,7 @@ test("a stale token is rejected even for an API no one has checkpointed yet", as
       // written there yet. Here it is Redis's own Lua execution deciding,
       // not our in-memory Ref.
       const stale = yield* checkpoints
-        .save("brand-new-api", (aToken as O.Some<string>).value, {
+        .save("brand-new-api", (aToken as O.Some<LeaseToken>).value, {
           state: "OPEN",
           reason: "ALL_ENDPOINTS_EJECTED",
           sequence: 1,
@@ -157,7 +157,7 @@ test("a stale token is rejected even for an API no one has checkpointed yet", as
       assert.equal(stale, "fenced", "A's stale token must be rejected by real Redis, not just reasoned about");
 
       const fresh = yield* checkpoints
-        .save("brand-new-api", (bToken as O.Some<string>).value, {
+        .save("brand-new-api", (bToken as O.Some<LeaseToken>).value, {
           state: "OPEN",
           reason: "ALL_ENDPOINTS_EJECTED",
           sequence: 1,

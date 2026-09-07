@@ -5,6 +5,7 @@ import { CheckpointStore, HaSettings, LeaderElection } from "./Coordination.ts";
 import { EventBus, EventSink, snapshotEvent, stateChanged } from "./Events.ts";
 import { FleetSource } from "./FleetSource.ts";
 import * as Telemetry from "./Telemetry.ts";
+import { formatToken, sameToken } from "./Coordination.ts";
 import type { Checkpoint, LeaseToken } from "./Coordination.ts";
 import type { ApiSnapshot, CircuitEvent, Reason, State } from "@egress/domain/Model.ts";
 
@@ -154,7 +155,15 @@ export const AggregatorLayer = Layer.effect(
         }
         const token = tokenOpt.value;
         const prior = yield* Ref.get(leadership);
-        const justAcquired = !prior.isLeader || O.getOrUndefined(prior.token) !== token;
+        // `sameToken`, not `!==`. A token is a record now, so identity
+        // comparison would call every tick a fresh acquisition and rehydrate
+        // the registry each time — the sort of thing a type change does not
+        // announce.
+        const justAcquired =
+          !prior.isLeader || !O.match(prior.token, {
+            onNone: () => false,
+            onSome: (held) => sameToken(held, token),
+          });
         yield* Ref.set(leadership, { isLeader: true, token: O.some(token) });
 
         const [pollDuration, reports] = yield* Effect.timed(fleet.poll);
@@ -231,7 +240,11 @@ export const AggregatorLayer = Layer.effect(
                 Effect.andThen(
                   Effect.logWarning(
                     `lost leadership publishing ${e.data.apiId}: ` +
-                      `token ${err.attempted} superseded by ${err.current}`,
+                      `token ${formatToken(err.attempted)} superseded by ` +
+                        O.match(err.current, {
+                          onNone: () => "an unreadable one",
+                          onSome: formatToken,
+                        }),
                   ),
                   Effect.succeed(true),
                 ),
