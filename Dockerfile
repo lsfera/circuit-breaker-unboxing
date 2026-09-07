@@ -30,6 +30,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # ERR_MODULE_NOT_FOUND at runtime rather than as a build error. Adding
 # @egress/tracing is exactly how that was learned.
 COPY packages/aggregator/package.json packages/aggregator/
+COPY packages/config/package.json packages/config/
 COPY packages/demo/package.json packages/demo/
 COPY packages/domain/package.json packages/domain/
 COPY packages/rmq/package.json packages/rmq/

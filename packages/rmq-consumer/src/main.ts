@@ -1,10 +1,11 @@
-import { Effect, Layer } from "effect";
+import { Config, Effect, Layer, Schema } from "effect";
 import { HttpMiddleware, HttpRouter, HttpServerResponse } from "effect/unstable/http";
 import { PrometheusMetrics } from "effect/unstable/observability";
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { RmqLive } from "@egress/rmq/Client.ts";
+import { brokerAddress, load, PositiveInt } from "@egress/config/Settings.ts";
 import { TracingLive } from "@egress/tracing/Tracing.ts";
 import { runDaemon } from "./daemon.ts";
 
@@ -23,37 +24,54 @@ import { runDaemon } from "./daemon.ts";
  * rmq-daemon-* services in docker-compose.yml. DAEMON_INDEX is the one value
  * that differs between otherwise identical daemon containers.
  *
+ * Declared once and decoded at boot rather than read with `Number(env(...))`,
+ * which is what this used to do. A daemon is the worst place in this repo for
+ * a `NaN`: it does not crash, it idles. See @egress/config for what each
+ * mistyped variable was measured doing.
+ *
  * It also serves `/metrics` on METRICS_PORT from the same in-process `effect`
  * registry @egress/aggregator uses, scraped by the same Prometheus. That is
  * what puts the fleet's behaviour on the same dashboard as the circuit it is
  * reacting to, instead of in a second tool on a second screen.
  */
 
-const env = (name: string, fallback: string) => process.env[name] ?? fallback;
+const settings = load(
+  "rmq-daemon",
+  Config.all({
+    broker: brokerAddress("RMQ").pipe(Config.withDefault({ host: "127.0.0.1", port: 5672 })),
+    apiId: Config.nonEmptyString("API_ID").pipe(Config.withDefault("payments-provider")),
+    /**
+     * `Natural`, not `PositiveInt`: this one is a 0-based position, and index
+     * 0 is the daemon that stays active longest. Below zero it is nothing.
+     */
+    index: Config.schema(Schema.Natural, "DAEMON_INDEX").pipe(Config.withDefault(0)),
+    /**
+     * The value every daemon derives its own share of the work from. A fleet
+     * size that is not a positive integer made `activeIndices` produce an
+     * empty set, so every daemon idled while the queue filled — five
+     * containers up, healthy, and doing nothing.
+     */
+    fleetSize: Config.schema(PositiveInt, "FLEET_SIZE").pipe(Config.withDefault(5)),
+    instanceId: Config.nonEmptyString("INSTANCE_ID").pipe(Config.withDefault(randomUUID())),
+    // One address, no replica names — the same string a real client of this API
+    // would be configured with.
+    egressAddr: Config.nonEmptyString("EGRESS_ADDR").pipe(
+      Config.withDefault("http://envoy:10000"),
+    ),
+    apiPath: Config.nonEmptyString("API_PATH").pipe(Config.withDefault("/payments")),
+    /** Zero is excluded with everything else: the gate would never admit a call. */
+    maxInFlight: Config.schema(PositiveInt, "MAX_IN_FLIGHT").pipe(Config.withDefault(32)),
+    // Off unless asked for: replaying work that failed during an outage is a
+    // decision about this workload, not a property of the queue. `1`, `yes` and
+    // `on` turn it on too — the old `=== "true"` silently did not.
+    redriveOnClose: Config.boolean("REDRIVE_ON_CLOSE").pipe(Config.withDefault(false)),
+    /** The bound a redrive pass respects. Unbounded, it republished two messages 17,703 times. */
+    redriveMax: Config.schema(PositiveInt, "REDRIVE_MAX").pipe(Config.withDefault(5000)),
+    metricsPort: Config.port("METRICS_PORT").pipe(Config.withDefault(9464)),
+  }),
+);
 
-const rmqAddr = env("RMQ", "127.0.0.1:5672");
-const [rmqHost, rmqPort] = rmqAddr.split(":");
-const connect = { host: rmqHost ?? "127.0.0.1", port: Number(rmqPort ?? 5672) };
-
-const apiId = env("API_ID", "payments-provider");
-
-const program = runDaemon({
-  apiId,
-  index: Number(env("DAEMON_INDEX", "0")),
-  fleetSize: Number(env("FLEET_SIZE", "5")),
-  instanceId: env("INSTANCE_ID", randomUUID()),
-  // One address, no replica names — the same string a real client of this API
-  // would be configured with.
-  egressAddr: env("EGRESS_ADDR", "http://envoy:10000"),
-  apiPath: env("API_PATH", "/payments"),
-  maxInFlight: Number(env("MAX_IN_FLIGHT", "32")),
-  // Off unless asked for: replaying work that failed during an outage is a
-  // decision about this workload, not a property of the queue.
-  redriveOnClose: env("REDRIVE_ON_CLOSE", "false") === "true",
-  redriveMax: Number(env("REDRIVE_MAX", "5000")),
-});
-
-const METRICS_PORT = Number(env("METRICS_PORT", "9464"));
+const program = runDaemon(settings);
 
 /**
  * Identical to @egress/aggregator's `/metrics` route, deliberately: one
@@ -90,9 +108,9 @@ const MetricsRoute = HttpRouter.use((router) =>
 const Daemon = Layer.effectDiscard(Effect.forkScoped(Effect.orDie(program)));
 
 const MainLayer = HttpRouter.serve(
-  Layer.provideMerge(Daemon, MetricsRoute).pipe(Layer.provide(RmqLive(connect))),
+  Layer.provideMerge(Daemon, MetricsRoute).pipe(Layer.provide(RmqLive(settings.broker))),
 ).pipe(
-  Layer.provide(NodeHttpServer.layer(createServer, { port: METRICS_PORT })),
+  Layer.provide(NodeHttpServer.layer(createServer, { port: settings.metricsPort })),
   // All five daemons report as one service: which daemon is an attribute of a
   // span, not a different system.
   Layer.provide(TracingLive("rmq-daemon")),

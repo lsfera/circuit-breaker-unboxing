@@ -1,9 +1,10 @@
-import { Effect, Layer } from "effect";
+import { Config, Effect, Layer } from "effect";
 import { HttpMiddleware, HttpRouter, HttpServerResponse } from "effect/unstable/http";
 import { PrometheusMetrics } from "effect/unstable/observability";
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node";
 import { createServer } from "node:http";
 import { RmqLive } from "@egress/rmq/Client.ts";
+import { brokerAddress, load, PositiveInt } from "@egress/config/Settings.ts";
 import { TracingLive } from "@egress/tracing/Tracing.ts";
 import { runProducer } from "./producer.ts";
 
@@ -22,21 +23,28 @@ import { runProducer } from "./producer.ts";
  *
  * Configuration comes from the environment rather than flags, because these
  * are containers rather than commands someone types — see `rmq-producer` in
- * docker-compose.yml.
+ * docker-compose.yml. It is declared once and decoded at boot: a rate that is
+ * not a positive number stops this process instead of turning into
+ * `Array.from({ length: NaN })`, which publishes nothing and says nothing.
+ * See @egress/config.
  */
 
-const env = (name: string, fallback: string) => process.env[name] ?? fallback;
+const settings = load(
+  "rmq-producer",
+  Config.all({
+    broker: brokerAddress("RMQ").pipe(Config.withDefault({ host: "127.0.0.1", port: 5672 })),
+    apiId: Config.nonEmptyString("API_ID").pipe(Config.withDefault("payments-provider")),
+    /**
+     * Fixed, and deliberately never lowered in reaction to the circuit — the
+     * backlog this builds during an outage is the thing the fleet has to
+     * survive.
+     */
+    ratePerSecond: Config.schema(PositiveInt, "RATE_PER_SECOND").pipe(Config.withDefault(200)),
+    metricsPort: Config.port("METRICS_PORT").pipe(Config.withDefault(9464)),
+  }),
+);
 
-const rmqAddr = env("RMQ", "127.0.0.1:5672");
-const [rmqHost, rmqPort] = rmqAddr.split(":");
-const connect = { host: rmqHost ?? "127.0.0.1", port: Number(rmqPort ?? 5672) };
-
-const program = runProducer({
-  apiId: env("API_ID", "payments-provider"),
-  ratePerSecond: Number(env("RATE_PER_SECOND", "200")),
-});
-
-const METRICS_PORT = Number(env("METRICS_PORT", "9464"));
+const program = runProducer(settings);
 
 /**
  * Identical to the aggregator's and the daemon's `/metrics` route: one
@@ -68,9 +76,9 @@ const MetricsRoute = HttpRouter.use((router) =>
 const Producer = Layer.effectDiscard(Effect.forkScoped(Effect.orDie(program)));
 
 const MainLayer = HttpRouter.serve(
-  Layer.provideMerge(Producer, MetricsRoute).pipe(Layer.provide(RmqLive(connect))),
+  Layer.provideMerge(Producer, MetricsRoute).pipe(Layer.provide(RmqLive(settings.broker))),
 ).pipe(
-  Layer.provide(NodeHttpServer.layer(createServer, { port: METRICS_PORT })),
+  Layer.provide(NodeHttpServer.layer(createServer, { port: settings.metricsPort })),
   // Every trace in this repo starts in this process. Without an OTLP endpoint
   // this installs no tracer at all — see @egress/tracing.
   Layer.provide(TracingLive("rmq-producer")),

@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",
+    "@egress/config": "workspace:*",
     "@egress/rmq": "workspace:*",
     "@egress/tracing": "workspace:*",
     "effect": "catalog:"

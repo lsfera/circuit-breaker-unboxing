@@ -1,0 +1,15 @@
+{
+  "name": "@egress/config",
+  "private": true,
+  "type": "module",
+  "description": "How every process here reads its settings: one declaration per process, decoded at boot, and a value the process cannot use stops it before it opens a socket — see docs/decisions/008-configuration-is-a-boundary.md.",
+  "exports": {
+    "./Settings.ts": "./src/Settings.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test 'test/*.test.ts'"
+  },
+  "dependencies": {
+    "effect": "catalog:"
+  }
+}

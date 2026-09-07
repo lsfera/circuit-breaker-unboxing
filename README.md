@@ -443,7 +443,9 @@ packages/
 
   rmq/                       @egress/rmq — Effect wrapper over amqplib (AMQP 0-9-1)
     src/Client.ts            the Rmq service; two silent client bugs guarded here
-    src/ControlPlane.ts      circuit.control naming, shared by publisher and consumers
+    src/ControlPlane.ts      circuit.control naming and both message codecs, shared by
+                             publisher and consumers
+    test/ControlPlane.test.ts  7 tests, pure — what this control plane will and will not read
     test/integration/        12 tests against a real broker, opt-in (`pnpm run test:rmq`)
 
   rmq-consumer/              @egress/rmq-consumer — the competing-consumer daemon fleet
@@ -467,6 +469,11 @@ packages/
 
   tracing/                   @egress/tracing — the OpenTelemetry layer, and nothing else
     src/Tracing.ts           opt-in: no OTLP endpoint, no tracer, no cost
+
+  config/                    @egress/config — how every process reads its settings
+    src/Settings.ts          declared once, decoded at boot; a value a process cannot
+                             use stops it before it opens a socket
+    test/Settings.test.ts    7 tests, pure — every value that used to become NaN
 
   demo/                      @egress/demo — no dependency on the others, speaks only HTTP
     src/driver.ts            drives the demo script over HTTP, narrates transitions

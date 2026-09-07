@@ -1,10 +1,15 @@
-import { Effect, Layer } from "effect";
+// `Config` is aliased to `Flags` because @egress/domain also exports a `Config`
+// (the breaker's tuning knobs) and both belong in this file. `Flags` is also
+// the honest name here: this process is configured by argv, not the
+// environment — see the provider at the bottom of the settings block.
+import { Config as Flags, ConfigProvider, Effect, Layer, Option as O, Schema } from "effect";
 import { HttpRouter } from "effect/unstable/http";
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
 import { RmqLive } from "@egress/rmq/Client.ts";
+import { brokerAddress, load, PositiveInt } from "@egress/config/Settings.ts";
 import { Aggregator, AggregatorLayer } from "./Aggregator.ts";
 import { makeAmqpControlPlaneSink } from "./AmqpControlPlaneSink.ts";
 import { HaSettings, InMemoryCoordinationLayer, RedisCoordinationLayer } from "./Coordination.ts";
@@ -30,9 +35,39 @@ for (const arg of process.argv.slice(2)) {
   if (k) args.set(k, v);
 }
 
-const PORT = Number(args.get("port") ?? 8088);
-const MODE = args.get("source") ?? "sim";
-const REPLICAS = Number(args.get("replicas") ?? 5);
+/**
+ * Every flag this process takes, declared once and decoded before anything is
+ * built — the same rule @egress/config applies to the daemons' environment,
+ * over the argv record parsed above.
+ *
+ * The mode literals matter more here than the numbers do. This file has a
+ * scar from a flag that never reached argv at all: the aggregator ran in `sim`
+ * mode against real Envoy replicas and reported nothing wrong, because
+ * anything that was not a recognised mode silently *was* the default. A
+ * misspelled `--source=envoy-push` now stops the process and says so.
+ */
+const settings = load(
+  "aggregator",
+  Flags.all({
+    port: Flags.port("port").pipe(Flags.withDefault(8088)),
+    source: Flags.literals(["sim", "envoy", "envoy-push"], "source").pipe(
+      Flags.withDefault("sim" as const),
+    ),
+    replicas: Flags.schema(PositiveInt, "replicas").pipe(Flags.withDefault(5)),
+    /** Zero means "use the three named APIs"; see syntheticApis below. */
+    apis: Flags.schema(Schema.Natural, "apis").pipe(Flags.withDefault(0)),
+    pushPort: Flags.port("push-port").pipe(Flags.withDefault(9900)),
+    envoy: Flags.nonEmptyString("envoy").pipe(Flags.withDefault("http://127.0.0.1:9901")),
+    /** Absent means "no control-plane sink", which is a different thing from a bad address. */
+    rmq: Flags.option(brokerAddress("rmq")),
+    noWebhook: Flags.boolean("no-webhook").pipe(Flags.withDefault(false)),
+    ha: Flags.literals(["memory", "redis"], "ha").pipe(Flags.withDefault("memory" as const)),
+    redis: Flags.nonEmptyString("redis").pipe(Flags.withDefault("redis://127.0.0.1:6379")),
+    instanceId: Flags.nonEmptyString("instance-id").pipe(Flags.withDefault(randomUUID())),
+    leaseTtlMs: Flags.schema(PositiveInt, "lease-ttl-ms").pipe(Flags.withDefault(5000)),
+  }),
+  ConfigProvider.fromUnknown(Object.fromEntries(args)),
+);
 
 const NAMED_APIS: ReadonlyArray<ApiSpec> = [
   { apiId: "payments-provider", endpoints: 6, rps: 900, failureRate: 0 },
@@ -58,8 +93,8 @@ const syntheticApis = (count: number): ReadonlyArray<ApiSpec> =>
     failureRate: 0,
   }));
 
-const API_COUNT = args.has("apis") ? Number(args.get("apis")) : 0;
-const APIS: ReadonlyArray<ApiSpec> = API_COUNT > 0 ? syntheticApis(API_COUNT) : NAMED_APIS;
+const APIS: ReadonlyArray<ApiSpec> =
+  settings.apis > 0 ? syntheticApis(settings.apis) : NAMED_APIS;
 
 /**
  * Three ingestion layers, one interface.
@@ -75,12 +110,12 @@ const APIS: ReadonlyArray<ApiSpec> = API_COUNT > 0 ? syntheticApis(API_COUNT) : 
  * different files.
  */
 const FleetLayer =
-  MODE === "sim"
-    ? SimFleetLayer(APIS, REPLICAS)
-    : MODE === "envoy-push"
-      ? EnvoyPushFleetLayer(Number(args.get("push-port") ?? 9900), APIS)
+  settings.source === "sim"
+    ? SimFleetLayer(APIS, settings.replicas)
+    : settings.source === "envoy-push"
+      ? EnvoyPushFleetLayer(settings.pushPort, APIS)
       : EnvoyFleetLayer(
-          (args.get("envoy") ?? "http://127.0.0.1:9901")
+          settings.envoy
             .split(",")
             .map((adminUrl, i) => ({
               replicaId: `envoy-${String(i).padStart(2, "0")}`,
@@ -96,26 +131,22 @@ const FleetLayer =
  * @egress/rmq-consumer also gets circuit.control events. `--no-webhook`
  * still drops the webhook side if only the RMQ path is wanted.
  */
-const rmqAddr = args.get("rmq");
-const webhookEnabled = !args.has("no-webhook");
-const webhookUrl = `http://127.0.0.1:${PORT}/subscriber/webhook`;
+const webhookEnabled = !settings.noWebhook;
+const webhookUrl = `http://127.0.0.1:${settings.port}/subscriber/webhook`;
 
 // Self-contained regardless of branch: when --rmq is set, this Layer
 // provides its own Rmq dependency internally (Layer.provide, scoped to just
 // this sink) rather than threading Rmq through the outer AppLayer graph, so
 // the two branches below have the same RIn = never shape either way.
-const SinkLayer = rmqAddr
-  ? (() => {
-      const [host, port] = rmqAddr.split(":");
-      return Layer.effect(
-        EventSink,
-        Effect.gen(function* () {
-          const impls = webhookEnabled ? [yield* makeWebhookSink(webhookUrl)] : [];
-          impls.push(yield* makeAmqpControlPlaneSink);
-          return impls.length === 1 ? impls[0]! : combineSinks(impls);
-        }),
-      ).pipe(Layer.provide(RmqLive({ host: host ?? "127.0.0.1", port: Number(port ?? 5672) })));
-    })()
+const SinkLayer = O.isSome(settings.rmq)
+  ? Layer.effect(
+      EventSink,
+      Effect.gen(function* () {
+        const impls = webhookEnabled ? [yield* makeWebhookSink(webhookUrl)] : [];
+        impls.push(yield* makeAmqpControlPlaneSink);
+        return impls.length === 1 ? impls[0]! : combineSinks(impls);
+      }),
+    ).pipe(Layer.provide(RmqLive(settings.rmq.value)))
   : webhookEnabled
     ? Layer.effect(EventSink, makeWebhookSink(webhookUrl))
     : NoopSinkLayer;
@@ -130,8 +161,6 @@ const SinkLayer = rmqAddr
  * against one shared `redis` service — the same coordination logic, now
  * actually contended over by two processes instead of one.
  */
-const instanceId = args.get("instance-id") ?? randomUUID();
-
 const asRedisLike = (redis: Redis): RedisLike => ({
   eval: (script, { keys, args: evalArgs }) =>
     redis.eval(script, keys.length, ...keys, ...evalArgs) as Promise<string | number | null>,
@@ -145,12 +174,12 @@ const asRedisLike = (redis: Redis): RedisLike => ({
  * at import time is the one place that quietly did not.
  */
 const CoordinationLayer =
-  args.get("ha") === "redis"
+  settings.ha === "redis"
     ? Layer.unwrap(
         Effect.acquireRelease(
           Effect.sync(
             () =>
-              new Redis(args.get("redis") ?? "redis://127.0.0.1:6379", {
+              new Redis(settings.redis, {
                 // Fail fast rather than queue. ioredis defaults to holding
                 // commands in an offline queue and retrying a request across
                 // twenty reconnection attempts, which turns "the coordinator
@@ -181,8 +210,8 @@ const CoordinationLayer =
 const HaLayer = Layer.mergeAll(
   CoordinationLayer,
   Layer.succeed(HaSettings, {
-    instanceId,
-    leaseTtlMs: Number(args.get("lease-ttl-ms") ?? 5000),
+    instanceId: settings.instanceId,
+    leaseTtlMs: settings.leaseTtlMs,
   }),
 );
 
@@ -220,24 +249,30 @@ const AggregatorDaemon = Layer.effectDiscard(
     yield* Effect.forkScoped(
       agg.run.pipe(
         Effect.catchDefect((defect) =>
-          Effect.logFatal(`${instanceId}: control loop died, restarting the process`, defect).pipe(
+          Effect.logFatal(
+            `${settings.instanceId}: control loop died, restarting the process`,
+            defect,
+          ).pipe(
             Effect.andThen(Effect.sync(() => process.exit(1))),
           ),
         ),
       ),
     );
     yield* Effect.log(
-      `egress circuit breaker console  source=${MODE}` +
-        (MODE === "sim" ? ` replicas=${REPLICAS}` : "") +
-        `  instance=${instanceId}  ha=${args.get("ha") ?? "memory"}` +
-        (rmqAddr ? `  rmq=${rmqAddr}` : "") +
-        `  http://localhost:${PORT}`,
+      `egress circuit breaker console  source=${settings.source}` +
+        (settings.source === "sim" ? ` replicas=${settings.replicas}` : "") +
+        `  instance=${settings.instanceId}  ha=${settings.ha}` +
+        O.match(settings.rmq, {
+          onNone: () => "",
+          onSome: ({ host, port }) => `  rmq=${host}:${port}`,
+        }) +
+        `  http://localhost:${settings.port}`,
     );
   }),
 );
 
 const MainLayer = HttpRouter.serve(
   Layer.provideMerge(AggregatorDaemon, AppLayer),
-).pipe(Layer.provide(NodeHttpServer.layer(createServer, { port: PORT })));
+).pipe(Layer.provide(NodeHttpServer.layer(createServer, { port: settings.port })));
 
 NodeRuntime.runMain(Layer.launch(MainLayer));

@@ -29,6 +29,9 @@ importers:
       '@effect/platform-node':
         specifier: 'catalog:'
         version: 4.0.0-rc.112(effect@4.0.0-rc.112)(redis@6.2.1(@opentelemetry/api@1.9.1))
+      '@egress/config':
+        specifier: workspace:*
+        version: link:../config
       '@egress/domain':
         specifier: workspace:*
         version: link:../domain
@@ -54,6 +57,12 @@ importers:
       testcontainers:
         specifier: ^12.1.0
         version: 12.1.0
+
+  packages/config:
+    dependencies:
+      effect:
+        specifier: 'catalog:'
+        version: 4.0.0-rc.112
 
   packages/demo:
     dependencies:
@@ -91,6 +100,9 @@ importers:
       '@effect/platform-node':
         specifier: 'catalog:'
         version: 4.0.0-rc.112(effect@4.0.0-rc.112)(redis@6.2.1(@opentelemetry/api@1.9.1))
+      '@egress/config':
+        specifier: workspace:*
+        version: link:../config
       '@egress/domain':
         specifier: workspace:*
         version: link:../domain
@@ -109,6 +121,9 @@ importers:
       '@effect/platform-node':
         specifier: 'catalog:'
         version: 4.0.0-rc.112(effect@4.0.0-rc.112)(redis@6.2.1(@opentelemetry/api@1.9.1))
+      '@egress/config':
+        specifier: workspace:*
+        version: link:../config
       '@egress/rmq':
         specifier: workspace:*
         version: link:../rmq
