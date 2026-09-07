@@ -444,7 +444,7 @@ packages/
   rmq/                       @egress/rmq — Effect wrapper over amqplib (AMQP 0-9-1)
     src/Client.ts            the Rmq service; two silent client bugs guarded here
     src/ControlPlane.ts      circuit.control naming, shared by publisher and consumers
-    test/integration/        10 tests against a real broker, opt-in (`pnpm run test:rmq`)
+    test/integration/        11 tests against a real broker, opt-in (`pnpm run test:rmq`)
 
   rmq-consumer/              @egress/rmq-consumer — the competing-consumer daemon fleet
     src/DaemonPolicy.ts      pure: (prior, circuit state, fleet size, now) -> target active count

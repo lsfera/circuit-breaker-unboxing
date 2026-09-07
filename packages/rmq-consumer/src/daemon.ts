@@ -69,9 +69,10 @@ import type { Action, Command, DaemonState } from "./DaemonState.ts";
  * ## Backpressure is settlement timing
  *
  * The work handler returns the egress call's promise, and `@egress/rmq`
- * settles only once it resolves. AMQP 1.0 replenishes credit on settlement, so
- * a daemon holding `maxInFlight` calls open stops settling, the broker stops
- * pushing, and the backlog stays where it belongs — in the queue, visible.
+ * settles only once it resolves. `prefetch` caps how many deliveries a
+ * consumer may hold unsettled, so a daemon holding `maxInFlight` calls open
+ * stops acking, hits that cap, and the broker stops pushing — the backlog
+ * stays where it belongs, in the queue, visible.
  * The first version of this file accepted every message on arrival and called
  * afterwards, which turned a 50k backlog into 50k concurrent calls from one
  * daemon: precisely the herd the fleet-level policy exists to prevent.
@@ -190,10 +191,10 @@ export const runDaemon = (cfg: DaemonConfig) =>
     /**
      * A plain concurrency gate, and the reason it can *wait* rather than
      * drop: `@egress/rmq`'s `consume` accepts a message only once the
-     * handler's promise settles, so a handler parked here holds its
-     * delivery unsettled and the broker's credit window stops refilling.
-     * Waiting is therefore real backpressure all the way to the queue, not
-     * an in-process buffer pretending to be one.
+     * handler's promise settles, so a handler parked here holds its delivery
+     * unacked, and enough of those reach the consumer's prefetch ceiling and
+     * stop the broker pushing. Waiting is therefore real backpressure all the
+     * way to the queue, not an in-process buffer pretending to be one.
      */
     const waiting: Array<() => void> = [];
     const acquire = (): Promise<void> => {

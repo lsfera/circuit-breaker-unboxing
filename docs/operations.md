@@ -117,6 +117,7 @@ endpoint is live on the same port in both modes (`--source=sim` or
 | `egress_circuit_healthy_endpoints` / `_total_endpoints` | Fleet-averaged endpoint counts per API |
 | `egress_circuit_reporting_replicas` | Replicas still within `replicaTimeoutMs` — what quorum is computed against |
 | `egress_circuit_ejections_active` | Ejected hosts summed across replicas — the one signal that separates "outlier detection ejected a host" from "membership changed" |
+| `egress_circuit_sequence` | Last published sequence number per API — the counter the delivery contract is stated in, so a flat line during an incident means nothing was published |
 | `egress_circuit_transitions_total` | Published `state_changed` events, by API/state/reason |
 | `egress_circuit_snapshots_total` | Periodic full-state republishes, by API |
 | `egress_fleet_poll_duration_ms` | Time to poll and parse every replica once per tick |

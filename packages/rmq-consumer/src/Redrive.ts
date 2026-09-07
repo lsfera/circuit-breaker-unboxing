@@ -105,8 +105,8 @@ export const makeRedrive = (opts: RedriveOptions) => {
         }
       }
 
-      // Reserve the slot *before* awaiting. The broker delivers with a
-      // credit window in the hundreds, so a check-then-await-then-increment
+      // Reserve the slot *before* awaiting. The consumer's prefetch lets the
+      // broker keep a hundred deliveries in flight, so check-then-await-then-increment
       // lets every in-flight handler pass the same check and overshoot the
       // cap by an order of magnitude — measured at 5739 against a cap of
       // 5000 before this was reordered.

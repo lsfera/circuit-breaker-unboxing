@@ -298,22 +298,31 @@ Everything this design leans on is pinned by
 `pnpm run test:rmq` (opt-in, needs Docker; not part of `pnpm test`). It
 drives the real `@egress/rmq` service against a real
 `rabbitmq:4.0-management-alpine` container via Testcontainers, and covers
-five things:
+six things:
 
 ```
 ✔ concurrent publisher creation routes each message to its own binding
 ✔ concurrent consumer creation binds each consumer to its own queue
+✔ a poisoned publish channel reopens rather than ending publishing
 ✔ x-single-active-consumer elects one consumer and promotes another when it closes
 ✔ closing a consumer stops delivery without closing the connection
-✔ closing a consumer with deliveries in flight stalls the whole connection
+✔ closing a consumer with deliveries in flight leaves the rest of the connection alone
 ```
 
-The third and fourth are the primitives the `OPEN`/`HALF_OPEN` mechanism is
-built on: SAC really does elect exactly one of several registered consumers
-and promote a different one when the active one closes (no election code of
-our own), and closing a consumer really does stop delivery while leaving the
-connection up. The other three pin client bugs, described below, and each was
-confirmed to fail with its fix removed.
+The SAC line and the one below it are the primitives the `OPEN`/`HALF_OPEN`
+mechanism is built on: SAC really does elect exactly one of several registered
+consumers and promote a different one when the active one closes (no election
+code of our own), and closing a consumer really does stop delivery while
+leaving the connection up.
+
+The first two and the last are inherited from the AMQP 1.0 client, where each
+pinned a bug. On amqplib the first two hold by construction — there are no
+publisher links to race — and the last is *inverted*: it used to assert that a
+shared connection stalled, and now asserts that it does not. They stay because
+"by construction" is a claim and this is what checks it. The poisoned channel
+test is newer, and pins a defect of this repo's own making rather than a
+client's: a publish channel with no way to reopen ends publishing for the whole
+process on the first channel-level error, silently.
 
 ### Concurrent link creation is broken in this client — and silently
 
@@ -454,6 +463,14 @@ set link credit**, and the receiver's link configuration is hardcoded (no
 the client's bundle). Settlement timing is the one credit-adjacent lever
 that *is* reachable, and it is enough for backpressure even though it is not
 enough to implement `DEGRADED` as credit reduction.
+
+> **Amendment, 2026-09-06.** The mechanism is the same and the vocabulary has
+> changed: on amqplib the bound is `prefetch`, set per consumer when it is
+> created, and a handler that has not acked yet counts against it. Deferring
+> the ack is still what transmits the pressure, so every conclusion above
+> holds — what is no longer true is that the lever is unreachable. It is an
+> argument now (`DEFAULT_PREFETCH`, and `prefetch: 1` for the HALF_OPEN
+> probe). See [decisions/004](decisions/004-downgrade-to-amqp-0-9-1.md).
 
 ### Two ways the client takes the process down
 
@@ -976,4 +993,9 @@ reachable on the real stack now, not only in `DaemonPolicy.test.ts`.
   [RabbitMQ's own comparison](https://www.rabbitmq.com/blog/2024/08/05/native-amqp)
   treats 0-9-1 prefetch and 1.0 flow control as different mechanisms, not a
   rename). `DEGRADED` therefore scales the *number of active daemons* down,
-  not any one consumer's credit.
+  not any one consumer's credit. **Amended 2026-09-06**: amqplib does expose
+  the lever, so this is a choice now rather than a constraint — and the same
+  choice, for a better reason. Prefetch is fixed when a consumer is created,
+  so lowering it live means cancelling and re-registering, which is the same
+  operation as retiring a daemon at more risk. Scaling daemons stays the
+  cheaper lever, and the one five processes can agree on with no coordination.

@@ -253,6 +253,36 @@ export type RmqConnectOptions = {
   readonly port: number;
   readonly username?: string;
   readonly password?: string;
+  /**
+   * What to do when the connection goes away without anyone here asking it to.
+   *
+   * The default is to exit, and that is the considered choice rather than
+   * laziness — see `connectionLost`. Tests that deliberately take a broker away
+   * override it.
+   */
+  readonly onLost?: (reason: string) => void;
+};
+
+/**
+ * A lost connection is fatal by default.
+ *
+ * amqplib does not reconnect, and every consumer on a dead connection is
+ * simply gone. Nothing in this process notices: the daemon's heartbeat reads
+ * local state, so it goes on reporting `self=ACTIVE` while consuming nothing,
+ * and the queue it was draining shows zero consumers. Measured, by restarting
+ * the broker under the running fleet: five daemons up, five daemons idle, the
+ * producer silent, and not one error line between them.
+ *
+ * That is the deaf-daemon failure this repo has an alert and a runbook for,
+ * and surviving it quietly is worse than dying. Exiting hands the problem to
+ * `restart: unless-stopped`, which is what the crash-fast stance in the
+ * entrypoints has always assumed — see docker-compose.yml.
+ */
+const connectionLost = (reason: string) => {
+  console.error(
+    `[rmq] connection lost (${reason}) — exiting so the restart policy can rebuild it`,
+  );
+  process.exit(1);
 };
 
 const describe = (delivery: ConsumeMessage): DeliveryInfo => {
@@ -294,6 +324,9 @@ export const makeRmq = (
   opts: RmqConnectOptions,
 ): Effect.Effect<RmqService, RmqError, Scope.Scope> =>
   Effect.gen(function* () {
+    // Distinguishes a teardown this process asked for from one it suffered.
+    let closingDeliberately = false;
+
     const connection: ChannelModel = yield* Effect.acquireRelease(
       wrap("connect", () =>
         amqp.connect({
@@ -308,7 +341,11 @@ export const makeRmq = (
       // closes connections constantly. A broker that has already gone makes
       // `close` reject, and a rejection here would fail the teardown rather
       // than complete it.
-      (conn) => Effect.promise(() => conn.close().then(() => {}, () => {})),
+      (conn) =>
+        Effect.promise(() => {
+          closingDeliberately = true;
+          return conn.close().then(() => {}, () => {});
+        }),
     );
 
     // amqplib emits 'error' on the connection and on every channel. An
@@ -318,6 +355,10 @@ export const makeRmq = (
     // is what makes a broken connection an observable event instead.
     connection.on("error", (error) => {
       console.warn(`[rmq] connection error: ${error.message}`);
+    });
+    connection.on("close", () => {
+      if (closingDeliberately) return;
+      (opts.onLost ?? connectionLost)("closed by peer");
     });
 
     /**
@@ -347,6 +388,19 @@ export const makeRmq = (
     );
     let opening: Promise<ConfirmChannel> | null = null;
 
+    /**
+     * Publishes still waiting for a confirm, so one 'close' listener per
+     * channel can fail all of them.
+     *
+     * A listener per in-flight publish is the obvious way to write this and
+     * the wrong one: the producer sends its whole batch at once, so Node
+     * started reporting a possible leak at eleven concurrent publishes. They
+     * were not leaking — each was removed on confirm — but a warning that
+     * cries leak in the logs of a system whose logs are the diagnostic is a
+     * cost of its own.
+     */
+    const pending = new Set<(error: Error) => void>();
+
     const watchPublishChannel = (ch: ConfirmChannel) => {
       ch.on("error", (error) => {
         console.warn(`[rmq] publish channel error: ${error.message}`);
@@ -355,6 +409,8 @@ export const makeRmq = (
       // for. Dropping the reference is what makes the next publish reopen.
       ch.on("close", () => {
         if (out === ch) out = null;
+        const closed = new Error("publish channel closed before the broker confirmed");
+        for (const fail of [...pending]) fail(closed);
       });
       return ch;
     };
@@ -412,16 +468,16 @@ export const makeRmq = (
       publishChannel().then(
         (ch) =>
           new Promise<void>((resolve, reject) => {
-            const finish = (outcome: () => void) => {
-              ch.removeListener("close", onClose);
-              outcome();
+            const fail = (error: Error) => {
+              pending.delete(fail);
+              reject(error);
             };
-            const onClose = () =>
-              finish(() => reject(new Error("publish channel closed before the broker confirmed")));
-            ch.once("close", onClose);
-            ch.publish(pub.exchange, pub.routingKey, content, options, (error) =>
-              error ? finish(() => reject(error)) : finish(resolve),
-            );
+            pending.add(fail);
+            ch.publish(pub.exchange, pub.routingKey, content, options, (error) => {
+              if (!pending.delete(fail)) return; // already failed by a close
+              if (error) reject(error instanceof Error ? error : new Error(String(error)));
+              else resolve();
+            });
           }),
       );
 
