@@ -149,10 +149,17 @@ export type DeliveryInfo = {
  * an answer for a thousand messages. Every caller here wants far fewer, and
  * the probe wants exactly one.
  *
- * The default is deliberately above the daemon's `maxInFlight` (32) rather
- * than equal to it: the concurrency gate should be what limits calls, with
- * prefetch as the outer bound that keeps a stalled consumer from holding an
- * unbounded slice of the queue.
+ * This is only a default, for consumers whose work is bounded by something
+ * other than how many messages they hold: the control queue, the two election
+ * queues, a redrive pass. Anything whose prefetch *is* its concurrency limit
+ * passes its own — the daemon's work consumer asks for `maxInFlight` and the
+ * HALF_OPEN probe asks for exactly one.
+ *
+ * It used to be justified the other way round, as deliberately above the
+ * daemon's `maxInFlight` so that an in-process gate could do the limiting.
+ * That gate is gone: a prefetch above the concurrency limit does not add
+ * headroom, it moves the difference out of the queue and into an array in the
+ * consumer, where nothing can see it.
  */
 export const DEFAULT_PREFETCH = 100;
 

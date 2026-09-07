@@ -43,12 +43,6 @@ export const inFlight = Metric.gauge("egress_daemon_in_flight", {
   description: "Third-party calls this daemon has open right now.",
 });
 
-export const queued = Metric.gauge("egress_daemon_queued", {
-  description:
-    "Deliveries parked at the concurrency gate, unsettled — the point at which " +
-    "backpressure has reached the broker and credit stops being replenished.",
-});
-
 export const calls = Metric.counter("egress_daemon_calls_total", {
   description: "Third-party calls made through the egress listener, by outcome.",
 });

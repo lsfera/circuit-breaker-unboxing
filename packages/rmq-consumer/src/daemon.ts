@@ -72,16 +72,20 @@ import type { Action, Command, DaemonState } from "./DaemonState.ts";
  * `${egressAddr}${apiPath}` and never learns Envoy is a fleet — that topology
  * is known to exactly one thing in this repo, the aggregator's FleetSource.
  *
- * ## Backpressure is settlement timing
+ * ## Backpressure is settlement timing, and the ceiling is the broker's
  *
  * The work handler returns the egress call's promise, and `@egress/rmq`
- * settles only once it resolves. `prefetch` caps how many deliveries a
- * consumer may hold unsettled, so a daemon holding `maxInFlight` calls open
- * stops acking, hits that cap, and the broker stops pushing — the backlog
- * stays where it belongs, in the queue, visible.
+ * settles only once it resolves. The work consumer's `prefetch` is
+ * `maxInFlight`, so the broker will not push another delivery until this
+ * daemon settles one — the backlog stays where it belongs, in the queue,
+ * visible.
  * The first version of this file accepted every message on arrival and called
  * afterwards, which turned a 50k backlog into 50k concurrent calls from one
- * daemon: precisely the herd the fleet-level policy exists to prevent.
+ * daemon: precisely the herd the fleet-level policy exists to prevent. The
+ * second version fixed that with a concurrency gate in this process, which
+ * was the same mistake one layer up: prefetch stayed at 100 while the gate
+ * held 32, so the other sixty-eight sat in an array here instead of in the
+ * queue. One limit, at the broker, is what both versions were reaching for.
  *
  * ## Work that fails
  *
@@ -110,11 +114,11 @@ export type DaemonConfig = {
   /** The route on that address for this API — /payments for payments-provider. */
   readonly apiPath: string;
   /**
-   * Ceiling on concurrent third-party calls from this one daemon. Without it
-   * a daemon draining a backlog fires one call per delivered message as fast
-   * as the broker can push, which is a thundering herd of its own making —
-   * the fleet-level policy would be scaling daemons down while each surviving
-   * daemon hammered harder.
+   * Ceiling on concurrent third-party calls from this one daemon, applied as
+   * the work consumer's prefetch. Without it a daemon draining a backlog fires
+   * one call per delivered message as fast as the broker can push, which is a
+   * thundering herd of its own making — the fleet-level policy would be
+   * scaling daemons down while each surviving daemon hammered harder.
    */
   readonly maxInFlight: number;
   /**
@@ -182,12 +186,10 @@ export const runDaemon = (cfg: DaemonConfig) =>
     const redriveConsumer = yield* Ref.make(O.none<Consumer>());
 
     /**
-     * The gate's own state, and the only two numbers here that are read for a
-     * decision rather than for a graph — which is why they stay out of the
-     * tally with the rest.
+     * Calls open right now — a graph, not a decision. What *bounds* it is the
+     * work consumer's prefetch; see below.
      */
     let inFlight = 0;
-    let queued = 0;
 
     /** Everything counted for the metrics registry — see Tally.ts. */
     const counts = Tally.zero();
@@ -196,37 +198,28 @@ export const runDaemon = (cfg: DaemonConfig) =>
     let contract: ContractState = initialContract;
 
     /**
-     * A plain concurrency gate, and the reason it can *wait* rather than
-     * drop: `@egress/rmq`'s `consume` accepts a message only once the
-     * handler's promise settles, so a handler parked here holds its delivery
-     * unacked, and enough of those reach the consumer's prefetch ceiling and
-     * stop the broker pushing. Waiting is therefore real backpressure all the
-     * way to the queue, not an in-process buffer pretending to be one.
-     */
-    const waiting: Array<() => void> = [];
-    const acquire = (): Promise<void> => {
-      if (inFlight < cfg.maxInFlight) {
-        inFlight++;
-        return Promise.resolve();
-      }
-      queued++;
-      return new Promise<void>((resolve) => waiting.push(resolve)).then(() => {
-        queued--;
-        inFlight++;
-      });
-    };
-    const release = () => {
-      inFlight--;
-      waiting.shift()?.();
-    };
-
-    /**
      * One real call to the flaky third party, through the egress listener.
      * Deliberately plain async: it is awaited by the AMQP message handler,
      * and wrapping it in Effect would buy nothing here.
+     *
+     * There used to be a hand-rolled concurrency gate in front of this — a
+     * counter, a queue of pending resolvers, and a comment claiming it was
+     * "real backpressure all the way to the queue, not an in-process buffer
+     * pretending to be one". It was exactly the second thing. The client's
+     * default prefetch was 100 and `maxInFlight` was 32, chosen that way on
+     * purpose, so a saturated daemon held a hundred deliveries unacked with
+     * sixty-eight of them parked in an array inside this process — off the
+     * queue, invisible to the broker and to the management UI, and gone if
+     * the container died.
+     *
+     * The ceiling belongs to the broker, which already had a lever for it.
+     * The work consumer asks for `prefetch: maxInFlight`, so at most that many
+     * deliveries exist here at once and every one of them is a call actually
+     * in progress. The rest stay in the queue, where the backlog is something
+     * you can see, count, and let another daemon drain.
      */
     const rawCall = async (): Promise<Settlement> => {
-      await acquire();
+      inFlight++;
       try {
         const res = await fetch(`${cfg.egressAddr}${cfg.apiPath}`, {
           signal: AbortSignal.timeout(2000),
@@ -260,7 +253,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
         counts.failed++;
         return "requeue";
       } finally {
-        release();
+        inFlight--;
       }
     };
 
@@ -353,8 +346,13 @@ export const runDaemon = (cfg: DaemonConfig) =>
 
     /** Open a work-queue consumer on its own channel. */
     const startWork = Effect.gen(function* () {
-      const consumer = yield* control.consume(workQueue, (_body, delivery) =>
-        callEgress(delivery.parent),
+      const consumer = yield* control.consume(
+        workQueue,
+        (_body, delivery) => callEgress(delivery.parent),
+        // The whole concurrency limit, expressed once, where it can actually
+        // stop the flow: the broker will not push a `maxInFlight + 1`th
+        // delivery until this daemon settles one.
+        { prefetch: cfg.maxInFlight },
       );
       yield* Ref.set(workConsumer, O.some(consumer));
     });
@@ -504,7 +502,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
       const active = O.isSome(yield* Ref.get(workConsumer));
       return (
         `${circuit} target=${policy.targetActive}/${cfg.fleetSize} self=${active ? "ACTIVE" : "idle"} ` +
-        `calls ok=${counts.ok} failed=${counts.failed} inFlight=${inFlight} queued=${queued} ` +
+        `calls ok=${counts.ok} failed=${counts.failed} inFlight=${inFlight} ` +
         `control=${[...counts.byType.values()].reduce((a, b) => a + b, 0)} ` +
         `gaps=${contract.gaps} dup=${contract.duplicates}`
       );
@@ -660,7 +658,6 @@ export const runDaemon = (cfg: DaemonConfig) =>
           Metric.update(Metric.withAttributes(Telemetry.fleetSize, attrs), cfg.fleetSize),
           Metric.update(Metric.withAttributes(Telemetry.selfActive, attrs), active ? 1 : 0),
           Metric.update(Metric.withAttributes(Telemetry.inFlight, attrs), inFlight),
-          Metric.update(Metric.withAttributes(Telemetry.queued, attrs), queued),
         ],
         { discard: true },
       );

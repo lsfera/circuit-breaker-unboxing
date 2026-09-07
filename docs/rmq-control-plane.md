@@ -141,7 +141,7 @@ reachable.
 | `OPEN` | No daemons active | Every daemon retires its work connection — the *control* connection and its subscription stay up untouched |
 | `HALF_OPEN` | Exactly one daemon probes | SAC promotion on `probe-trigger`; the elected daemon opens a one-shot connection, takes a single message, and closes the consumer immediately |
 | → `CLOSED` (recovery) | Ramp the active-daemon count back up (1→…→N) | Consumption resumed gradually, not all at once — never a snap to full, which is the actual thundering-herd risk on the way *back* |
-| any state, per daemon | Cap concurrent third-party calls | The work handler parks at `maxInFlight` and holds its delivery unsettled, so credit stops refilling and the broker stops pushing |
+| any state, per daemon | Cap concurrent third-party calls | The work consumer's prefetch *is* `maxInFlight`, so the broker holds the next delivery until this daemon settles one |
 
 Judgment of `PROBE_SUCCEEDED` vs `PROBE_FAILED` is **not** reimplemented
 here — it stays with Envoy's outlier detection and the aggregator's existing
@@ -456,7 +456,7 @@ replenishes link credit on settlement, so:
 - `@egress/rmq`'s `consume` now takes a handler that may return a promise,
   and accepts the delivery only once that promise settles;
 - the daemon's work handler returns the egress call, and parks behind a
-  `maxInFlight` gate (default 32, `MAX_IN_FLIGHT`) when saturated;
+  `maxInFlight` prefetch (default 32, `MAX_IN_FLIGHT`) when saturated;
 - a parked handler holds its delivery unsettled, credit stops refilling, and
   the broker stops pushing.
 
