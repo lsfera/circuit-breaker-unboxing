@@ -7,8 +7,9 @@
     "start": "node --experimental-strip-types src/main.ts"
   },
   "dependencies": {
-    "@egress/rmq": "workspace:*",
     "@effect/platform-node": "catalog:",
+    "@egress/rmq": "workspace:*",
+    "@egress/tracing": "workspace:*",
     "effect": "catalog:"
   }
 }

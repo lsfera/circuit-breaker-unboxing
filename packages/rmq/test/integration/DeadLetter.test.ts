@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { Effect } from "effect";
+import { Effect, Option as O } from "effect";
 import { GenericContainer, Wait } from "testcontainers";
 import type { StartedTestContainer } from "testcontainers";
 import { Rmq, RmqLive } from "../../src/Client.ts";
@@ -185,8 +185,8 @@ test("a dead-lettered message says which queue it came from", async (t) => {
       yield* rmq.consume(dead, (body, delivery) => {
         seen.push({
           body,
-          queue: delivery.deadLetter?.queue ?? null,
-          reason: delivery.deadLetter?.reason ?? null,
+          queue: O.getOrUndefined(delivery.deadLetter)?.queue ?? null,
+          reason: O.getOrUndefined(delivery.deadLetter)?.reason ?? null,
         });
       });
 
@@ -354,7 +354,7 @@ test("the work queue parks a message at the delivery limit, and a redrive republ
       const parked: string[] = [];
       let replayed = false;
       yield* rmq.consume(dead, (body, delivery) => {
-        parked.push(delivery.deadLetter?.reason ?? "unknown");
+        parked.push(O.getOrUndefined(delivery.deadLetter)?.reason ?? "unknown");
         if (replayed) return "accept" as const;
         replayed = true;
         // What Redrive.ts does on the transition back to CLOSED: publish the

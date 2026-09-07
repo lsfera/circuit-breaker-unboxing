@@ -25,6 +25,10 @@ WORKDIR /app
 # corepack rather than named twice.
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# One line per workspace, and it has to be kept in step by hand: a package
+# missing here installs none of its dependencies, and the failure surfaces as
+# ERR_MODULE_NOT_FOUND at runtime rather than as a build error. Adding
+# @egress/tracing is exactly how that was learned.
 COPY packages/aggregator/package.json packages/aggregator/
 COPY packages/demo/package.json packages/demo/
 COPY packages/domain/package.json packages/domain/
@@ -32,6 +36,7 @@ COPY packages/rmq/package.json packages/rmq/
 COPY packages/rmq-consumer/package.json packages/rmq-consumer/
 COPY packages/rmq-producer/package.json packages/rmq-producer/
 COPY packages/subscriber/package.json packages/subscriber/
+COPY packages/tracing/package.json packages/tracing/
 # --prod drops typescript and testcontainers, which exist for `pnpm run check`
 # and the opt-in integration suites and have no business in a runtime image.
 RUN pnpm install --frozen-lockfile --prod

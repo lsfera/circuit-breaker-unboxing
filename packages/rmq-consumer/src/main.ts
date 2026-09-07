@@ -5,6 +5,7 @@ import { NodeHttpServer, NodeRuntime } from "@effect/platform-node";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { RmqLive } from "@egress/rmq/Client.ts";
+import { TracingLive } from "@egress/tracing/Tracing.ts";
 import { runDaemon } from "./daemon.ts";
 
 /**
@@ -90,6 +91,11 @@ const Daemon = Layer.effectDiscard(Effect.forkScoped(Effect.orDie(program)));
 
 const MainLayer = HttpRouter.serve(
   Layer.provideMerge(Daemon, MetricsRoute).pipe(Layer.provide(RmqLive(connect))),
-).pipe(Layer.provide(NodeHttpServer.layer(createServer, { port: METRICS_PORT })));
+).pipe(
+  Layer.provide(NodeHttpServer.layer(createServer, { port: METRICS_PORT })),
+  // All five daemons report as one service: which daemon is an attribute of a
+  // span, not a different system.
+  Layer.provide(TracingLive("rmq-daemon")),
+);
 
 NodeRuntime.runMain(Layer.launch(MainLayer));

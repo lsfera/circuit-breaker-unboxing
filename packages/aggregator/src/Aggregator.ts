@@ -1,4 +1,4 @@
-import { Context, Duration, Effect, Layer, Metric, Option, Ref, Schedule } from "effect";
+import { Context, Duration, Effect, Layer, Metric, Option as O, Ref, Schedule } from "effect";
 import * as Breaker from "@egress/domain/Breaker.ts";
 import { Config } from "@egress/domain/Model.ts";
 import { CheckpointStore, HaSettings, LeaderElection } from "./Coordination.ts";
@@ -54,12 +54,12 @@ export class Aggregator extends Context.Service<
  */
 const seedFromCheckpoint = (
   apiId: string,
-  checkpoint: Option.Option<Checkpoint>,
+  checkpoint: O.Option<Checkpoint>,
   cfg: Parameters<typeof Breaker.initial>[1],
   now: number,
 ): Breaker.BreakerState => {
   const base = Breaker.initial(apiId, cfg, now);
-  if (Option.isNone(checkpoint)) return base;
+  if (O.isNone(checkpoint)) return base;
   const cp = checkpoint.value;
   return {
     ...base,
@@ -141,9 +141,9 @@ export const AggregatorLayer = Layer.effect(
           yield* Ref.set(coordinationOk, true);
           yield* Effect.logInfo(`${ha.instanceId}: coordination is reachable again`);
         }
-        yield* Metric.update(Telemetry.isLeader, Option.isSome(tokenOpt) ? 1 : 0);
+        yield* Metric.update(Telemetry.isLeader, O.isSome(tokenOpt) ? 1 : 0);
 
-        if (Option.isNone(tokenOpt)) {
+        if (O.isNone(tokenOpt)) {
           // Standby: do not poll, do not step, do not publish. The only
           // thing a non-leader instance does is keep trying to acquire.
           yield* demote;
@@ -179,7 +179,7 @@ export const AggregatorLayer = Layer.effect(
               breakers.get(report.apiId) ??
               seedFromCheckpoint(
                 report.apiId,
-                checkpointByApi.get(report.apiId) ?? Option.none(),
+                checkpointByApi.get(report.apiId) ?? O.none(),
                 cfg,
                 now,
               );

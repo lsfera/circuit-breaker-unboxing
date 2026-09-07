@@ -1,5 +1,7 @@
-import { Effect, Metric, Option, Ref, Semaphore } from "effect";
+import { Effect, Metric, Option as O, Ref, Semaphore } from "effect";
+import type { Tracer } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
+import { withParent } from "@egress/rmq/Trace.ts";
 import {
   CONTROL_EXCHANGE,
   CONTROL_EXCHANGE_OPTIONS,
@@ -21,6 +23,7 @@ import { makeRedrive } from "./Redrive.ts";
 import { desired, initialState, plan, reduce } from "./DaemonState.ts";
 import * as Telemetry from "./Telemetry.ts";
 import type { Consumer, Settlement } from "@egress/rmq/Client.ts";
+
 import type { ContractState } from "./Contract.ts";
 import type { Action, Command, DaemonState } from "./DaemonState.ts";
 
@@ -218,7 +221,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
      * Deliberately plain async: it is awaited by the AMQP message handler,
      * and wrapping it in Effect would buy nothing here.
      */
-    const callEgress = async (): Promise<Settlement> => {
+    const rawCall = async (): Promise<Settlement> => {
       await acquire();
       try {
         const res = await fetch(`${cfg.egressAddr}${cfg.apiPath}`, {
@@ -256,6 +259,49 @@ export const runDaemon = (cfg: DaemonConfig) =>
         release();
       }
     };
+
+    /**
+     * The services this daemon was built with, captured so work started from an
+     * AMQP callback can still reach them.
+     *
+     * `Effect.runPromise` builds a fresh runtime with default services every
+     * time, which for a span means the default no-op tracer: the span is
+     * created, costs something, and goes nowhere. That is exactly what happened
+     * the first time this was wired — the `traceparent` was on the wire and the
+     * daemon's spans simply never reached the collector.
+     */
+    const services = yield* Effect.context<never>();
+    const runInContext = Effect.runPromiseWith(services);
+
+    /**
+     * The same call, inside a span when the message carried one.
+     *
+     * The path docs/decisions/003-tracing.md named as the one worth tracing —
+     * a message off the work queue, the third-party call it causes, and the
+     * circuit event that eventually comes back — starts here. It is also the
+     * hottest code in this process, which is why the untraced case is the
+     * original function called directly: no Effect runtime, no span, one null
+     * check. Only a message that arrived carrying a traceparent pays for a
+     * `runPromise`.
+     */
+    const callEgress = (parent: O.Option<Tracer.ExternalSpan>): Promise<Settlement> =>
+      O.isNone(parent)
+        ? rawCall()
+        : runInContext(
+            Effect.promise(rawCall).pipe(
+              Effect.tap((outcome) =>
+                Effect.annotateCurrentSpan({ "egress.settlement": outcome }),
+              ),
+              Effect.withSpan("work.call", {
+                attributes: {
+                  "egress.api_id": cfg.apiId,
+                  "egress.path": cfg.apiPath,
+                  "egress.daemon_index": cfg.index,
+                },
+              }),
+              (call) => withParent(parent, call),
+            ),
+          );
 
     /**
      * How many unreadable messages this daemon preserves before it starts
@@ -303,7 +349,9 @@ export const runDaemon = (cfg: DaemonConfig) =>
 
     /** Open a work-queue consumer on its own channel. */
     const startWork = Effect.gen(function* () {
-      const consumer = yield* control.consume(workQueue, () => callEgress());
+      const consumer = yield* control.consume(workQueue, (_body, delivery) =>
+        callEgress(delivery.parent),
+      );
       yield* Ref.set(workConsumer, consumer);
     });
 
@@ -360,11 +408,11 @@ export const runDaemon = (cfg: DaemonConfig) =>
         let taken = false;
         const consumer = yield* control.consume(
           workQueue,
-          () => {
+          (_body, delivery) => {
             if (taken || self === null) return;
             taken = true;
             Effect.runFork(control.cancelConsumer(self));
-            return callEgress();
+            return callEgress(delivery.parent);
           },
           // The one state whose contract is "exactly one call" asks the broker
           // for exactly one message. The AMQP 1.0 client had no such lever —
@@ -476,7 +524,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
 
     yield* control.consume(controlQueue, (body) => {
       const decoded = decodeCircuitEvent(body);
-      if (Option.isNone(decoded)) {
+      if (O.isNone(decoded)) {
         // Same stance as @egress/subscriber: an event that does not match the
         // published contract is never half-applied. It is rejected rather
         // than accepted, so it lands on the canonical dead-letter queue

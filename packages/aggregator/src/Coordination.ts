@@ -1,4 +1,4 @@
-import { Context, Data, Duration, Effect, Layer, Option, Ref, Schema } from "effect";
+import { Context, Data, Duration, Effect, Layer, Option as O, Ref, Schema } from "effect";
 import { ReasonSchema, StateSchema } from "@egress/domain/Model.ts";
 import type { Reason, State } from "@egress/domain/Model.ts";
 
@@ -124,7 +124,7 @@ export class LeaderElection extends Context.Service<
     readonly tryAcquireOrRenew: (
       holderId: string,
       ttlMs: number,
-    ) => Effect.Effect<Option.Option<LeaseToken>, CoordinationUnavailable>;
+    ) => Effect.Effect<O.Option<LeaseToken>, CoordinationUnavailable>;
     readonly release: (holderId: string) => Effect.Effect<void, CoordinationUnavailable>;
   }
 >()("LeaderElection") {}
@@ -156,7 +156,7 @@ export class CheckpointStore extends Context.Service<
      */
     readonly load: (
       apiId: string,
-    ) => Effect.Effect<Option.Option<Checkpoint>, CoordinationUnavailable>;
+    ) => Effect.Effect<O.Option<Checkpoint>, CoordinationUnavailable>;
   }
 >()("CheckpointStore") {}
 
@@ -188,19 +188,19 @@ export const makeInMemoryCoordination = Effect.gen(function* () {
       Effect.flatMap((now) =>
         Ref.modify(lock, (current) => {
           if (current && current.expiresAt > now && current.holderId !== holderId) {
-            return [Option.none<LeaseToken>(), current]; // someone else holds a live lease
+            return [O.none<LeaseToken>(), current]; // someone else holds a live lease
           }
           if (current && current.holderId === holderId && current.expiresAt > now) {
             // Renewal: same token, extended TTL.
             return [
-              Option.some(`${epoch}:${current.counter}`),
+              O.some(`${epoch}:${current.counter}`),
               { ...current, expiresAt: now + ttlMs },
             ];
           }
           // Expired or never held: a genuine handoff, counter strictly increases.
           const next = (current?.counter ?? 0) + 1;
           return [
-            Option.some(`${epoch}:${next}`),
+            O.some(`${epoch}:${next}`),
             { holderId, counter: next, expiresAt: now + ttlMs },
           ];
         }),
@@ -224,7 +224,7 @@ export const makeInMemoryCoordination = Effect.gen(function* () {
     );
 
   const load = (apiId: string) =>
-    Ref.get(checkpoints).pipe(Effect.map((map) => Option.fromUndefinedOr(map.get(apiId))));
+    Ref.get(checkpoints).pipe(Effect.map((map) => O.fromUndefinedOr(map.get(apiId))));
 
   return {
     leaderElection: { tryAcquireOrRenew, release },
@@ -400,7 +400,7 @@ export const RedisCoordinationLayer = (
         }).pipe(
           Effect.map((result) => {
             const token = String(result);
-            return token === "-1" ? Option.none<LeaseToken>() : Option.some(token);
+            return token === "-1" ? O.none<LeaseToken>() : O.some(token);
           }),
         ),
       release: (holderId) =>
@@ -432,11 +432,11 @@ export const RedisCoordinationLayer = (
           args: [],
         }).pipe(
           Effect.map((raw) => {
-            if (typeof raw !== "string") return Option.none<Checkpoint>();
+            if (typeof raw !== "string") return O.none<Checkpoint>();
             try {
               return decodeCheckpoint(JSON.parse(raw));
             } catch {
-              return Option.none<Checkpoint>(); // not even JSON
+              return O.none<Checkpoint>(); // not even JSON
             }
           }),
         ),

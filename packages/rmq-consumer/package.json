@@ -8,9 +8,10 @@
     "daemon": "node --experimental-strip-types src/main.ts"
   },
   "dependencies": {
+    "@effect/platform-node": "catalog:",
     "@egress/domain": "workspace:*",
     "@egress/rmq": "workspace:*",
-    "@effect/platform-node": "catalog:",
+    "@egress/tracing": "workspace:*",
     "effect": "catalog:"
   }
 }

@@ -1,4 +1,4 @@
-import { Effect, Option, Ref, Schema, Stream } from "effect";
+import { Effect, Option as O, Ref, Schema, Stream } from "effect";
 import { NodeRuntime } from "@effect/platform-node";
 import { CircuitEvent, State } from "@egress/domain/Model.ts";
 import type { State as StateType } from "@egress/domain/Model.ts";
@@ -63,7 +63,7 @@ const program = Effect.gen(function* () {
     Stream.mapEffect((line) =>
       Effect.suspend(() => {
         const decoded = decode(JSON.parse(line.slice(6)));
-        if (Option.isNone(decoded)) {
+        if (O.isNone(decoded)) {
           // Loud, not silently dropped: this is contract drift.
           return Effect.logError(`undecodable event: ${line}`).pipe(
             Effect.as(undefined),

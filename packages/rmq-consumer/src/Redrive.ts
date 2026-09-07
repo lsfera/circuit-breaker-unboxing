@@ -1,4 +1,4 @@
-import { Effect, Ref } from "effect";
+import { Effect, Option as O, Ref } from "effect";
 import { randomUUID } from "node:crypto";
 import type { Consumer, RmqService, Settlement } from "@egress/rmq/Client.ts";
 import type { Semaphore } from "effect/Semaphore";
@@ -80,10 +80,10 @@ export const makeRedrive = (opts: RedriveOptions) => {
       // stamp once an earlier pass moved it, and "unknown" for anything
       // published straight onto this queue by something else. Only work is
       // ever replayed, so anything unattributable is kept, not guessed at.
-      const originQueue =
-        delivery.deadLetter?.queue ?? delivery.properties[ORIGIN_PROPERTY] ?? "unknown";
+      const death = O.getOrUndefined(delivery.deadLetter);
+      const originQueue = death?.queue ?? delivery.properties[ORIGIN_PROPERTY] ?? "unknown";
       const originReason =
-        delivery.deadLetter?.reason ?? delivery.properties[ORIGIN_REASON_PROPERTY] ?? "unknown";
+        death?.reason ?? delivery.properties[ORIGIN_REASON_PROPERTY] ?? "unknown";
 
       if (originQueue !== opts.workQueue) {
         // Moved to the tail rather than released, because releasing puts it

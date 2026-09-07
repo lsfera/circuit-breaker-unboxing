@@ -57,10 +57,25 @@ export const runProducer = (cfg: ProducerConfig) =>
       const batch = Array.from({ length: perTick }, () =>
         JSON.stringify({ apiId: cfg.apiId, n: sent++ }),
       );
-      yield* Effect.forEach(batch, (body) => rmq.send(publisher, body), {
-        concurrency: "unbounded",
-        discard: true,
-      });
+      yield* Effect.forEach(
+        batch,
+        (body) =>
+          // The root of every trace in this repo. The sampler decides here and
+          // nowhere else — `@egress/rmq` stamps a traceparent only when a span
+          // is active, and every span downstream is ParentBased, so a message
+          // is either followed the whole way or not at all.
+          rmq.send(publisher, body).pipe(
+            Effect.withSpan("work.publish", {
+              attributes: {
+                "messaging.system": "rabbitmq",
+                "messaging.operation.name": "publish",
+                "messaging.destination.name": queue,
+                "egress.api_id": cfg.apiId,
+              },
+            }),
+          ),
+        { concurrency: "unbounded", discard: true },
+      );
       // Scraped alongside the daemons' call counters: arrival rate against
       // completion rate is the queue's depth, expressed as two lines that
       // separate during an outage and converge again on the ramp back.

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Duration, Effect, Fiber, Layer, Option, Ref } from "effect";
+import { Duration, Effect, Fiber, Layer, Option as O, Ref } from "effect";
 import { TestClock } from "effect/testing";
 import { Aggregator, AggregatorLayer } from "../src/Aggregator.ts";
 import {
@@ -49,10 +49,10 @@ test("renewal keeps the same token; a genuine handoff strictly increases it", as
 
         yield* TestClock.adjust(Duration.millis(2000)); // outlive the lease
         const handoff = yield* leaderElection.tryAcquireOrRenew("B", 1000);
-        assert.ok(Option.isSome(first) && Option.isSome(handoff));
+        assert.ok(O.isSome(first) && O.isSome(handoff));
         assert.ok(
-          tokenCounter((handoff as Option.Some<string>).value) >
-            tokenCounter((first as Option.Some<string>).value),
+          tokenCounter((handoff as O.Some<string>).value) >
+            tokenCounter((first as O.Some<string>).value),
           "a real handoff must produce a strictly higher token",
         );
       }),
@@ -68,7 +68,7 @@ test("a live holder blocks a competing acquire", async () => {
         const { leaderElection } = yield* makeInMemoryCoordination;
         yield* leaderElection.tryAcquireOrRenew("A", 10_000);
         const blocked = yield* leaderElection.tryAcquireOrRenew("B", 10_000);
-        assert.ok(Option.isNone(blocked), "B must not acquire while A's lease is live");
+        assert.ok(O.isNone(blocked), "B must not acquire while A's lease is live");
       }),
       TestClock.layer(),
     ),
@@ -84,7 +84,7 @@ test("a stale token is rejected even for an API no one has checkpointed yet", as
         const aToken = yield* leaderElection.tryAcquireOrRenew("A", 1000);
         yield* TestClock.adjust(Duration.millis(2000));
         const bToken = yield* leaderElection.tryAcquireOrRenew("B", 1000);
-        assert.ok(Option.isSome(aToken) && Option.isSome(bToken));
+        assert.ok(O.isSome(aToken) && O.isSome(bToken));
 
         // "brand-new-api" has never been checkpointed by anyone. A per-key
         // "last write wins" fence would wrongly let A's stale token win here
@@ -92,7 +92,7 @@ test("a stale token is rejected even for an API no one has checkpointed yet", as
         // that was the bug. Fencing against the shared lease token closes it
         // for every key at once, the moment leadership actually changed.
         const staleWrite = yield* checkpointStore
-          .save("brand-new-api", (aToken as Option.Some<string>).value, {
+          .save("brand-new-api", (aToken as O.Some<string>).value, {
             state: "OPEN",
             reason: "ALL_ENDPOINTS_EJECTED",
             sequence: 1,
@@ -103,7 +103,7 @@ test("a stale token is rejected even for an API no one has checkpointed yet", as
         assert.equal(staleWrite, "fenced", "A's stale token must be rejected");
 
         const freshWrite = yield* checkpointStore
-          .save("brand-new-api", (bToken as Option.Some<string>).value, {
+          .save("brand-new-api", (bToken as O.Some<string>).value, {
             state: "OPEN",
             reason: "ALL_ENDPOINTS_EJECTED",
             sequence: 1,
@@ -298,7 +298,7 @@ test("a re-promoted instance resumes from the checkpoint, not its own stale sequ
           // handoff with a strictly higher token.
           yield* TestClock.adjust(Duration.millis(2000));
           const token = yield* coordination.leaderElection.tryAcquireOrRenew("B", 1000);
-          assert.ok(Option.isSome(token), "the other instance must be able to acquire");
+          assert.ok(O.isSome(token), "the other instance must be able to acquire");
           const advanced = last.data.sequence + 5;
           yield* Ref.set(handoff, advanced);
           yield* coordination.checkpointStore.save("payments", token.value, {
@@ -415,7 +415,7 @@ test("an unreachable coordinator stands the instance down, and the loop recovers
             load: (apiId) =>
               Ref.get(reachable).pipe(
                 Effect.flatMap(
-                  (up): Effect.Effect<Option.Option<Checkpoint>, CoordinationUnavailable> =>
+                  (up): Effect.Effect<O.Option<Checkpoint>, CoordinationUnavailable> =>
                     up ? inner.checkpointStore.load(apiId) : Effect.fail(unavailable("load")),
                 ),
               ),
@@ -492,7 +492,7 @@ test("a clean shutdown hands the lease back rather than leaving it to expire", a
             60_000,
           );
           assert.ok(
-            Option.isNone(blocked),
+            O.isNone(blocked),
             "while the leader is running, a competing acquire must fail",
           );
 
@@ -504,7 +504,7 @@ test("a clean shutdown hands the lease back rather than leaving it to expire", a
 
         const taken = yield* coordination.leaderElection.tryAcquireOrRenew("arriving", 60_000);
         assert.ok(
-          Option.isSome(taken),
+          O.isSome(taken),
           "the lease must be free the moment the leader stops, not a minute later",
         );
       }),

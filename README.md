@@ -465,6 +465,9 @@ packages/
     src/Telemetry.ts         its one counter
     src/main.ts              entrypoint plus /metrics
 
+  tracing/                   @egress/tracing — the OpenTelemetry layer, and nothing else
+    src/Tracing.ts           opt-in: no OTLP endpoint, no tracer, no cost
+
   demo/                      @egress/demo — no dependency on the others, speaks only HTTP
     src/driver.ts            drives the demo script over HTTP, narrates transitions
 
@@ -570,16 +573,19 @@ general caveat — where it has been measured, the number is here.
   more — RSS moved about 5 MiB. There is no multi-hour run, no run at 1000
   APIs beyond a sampling window, and RSS at that size is one reading rather
   than a curve.
-- **No distributed tracing.** `@effect/opentelemetry` publishes the exact
-  version this repo pins, so this is a choice:
-  [docs/decisions/003-tracing.md](docs/decisions/003-tracing.md) records that
-  every failure here has been state-over-time rather than trace-shaped, and
-  names the one path (message → egress call → Envoy stats → circuit event)
-  that would earn one.
 
-### Four things that used to be on this list
+### Five things that used to be on this list
 
 Kept because a list of gaps is only trustworthy if you can see what leaves it.
+
+- **There is distributed tracing now.** This said there was none, and that it
+  was a choice rather than an omission. It is built: a `traceparent` rides the
+  AMQP header, so a trace runs from the producer's publish through the daemon's
+  third-party call, and an OpenTelemetry collector decides *at the tail* what to
+  keep — errors, anything slow, anything requeued, and a small baseline. It is
+  opt-in and off by default, because the reason for deferring it holds: every
+  failure this repo has had was state-over-time, and metrics are what surface
+  those. See [docs/decisions/003-tracing.md](docs/decisions/003-tracing.md).
 
 - **The AMQP client is no longer an unmaintained dependency.** This said so for
   about a day: `rabbitmq-amqp-js-client` had no upstream commit since

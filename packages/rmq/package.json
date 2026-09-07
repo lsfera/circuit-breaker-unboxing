@@ -5,7 +5,8 @@
   "description": "Effect wrapper over amqplib (AMQP 0-9-1) plus the circuit.control exchange helpers — shared by @egress/aggregator's AmqpControlPlaneSink and @egress/rmq-consumer's daemon fleet.",
   "exports": {
     "./Client.ts": "./src/Client.ts",
-    "./ControlPlane.ts": "./src/ControlPlane.ts"
+    "./ControlPlane.ts": "./src/ControlPlane.ts",
+    "./Trace.ts": "./src/Trace.ts"
   },
   "scripts": {
     "test:rmq": "node --experimental-strip-types --test 'test/integration/*.test.ts'"

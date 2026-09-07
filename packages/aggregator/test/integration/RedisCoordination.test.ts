@@ -1,7 +1,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
-import { Effect, Option } from "effect";
+import { Effect, Option as O } from "effect";
 import { Redis } from "ioredis";
 import { GenericContainer, Wait } from "testcontainers";
 import type { StartedTestContainer } from "testcontainers";
@@ -97,7 +97,7 @@ test("acquire, renew keeps the token, real TTL expiry allows a strictly higher o
     Effect.gen(function* () {
       const leader = yield* LeaderElection;
       const first = yield* leader.tryAcquireOrRenew("A", 200);
-      assert.ok(Option.isSome(first));
+      assert.ok(O.isSome(first));
 
       const renewed = yield* leader.tryAcquireOrRenew("A", 200);
       assert.deepEqual(renewed, first, "renewal by the same holder keeps the token");
@@ -105,10 +105,10 @@ test("acquire, renew keeps the token, real TTL expiry allows a strictly higher o
       yield* Effect.promise(() => sleep(400)); // real time — outlive the 200ms TTL
 
       const handoff = yield* leader.tryAcquireOrRenew("B", 200);
-      assert.ok(Option.isSome(handoff));
+      assert.ok(O.isSome(handoff));
       assert.ok(
-        tokenCounter((handoff as Option.Some<string>).value) >
-          tokenCounter((first as Option.Some<string>).value),
+        tokenCounter((handoff as O.Some<string>).value) >
+          tokenCounter((first as O.Some<string>).value),
         "a real handoff must produce a strictly higher token",
       );
     }),
@@ -123,7 +123,7 @@ test("a live holder blocks a competing acquire", async (t) => {
       const leader = yield* LeaderElection;
       yield* leader.tryAcquireOrRenew("A", 10_000);
       const blocked = yield* leader.tryAcquireOrRenew("B", 10_000);
-      assert.ok(Option.isNone(blocked), "B must not acquire while A's lease is live");
+      assert.ok(O.isNone(blocked), "B must not acquire while A's lease is live");
     }),
     freshLayer(),
   ));
@@ -139,14 +139,14 @@ test("a stale token is rejected even for an API no one has checkpointed yet", as
       const aToken = yield* leader.tryAcquireOrRenew("A", 200);
       yield* Effect.promise(() => sleep(400));
       const bToken = yield* leader.tryAcquireOrRenew("B", 200);
-      assert.ok(Option.isSome(aToken) && Option.isSome(bToken));
+      assert.ok(O.isSome(aToken) && O.isSome(bToken));
 
       // Same property Coordination.test.ts proves in-memory: an untouched
       // key must not let a stale token win just because nothing higher has
       // written there yet. Here it is Redis's own Lua execution deciding,
       // not our in-memory Ref.
       const stale = yield* checkpoints
-        .save("brand-new-api", (aToken as Option.Some<string>).value, {
+        .save("brand-new-api", (aToken as O.Some<string>).value, {
           state: "OPEN",
           reason: "ALL_ENDPOINTS_EJECTED",
           sequence: 1,
@@ -157,7 +157,7 @@ test("a stale token is rejected even for an API no one has checkpointed yet", as
       assert.equal(stale, "fenced", "A's stale token must be rejected by real Redis, not just reasoned about");
 
       const fresh = yield* checkpoints
-        .save("brand-new-api", (bToken as Option.Some<string>).value, {
+        .save("brand-new-api", (bToken as O.Some<string>).value, {
           state: "OPEN",
           reason: "ALL_ENDPOINTS_EJECTED",
           sequence: 1,
@@ -168,7 +168,7 @@ test("a stale token is rejected even for an API no one has checkpointed yet", as
       assert.equal(fresh, "ok", "B's current token must be accepted");
 
       const loaded = yield* checkpoints.load("brand-new-api");
-      assert.ok(Option.isSome(loaded));
+      assert.ok(O.isSome(loaded));
       assert.equal(loaded.value.sequence, 1);
     }),
     freshLayer(),
@@ -187,7 +187,7 @@ test("release only removes the lease if the caller still holds it", async (t) =>
       yield* leader.tryAcquireOrRenew("B", 10_000);
       yield* leader.release("A");
       const stillB = yield* leader.tryAcquireOrRenew("C", 200);
-      assert.ok(Option.isNone(stillB), "A's stale release must not evict B's live lease");
+      assert.ok(O.isNone(stillB), "A's stale release must not evict B's live lease");
     }),
     freshLayer(),
   ));
@@ -213,7 +213,7 @@ test("a corrupt checkpoint reads as absent, not as garbage state", async (t) => 
         const store = yield* CheckpointStore;
         const leader = yield* LeaderElection;
         const token = yield* leader.tryAcquireOrRenew("writer", 10_000);
-        assert.ok(Option.isSome(token));
+        assert.ok(O.isSome(token));
 
         yield* store.save("good", token.value, {
           state: "OPEN",
@@ -242,11 +242,11 @@ test("a corrupt checkpoint reads as absent, not as garbage state", async (t) => 
     ),
   );
 
-  assert.ok(Option.isSome(valid), "a well-formed checkpoint still loads");
-  assert.equal((valid as Option.Some<{ sequence: number }>).value.sequence, 7);
-  assert.ok(Option.isNone(truncated), "a truncated write must read as absent");
-  assert.ok(Option.isNone(notJson), "a non-JSON value must read as absent");
-  assert.ok(Option.isNone(wrongShape), "valid JSON of the wrong shape must read as absent");
+  assert.ok(O.isSome(valid), "a well-formed checkpoint still loads");
+  assert.equal((valid as O.Some<{ sequence: number }>).value.sequence, 7);
+  assert.ok(O.isNone(truncated), "a truncated write must read as absent");
+  assert.ok(O.isNone(notJson), "a non-JSON value must read as absent");
+  assert.ok(O.isNone(wrongShape), "valid JSON of the wrong shape must read as absent");
 });
 
 /**
@@ -279,7 +279,7 @@ test("a coordinator that loses its state does not let a stale leader win", async
         const store = yield* CheckpointStore;
 
         const first = yield* leader.tryAcquireOrRenew("A", 10_000);
-        assert.ok(Option.isSome(first));
+        assert.ok(O.isSome(first));
         const cp = {
           state: "OPEN",
           reason: "ALL_ENDPOINTS_EJECTED",
@@ -302,7 +302,7 @@ test("a coordinator that loses its state does not let a stale leader win", async
 
         // B comes along and takes the lease from a blank coordinator.
         const second = yield* leader.tryAcquireOrRenew("B", 10_000);
-        assert.ok(Option.isSome(second));
+        assert.ok(O.isSome(second));
 
         // A was paused through all of this and still believes it leads.
         const staleWrite = yield* store

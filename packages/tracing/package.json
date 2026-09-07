@@ -1,0 +1,19 @@
+{
+  "name": "@egress/tracing",
+  "private": true,
+  "type": "module",
+  "description": "OpenTelemetry wiring for every process here: one layer, off unless an OTLP endpoint is configured — see docs/decisions/003-tracing.md.",
+  "exports": {
+    "./Tracing.ts": "./src/Tracing.ts"
+  },
+  "dependencies": {
+    "@effect/opentelemetry": "4.0.0-rc.112",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.208.0",
+    "@opentelemetry/resources": "^2.11.0",
+    "@opentelemetry/sdk-trace-base": "^2.11.0",
+    "@opentelemetry/sdk-trace-node": "^2.11.0",
+    "@opentelemetry/semantic-conventions": "^1.43.0",
+    "effect": "catalog:"
+  }
+}

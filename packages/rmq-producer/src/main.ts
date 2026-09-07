@@ -4,6 +4,7 @@ import { PrometheusMetrics } from "effect/unstable/observability";
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node";
 import { createServer } from "node:http";
 import { RmqLive } from "@egress/rmq/Client.ts";
+import { TracingLive } from "@egress/tracing/Tracing.ts";
 import { runProducer } from "./producer.ts";
 
 /**
@@ -68,6 +69,11 @@ const Producer = Layer.effectDiscard(Effect.forkScoped(Effect.orDie(program)));
 
 const MainLayer = HttpRouter.serve(
   Layer.provideMerge(Producer, MetricsRoute).pipe(Layer.provide(RmqLive(connect))),
-).pipe(Layer.provide(NodeHttpServer.layer(createServer, { port: METRICS_PORT })));
+).pipe(
+  Layer.provide(NodeHttpServer.layer(createServer, { port: METRICS_PORT })),
+  // Every trace in this repo starts in this process. Without an OTLP endpoint
+  // this installs no tracer at all — see @egress/tracing.
+  Layer.provide(TracingLive("rmq-producer")),
+);
 
 NodeRuntime.runMain(Layer.launch(MainLayer));

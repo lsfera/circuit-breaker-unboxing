@@ -17,7 +17,23 @@ networks:
 # into it — a daemon that redeclared `environment:` to set its own
 # DAEMON_INDEX would otherwise drop every other variable. Merging at the map
 # level instead keeps the differing value to one line per daemon.
+# Tracing is opt-in, and this is the opt. Unset on the host, this interpolates
+# to the empty string, which @egress/tracing treats as "no endpoint" and
+# installs no tracer at all — so the default stack traces nothing and pays
+# nothing. To turn it on, start the tracing profile as well:
+#
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 \
+#     docker compose --profile tracing up -d
+#
+# Pointed at the collector rather than at Jaeger directly, because the sampling
+# decision is made there: every process exports every span and
+# infra/otel-collector.yaml decides what is worth keeping once each trace is
+# complete.
+x-tracing-env: &tracing-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT-}
+
 x-daemon-env: &daemon-env
+  <<: *tracing-env
   RMQ: rabbitmq:5672
   API_ID: payments-provider
   FLEET_SIZE: "5"
@@ -213,15 +229,17 @@ services:
     command: >
       node --experimental-strip-types packages/rmq-producer/src/main.ts
     environment:
+      <<: *tracing-env
       RMQ: rabbitmq:5672
       API_ID: payments-provider
       RATE_PER_SECOND: "200"
       METRICS_PORT: "9464"
-    # Restarting is what makes main.ts's stance on crashes coherent: it lets
-    # exactly one library race through an uncaughtException handler and
-    # treats everything else as fatal, on the grounds that a daemon
-    # swallowing its own bugs is worse than one that restarts. Without a
-    # policy here, "restarts" was wishful — the container just stayed dead.
+    # Restarting is what makes the crash-fast stance coherent. Less reaches it
+    # than it used to: the AMQP client reconnects and rebuilds its own topology
+    # and consumers (docs/decisions/005-connection-recovery.md), so this covers
+    # what recovery cannot — a broker unreachable for about five minutes, and
+    # any unhandled defect. Without a policy here, "fatal" just meant "stays
+    # dead".
     restart: unless-stopped
     depends_on: &rmq-depends
       rabbitmq: {condition: service_healthy}
@@ -369,6 +387,32 @@ services:
     restart: unless-stopped
     depends_on: [prometheus]
     ports: ["3000:3000"]
+    networks: [default, devcontainer]
+
+  # Where every span goes, and where most of them stop. See
+  # infra/otel-collector.yaml for the policies — errors and slow traces kept in
+  # full, a 2% baseline of the ordinary, everything else dropped once the trace
+  # is complete and it is clear which it was.
+  otel-collector:
+    profiles: [tracing]
+    image: otel/opentelemetry-collector-contrib:0.115.1@sha256:d2da12c4336a79758826700be9e21ecf4a9f7d945b7f8a58ba55ee3fa45427c8
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - $HOST_WORKSPACE_FOLDER/infra/otel-collector.yaml:/etc/otel/config.yaml:ro
+    restart: unless-stopped
+    depends_on: [jaeger]
+    networks: [default, devcontainer]
+
+  # The trace view. all-in-one keeps traces in memory, which is right for a
+  # demo and wrong for anything else — losing them on restart costs nothing
+  # here and would cost a lot in production.
+  jaeger:
+    profiles: [tracing]
+    image: jaegertracing/all-in-one:1.62.0@sha256:836e9b69c88afbedf7683ea7162e179de63b1f981662e83f5ebb68badadc710f
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    restart: unless-stopped
+    ports: ["16686:16686"]
     networks: [default, devcontainer]
 
 # Named, not bind-mounted: this is service state, not repo content, and it must

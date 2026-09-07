@@ -1,5 +1,6 @@
-import { Context, Data, Effect, Layer, Scope } from "effect";
+import { Context, Data, Effect, Layer, Option as O, Scope, Tracer } from "effect";
 import * as amqp from "amqplib";
+import { parentFrom, TRACEPARENT, traceparent } from "./Trace.ts";
 import type { ChannelModel, ConfirmChannel, ConsumeMessage, Channel } from "amqplib";
 
 /**
@@ -110,7 +111,7 @@ export type DeliveryInfo = {
   readonly deliveryCount: number;
   /**
    * Where this message was dead-lettered from, when it was — RabbitMQ 4 stamps
-   * `x-first-death-queue` and `x-first-death-reason` as headers. `null` for a
+   * `x-first-death-queue` and `x-first-death-reason` as headers. `None` for a
    * message that arrived normally.
    *
    * Computed on first access and cached: the high-rate handlers never read it.
@@ -119,7 +120,7 @@ export type DeliveryInfo = {
    * bin of unrelated things — anything draining it can tell work that failed
    * its third-party call from a control message that failed to decode.
    */
-  readonly deadLetter: { readonly queue: string; readonly reason: string } | null;
+  readonly deadLetter: O.Option<{ readonly queue: string; readonly reason: string }>;
   /**
    * Headers carried on the message, as strings.
    *
@@ -128,6 +129,16 @@ export type DeliveryInfo = {
    * queue has to carry the provenance itself. This is where it puts it.
    */
   readonly properties: Readonly<Record<string, string>>;
+  /**
+   * The span that published this message, when it was published inside one.
+   *
+   * `None` for the overwhelming majority, because tracing is sampled at the
+   * root — so a handler that wraps its work in a span only pays for it on the
+   * messages someone decided to follow. Handed to the caller rather than
+   * applied here, because this client has no idea what the work around a
+   * delivery is or what the span should be called.
+   */
+  readonly parent: O.Option<Tracer.ExternalSpan>;
 };
 
 /**
@@ -296,6 +307,7 @@ const describe = (delivery: ConsumeMessage): DeliveryInfo => {
   const headers = delivery.properties.headers ?? {};
   let deadLetter: DeliveryInfo["deadLetter"] | undefined;
   let properties: Readonly<Record<string, string>> | undefined;
+  let parent: DeliveryInfo["parent"] | undefined;
   return {
     deliveryCount: Number(headers["x-delivery-count"] ?? 0),
     get deadLetter() {
@@ -304,8 +316,8 @@ const describe = (delivery: ConsumeMessage): DeliveryInfo => {
         const reason = headers["x-first-death-reason"];
         deadLetter =
           typeof queue === "string"
-            ? { queue, reason: typeof reason === "string" ? reason : "unknown" }
-            : null;
+            ? O.some({ queue, reason: typeof reason === "string" ? reason : "unknown" })
+            : O.none();
       }
       return deadLetter;
     },
@@ -316,6 +328,13 @@ const describe = (delivery: ConsumeMessage): DeliveryInfo => {
         );
       }
       return properties;
+    },
+    get parent() {
+      if (parent === undefined) {
+        const header = headers[TRACEPARENT];
+        parent = parentFrom(typeof header === "string" ? header : undefined);
+      }
+      return parent;
     },
   };
 };
@@ -660,16 +679,26 @@ export const makeRmq = (
         // The default exchange routes by queue name, which is the same path
         // `deadLetterArgs` uses for dead-lettering.
         Effect.succeed({ exchange: "", routingKey: queue }),
+      // The `traceparent` goes on as an ordinary header, from whatever span the
+      // caller is inside. Outside a span it resolves to undefined and nothing
+      // is added, so an untraced publish carries exactly the bytes it did
+      // before — see Trace.ts.
       send: (pub, body, properties) =>
-        wrap("send", () =>
-          publish(
-            pub,
-            Buffer.from(body, "utf8"),
-            properties === undefined
-              ? { persistent: true }
-              : { persistent: true, headers: properties },
-          ),
-        ),
+        Effect.flatMap(traceparent, (tp) => {
+          const headers = O.match(tp, {
+            onNone: () => properties,
+            onSome: (value) => ({ ...(properties ?? {}), [TRACEPARENT]: value }),
+          });
+          return wrap("send", () =>
+            publish(
+              pub,
+              Buffer.from(body, "utf8"),
+              headers === undefined
+                ? { persistent: true }
+                : { persistent: true, headers },
+            ),
+          );
+        }),
       cancelConsumer: (c) =>
         Effect.promise(() => {
           forget(c);
