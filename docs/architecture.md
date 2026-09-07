@@ -199,6 +199,12 @@ Four properties the middleware hop depends on:
   next incident. On a compacted Kafka topic keyed by `apiId` this gives
   current-state-on-subscribe for free. Snapshots deliberately repeat the current
   sequence; only `state_changed` carries the gapless guarantee.
+- **The vocabulary is part of the contract, not decoration.** `state`,
+  `previousState` and `reason` decode against the declared literals, and
+  `sequence` against `Natural` — so an event carrying a reason nobody has
+  heard of, or a sequence that cannot be ordered, fails to decode rather than
+  arriving half-understood. See
+  [decisions/007](decisions/007-message-contracts.md).
 - **`DEGRADED` is a published state, not an inference.** Binary open/closed
   throws away real information once an API has many endpoints: "3 of 10 hosts
   ejected" and "the API is gone" call for different reactions. The extra state

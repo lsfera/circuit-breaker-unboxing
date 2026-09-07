@@ -178,22 +178,37 @@ export const sacQueueOptions = (apiId: string) => ({
 /** Durable so the topology itself survives, even though what it feeds does not need to. */
 export const CONTROL_EXCHANGE_OPTIONS = { durable: true };
 
-export const encodeCircuitEvent = (event: CircuitEvent): string => JSON.stringify(event);
-
-const decode = Schema.decodeUnknownOption(CircuitEvent);
-
 /**
- * Why a control message could not be read.
+ * ## What counts as a readable message
  *
- * The two are worth telling apart, and used not to be — this returned an
- * `Option`, so "not JSON" and "JSON of the wrong shape" arrived as the same
- * `None` and the fleet logged one message for both. They mean different
- * things and want different reactions: a schema mismatch is a version skew
- * between the aggregator and the fleet, which is the failure this repo
- * dead-letters undecodable messages to catch; anything that is not JSON at all
- * means something other than the aggregator is publishing to the exchange.
+ * Two kinds of message cross this control plane, and until recently only one
+ * of them had a contract. The circuit event has been a `Schema` since it was
+ * first published; the election trigger was `JSON.stringify({ sequence })` at
+ * the publisher and `Number(JSON.parse(body).sequence ?? -1)` at each of the
+ * two consumers — an encoder and two parsers kept in agreement by hand.
+ *
+ * Both are read the same way now: parse, decode through the one declaration,
+ * and say which of the two steps failed. The reasons are worth keeping apart —
+ * a schema mismatch is a version skew between whatever published and this
+ * fleet, and something that is not JSON at all means the publisher is not who
+ * we think it is.
  */
 export type DecodeFailure = "malformed-json" | "schema-mismatch";
+
+const readerFor = <S extends Schema.ConstraintDecoder<unknown>>(schema: S) => {
+  const decode = Schema.decodeUnknownOption(schema);
+  return (body: string): Result.Result<S["Type"], DecodeFailure> => {
+    let json: unknown;
+    try {
+      json = JSON.parse(body);
+    } catch {
+      return Result.fail("malformed-json");
+    }
+    return Result.fromOption(decode(json), (): DecodeFailure => "schema-mismatch");
+  };
+};
+
+export const encodeCircuitEvent = (event: CircuitEvent): string => JSON.stringify(event);
 
 /**
  * The decode path @egress/subscriber uses, so the control plane and the
@@ -203,12 +218,40 @@ export type DecodeFailure = "malformed-json" | "schema-mismatch";
  * pure computation that can fail *for a reason someone acts on* is what
  * `Result` is for — see docs/decisions/006-representing-absence.md.
  */
-export const decodeCircuitEvent = (body: string): Result.Result<CircuitEvent, DecodeFailure> => {
-  let json: unknown;
-  try {
-    json = JSON.parse(body);
-  } catch {
-    return Result.fail("malformed-json");
-  }
-  return Result.fromOption(decode(json), (): DecodeFailure => "schema-mismatch");
-};
+export const decodeCircuitEvent: (body: string) => Result.Result<CircuitEvent, DecodeFailure> =
+  readerFor(CircuitEvent);
+
+/**
+ * What a daemon publishes to elect itself out of a job — the body on both SAC
+ * queues, `probe-trigger` and `redrive-trigger`.
+ *
+ * It carries the circuit sequence and nothing else, because that is the whole
+ * mechanism: every daemon publishes a trigger on the transition so one still
+ * arrives when some are down, the broker delivers all of them to the one
+ * elected consumer, and that consumer turns several triggers back into one
+ * action by keeping the highest sequence it has already acted on.
+ *
+ * `Natural` rather than `Number` is the load-bearing part, and it is the same
+ * hole this repo closed in the lease token: the dedupe is `sequence <=
+ * probedSequence`, and *any* comparison against `NaN` is false. A trigger
+ * whose sequence could not be ordered therefore read as new every time — and
+ * `Number(JSON.parse(body).sequence)` produces exactly that from
+ * `{"sequence":"7"}`, `{"sequence":{}}` or `{"sequence":[7]}`. A sequence that
+ * cannot be ordered no longer decodes, so it cannot reach the reducer that
+ * would have to order it.
+ *
+ * The `?? -1` the hand-written parser used had a quieter failure of its own: a
+ * trigger with no `sequence` field at all became a valid-looking `-1`, which
+ * every daemon silently ignores. Now it is a `schema-mismatch` like any other,
+ * which means it is dead-lettered and counted rather than dropped in silence —
+ * the one outcome this fleet consistently refuses.
+ */
+export const ElectionTrigger = Schema.Struct({ sequence: Schema.Natural });
+export type ElectionTrigger = typeof ElectionTrigger.Type;
+
+export const encodeElectionTrigger = (trigger: ElectionTrigger): string =>
+  JSON.stringify(trigger);
+
+export const decodeElectionTrigger: (
+  body: string,
+) => Result.Result<ElectionTrigger, DecodeFailure> = readerFor(ElectionTrigger);

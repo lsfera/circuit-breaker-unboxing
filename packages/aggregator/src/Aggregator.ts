@@ -7,7 +7,7 @@ import { FleetSource } from "./FleetSource.ts";
 import * as Telemetry from "./Telemetry.ts";
 import { formatToken, sameToken } from "./Coordination.ts";
 import type { Checkpoint, LeaseToken } from "./Coordination.ts";
-import type { ApiSnapshot, CircuitEvent, Reason, State } from "@egress/domain/Model.ts";
+import type { ApiSnapshot, CircuitEvent, State } from "@egress/domain/Model.ts";
 
 type Registry = {
   readonly breakers: ReadonlyMap<string, Breaker.BreakerState>;
@@ -229,7 +229,9 @@ export const AggregatorLayer = Layer.effect(
             const after = (yield* Ref.get(registry)).breakers.get(e.data.apiId);
             const checkpoint: Checkpoint = {
               state: e.data.state,
-              reason: e.data.reason as Reason,
+              // No cast: the published event's `reason` is the vocabulary
+              // itself now, so what decodes off the wire is already a Reason.
+              reason: e.data.reason,
               sequence: e.data.sequence,
               changedAt: now,
               openBackoffMs: after?.openBackoffMs ?? cfg.openMs,

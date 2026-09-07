@@ -107,14 +107,39 @@ export const ReasonSchema = Schema.Literals([
   "OPEN_TIMEOUT_ELAPSED",
 ]);
 
-// The published contract, declared once and used for both encoding and the
-// subscriber's decode. In v3 this lived in @effect/schema; in v4 Schema is core.
+/**
+ * The published contract, declared once and used for both encoding and the
+ * subscriber's decode. In v3 this lived in @effect/schema; in v4 Schema is core.
+ *
+ * Two fields are stricter than "a number" and "a string", because two things
+ * downstream do more than display them:
+ *
+ * - **`sequence` is a `Natural`.** It is the value the entire delivery
+ *   contract orders by — `Contract.observe` counts a gap or a duplicate by
+ *   comparing it against the last one seen, and every comparison against
+ *   `NaN` is false. Anything that cannot be ordered has no meaning here, so
+ *   it does not decode.
+ * - **`reason` is the vocabulary, not any string.** It was `Schema.String`
+ *   while `ReasonSchema` sat six lines above it, and the tell was in
+ *   `Aggregator.ts`: the one place that consumed a decoded event's reason as
+ *   a `Reason` had to write `as Reason` to do it. That is the "type assertion
+ *   wearing a schema's clothes" this file already condemns in the paragraph
+ *   above — the checkpoint validator was fixed and its mirror image on the
+ *   published event was not. It also left the checkpoint's write side looser
+ *   than its read side: a reason outside the vocabulary could be written and
+ *   then fail to decode on rehydration, which reads as "no checkpoint" and
+ *   cold-starts a new leader at CLOSED.
+ *
+ * The counts are deliberately left as `Number`. They are reported, not
+ * reasoned with, and tightening them would be tidiness rather than a closed
+ * hole.
+ */
 export const CircuitEventData = Schema.Struct({
   apiId: Schema.String,
-  sequence: Schema.Number,
+  sequence: Schema.Natural,
   previousState: Schema.NullOr(StateSchema),
   state: StateSchema,
-  reason: Schema.String,
+  reason: ReasonSchema,
   healthyEndpoints: Schema.Number,
   totalEndpoints: Schema.Number,
   observedSince: Schema.String,

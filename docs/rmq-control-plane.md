@@ -90,6 +90,14 @@ to be built wrong on a first pass:
   that to the *work* queue and you've disabled the N-way parallelism the
   whole fleet exists for. It's scoped to a separate, always-idle queue used
   only to elect a prober during `HALF_OPEN`.
+- **The trigger on that queue is a declared message, like the event itself.**
+  It carries the circuit sequence and nothing else, and the elected daemon
+  turns several triggers back into one probe by keeping the highest sequence
+  it has acted on. That makes the sequence's *orderability* load-bearing: it
+  was hand-parsed with `Number(...)` for a while, which yields `NaN` on odd
+  input, and every comparison against `NaN` is false — so a trigger nobody
+  could order read as a new transition and probed again. It is a `Schema` now
+  at both ends. See [decisions/007](decisions/007-message-contracts.md).
 - **The daemons never learn Envoy's topology.** Same invariant as
   `infra/traffic-generator.mjs` in the main repo: one configured egress
   address, no replica names, no admin ports. Replica-level detail stays

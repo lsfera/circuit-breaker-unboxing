@@ -10,6 +10,8 @@ import {
   deadLetterQueueFor,
   deadLetterQueueOptions,
   decodeCircuitEvent,
+  decodeElectionTrigger,
+  encodeElectionTrigger,
   probeTriggerQueueFor,
   redriveTriggerQueueFor,
   routingKeyFor,
@@ -479,9 +481,12 @@ export const runDaemon = (cfg: DaemonConfig) =>
     const perform = (action: Action) => {
       switch (action._tag) {
         case "PublishProbeTrigger":
-          return control.send(trigger, JSON.stringify({ sequence: action.sequence }));
+          return control.send(trigger, encodeElectionTrigger({ sequence: action.sequence }));
         case "PublishRedriveTrigger":
-          return control.send(redriveTrigger, JSON.stringify({ sequence: action.sequence }));
+          return control.send(
+            redriveTrigger,
+            encodeElectionTrigger({ sequence: action.sequence }),
+          );
         case "Probe":
           return probeOnce;
         case "Redrive":
@@ -556,45 +561,61 @@ export const runDaemon = (cfg: DaemonConfig) =>
       );
     });
 
+    /**
+     * Both elections read their trigger the same way, and used not to: each
+     * had its own `Number(JSON.parse(body).sequence ?? -1)` — one encoder up
+     * in `perform` and two parsers kept in agreement by hand, for the only
+     * message on this control plane that had no declaration.
+     *
+     * It has one now (`ElectionTrigger` in @egress/rmq), which closes two
+     * holes that were invisible from here. A sequence that is not a number
+     * came through as `NaN`, and the dedupe below it is `sequence <=
+     * probedSequence` — every comparison against `NaN` is false, so a trigger
+     * that could not be ordered read as a *new* transition and probed again.
+     * And `?? -1` turned a trigger with no sequence at all into a
+     * valid-looking number that every daemon silently ignores, which is the
+     * one outcome this fleet refuses everywhere else: neither acted on nor
+     * preserved. Both are now `schema-mismatch`, dead-lettered and counted
+     * like any other unreadable message.
+     *
+     * A duplicate trigger for a transition already acted on still produces no
+     * actions — that is the reducer's job, not this handler's.
+     */
+    const onTrigger =
+      (what: string, command: (sequence: number) => Command) => (body: string) => {
+        const decoded = decodeElectionTrigger(body);
+        if (Result.isFailure(decoded)) {
+          return sampleUnreadable(
+            decoded.failure === "malformed-json"
+              ? `${what} trigger that is not JSON`
+              : `${what} trigger that does not match the schema`,
+          );
+        }
+        Effect.runFork(
+          dispatch(command(decoded.success.sequence)).pipe(
+            Effect.flatMap(({ actions }) => performAll(actions)),
+            Effect.catchCause((cause) => Effect.logError(`${label}: ${what} failed`, cause)),
+          ),
+        );
+      };
+
     // Registered for the whole life of the process and idle almost all of it.
     // Being *registered* is the point: SAC promotion needs candidates already
     // waiting when the active one dies, which is exactly the failover this
     // fleet gets for free from the broker instead of hand-rolling.
-    yield* control.consume(probeQueue, (body) => {
-      let sequence = -1;
-      try {
-        sequence = Number(JSON.parse(body).sequence ?? -1);
-      } catch {
-        return sampleUnreadable("malformed probe trigger");
-      }
-      // A duplicate trigger for a transition already probed produces no
-      // actions, which is the reducer's job rather than this handler's.
-      Effect.runFork(
-        dispatch({ _tag: "ProbeTriggered", sequence }).pipe(
-          Effect.flatMap(({ actions }) => performAll(actions)),
-          Effect.catchCause((cause) => Effect.logError(`${label}: probe failed`, cause)),
-        ),
-      );
-    });
+    yield* control.consume(
+      probeQueue,
+      onTrigger("probe", (sequence) => ({ _tag: "ProbeTriggered", sequence })),
+    );
 
     // The second SAC election, identical in shape to the prober's: every
     // daemon publishes the trigger so it still arrives when some are down,
     // the broker delivers all of them to one consumer, and that consumer
     // dedupes on the circuit sequence so one recovery means one replay.
-    yield* control.consume(redriveQueue, (body) => {
-      let sequence = -1;
-      try {
-        sequence = Number(JSON.parse(body).sequence ?? -1);
-      } catch {
-        return sampleUnreadable("malformed redrive trigger");
-      }
-      Effect.runFork(
-        dispatch({ _tag: "RedriveTriggered", sequence }).pipe(
-          Effect.flatMap(({ actions }) => performAll(actions)),
-          Effect.catchCause((cause) => Effect.logError(`${label}: redrive failed`, cause)),
-        ),
-      );
-    });
+    yield* control.consume(
+      redriveQueue,
+      onTrigger("redrive", (sequence) => ({ _tag: "RedriveTriggered", sequence })),
+    );
 
     // CLOSED until told otherwise: a daemon that starts mid-incident learns
     // the real state from the aggregator's next snapshot (snapshotMs), which
