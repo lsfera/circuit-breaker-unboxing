@@ -182,6 +182,83 @@ test("a killed connection comes back with its consumers still registered", async
 });
 
 /**
+ * amqplib recovers connections, not channels. A channel that dies on its own —
+ * a protocol error, a queue deleted, a settle on a tag the broker has already
+ * seen — takes its consumer with it and leaves the connection healthy, so
+ * nothing else notices. The handle the caller holds still looks live, which is
+ * how a process goes deaf while reporting itself well: measured before the
+ * fix, the consumer below received nothing again, ever, and said nothing.
+ */
+test("a consumer whose channel dies alone is put back", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const queue = `channel-death.${Date.now()}`;
+  const seen: string[] = [];
+
+  await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(queue, {});
+      const pub = yield* rmq.publisherToQueue(queue);
+      const consumer = yield* rmq.consume(queue, (body) => void seen.push(body));
+
+      yield* rmq.send(pub, "before");
+      yield* waitFor(() => seen.length >= 1);
+
+      // Exactly what a channel-level error does, without needing to provoke one.
+      yield* Effect.promise(() => consumer.channel.close().then(() => {}, () => {}));
+
+      yield* rmq.send(pub, "after");
+      yield* waitFor(() => seen.length >= 2);
+    }),
+  );
+
+  assert.deepEqual(seen, ["before", "after"], "the consumer must survive losing its channel");
+});
+
+/**
+ * The other half of that: a consumer retired on purpose must stay retired.
+ *
+ * Recovery rebuilds every consumer the client still considers live, so the
+ * teardown paths drop theirs first. Without that, a daemon that closed its work
+ * consumer because the circuit went OPEN would come back consuming work the
+ * moment the broker restarted — pulling from a queue the whole fleet has agreed
+ * to leave alone, and reporting itself idle while it did.
+ */
+test("a consumer closed on purpose is not resurrected by a reconnect", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const queue = `retired.${Date.now()}`;
+  const seen: string[] = [];
+
+  await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(queue, { durable: true });
+      const pub = yield* rmq.publisherToQueue(queue);
+      const consumer = yield* rmq.consume(queue, (body) => void seen.push(body));
+
+      yield* rmq.send(pub, "before");
+      yield* waitFor(() => seen.length >= 1);
+
+      yield* rmq.closeConsumer(consumer);
+
+      yield* Effect.promise(() =>
+        container!.exec(["rabbitmqctl", "close_all_connections", "retired consumer test"]),
+      );
+      yield* waitFor(() => false, 3000);
+
+      // The publish also proves the connection came back, so "nothing arrived"
+      // cannot be mistaken for "nothing was published".
+      yield* rmq.send(pub, "after");
+      yield* waitFor(() => seen.length >= 2, 3000);
+    }),
+  );
+
+  assert.deepEqual(seen, ["before"], "a retired consumer must not come back with the connection");
+});
+
+/**
  * A publish channel with no way back is a single point of failure, and a quiet
  * one. amqplib closes a channel on any channel-level error, and publishing to
  * an exchange that does not exist is enough to cause one — RabbitMQ replies

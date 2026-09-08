@@ -288,8 +288,18 @@ export const makeRmq = (
       readonly queue: string;
       readonly onMessage: OnMessage;
       readonly prefetch: number;
+      /** Consecutive rebuilds, reset by a delivery. Bounds a channel the broker keeps closing. */
+      rebuilds: number;
     };
     const live = new Set<Live>();
+
+    /**
+     * Whether the connection is usable, tracked from amqplib's own events.
+     *
+     * A channel closing because the connection went is not a channel to rebuild:
+     * `setup` re-attaches every live consumer once the connection is back.
+     */
+    let connected = true;
 
     // `null` rather than `Option` on purpose: these are private mutable
     // interop state — "no channel open right now" and "no reopen in flight" —
@@ -319,11 +329,21 @@ export const makeRmq = (
 
     /** The delivery callback, shared by the first registration and every rebuild. */
     const deliver =
-      (ch: Channel, onMessage: OnMessage) =>
+      (ch: Channel, entry: Live) =>
       (message: ConsumeMessage | null): void => {
-        // null means the broker cancelled the consumer — the queue was deleted
-        // underneath it. There is no delivery to settle.
-        if (message === null) return;
+        // The broker cancelled this consumer — its queue was deleted underneath
+        // it. There is no delivery to settle and nothing to rebuild: the
+        // consumer is simply not receiving any more, which is worth saying,
+        // because the channel stays open and looks healthy.
+        if (message === null) {
+          console.warn(`[rmq] broker cancelled the consumer on ${entry.queue} — it receives nothing now`);
+          return;
+        }
+        // A delivery is proof the consumer works, which is what makes the
+        // rebuild budget a bound on *failing* rebuilds rather than on the
+        // lifetime of the process.
+        entry.rebuilds = 0;
+        const onMessage = entry.onMessage;
         // A handler that throws synchronously would escape into amqplib's
         // delivery callback. Every handler in this repo is careful, which is
         // exactly the kind of thing that stops being true later.
@@ -342,14 +362,56 @@ export const makeRmq = (
         );
       };
 
+    /**
+     * How many times a consumer may be rebuilt before it is abandoned. A queue
+     * that has gone, or arguments the broker keeps rejecting, would otherwise
+     * rebuild in a loop for the life of the process.
+     */
+    const MAX_REBUILDS = 5;
+
+    /**
+     * Put a consumer back after its channel closed under it.
+     *
+     * amqplib recovers *connections*; a channel that dies on its own — a
+     * protocol error, a queue deleted, a settle on a tag the broker has already
+     * seen — takes its consumer with it and leaves the connection healthy, so
+     * nothing else here would ever notice. The handle its caller holds still
+     * looks live, which is how a process goes deaf while reporting itself well.
+     */
+    const rebuild = (entry: Live) => {
+      // Retired deliberately: both teardown paths forget the entry first.
+      if (!live.has(entry)) return;
+      // The connection went, not the channel. `setup` re-attaches everything.
+      if (!connected) return;
+      if (entry.rebuilds >= MAX_REBUILDS) {
+        console.warn(
+          `[rmq] consumer on ${entry.queue} closed ${entry.rebuilds} times without ` +
+            `delivering — abandoning it`,
+        );
+        return;
+      }
+      entry.rebuilds += 1;
+      attach(() => connection.createChannel(), entry).then(
+        () => console.warn(`[rmq] consumer channel on ${entry.queue} closed — rebuilt`),
+        (error) => {
+          if (connected) {
+            console.warn(
+              `[rmq] consumer on ${entry.queue} closed and could not be rebuilt: ${String(error)}`,
+            );
+          }
+        },
+      );
+    };
+
     /** Register one consumer on its own channel, and point its handle at it. */
     const attach = async (open: () => Promise<Channel>, entry: Live) => {
       const ch = await open();
       ch.on("error", (error) => {
         console.warn(`[rmq] consumer channel error on ${entry.queue}: ${error.message}`);
       });
+      ch.on("close", () => rebuild(entry));
       await ch.prefetch(entry.prefetch);
-      const { consumerTag } = await ch.consume(entry.queue, deliver(ch, entry.onMessage), {
+      const { consumerTag } = await ch.consume(entry.queue, deliver(ch, entry), {
         noAck: false,
       });
       entry.handle.channel = ch;
@@ -388,7 +450,11 @@ export const makeRmq = (
     const setup = async (model: ChannelModel) => {
       await applyTopology(() => model.createChannel());
       out = watchPublishChannel(await model.createConfirmChannel());
-      for (const entry of live) await attach(() => model.createChannel(), entry);
+      for (const entry of live) {
+        entry.rebuilds = 0;
+        await attach(() => model.createChannel(), entry);
+      }
+      connected = true;
     };
 
     const connection = yield* Effect.acquireRelease(
@@ -416,14 +482,21 @@ export const makeRmq = (
       // closes connections constantly. A broker that has already gone makes
       // `close` reject, and a rejection here would fail the teardown rather
       // than complete it. Closing also stops recovery, which is what a
-      // deliberate teardown should do.
-      (conn) => Effect.promise(() => conn.close().then(() => {}, () => {})),
+      // deliberate teardown should do — including the per-channel rebuild
+      // below, hence the flag: every consumer channel is about to close, and
+      // none of them wants putting back.
+      (conn) =>
+        Effect.promise(() => {
+          connected = false;
+          return conn.close().then(() => {}, () => {});
+        }),
     );
 
     connection.on("error", (error) => {
       console.warn(`[rmq] connection error: ${error.message}`);
     });
     connection.on("disconnect", (error) => {
+      connected = false;
       console.warn(`[rmq] disconnected (${error?.message ?? "no reason given"}) — recovering`);
     });
     connection.on("reconnect-scheduled", ({ attempt, delay }) => {
@@ -548,6 +621,7 @@ export const makeRmq = (
             queue,
             onMessage,
             prefetch: options.prefetch ?? DEFAULT_PREFETCH,
+            rebuilds: 0,
           };
           await attach(() => connection.createChannel(), entry);
           live.add(entry);

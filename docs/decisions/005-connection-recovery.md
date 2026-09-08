@@ -112,3 +112,32 @@ dup=0`, every queue empty.
   thing, and it belongs to whichever component owns the alert.
 - A workload that declares topology dynamically, at which point the recorded
   list needs an eviction story.
+
+## What it still did not cover: one channel
+
+Added 2026-09-08, from a review pass over `Client.ts`.
+
+The section above is about the connection. Every consumer here has its own
+channel, and a channel can die on its own — a protocol error, a queue deleted
+underneath it, a settle on a tag the broker has already seen. amqplib does not
+recover channels, and the connection stays healthy, so nothing fires: not the
+`disconnect` handler, not `setup`, not the restart policy. The `Consumer` handle
+the caller holds still looks live, and `@egress/rmq-consumer` keeps it in a
+`Ref` and reconciles against it, so the daemon believes it is consuming.
+
+Measured against a real broker by closing a consumer's channel out from under
+it: the next message was never delivered, and nothing in the process said
+anything. That is the deaf-daemon failure this repo has an alert and a runbook
+for, reachable without any connection loss at all.
+
+A consumer whose channel closes while the client still considers it live is now
+rebuilt on a fresh channel. The bound is `MAX_REBUILDS`, reset by a delivery, so
+a channel the broker keeps rejecting stops rather than spins — and the same
+`live`/`forget` bookkeeping that keeps a deliberately retired consumer from
+being resurrected keeps it from being rebuilt here. Two tests pin both
+directions: a channel that dies alone comes back, and a consumer closed on
+purpose does not.
+
+A broker-initiated cancel (`message === null`, the queue was deleted) cannot be
+rebuilt and is now logged instead of returned from in silence.
+

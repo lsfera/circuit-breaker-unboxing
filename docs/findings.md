@@ -301,4 +301,22 @@ it is one more pair of things that have to agree.
   `?? 0` defaults stay: ejections are surfaced rather than voted on, and the
   overflow counters are edge-detected as deltas, where zero reads as "nothing
   new" rather than as a state.
+- **Recovery covered the connection, not the channel.** amqplib reconnects and
+  this client rebuilds its topology and consumers from the `setup` hook, which
+  is the failure everyone thinks of. Every consumer here has its own channel
+  though, and a channel can die alone — a protocol error, a queue deleted
+  underneath it, a settle on a delivery tag the broker has already seen. The
+  connection stays healthy, so `disconnect` never fires, `setup` never runs, and
+  the restart policy never sees anything; the `Consumer` handle the caller holds
+  still looks live, and the daemon's own reconciliation compares against it and
+  concludes there is nothing to do. Measured by closing a consumer's channel out
+  from under it against a real broker: the next message never arrived, and not
+  one line was logged. The same deaf daemon this repo has an alert and a runbook
+  for, reached without any connection loss. Consumers are rebuilt on a fresh
+  channel now, bounded by a rebuild budget that a delivery resets so a channel
+  the broker keeps rejecting stops instead of spinning, and skipped entirely
+  when the connection is the thing that went — `setup` owns that case. Both
+  directions are pinned: a channel that dies alone comes back, and a consumer
+  retired on purpose is *not* resurrected by a reconnect, which was the other
+  half of this and had no test either.
 
