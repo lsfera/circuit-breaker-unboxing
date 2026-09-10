@@ -10,7 +10,7 @@ import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
 import { RmqLive } from "@egress/rmq/Client.ts";
-import { PositiveInt, rmqFlag } from "@egress/config/Settings.ts";
+import { PositiveInt, rmqFlag, VERSION } from "@egress/config/Settings.ts";
 import { Aggregator, AggregatorLayer } from "./Aggregator.ts";
 import { makeAmqpControlPlaneSink } from "./AmqpControlPlaneSink.ts";
 import { HaSettings, InMemoryCoordinationLayer, RedisCoordinationLayer } from "./Coordination.ts";
@@ -297,7 +297,7 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
   );
 });
 
-Command.run(aggregator, { version: "0.1.0" }).pipe(
+Command.run(aggregator, { version: VERSION }).pipe(
   Effect.provide(NodeServices.layer),
   NodeRuntime.runMain,
 );

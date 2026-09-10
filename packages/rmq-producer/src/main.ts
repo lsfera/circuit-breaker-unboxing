@@ -4,7 +4,7 @@ import { HttpRouter } from "effect/unstable/http";
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
 import { createServer } from "node:http";
 import { RmqLive } from "@egress/rmq/Client.ts";
-import { brokerFlag, metricsPortFlag, PositiveInt } from "@egress/config/Settings.ts";
+import { brokerFlag, metricsPortFlag, PositiveInt, VERSION } from "@egress/config/Settings.ts";
 import { MetricsRoute } from "@egress/tracing/Metrics.ts";
 import { TracingLive } from "@egress/tracing/Tracing.ts";
 import { runProducer } from "./producer.ts";
@@ -60,7 +60,7 @@ const producer = Command.make("rmq-producer", flags, (settings) => {
   );
 });
 
-Command.run(producer, { version: "0.1.0" }).pipe(
+Command.run(producer, { version: VERSION }).pipe(
   Effect.provide(NodeServices.layer),
   NodeRuntime.runMain,
 );

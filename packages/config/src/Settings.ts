@@ -1,5 +1,6 @@
 import { Config, Option as O, Schema } from "effect";
 import { Flag } from "effect/unstable/cli";
+import manifest from "../../../package.json" with { type: "json" };
 
 /**
  * The settings more than one process here takes, declared once: one
@@ -7,6 +8,13 @@ import { Flag } from "effect/unstable/cli";
  * before it opens a socket. See
  * docs/decisions/008-configuration-is-a-boundary.md.
  */
+
+/**
+ * What every entry point reports for `--version`. One repo built into one
+ * image, so the number belongs to the manifest that names it rather than to
+ * five string literals that have to be remembered together.
+ */
+export const VERSION: string = manifest.version;
 
 /**
  * A capacity: fleet sizes, concurrency ceilings, rates. Zero is excluded rather

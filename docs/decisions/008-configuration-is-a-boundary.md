@@ -185,6 +185,12 @@ both. Nothing in docker-compose.yml changed.
 `ChildProcessSpawner`, which `NodeServices.layer` provides in one. Verified in
 containers with no TTY, which was the risk worth checking.
 
+Its `version` is read from the root manifest rather than written out per entry
+point. It was `"0.1.0"` in five files and in no `package.json` at all, so
+`--version` reported a number nothing in the repo claimed. One repo built into
+one image has one version; five literals that have to be remembered together
+have none.
+
 `packages/demo/src/driver.ts` was converted last and needed a different move.
 Its six settings are referenced 68 times across helpers and a *mutable* `ORIGIN`
 resolved against the live leader, and many of those matches are the words in

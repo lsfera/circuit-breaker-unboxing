@@ -2,6 +2,7 @@ import { Config, Effect, Ref, Result, Stream } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { Sse } from "effect/unstable/encoding";
 import { NodeRuntime, NodeServices } from "@effect/platform-node";
+import { VERSION } from "@egress/config/Settings.ts";
 import { decodeCircuitEvent, State } from "@egress/domain/Model.ts";
 import type { State as StateType } from "@egress/domain/Model.ts";
 
@@ -99,7 +100,7 @@ const subscriber = Command.make(
   ({ aggregator }) => program(aggregator),
 );
 
-Command.run(subscriber, { version: "0.1.0" }).pipe(
+Command.run(subscriber, { version: VERSION }).pipe(
   Effect.provide(NodeServices.layer),
   NodeRuntime.runMain,
 );

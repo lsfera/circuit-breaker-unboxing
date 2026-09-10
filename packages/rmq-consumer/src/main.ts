@@ -5,7 +5,7 @@ import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { RmqLive } from "@egress/rmq/Client.ts";
-import { brokerFlag, metricsPortFlag, PositiveInt } from "@egress/config/Settings.ts";
+import { brokerFlag, metricsPortFlag, PositiveInt, VERSION } from "@egress/config/Settings.ts";
 import { MetricsRoute } from "@egress/tracing/Metrics.ts";
 import { TracingLive } from "@egress/tracing/Tracing.ts";
 import { runDaemon } from "./daemon.ts";
@@ -122,7 +122,7 @@ const daemon = Command.make("rmq-daemon", flags, (settings) => {
   );
 });
 
-Command.run(daemon, { version: "0.1.0" }).pipe(
+Command.run(daemon, { version: VERSION }).pipe(
   Effect.provide(NodeServices.layer),
   NodeRuntime.runMain,
 );

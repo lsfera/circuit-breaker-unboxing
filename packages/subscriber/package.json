@@ -7,6 +7,7 @@
     "start": "node --experimental-strip-types src/subscriber.ts"
   },
   "dependencies": {
+    "@egress/config": "workspace:*",
     "@egress/domain": "workspace:*",
     "effect": "catalog:",
     "@effect/platform-node": "catalog:"

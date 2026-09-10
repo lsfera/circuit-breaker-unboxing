@@ -8,6 +8,7 @@
     "demo:envoy": "AGGREGATOR=http://127.0.0.1:8088 FAILURE_MODE=envoy FLAKY_UPSTREAM=http://127.0.0.1 node --experimental-strip-types src/driver.ts"
   },
   "dependencies": {
+    "@egress/config": "workspace:*",
     "effect": "catalog:",
     "@effect/platform-node": "catalog:"
   }

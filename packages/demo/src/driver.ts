@@ -1,6 +1,7 @@
 import { Config, Duration, Effect, Option as O, Schedule } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { NodeRuntime, NodeServices } from "@effect/platform-node";
+import { VERSION } from "@egress/config/Settings.ts";
 
 /**
  * Drives the "Demo script" from the README end to end over HTTP, narrating
@@ -473,7 +474,7 @@ const demo = Command.make(
   (settings) => run(settings),
 );
 
-Command.run(demo, { version: "0.1.0" }).pipe(
+Command.run(demo, { version: VERSION }).pipe(
   Effect.provide(NodeServices.layer),
   NodeRuntime.runMain,
 );
