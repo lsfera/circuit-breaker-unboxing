@@ -531,3 +531,42 @@ it is one more pair of things that have to agree.
   grep of the tree, so four in `@egress/rmq-consumer` and one in a test stayed.
   Worth recording because the mistake is the same shape as everything else
   here: a list maintained by hand alongside the thing it is supposed to cover.
+- **The checkpoint was written on every transition and read back never.**
+  `--source=envoy-push` is what docker-compose runs, and under it every leader
+  change silently cold-started every API at sequence 0 — with the checkpoint
+  sitting in Redis, valid and unread, and nothing logged. Rehydration required
+  *both* "this is the acquisition tick" and "reports for this API arrived",
+  which is one condition too many: a polling source answers its first poll
+  immediately, so it held in the simulator and in every test, and a push source
+  cannot, because no Envoy has streamed to a process that started milliseconds
+  ago. The guard is gone; `known.has(apiId)` alone already bounds the work to
+  one load per API per instance.
+
+  Worth recording how it surfaced, because none of the tests could have. The
+  Redis suite exercises `save`/`load` directly and passes. The failover tests
+  drive two full aggregators and pass. What caught it was the *daemon fleet's*
+  duplicate counter during an ordinary demo run: `gaps=0 dup=6`, six
+  transitions, six duplicates, identical across all five daemons — the fleet
+  correctly reporting that the publisher had reused numbers it had already
+  seen. The delivery contract's independent observer earned its place.
+
+  The regression test is a fleet source that is silent for the first five
+  ticks, which is the shape the deployment actually has and the shape no
+  existing harness had. Confirmed to fail against the old code with
+  `sequence must continue past the checkpoint (41), got 0`.
+- **The endpoint whose readings are quoted as proof was the one not checking.**
+  `/subscriber/webhook` read its body as `(yield* request.json) as CircuitEvent`
+  — a cast, on input from the network, in the handler that exists to verify the
+  delivery contract. Measured rather than argued: two *identical* events with no
+  `sequence` were accepted as `received=2, duplicates=0`, and the per-API
+  high-water mark became `undefined`, after which `n <= undefined` and
+  `n > undefined + 1` are both false — so every later event for that API reads
+  as an ordinary next one. One malformed POST permanently disabled gap
+  detection for an API, and returned 202. Both POST routes use
+  `HttpServerRequest.schemaBodyJson` now. `/api/failure` gained a bound with it:
+  `rate` is a probability, and `47` meant `Math.random() < 47`, which is
+  "always".
+- **The demo driver's contract check ran on a cast.** It declared its own copy
+  of the event payload and cast `/api/events` to it — in the script whose doc
+  says what it prints *is* the published contract rather than an assumption. It
+  decodes against `CircuitEvent` now and counts what does not.

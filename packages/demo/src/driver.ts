@@ -1,7 +1,11 @@
-import { Config, Duration, Effect, Option as O, Schedule } from "effect";
+import { Config, Duration, Effect, Option as O, Schedule, Schema } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { NodeRuntime, NodeServices } from "@effect/platform-node";
 import { VERSION } from "@egress/config/Settings.ts";
+import { CircuitEvent, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
+
+/** Derived from the published schema rather than restated — see getEvents. */
+type CircuitEventData = CircuitEvent["data"];
 
 /**
  * Drives the "Demo script" from the README end to end over HTTP, narrating
@@ -35,6 +39,8 @@ import { VERSION } from "@egress/config/Settings.ts";
  * Flags or the environment, whichever suits: `--failure-mode=envoy` and
  * `FAILURE_MODE=envoy` are the same instruction. `--help` is the full list.
  */
+
+const decodeEvent = Schema.decodeUnknownOption(CircuitEvent);
 
 type Settings = {
   readonly api: string;
@@ -83,21 +89,31 @@ const run = (settings: Settings) => {
     "tax-calc": [8094, 8095, 8096],
   };
 
-  type CircuitEventData = {
-    readonly apiId: string;
-    readonly sequence: number;
-    readonly previousState: string | null;
-    readonly state: string;
-    readonly reason: string;
-  };
-
+  /**
+   * Decoded against the published schema, not cast to a shape declared here.
+   * This script's claim is that what it prints *is* the contract; reading it
+   * through a hand-written copy of the payload would make a contract change
+   * show up as a timeout or a printed `undefined` rather than as a failure
+   * naming the field. Anything that does not decode is dropped and counted, so
+   * a partial answer is visible instead of silently short.
+   */
   const getEvents = Effect.tryPromise({
-    try: () =>
-      fetch(`${ORIGIN}/api/events`).then(
-        (r) => r.json() as Promise<{ events: ReadonlyArray<{ type: string; data: CircuitEventData }> }>,
-      ),
+    try: () => fetch(`${ORIGIN}/api/events`).then((r) => r.json() as Promise<unknown>),
     catch: (cause) => new Error(`GET /api/events failed: ${String(cause)}`),
-  });
+  }).pipe(
+    Effect.map((body) => {
+      const raw = (body as { events?: ReadonlyArray<unknown> }).events ?? [];
+      const events = raw.flatMap((e) => O.toArray(decodeEvent(e)));
+      return { events, undecodable: raw.length - events.length };
+    }),
+    Effect.tap(({ undecodable }) =>
+      undecodable > 0
+        ? Effect.logWarning(
+            `${undecodable} event(s) on /api/events did not match the published schema`,
+          )
+        : Effect.void,
+    ),
+  );
 
   const getSubscriber = Effect.tryPromise({
     try: () =>
@@ -311,8 +327,8 @@ const run = (settings: Settings) => {
         Effect.flatMap(({ events }) => {
           const next = events
             .filter(
-              (e): e is { type: "egress.circuit.state_changed"; data: CircuitEventData } =>
-                e.type === "egress.circuit.state_changed" &&
+              (e): e is CircuitEvent & { type: typeof SEQUENCED_EVENT } =>
+                e.type === SEQUENCED_EVENT &&
                 e.data.apiId === apiId &&
                 e.data.sequence > after,
             )

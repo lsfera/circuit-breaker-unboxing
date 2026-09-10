@@ -336,11 +336,11 @@ process on the first channel-level error, silently.
 ### Concurrent link creation is broken in this client — and silently
 
 `AmqpControlPlaneSink` publishes each API to its own `circuit.<apiId>`
-routing key via a dedicated `Publisher` per apiId, created lazily on first
-delivery. The aggregator's very first tick reports on all three APIs at
-once, so the first real run created three publishers *concurrently* — three
-forked deliveries, each calling `createPublisher` on the same connection at
-nearly the same moment.
+routing key. Under the client this repo started on, that meant a `Publisher`
+*handle* per apiId, created lazily on first delivery. The aggregator's very
+first tick reports on all three APIs at once, so the first real run created
+three publishers *concurrently* — three forked deliveries, each calling
+`createPublisher` on the same connection at nearly the same moment.
 
 That broke it: every message, regardless of apiId, arrived on the *first*
 publisher's queue. A minimal repro nailed it down —
@@ -361,7 +361,13 @@ place.
 
 **Fix**: the guard lives in `@egress/rmq`'s `Client.ts`, not at any call
 site — one semaphore permit owned by the connection, serializing every
-operation that touches it. This is not about sharing a connection between
+operation that touches it. (On amqplib, which
+[004](decisions/004-downgrade-to-amqp-0-9-1.md) moved this repo to, a
+`Publisher` is not a link at all — it is the `{ exchange, routingKey }` pair a
+send is addressed with, so there is nothing left to create concurrently on that
+path. The guard stays because consumers and declares still are links, and
+because the property is worth holding by construction rather than by which
+client happens to be underneath.) This is not about sharing a connection between
 daemons: each daemon is its own process with its own connection, as in
 production. It is about one process opening several links on its own
 connection at once, which is ordinary — the aggregator creates a publisher

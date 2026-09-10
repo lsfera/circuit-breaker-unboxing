@@ -72,6 +72,9 @@ importers:
       '@egress/config':
         specifier: workspace:*
         version: link:../config
+      '@egress/domain':
+        specifier: workspace:*
+        version: link:../domain
       effect:
         specifier: 'catalog:'
         version: 4.0.0-rc.112

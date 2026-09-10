@@ -197,6 +197,98 @@ test("a non-leader instance never publishes, even under total failure", async ()
   );
 });
 
+/**
+ * The shape the deployment actually has, and the one no test had: a source
+ * with nothing to say on the tick the lease is taken.
+ *
+ * `SimFleetLayer` answers its first poll immediately, so every test above
+ * rehydrates on the acquisition tick and passes. `EnvoyPushFleetLayer` cannot
+ * — its reports arrive when an Envoy streams, which is never in the
+ * milliseconds after the process starts. Rehydration used to require both at
+ * once, so in `--source=envoy-push` the checkpoint was written every
+ * transition and read back never: each leader change silently restarted every
+ * API at sequence 0, with the daemon fleet's duplicate counter as the only
+ * evidence.
+ */
+const silentUntil = (
+  ticksBeforeReporting: number,
+  inner: Layer.Layer<FleetSource>,
+): Layer.Layer<FleetSource> =>
+  Layer.effect(
+    FleetSource,
+    Effect.gen(function* () {
+      const source = yield* FleetSource;
+      let polls = 0;
+      return {
+        ...source,
+        poll: Effect.suspend(() =>
+          polls++ < ticksBeforeReporting ? Effect.succeed([]) : source.poll,
+        ),
+      };
+    }),
+  ).pipe(Layer.provide(inner));
+
+test("a source that reports nothing on the acquisition tick still resumes from its checkpoint", async () => {
+  const { handoffSequence, firstAfter } = await Effect.runPromise(
+    Effect.provide(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(T0);
+        const coordination = yield* makeInMemoryCoordination;
+        const delivered = yield* Ref.make<ReadonlyArray<CircuitEvent>>([]);
+
+        // Somebody led before, got to sequence 41, and left a checkpoint.
+        const handoffSequence = 41;
+        const token = yield* coordination.leaderElection.tryAcquireOrRenew("gone", 1);
+        assert.ok(O.isSome(token));
+        yield* coordination.checkpointStore.save("payments", token.value, {
+          state: "OPEN",
+          reason: "ALL_ENDPOINTS_EJECTED",
+          sequence: handoffSequence,
+          changedAt: T0,
+          openBackoffMs: 1000,
+        });
+        yield* TestClock.adjust(Duration.millis(2000));
+
+        yield* Effect.gen(function* () {
+          // Five ticks of silence covers the acquisition tick and then some,
+          // which is what a gRPC sink waiting for its first push looks like.
+          yield* ticks(60);
+        }).pipe(
+          Effect.provide(
+            AggregatorLayer.pipe(
+              Layer.provideMerge(
+                Layer.mergeAll(
+                  silentUntil(5, SimFleetLayer(SPECS, 5)),
+                  EventBusLayer,
+                  RecordingSink(delivered),
+                  Layer.succeed(LeaderElection, coordination.leaderElection),
+                  Layer.succeed(CheckpointStore, coordination.checkpointStore),
+                  Layer.succeed(HaSettings, { instanceId: "late", leaseTtlMs: 1000 }),
+                ),
+              ),
+            ),
+          ),
+          Effect.provideService(Config, CFG),
+        );
+
+        const firstAfter = (yield* Ref.get(delivered)).find(
+          (e) => e.data.apiId === "payments",
+        );
+        return { handoffSequence, firstAfter };
+      }),
+      TestClock.layer(),
+    ),
+  );
+
+  assert.ok(firstAfter, "the instance must publish for payments once reports start");
+  assert.ok(
+    firstAfter!.data.sequence > handoffSequence,
+    `sequence must continue past the checkpoint (${handoffSequence}), got ` +
+      `${firstAfter!.data.sequence} — a source that is quiet on the acquisition ` +
+      `tick must still rehydrate`,
+  );
+});
+
 test("failover resumes sequence and previousState from the checkpoint, not from zero", async () => {
   const { lastFromA, firstFromB } = await Effect.runPromise(
     Effect.provide(

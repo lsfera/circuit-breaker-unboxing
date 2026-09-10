@@ -1,7 +1,7 @@
-import { Clock, Effect, Metric, Option as O, Ref, Schedule, Stream } from "effect";
-import { HttpMiddleware, HttpRouter, HttpServerResponse } from "effect/unstable/http";
+import { Clock, Effect, Metric, Option as O, Ref, Schedule, Schema, Stream } from "effect";
+import { HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 import { Sse } from "effect/unstable/encoding";
-import { classifySequence, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
+import { CircuitEvent, classifySequence, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
 import { metricsResponse } from "@egress/tracing/Metrics.ts";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -11,7 +11,6 @@ import { HaSettings } from "./Coordination.ts";
 import { EventBus, EventSink } from "./Events.ts";
 import { FleetSource } from "./FleetSource.ts";
 import * as Telemetry from "./Telemetry.ts";
-import type { CircuitEvent } from "@egress/domain/Model.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -85,6 +84,17 @@ export const record = (self: Integrity, event: CircuitEvent): Integrity => {
  * @egress/subscriber decodes with the same module, so the wire format has one
  * definition instead of an encoder and a parser that happen to agree.
  */
+/**
+ * `/api/failure`'s body. `rate` is a probability, and it is bounded here for
+ * the reason every other bound in this repo exists: `setFailureRate(47)` is
+ * `Math.random() < 47`, which is "always", and `-1` is "never" — two silent
+ * settings that look like a typo and behave like a decision.
+ */
+const FailureRequest = Schema.Struct({
+  apiId: Schema.NonEmptyString,
+  rate: Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
+});
+
 const sse = (event: string, data: unknown): Sse.Event => ({
   _tag: "Event",
   event,
@@ -283,15 +293,9 @@ export const HttpLive = HttpRouter.use((router) =>
       ),
     );
 
-    yield* router.add("POST", "/api/failure", (request) =>
+    yield* router.add("POST", "/api/failure", () =>
       Effect.gen(function* () {
-        const body = (yield* request.json) as { apiId?: string; rate?: number };
-        if (!body.apiId || typeof body.rate !== "number") {
-          return HttpServerResponse.jsonUnsafe(
-            { error: "expected { apiId, rate }" },
-            { status: 400 },
-          );
-        }
+        const body = yield* HttpServerRequest.schemaBodyJson(FailureRequest);
         const ok = yield* fleet.setFailureRate(body.apiId, body.rate);
         const specs = yield* fleet.specs;
         return HttpServerResponse.jsonUnsafe({ ok, specs }, { status: ok ? 200 : 404 });
@@ -305,9 +309,16 @@ export const HttpLive = HttpRouter.use((router) =>
     );
 
     // The demo's downstream consumer. In production this is your broker.
-    yield* router.add("POST", "/subscriber/webhook", (request) =>
+    yield* router.add("POST", "/subscriber/webhook", () =>
       Effect.gen(function* () {
-        const event = (yield* request.json) as CircuitEvent;
+        // Decoded, not cast. This endpoint is the delivery-contract check, and
+        // it was trusting its input: an event whose `sequence` was absent or
+        // not a number sailed past `as CircuitEvent` into `record`, where
+        // `undefined <= n` and `undefined > n + 1` are both false — so it
+        // counted as an ordinary next event and wrote `undefined` into the
+        // per-API high-water mark. The one endpoint whose readings are quoted
+        // as proof of the contract was the one not applying it.
+        const event = yield* HttpServerRequest.schemaBodyJson(CircuitEvent);
         const apiId = event.data.apiId;
         // Diffed rather than derived from `event` alone: gap/duplicate is a
         // property of this event against what the subscriber already holds.

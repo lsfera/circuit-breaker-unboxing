@@ -5,7 +5,7 @@ import { CheckpointStore, HaSettings, LeaderElection } from "./Coordination.ts";
 import { EventBus, EventSink, snapshotEvent, stateChanged } from "./Events.ts";
 import { FleetSource } from "./FleetSource.ts";
 import * as Telemetry from "./Telemetry.ts";
-import { formatToken, sameToken } from "./Coordination.ts";
+import { formatToken } from "./Coordination.ts";
 import type { Checkpoint, LeaseToken } from "./Coordination.ts";
 import type { ApiSnapshot, CircuitEvent, State } from "@egress/domain/Model.ts";
 
@@ -145,29 +145,35 @@ export const AggregatorLayer = Layer.effect(
           return [];
         }
         const token = tokenOpt.value;
-        const prior = yield* Ref.get(leadership);
-        // `sameToken`, not `!==`. A token is a record now, so identity
-        // comparison would call every tick a fresh acquisition and rehydrate
-        // the registry each time — the sort of thing a type change does not
-        // announce.
-        const justAcquired =
-          !prior.isLeader || !O.match(prior.token, {
-            onNone: () => false,
-            onSome: (held) => sameToken(held, token),
-          });
         yield* Ref.set(leadership, { isLeader: true, token: O.some(token) });
 
         const [pollDuration, reports] = yield* Effect.timed(fleet.poll);
         yield* Metric.update(Telemetry.fleetPollDuration, pollDuration);
         const now = yield* Clock.currentTimeMillis;
 
-        // On a fresh acquisition, rehydrate any API this instance has not
-        // seen yet from its last published checkpoint, so `sequence`
-        // continues after a failover instead of restarting at zero.
+        // Rehydrate any API this instance is leading and has no breaker for,
+        // so `sequence` continues after a failover instead of restarting at
+        // zero.
+        //
+        // The condition is "no breaker yet", and nothing more. It used to also
+        // require the *acquisition tick*, which quietly meant "only if reports
+        // for that API happened to arrive on the same tick the lease was
+        // taken". A polling source answers immediately, so this held in the
+        // simulator and in every test; the push source cannot, because no
+        // Envoy has streamed to a process that started milliseconds ago. In
+        // `--source=envoy-push` — what docker-compose runs — every leader
+        // change therefore cold-started every API at sequence 0, with the
+        // checkpoint sitting in Redis unread and nothing logged. The daemon
+        // fleet's own duplicate counter is what caught it.
+        //
+        // Dropping the guard costs nothing: `known.has(id)` is true from the
+        // moment an API is seeded, so this is one load per API per instance,
+        // not one per tick. An API first seen long after acquisition now
+        // resumes too, which is the same intent applied honestly.
         const known = yield* Ref.get(registry).pipe(Effect.map((reg) => reg.breakers));
-        const toRehydrate = justAcquired
-          ? [...new Set(reports.map((r) => r.apiId))].filter((id) => !known.has(id))
-          : [];
+        const toRehydrate = [...new Set(reports.map((r) => r.apiId))].filter(
+          (id) => !known.has(id),
+        );
         const rehydrated = yield* Effect.forEach(toRehydrate, (apiId) =>
           checkpoints.load(apiId).pipe(Effect.map((cp) => [apiId, cp] as const)),
         );
