@@ -375,4 +375,20 @@ it is one more pair of things that have to agree.
   naive form and paid it on every message a pass moves — thousands. Fixed by
   capturing the context the same way, which is also what makes the span above
   reach a real tracer rather than the default no-op one.
+- **Durable execution answers a question this system does not ask.**
+  `effect/unstable/workflow` was evaluated the way every other `unstable` module
+  here was, and declined — recorded in
+  [decisions/012](decisions/012-durable-workflows.md) rather than left as a
+  shrug. The short version: a daemon's unit of work is *one* activity, so there
+  is no partial progress to resume and nothing to compensate; durability for
+  that work already belongs to the broker by a decision that was measured; and
+  the state machine is a fold over an unbounded stream of observations rather
+  than a sequence of steps, which is the shape a workflow engine is for. The
+  cost side was checked rather than guessed at: `layerMemory` documents itself
+  as unsuitable for durability, so real durability means
+  `ClusterWorkflowEngine`, which needs `Sharding` plus a `MessageStorage` whose
+  only durable implementation is SQL — a third stateful dependency for a stack
+  that keeps its durable state in RabbitMQ and Redis. What would reopen it is
+  named: work that is more than one step, where an unacked delivery cannot say
+  how far it got.
 
