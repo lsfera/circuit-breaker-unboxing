@@ -82,11 +82,10 @@ export const makeRedrive = (opts: RedriveOptions) => {
         return "requeue";
       }
 
-      // Where it came from: 
-      // - the broker's annotation on first sight, 
-      // - our own stamp once an earlier pass moved it,
-      // -  "unknown" for anything published straight onto this queue by something else.
-      //Only work is ever replayed, so anything unattributable is kept, not guessed at.
+      // Where it came from: the broker's annotation on first sight, our own
+      // stamp once an earlier pass moved it, and "unknown" for anything
+      // published straight onto this queue by something else. Only work is
+      // ever replayed, so anything unattributable is kept, not guessed at.
       const death = O.getOrUndefined(delivery.deadLetter);
       const originQueue = death?.queue ?? delivery.properties[ORIGIN_PROPERTY] ?? "unknown";
       const originReason =

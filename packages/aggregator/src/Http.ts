@@ -137,12 +137,38 @@ export const HttpLive = HttpRouter.use((router) =>
                 Metric.update(Metric.withAttributes(Telemetry.outboxDepth, { apiId }), 0),
                 Metric.update(Metric.withAttributes(Telemetry.outboxReplayed, { apiId }), 0),
                 Metric.update(Metric.withAttributes(Telemetry.outboxDropped, { apiId }), 0),
+                // Per-API, and the least likely of the lot to fire: a fencing
+                // conflict means two instances believed they held the lease.
+                // A panel that has never had a series cannot show that it has
+                // stayed at zero, which is the whole claim being made.
+                Metric.update(Metric.withAttributes(Telemetry.fencingConflicts, { apiId }), 0),
               ],
               { discard: true },
             ),
           { discard: true },
         ),
       ),
+    );
+
+    /**
+     * The same rule for the counters that have no apiId, so they are registered
+     * once rather than per API.
+     *
+     * `replicasLost` is enumerated by reason on purpose: the runbook documents
+     * four ways a replica leaves the quorum, and a dashboard that only grows a
+     * series when one of them happens cannot show the other three staying at
+     * zero. Both of these are named directly by alerts in
+     * infra/monitoring/alerts.yml, which is where "no series" stops being a
+     * cosmetic problem.
+     */
+    yield* Effect.all(
+      [
+        Metric.update(Telemetry.coordinationErrors, 0),
+        ...(["no-node-id", "went-quiet", "unreachable", "incomplete-stats"] as const).map(
+          (reason) => Metric.update(Metric.withAttributes(Telemetry.replicasLost, { reason }), 0),
+        ),
+      ],
+      { discard: true },
     );
 
     const stateFrame = Effect.gen(function* () {

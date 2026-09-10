@@ -1,4 +1,4 @@
-import { Clock, Effect, Metric, Option as O, Ref, Result, Semaphore } from "effect";
+import { Clock, Duration, Effect, Metric, Option as O, Ref, Result, Schedule, Semaphore } from "effect";
 import type { Tracer } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
 import { withParent } from "@egress/rmq/Trace.ts";
@@ -73,6 +73,11 @@ type DaemonConfig = {
   /** Messages moved per redrive pass, so a large backlog is recovered in bounded bites. */
   readonly redriveMax: number;
 };
+
+/** How often the daemon publishes counters, advances its ramp, and says it is alive. */
+const FLUSH_INTERVAL = Duration.seconds(1);
+const RAMP_INTERVAL = Duration.seconds(1);
+const HEARTBEAT_INTERVAL = Duration.seconds(15);
 
 export const runDaemon = (cfg: DaemonConfig) =>
   Effect.gen(function* () {
@@ -498,9 +503,15 @@ export const runDaemon = (cfg: DaemonConfig) =>
      */
     yield* Effect.forEach(counters, ([, metric]) => Metric.update(metric, 0), { discard: true });
 
-    yield* Effect.forkScoped(
-      Effect.forever(Effect.sleep("1 second").pipe(Effect.andThen(flush))),
-    );
+    /**
+     * A `Schedule`, not `forever(sleep >> act)` — the same reason the
+     * aggregator's tick loop is one. A schedule is a value: `TestClock` can
+     * drive it, and interrupting it is closing a scope rather than remembering
+     * a handle. It also runs the first pass immediately, so the gauges carry
+     * real numbers from startup instead of whatever the zeroing left for a
+     * second.
+     */
+    yield* Effect.forkScoped(Effect.repeat(flush, Schedule.spaced(FLUSH_INTERVAL)));
 
     /**
      * The ramp advances on a clock, so something must look at the clock — otherwise
@@ -518,16 +529,12 @@ export const runDaemon = (cfg: DaemonConfig) =>
       );
     });
 
-    yield* Effect.forkScoped(
-      Effect.forever(Effect.sleep("1 second").pipe(Effect.andThen(advanceRamp))),
-    );
+    yield* Effect.forkScoped(Effect.repeat(advanceRamp, Schedule.spaced(RAMP_INTERVAL)));
 
     // Independent of the control plane: without it, a daemon that has gone deaf
     // looks exactly like one whose circuit has not moved.
-    yield* Effect.forever(
-      Effect.sleep("15 seconds").pipe(
-        Effect.andThen(describe),
-        Effect.flatMap((s) => Effect.log(`${label}: heartbeat ${s}`)),
-      ),
+    yield* Effect.repeat(
+      describe.pipe(Effect.flatMap((s) => Effect.log(`${label}: heartbeat ${s}`))),
+      Schedule.spaced(HEARTBEAT_INTERVAL),
     );
   });

@@ -213,14 +213,15 @@ const run = (settings: Settings) => {
    */
   let peakWork = 0;
 
-  const sampleFleet = Effect.forever(
+  const sampleFleet = Effect.repeat(
     fleetSnapshot.pipe(
       Effect.map((f) => {
         peakWork = Math.max(peakWork, f.work ?? 0);
       }),
+      // A scrape blip is not a demo failure; the next sample covers it.
       Effect.catchCause(() => Effect.void),
-      Effect.andThen(Effect.sleep(Duration.seconds(1))),
     ),
+    Schedule.spaced(Duration.seconds(1)),
   );
 
   const describeFleet = (f: Fleet) =>

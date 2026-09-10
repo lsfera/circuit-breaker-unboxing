@@ -570,3 +570,32 @@ it is one more pair of things that have to agree.
   of the event payload and cast `/api/events` to it — in the script whose doc
   says what it prints *is* the published contract rather than an assumption. It
   decodes against `CircuitEvent` now and counts what does not.
+- **Three alerts pointed at metrics that had no series.** `Http.ts` carries a
+  block whose entire job is registering counters at zero before anything
+  happens to them, under a comment saying why: an `effect` counter has no
+  series until its first update, and "a tile whose whole job is to sit at zero
+  through an incident is worse than useless when zero looks like broken." The
+  block covered the per-API counters and missed every counter without an
+  `apiId` — so `egress_aggregator_coordination_errors_total` and
+  `egress_aggregator_fencing_conflicts_total` did not exist in Prometheus at
+  all, and `egress_fleet_replica_lost_total` only grew a series once a replica
+  had already been lost. All three are named by alerts in
+  `infra/monitoring/alerts.yml`. Checked against the running Prometheus rather
+  than by reading: two returned `NO SERIES` before, and afterwards coordination
+  errors, fencing conflicts and all four documented `replicasLost` reasons
+  report zero on both instances, with 14 rules healthy and none firing.
+
+  The rule was stated in one place and applied to one of the two shapes it
+  covers. That is this review's most common finding by some distance.
+- **`Effect.forever(sleep >> act)`, four times.** `Aggregator.ts` explains why
+  its tick loop is a `Schedule` — "not a `setInterval` … that is what lets
+  TestClock drive thousands of simulated seconds instantly, and what makes the
+  loop interruptible as a value rather than via a `clearInterval` handle
+  someone has to remember to call" — and the daemon's metrics flush, ramp
+  advance and heartbeat, plus the demo's queue sampler, were all hand-rolled
+  the other way. They are `Effect.repeat(action, Schedule.spaced(…))` now, with
+  the three daemon intervals named where they can be read together. One
+  visible consequence, since a schedule runs its first pass immediately: the
+  daemon's gauges carry real numbers from startup rather than after a second,
+  and the first heartbeat lands next to the "up" line instead of fifteen
+  seconds later.
