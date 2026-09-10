@@ -1,25 +1,35 @@
 import { Context, Data, Result, Schema } from "effect";
 
-export const State = {
-  CLOSED: "CLOSED",
-  DEGRADED: "DEGRADED",
-  OPEN: "OPEN",
-  HALF_OPEN: "HALF_OPEN",
-} as const;
-export type State = (typeof State)[keyof typeof State];
+/**
+ * The vocabulary, declared once each.
+ *
+ * The schema owns the list, and the object call sites read (`State.CLOSED`) is
+ * derived from it — so a new state is one edit rather than two lists that
+ * nothing checks against each other.
+ */
+const vocabulary = <const L extends ReadonlyArray<string>>(
+  literals: L,
+): { readonly [K in L[number]]: K } =>
+  Object.fromEntries(literals.map((l) => [l, l])) as { readonly [K in L[number]]: K };
 
-export const Reason = {
-  HEALTHY: "HEALTHY",
-  OUTLIER_EJECTION: "OUTLIER_EJECTION",
-  ALL_ENDPOINTS_EJECTED: "ALL_ENDPOINTS_EJECTED",
-  THRESHOLD_OVERFLOW: "THRESHOLD_OVERFLOW",
-  PROBE_SUCCEEDED: "PROBE_SUCCEEDED",
-  PROBE_FAILED: "PROBE_FAILED",
-  OPEN_TIMEOUT_ELAPSED: "OPEN_TIMEOUT_ELAPSED",
-} as const;
-export type Reason = (typeof Reason)[keyof typeof Reason];
+export const StateSchema = Schema.Literals(["CLOSED", "DEGRADED", "OPEN", "HALF_OPEN"]);
+export type State = typeof StateSchema.Type;
+export const State = vocabulary(StateSchema.literals);
 
-export const Vote = { OK: "OK", DEGRADED: "DEGRADED", DOWN: "DOWN" } as const;
+export const ReasonSchema = Schema.Literals([
+  "HEALTHY",
+  "OUTLIER_EJECTION",
+  "ALL_ENDPOINTS_EJECTED",
+  "THRESHOLD_OVERFLOW",
+  "PROBE_SUCCEEDED",
+  "PROBE_FAILED",
+  "OPEN_TIMEOUT_ELAPSED",
+]);
+export type Reason = typeof ReasonSchema.Type;
+export const Reason = vocabulary(ReasonSchema.literals);
+
+/** No schema: a vote is derived from a report and consumed in-process, never decoded. */
+export const Vote = vocabulary(["OK", "DEGRADED", "DOWN"] as const);
 export type Vote = (typeof Vote)[keyof typeof Vote];
 
 /**
@@ -88,24 +98,6 @@ export type ApiSnapshot = {
     readonly ejectionsActive: number;
   }>;
 };
-
-/**
- * The vocabulary as schemas, so the literals are written once rather than
- * copied wherever something needs to validate them. Three places had their
- * own copy of the state list, and a checkpoint validator accepted any string
- * as a reason and cast it — which is not validation, it is a type assertion
- * wearing a schema's clothes.
- */
-export const StateSchema = Schema.Literals(["CLOSED", "DEGRADED", "OPEN", "HALF_OPEN"]);
-export const ReasonSchema = Schema.Literals([
-  "HEALTHY",
-  "OUTLIER_EJECTION",
-  "ALL_ENDPOINTS_EJECTED",
-  "THRESHOLD_OVERFLOW",
-  "PROBE_SUCCEEDED",
-  "PROBE_FAILED",
-  "OPEN_TIMEOUT_ELAPSED",
-]);
 
 /**
  * The published contract, declared once and used for both encoding and the

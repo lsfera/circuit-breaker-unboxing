@@ -1,6 +1,5 @@
 import { Context, Data, Duration, Effect, Layer, Option as O, Ref, Schema } from "effect";
 import { ReasonSchema, StateSchema } from "@egress/domain/Model.ts";
-import type { Reason, State } from "@egress/domain/Model.ts";
 
 /**
  * What makes N aggregator instances safe to run at once: exactly one may publish
@@ -82,13 +81,21 @@ export const isFenced = (attempted: LeaseToken, current: LeaseToken): boolean =>
  * (`openBackoffMs` — resetting this after a failover would let a still-flaky
  * upstream get probed sooner than its real backoff allows).
  */
-export type Checkpoint = {
-  readonly state: State;
-  readonly reason: Reason;
-  readonly sequence: number;
-  readonly changedAt: number;
-  readonly openBackoffMs: number;
-};
+const CheckpointFromJson = Schema.Struct({
+  state: StateSchema,
+  reason: ReasonSchema,
+  // Naturals, not numbers, for the reason the published event's sequence is
+  // one: these are read back from a store that outlives the process, and each
+  // is either ordered against another (`sequence`, `changedAt`) or used as a
+  // duration to wait out (`openBackoffMs`). A value that cannot be ordered, or
+  // a negative backoff that makes the next probe immediate and permanent, is
+  // not a checkpoint — it reads as none, and a cold start is already handled.
+  sequence: Schema.Natural,
+  changedAt: Schema.Natural,
+  openBackoffMs: Schema.Natural,
+});
+
+export type Checkpoint = typeof CheckpointFromJson.Type;
 
 export class CheckpointFenced extends Data.TaggedError("CheckpointFenced")<{
   readonly apiId: string;
@@ -284,17 +291,6 @@ export const InMemoryCoordinationLayer: Layer.Layer<LeaderElection | CheckpointS
  * than casting means anything malformed reads as "no checkpoint" — a cold start,
  * which is handled — instead of seeding the breaker with `undefined`.
  */
-const CheckpointFromJson = Schema.Struct({
-  state: StateSchema,
-  // The reason is validated against the real set rather than accepted as any
-  // string and cast. A cast here would have made this function look like a
-  // validator while letting anything through the one field it did not check.
-  reason: ReasonSchema,
-  sequence: Schema.Number,
-  changedAt: Schema.Number,
-  openBackoffMs: Schema.Number,
-});
-
 const decodeCheckpoint = Schema.decodeUnknownOption(CheckpointFromJson);
 
 export type RedisLike = {
