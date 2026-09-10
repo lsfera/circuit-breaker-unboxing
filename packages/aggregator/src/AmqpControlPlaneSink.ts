@@ -1,4 +1,4 @@
-import { Duration, Effect, Layer, Ref, Schedule } from "effect";
+import { Duration, Effect, Ref, Schedule } from "effect";
 import { Rmq, RmqError } from "@egress/rmq/Client.ts";
 import {
   CONTROL_EXCHANGE,
@@ -7,7 +7,7 @@ import {
   routingKeyFor,
 } from "@egress/rmq/ControlPlane.ts";
 import { DeliveryFailed } from "@egress/domain/Model.ts";
-import { DEAD_LETTER_BUFFER, EventSink } from "./Events.ts";
+import { DEAD_LETTER_BUFFER } from "./Events.ts";
 import type { SinkImpl } from "./Events.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 import type { Publisher } from "@egress/rmq/Client.ts";
@@ -86,5 +86,3 @@ export const makeAmqpControlPlaneSink: Effect.Effect<SinkImpl, RmqError, Rmq> = 
     return { name: "amqp", deliver, deadLetters: Ref.get(dead), drainOutbox: Effect.succeed(0) };
   },
 );
-
-export const AmqpControlPlaneSinkLayer = Layer.effect(EventSink, makeAmqpControlPlaneSink);

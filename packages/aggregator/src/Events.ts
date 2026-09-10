@@ -323,8 +323,6 @@ export const makeWebhookSink = (url: string): Effect.Effect<SinkImpl, never, Out
       return { name: "webhook", deliver, deadLetters: Ref.get(dead), drainOutbox };
   });
 
-export const WebhookSinkLayer = (url: string) => Layer.effect(EventSink, makeWebhookSink(url));
-
 /**
  * Fans one event out to every given sink and forks each delivery
  * independently, so a slow or unreachable one (e.g. RabbitMQ down while the

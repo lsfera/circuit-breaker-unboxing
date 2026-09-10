@@ -117,7 +117,7 @@ export const ReasonSchema = Schema.Literals([
  * than any string, so nothing has to cast it back. The counts stay `Number` —
  * they are reported, not reasoned with.
  */
-export const CircuitEventData = Schema.Struct({
+const CircuitEventData = Schema.Struct({
   apiId: Schema.String,
   sequence: Schema.Natural,
   previousState: Schema.NullOr(StateSchema),

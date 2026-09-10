@@ -16,7 +16,7 @@ import * as Telemetry from "./Telemetry.ts";
  * producer that backed off would hide the backlog the fleet has to survive.
  */
 
-export type ProducerConfig = {
+type ProducerConfig = {
   readonly apiId: string;
   readonly ratePerSecond: number;
 };

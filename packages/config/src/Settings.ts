@@ -21,7 +21,7 @@ const BrokerAddressFromString = Schema.TemplateLiteralParser([
   Config.Port,
 ]);
 
-export type BrokerAddress = { readonly host: string; readonly port: number };
+type BrokerAddress = { readonly host: string; readonly port: number };
 
 export const brokerAddress = (name: string): Config.Config<BrokerAddress> =>
   Config.schema(BrokerAddressFromString, name).pipe(

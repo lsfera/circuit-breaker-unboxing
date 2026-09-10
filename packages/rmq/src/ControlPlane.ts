@@ -112,7 +112,7 @@ export const CONTROL_EXCHANGE_OPTIONS = { durable: true };
  * they call for different reactions — a schema mismatch is a version skew, and
  * something that is not JSON means the publisher is not who we think it is.
  */
-export type DecodeFailure = "malformed-json" | "schema-mismatch";
+type DecodeFailure = "malformed-json" | "schema-mismatch";
 
 const readerFor = <S extends Schema.ConstraintDecoder<unknown>>(schema: S) => {
   const decode = Schema.decodeUnknownOption(schema);
@@ -142,8 +142,8 @@ export const decodeCircuitEvent: (body: string) => Result.Result<CircuitEvent, D
  * comparison against `NaN` is false, so a sequence that cannot be ordered must
  * not decode. See docs/decisions/007-message-contracts.md.
  */
-export const ElectionTrigger = Schema.Struct({ sequence: Schema.Natural });
-export type ElectionTrigger = typeof ElectionTrigger.Type;
+const ElectionTrigger = Schema.Struct({ sequence: Schema.Natural });
+type ElectionTrigger = typeof ElectionTrigger.Type;
 
 export const encodeElectionTrigger = (trigger: ElectionTrigger): string =>
   JSON.stringify(trigger);

@@ -57,7 +57,7 @@ import type { Action, Command, DaemonState } from "./DaemonState.ts";
  * workload.
  */
 
-export type DaemonConfig = {
+type DaemonConfig = {
   readonly apiId: string;
   /** 0-based position in the fleet. Fixed per container — see docker-compose.yml. */
   readonly index: number;

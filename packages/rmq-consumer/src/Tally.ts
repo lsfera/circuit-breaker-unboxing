@@ -11,7 +11,7 @@ import type { ContractState } from "./Contract.ts";
  */
 
 /** Bumped from AMQP callbacks and the egress call, which have no fiber to run an Effect in. */
-export type Counts = {
+type Counts = {
   ok: number;
   failed: number;
   probed: number;
@@ -39,7 +39,7 @@ export const observed = (counts: Counts, type: string): void => {
  * `gaps`/`duplicates` come from `ContractState` because `observe` derives them
  * rather than the daemon incrementing them.
  */
-export type Snapshot = {
+type Snapshot = {
   readonly ok: number;
   readonly failed: number;
   readonly probed: number;
@@ -73,7 +73,7 @@ export const snapshot = (counts: Counts, contract: ContractState): Snapshot => (
 });
 
 /** What the registry is owed since the last publication. Positive amounts only. */
-export type Delta = {
+type Delta = {
   readonly ok: number;
   readonly failed: number;
   readonly probed: number;

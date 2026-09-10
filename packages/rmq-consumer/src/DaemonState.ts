@@ -59,7 +59,7 @@ export type Action =
   | { readonly _tag: "Probe" }
   | { readonly _tag: "Redrive" };
 
-export type Transition = {
+type Transition = {
   readonly next: DaemonState;
   readonly actions: ReadonlyArray<Action>;
 };
@@ -116,7 +116,7 @@ export const reduce = (
 };
 
 /** Which connections are allowed to exist in this state. */
-export type Connections = {
+type Connections = {
   readonly work: boolean;
   readonly probe: boolean;
   readonly redrive: boolean;
@@ -142,7 +142,7 @@ export const desired = (
   redrive: state.circuit === State.CLOSED,
 });
 
-export type Plan = {
+type Plan = {
   readonly startWork: boolean;
   readonly stopWork: boolean;
   readonly stopProbe: boolean;

@@ -12,7 +12,7 @@ import type { Semaphore } from "effect/Semaphore";
  * options are the coupling written down, including the daemon's consumer Ref and
  * permit, because `reconcile` retires the channel from the other side.
  */
-export type RedriveOptions = {
+type RedriveOptions = {
   readonly label: string;
   readonly enabled: boolean;
   /** The daemon's one connection. A pass opens a channel on it and closes that. */

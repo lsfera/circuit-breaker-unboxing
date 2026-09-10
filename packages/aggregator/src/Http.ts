@@ -18,7 +18,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
  * buffers: this is a diagnostic list in a long-running process, and the exact
  * count is a Prometheus counter (`egress_subscriber_gaps_total`).
  */
-export const GAP_BUFFER = 100;
+const GAP_BUFFER = 100;
 
 /**
  * Delivery integrity as seen from OUTSIDE the process. The webhook sink posts
@@ -28,7 +28,7 @@ export const GAP_BUFFER = 100;
  * Snapshots deliberately republish the current sequence, so only
  * state_changed events carry that guarantee.
  */
-export type Integrity = {
+type Integrity = {
   readonly received: number;
   readonly snapshots: number;
   readonly duplicates: number;

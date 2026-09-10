@@ -8,8 +8,8 @@ import type { ChannelModel, ConfirmChannel, ConsumeMessage, Channel } from "amqp
  * back to `bind`, and nothing else ever inspects them, so their shape is not
  * part of the contract.
  */
-export type RmqExchange = unknown;
-export type RmqQueue = unknown;
+type RmqExchange = unknown;
+type RmqQueue = unknown;
 
 /**
  * A channel plus the tag the broker gave it. Mutable on purpose: recovery
@@ -41,7 +41,7 @@ export class RmqError extends Data.TaggedError("RmqError")<{
   readonly cause: unknown;
 }> {}
 
-export type QueueArgs = Record<string, unknown>;
+type QueueArgs = Record<string, unknown>;
 
 /**
  * What a handler asks the broker to do with its delivery.
@@ -55,7 +55,7 @@ export type QueueArgs = Record<string, unknown>;
 export type Settlement = "accept" | "requeue" | "discard";
 
 /** What the broker knows about this particular delivery. */
-export type DeliveryInfo = {
+type DeliveryInfo = {
   /**
    * The broker's own `x-delivery-count`, 0 on a first delivery. For looking at;
    * enforcement stays the queue's job via `x-delivery-limit`, because an
@@ -91,7 +91,7 @@ export type DeliveryInfo = {
  * whose prefetch *is* its concurrency limit passes its own; see
  * docs/decisions/011-the-ceiling-belongs-to-the-broker.md.
  */
-export const DEFAULT_PREFETCH = 100;
+const DEFAULT_PREFETCH = 100;
 
 export interface RmqService {
   /**
@@ -180,7 +180,7 @@ const settle = (channel: Channel, message: ConsumeMessage, outcome: Settlement) 
   }
 };
 
-export type RmqConnectOptions = {
+type RmqConnectOptions = {
   readonly host: string;
   readonly port: number;
   readonly username?: string;

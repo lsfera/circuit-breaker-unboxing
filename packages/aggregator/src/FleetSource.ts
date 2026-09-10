@@ -238,7 +238,7 @@ const PATTERN = new RegExp(
   `^cluster\\.(.+)\\.(${SUFFIXES.map((s) => s.replace(/\./g, "\\.")).join("|")})$`,
 );
 
-export type EnvoyReplica = { readonly replicaId: string; readonly adminUrl: string };
+type EnvoyReplica = { readonly replicaId: string; readonly adminUrl: string };
 
 /**
  * What one replica's stats say, and which clusters it did not say enough about.
@@ -249,7 +249,7 @@ export type EnvoyReplica = { readonly replicaId: string; readonly adminUrl: stri
  * consequential reading in the domain. A cluster missing either is not reported
  * at all — the replica abstains, which the quorum already handles and 009 counts.
  */
-export type ParsedStats = {
+type ParsedStats = {
   readonly reports: ReadonlyArray<ReplicaReport>;
   /** Clusters seen in the stat set but not reported, because a vote could not be computed. */
   readonly incomplete: ReadonlyArray<string>;

@@ -13,7 +13,7 @@ import type { AggregatorConfig, ApiSnapshot, ReplicaReport } from "./Model.ts";
  * exhaustively without a runtime.
  */
 
-export type ReplicaSlot = {
+type ReplicaSlot = {
   readonly report: ReplicaReport;
   readonly lastOverflowTotal: number;
   readonly overflowSinceTick: number;

@@ -35,7 +35,7 @@ export const initial = (fleetSize: number, now: number): DaemonPolicyState => ({
  * fleet the instant OPEN clears is the thundering herd this design exists to
  * prevent — the ramp is the actual fix, not the cutoff on OPEN.
  */
-export const RAMP_SCHEDULE: ReadonlyArray<number> = [1, 4, 16];
+const RAMP_SCHEDULE: ReadonlyArray<number> = [1, 4, 16];
 
 /**
  * How long a rung is held before the next is allowed.

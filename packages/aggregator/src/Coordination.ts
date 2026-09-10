@@ -119,7 +119,7 @@ export type HaSettings = {
   readonly leaseTtlMs: number;
 };
 
-export const defaultHaSettings: HaSettings = {
+const defaultHaSettings: HaSettings = {
   instanceId: `solo-${Math.random().toString(36).slice(2, 10)}`,
   leaseTtlMs: 5000,
 };
@@ -375,7 +375,7 @@ return ARGV[1]
  * Well under `leaseTtlMs`: a leader must be able to fail a call, notice, and
  * still renew inside its lease.
  */
-export const COORDINATION_TIMEOUT_MS = 1000;
+const COORDINATION_TIMEOUT_MS = 1000;
 
 /** Every call to the store goes through this: a rejected promise is a failure, never a defect. */
 const evalGuarded = (
