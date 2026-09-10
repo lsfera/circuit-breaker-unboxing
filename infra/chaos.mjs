@@ -57,8 +57,14 @@ const metrics = async (url) => {
   return res.text();
 };
 
+// Matches the labelled form too. Every gauge read here happens to be
+// unlabelled today, and a `name ` prefix would silently return null the day one
+// of them gains an attribute — which reads as "no leader" rather than as a
+// broken probe.
 const gauge = (body, name) => {
-  const line = body.split("\n").find((l) => l.startsWith(`${name} `));
+  const line = body
+    .split("\n")
+    .find((l) => l.startsWith(`${name} `) || l.startsWith(`${name}{`));
   return line ? Number(line.slice(line.lastIndexOf(" ") + 1)) : null;
 };
 

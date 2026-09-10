@@ -9,7 +9,6 @@ import {
   controlQueueOptions,
   deadLetterQueueFor,
   deadLetterQueueOptions,
-  decodeCircuitEvent,
   decodeElectionTrigger,
   encodeElectionTrigger,
   probeTriggerQueueFor,
@@ -19,7 +18,7 @@ import {
   workQueueFor,
   workQueueOptions,
 } from "@egress/rmq/ControlPlane.ts";
-import { State, STATE_CODE } from "@egress/domain/Model.ts";
+import { decodeCircuitEvent, State, STATE_CODE } from "@egress/domain/Model.ts";
 import { initialContract, observe } from "./Contract.ts";
 import { makeRedrive } from "./Redrive.ts";
 import { desired, initialState, plan, reduce } from "./DaemonState.ts";

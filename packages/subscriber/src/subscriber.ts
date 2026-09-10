@@ -1,6 +1,6 @@
-import { Effect, Option as O, Ref, Schema, Stream } from "effect";
+import { Effect, Ref, Result, Stream } from "effect";
 import { NodeRuntime } from "@effect/platform-node";
-import { CircuitEvent, State } from "@egress/domain/Model.ts";
+import { decodeCircuitEvent, State } from "@egress/domain/Model.ts";
 import type { State as StateType } from "@egress/domain/Model.ts";
 
 /**
@@ -15,9 +15,6 @@ import type { State as StateType } from "@egress/domain/Model.ts";
 
 const ORIGIN = process.env["AGGREGATOR"] ?? "http://127.0.0.1:8088";
 
-// Option-returning decoder: an event that does not match the published
-// contract is rejected here rather than silently corrupting local state.
-const decode = Schema.decodeUnknownOption(CircuitEvent);
 
 type Known = { readonly state: StateType; readonly sequence: number };
 
@@ -53,14 +50,16 @@ const program = Effect.gen(function* () {
     Stream.filter((l): l is string => l !== undefined),
     Stream.mapEffect((line) =>
       Effect.suspend(() => {
-        const decoded = decode(JSON.parse(line.slice(6)));
-        if (O.isNone(decoded)) {
+        // Through the contract's own reader: a frame that is not JSON at all is
+        // a failure to report, not an exception to escape into the stream.
+        const decoded = decodeCircuitEvent(line.slice(6));
+        if (Result.isFailure(decoded)) {
           // Loud, not silently dropped: this is contract drift.
           return Effect.logError(`undecodable event: ${line}`).pipe(
             Effect.as(undefined),
           );
         }
-        const event = decoded.value;
+        const event = decoded.success;
         return Ref.modify(known, (map) => {
             const { apiId, sequence, state } = event.data;
             const current = map.get(apiId);

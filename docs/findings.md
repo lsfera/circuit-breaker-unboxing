@@ -335,4 +335,22 @@ it is one more pair of things that have to agree.
   already existed rather than a second flag, and the flag survives only where it
   is honest — deciding whether a *failed* rebuild is worth reporting, which runs
   late enough for it to be true.
+- **One published contract, three readers, two of them guesswork.** The event
+  this repo exists to publish crosses three boundaries — AMQP to the daemon
+  fleet, Redis to the outbox that replays it after a restart, SSE to a
+  subscriber — and each hop had grown its own idea of what a valid event is.
+  Only the AMQP one decoded. The outbox cast: `JSON.parse(raw) as CircuitEvent`
+  followed by two `typeof` tests, checking two of the event's nine fields and
+  asserting the rest, under a comment claiming "only the shape the publisher
+  guarantees is let through". Measured against the old check, it would have
+  replayed a `state` that does not exist, a `reason` outside the vocabulary, a
+  sequence that cannot be ordered, and an object missing seven of its nine
+  fields — straight to subscribers, from the durable path that exists precisely
+  to survive the version skew that produces such entries. The subscriber's hop
+  decoded properly but reached it through a bare `JSON.parse`, so a frame that
+  was not JSON at all threw out of the stream and ended the process, which is
+  the failure the AMQP reader had already been given two distinct outcomes to
+  avoid. There is one reader now, in `@egress/domain` beside the schema it
+  reads, and all three hops go through it — so the tests that pin what a valid
+  event is now guard three call sites instead of one.
 

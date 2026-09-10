@@ -1,5 +1,6 @@
 import { Result, Schema } from "effect";
-import { CircuitEvent } from "@egress/domain/Model.ts";
+import { readerFor } from "@egress/domain/Model.ts";
+import type { CircuitEvent, DecodeFailure } from "@egress/domain/Model.ts";
 
 /**
  * Naming conventions for the circuit.control control plane, shared by
@@ -106,32 +107,7 @@ export const sacQueueOptions = (apiId: string) => ({
 /** Durable so the topology itself survives, even though what it feeds does not need to. */
 export const CONTROL_EXCHANGE_OPTIONS = { durable: true };
 
-/**
- * Every message here is read the same way: parse, decode through the one
- * declaration, and say which step failed. The two reasons are kept apart because
- * they call for different reactions — a schema mismatch is a version skew, and
- * something that is not JSON means the publisher is not who we think it is.
- */
-type DecodeFailure = "malformed-json" | "schema-mismatch";
-
-const readerFor = <S extends Schema.ConstraintDecoder<unknown>>(schema: S) => {
-  const decode = Schema.decodeUnknownOption(schema);
-  return (body: string): Result.Result<S["Type"], DecodeFailure> => {
-    let json: unknown;
-    try {
-      json = JSON.parse(body);
-    } catch {
-      return Result.fail("malformed-json");
-    }
-    return Result.fromOption(decode(json), (): DecodeFailure => "schema-mismatch");
-  };
-};
-
 export const encodeCircuitEvent = (event: CircuitEvent): string => JSON.stringify(event);
-
-/** Shared with @egress/subscriber, so the AMQP and SSE paths cannot disagree on what a valid event is. */
-export const decodeCircuitEvent: (body: string) => Result.Result<CircuitEvent, DecodeFailure> =
-  readerFor(CircuitEvent);
 
 /**
  * The body on both SAC queues. Every daemon publishes one per transition so a

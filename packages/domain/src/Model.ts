@@ -1,4 +1,4 @@
-import { Context, Data, Schema } from "effect";
+import { Context, Data, Result, Schema } from "effect";
 
 export const State = {
   CLOSED: "CLOSED",
@@ -144,6 +144,36 @@ export const CircuitEvent = Schema.Struct({
 });
 
 export type CircuitEvent = typeof CircuitEvent.Type;
+
+/**
+ * Why a message could not be read. The two are worth telling apart: a schema
+ * mismatch is a version skew between the publisher and this reader, and
+ * something that is not JSON at all means the publisher is not who we think.
+ */
+export type DecodeFailure = "malformed-json" | "schema-mismatch";
+
+/** Parse, then decode through one declaration, and say which step failed. */
+export const readerFor = <S extends Schema.ConstraintDecoder<unknown>>(schema: S) => {
+  const decode = Schema.decodeUnknownOption(schema);
+  return (body: string): Result.Result<S["Type"], DecodeFailure> => {
+    let json: unknown;
+    try {
+      json = JSON.parse(body);
+    } catch {
+      return Result.fail("malformed-json");
+    }
+    return Result.fromOption(decode(json), (): DecodeFailure => "schema-mismatch");
+  };
+};
+
+/**
+ * The one reader for a published event, here rather than beside any single
+ * transport because three of them carry it: AMQP to the daemon fleet, Redis to
+ * the outbox that replays it, and SSE to a subscriber. They agree on what a
+ * valid event is by sharing this, not by each checking a few fields.
+ */
+export const decodeCircuitEvent: (body: string) => Result.Result<CircuitEvent, DecodeFailure> =
+  readerFor(CircuitEvent);
 
 export class DeliveryFailed extends Data.TaggedError("DeliveryFailed")<{
   readonly sink: string;

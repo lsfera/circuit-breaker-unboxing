@@ -1,6 +1,7 @@
-import { Context, Effect, Layer, Ref, Option as O} from "effect";
+import { Context, Effect, Layer, Ref, Option as O, Result } from "effect";
 import { CoordinationUnavailable } from "./Coordination.ts";
 import type { RedisLike } from "./Coordination.ts";
+import { decodeCircuitEvent } from "@egress/domain/Model.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 
 /**
@@ -142,23 +143,15 @@ const evalGuarded = (
   });
 
 /**
- * A stored entry that cannot be parsed back into an event is dropped rather
- * than replayed, and the same reasoning as the checkpoint validator applies:
- * garbage in this position is a version skew or a corrupt write, and
- * delivering it to a subscriber that trusts the schema is worse than losing
- * it. Only the shape the publisher guarantees is let through.
+ * A stored entry that cannot be decoded is dropped rather than replayed:
+ * garbage here is a version skew or a corrupt write, and handing it to a
+ * subscriber that trusts the schema is worse than losing it.
+ *
+ * Through the contract's own reader, so what this replays and what the daemons
+ * accept are the same definition of a valid event.
  */
-const parseEvent = (raw: unknown): O.Option<CircuitEvent> => {
-  if (typeof raw !== "string") return O.none();
-  try {
-    const parsed = JSON.parse(raw) as CircuitEvent;
-    return typeof parsed?.data?.apiId === "string" && typeof parsed?.data?.sequence === "number"
-      ? O.some(parsed)
-      : O.none();
-  } catch {
-    return O.none();
-  }
-};
+const parseEvent = (raw: unknown): O.Option<CircuitEvent> =>
+  typeof raw === "string" ? Result.getSuccess(decodeCircuitEvent(raw)) : O.none();
 
 const parseList = (result: string | number | null): ReadonlyArray<unknown> => {
   if (typeof result !== "string") return [];

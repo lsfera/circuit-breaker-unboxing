@@ -2,11 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Result } from "effect";
 import {
-  decodeCircuitEvent,
   decodeElectionTrigger,
   encodeCircuitEvent,
   encodeElectionTrigger,
 } from "../src/ControlPlane.ts";
+import { decodeCircuitEvent } from "@egress/domain/Model.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 
 /** What this control plane will and will not read, with no broker. */
