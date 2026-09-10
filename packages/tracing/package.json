@@ -2,9 +2,10 @@
   "name": "@egress/tracing",
   "private": true,
   "type": "module",
-  "description": "OpenTelemetry wiring for every process here: one layer, off unless an OTLP endpoint is configured — see docs/decisions/003-tracing.md.",
+  "description": "Observability wiring for every process here: the tracing layer (off unless an OTLP endpoint is configured — see docs/decisions/003-tracing.md) and the one /metrics route they all serve.",
   "exports": {
-    "./Tracing.ts": "./src/Tracing.ts"
+    "./Tracing.ts": "./src/Tracing.ts",
+    "./Metrics.ts": "./src/Metrics.ts"
   },
   "dependencies": {
     "@effect/opentelemetry": "4.0.0-rc.112",

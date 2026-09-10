@@ -1,6 +1,6 @@
 import { Effect, Metric, Ref, Schedule, Stream } from "effect";
 import { HttpMiddleware, HttpRouter, HttpServerResponse } from "effect/unstable/http";
-import { PrometheusMetrics } from "effect/unstable/observability";
+import { metricsResponse } from "@egress/tracing/Metrics.ts";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -240,14 +240,7 @@ export const HttpLive = HttpRouter.use((router) =>
     yield* router.add(
       "GET",
       "/metrics",
-      PrometheusMetrics.format().pipe(
-        Effect.map((body) =>
-          HttpServerResponse.text(body, {
-            contentType: "text/plain; version=0.0.4; charset=utf-8",
-          }),
-        ),
-        HttpMiddleware.withLoggerDisabled,
-      ),
+      metricsResponse,
     );
 
     yield* router.add(

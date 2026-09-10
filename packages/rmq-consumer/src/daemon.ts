@@ -431,6 +431,29 @@ export const runDaemon = (cfg: DaemonConfig) =>
     /** Advanced from the same snapshot the delta came from, never by re-reading — see Tally.ts. */
     let published = Tally.nothing;
 
+    /**
+     * Every counter this daemon publishes, and which field of a delta feeds it.
+     *
+     * One table, two readers: the flush below and the zeroing at startup. They
+     * used to be a chain of `if (delta.x > 0)` and a separate list of the same
+     * metrics, so a new counter was three edits — the delta, the flush, the
+     * zeroing — and the one that got missed was whichever you did not think of.
+     */
+    const counters = [
+      ["ok", Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "ok" })],
+      ["failed", Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "failed" })],
+      // Fed by the same field as calls{failed}, because the gap between the two is
+      // informative: a rejection whose link has already gone is requeued rather
+      // than dead-lettered, so dead_lettered trailing calls{failed} slightly is
+      // work that was retried rather than work that was lost.
+      ["failed", Metric.withAttributes(Telemetry.deadLettered, attrs)],
+      ["probed", Metric.withAttributes(Telemetry.probes, attrs)],
+      ["redriven", Metric.withAttributes(Telemetry.redriven, attrs)],
+      ["undecodable", Metric.withAttributes(Telemetry.undecodable, attrs)],
+      ["gaps", Metric.withAttributes(Telemetry.controlGaps, attrs)],
+      ["duplicates", Metric.withAttributes(Telemetry.controlDuplicates, attrs)],
+    ] as const;
+
     const flush = Effect.gen(function* () {
       const { circuit, policy } = yield* Ref.get(state);
       const active = O.isSome(yield* Ref.get(workConsumer));
@@ -452,48 +475,13 @@ export const runDaemon = (cfg: DaemonConfig) =>
       const delta = Tally.since(published, current);
       published = current;
 
-      if (delta.ok > 0) {
-        yield* Metric.update(
-          Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "ok" }),
-          delta.ok,
-        );
-      }
-      if (delta.failed > 0) {
-        // Together, because the gap between them is informative: a rejection whose
-        // link has already gone is requeued rather than dead-lettered, so
-        // dead_lettered trailing calls{failed} slightly is work that was retried.
-        yield* Effect.all(
-          [
-            Metric.update(
-              Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "failed" }),
-              delta.failed,
-            ),
-            Metric.update(Metric.withAttributes(Telemetry.deadLettered, attrs), delta.failed),
-          ],
-          { discard: true },
-        );
-      }
-      if (delta.probed > 0) {
-        yield* Metric.update(Metric.withAttributes(Telemetry.probes, attrs), delta.probed);
-      }
-      if (delta.redriven > 0) {
-        yield* Metric.update(Metric.withAttributes(Telemetry.redriven, attrs), delta.redriven);
-      }
-      if (delta.undecodable > 0) {
-        yield* Metric.update(
-          Metric.withAttributes(Telemetry.undecodable, attrs),
-          delta.undecodable,
-        );
-      }
-      if (delta.gaps > 0) {
-        yield* Metric.update(Metric.withAttributes(Telemetry.controlGaps, attrs), delta.gaps);
-      }
-      if (delta.duplicates > 0) {
-        yield* Metric.update(
-          Metric.withAttributes(Telemetry.controlDuplicates, attrs),
-          delta.duplicates,
-        );
-      }
+      yield* Effect.forEach(
+        counters,
+        ([field, metric]) =>
+          delta[field] > 0 ? Metric.update(metric, delta[field]) : Effect.void,
+        { discard: true },
+      );
+
       for (const [type, seen] of delta.byType) {
         yield* Metric.update(
           Metric.withAttributes(Telemetry.controlEvents, { ...attrs, type }),
@@ -506,19 +494,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
      * Zero every counter at startup so its series exists before anything happens to
      * it: a tile whose job is to sit at zero is useless if zero reads as "No data".
      */
-    yield* Effect.all(
-      [
-        Metric.update(Metric.withAttributes(Telemetry.controlGaps, attrs), 0),
-        Metric.update(Metric.withAttributes(Telemetry.controlDuplicates, attrs), 0),
-        Metric.update(Metric.withAttributes(Telemetry.deadLettered, attrs), 0),
-        Metric.update(Metric.withAttributes(Telemetry.probes, attrs), 0),
-        Metric.update(Metric.withAttributes(Telemetry.redriven, attrs), 0),
-        Metric.update(Metric.withAttributes(Telemetry.undecodable, attrs), 0),
-        Metric.update(Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "ok" }), 0),
-        Metric.update(Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "failed" }), 0),
-      ],
-      { discard: true },
-    );
+    yield* Effect.forEach(counters, ([, metric]) => Metric.update(metric, 0), { discard: true });
 
     yield* Effect.forkScoped(
       Effect.forever(Effect.sleep("1 second").pipe(Effect.andThen(flush))),

@@ -1,15 +1,13 @@
-import { Config, Effect, Layer, Option as O, Schema } from "effect";
+import { Config, Effect, Layer } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
-import { HttpMiddleware, HttpRouter, HttpServerResponse } from "effect/unstable/http";
-import { PrometheusMetrics } from "effect/unstable/observability";
+import { HttpRouter } from "effect/unstable/http";
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
 import { createServer } from "node:http";
 import { RmqLive } from "@egress/rmq/Client.ts";
-import { BrokerAddress, brokerAddress, PositiveInt } from "@egress/config/Settings.ts";
+import { brokerFlag, metricsPortFlag, PositiveInt } from "@egress/config/Settings.ts";
+import { MetricsRoute } from "@egress/tracing/Metrics.ts";
 import { TracingLive } from "@egress/tracing/Tracing.ts";
 import { runProducer } from "./producer.ts";
-
-const decodeBroker = Schema.decodeUnknownOption(BrokerAddress);
 
 /**
  * The producer, its own component rather than a role inside the daemon process:
@@ -22,15 +20,7 @@ const decodeBroker = Schema.decodeUnknownOption(BrokerAddress);
 
 /** Every setting this process takes, declared once — flags with the environment behind them. */
 const flags = {
-  broker: Flag.string("rmq").pipe(
-    Flag.filterMap(
-      (raw) => O.map(decodeBroker(raw), ([host, , port]) => ({ host, port })),
-      (raw) => `expected host:port, got ${raw}`,
-    ),
-    Flag.withFallbackConfig(brokerAddress("RMQ")),
-    Flag.withDefault({ host: "127.0.0.1", port: 5672 }),
-    Flag.withDescription("Broker to publish work onto"),
-  ),
+  broker: brokerFlag("Broker to publish work onto"),
   apiId: Flag.string("api-id").pipe(
     Flag.withFallbackConfig(Config.nonEmptyString("API_ID")),
     Flag.withDefault("payments-provider"),
@@ -46,33 +36,8 @@ const flags = {
     Flag.withDefault(200),
     Flag.withDescription("Messages published per second, regardless of circuit state"),
   ),
-  metricsPort: Flag.integer("metrics-port").pipe(
-    Flag.withFallbackConfig(Config.port("METRICS_PORT")),
-    Flag.withDefault(9464),
-    Flag.withDescription("Port /metrics is served on"),
-  ),
+  metricsPort: metricsPortFlag,
 };
-
-/**
- * Identical to the aggregator's and the daemon's `/metrics` route: one
- * registry, one exposition format, nothing extra to keep in sync. The logger
- * is disabled for it because Prometheus scrapes every 2s and an access log
- * line per scrape buries everything worth reading.
- */
-const MetricsRoute = HttpRouter.use((router) =>
-  router.add(
-    "GET",
-    "/metrics",
-    PrometheusMetrics.format().pipe(
-      Effect.map((body) =>
-        HttpServerResponse.text(body, {
-          contentType: "text/plain; version=0.0.4; charset=utf-8",
-        }),
-      ),
-      HttpMiddleware.withLoggerDisabled,
-    ),
-  ),
-);
 
 /**
  * Scoped fiber for the lifetime of the server, the same shape the aggregator's
