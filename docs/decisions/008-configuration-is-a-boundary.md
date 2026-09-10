@@ -152,3 +152,45 @@ options are the coupling written down deliberately. Passing values into a layer
 at the composition root is dependency injection; it is not the prop-drilling the
 pattern warns about.
 
+## Parsed by `effect/unstable/cli`
+
+Added 2026-09-10. The runtime this repo already pins ships a CLI module, which
+is a better answer than either of the two things that preceded it here.
+
+It replaced a hand-written argv loop in the aggregator and, briefly, a
+hand-written strictness check beside it. The check existed because
+`@effect/cli` is still on `effect@3` (0.77.1) and pulling the runtime back a
+major version for flag parsing was not worth it — a conclusion that was correct
+about the *package* and wrong about the *runtime*, which had the same thing
+in-core under `unstable` all along.
+
+What it gives that a record of `Config`s read from a parsed record did not:
+
+- **An unrecognised flag stops the process, with a suggestion.**
+  `--sorce=envoy-push` used to leave `source` at its default and run the
+  simulator against real Envoy replicas, reporting nothing wrong. It now prints
+  `Unrecognized flag: --sorce` / `Did you mean this? --source` and exits 1. The
+  mode literals already caught a misspelled *value*; this is the same class of
+  mistake one level up, on the flag's name.
+- **`--help`.** Every setting of every process, with a description. Reading
+  `main.ts` was the documentation before.
+
+Every entry point takes it, and the two shapes are deliberate. The aggregator is
+flags-only, because they are typed by a person. The daemon, producer and
+subscriber are containers configured by environment, so each flag carries
+`Flag.withFallbackConfig` over the variable it always read: `FLEET_SIZE` still
+works and is still validated, `--fleet-size` now works too, and `--help` lists
+both. Nothing in docker-compose.yml changed.
+
+`Command.run` needs `FileSystem`, `Path`, `Terminal`, `Stdio` and
+`ChildProcessSpawner`, which `NodeServices.layer` provides in one. Verified in
+containers with no TTY, which was the risk worth checking.
+
+Not converted: `packages/demo/src/driver.ts`. It is a 410-line script run by
+hand, its six settings are referenced 68 times across helpers and a *mutable*
+`ORIGIN` resolved against the live leader, and many of those matches are the
+words in prose. The refactor is disproportionate to a script the stack never
+runs. Its one real defect was fixed in place instead: `FAILURE_MODE` was
+`=== "envoy" ? "envoy" : "sim"`, so every misspelling silently selected the
+simulator — exactly what `--source` was made strict to prevent.
+

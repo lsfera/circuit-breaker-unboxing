@@ -50,7 +50,17 @@ const CANDIDATES = (process.env["AGGREGATOR"] ?? "http://127.0.0.1:8088")
   .filter((s) => s.length > 0);
 let ORIGIN = CANDIDATES[0] ?? "http://127.0.0.1:8088";
 const API = process.argv[2] ?? "payments-provider";
-const FAILURE_MODE = process.env["FAILURE_MODE"] === "envoy" ? "envoy" : "sim";
+/**
+ * Validated rather than coerced. `=== "envoy" ? "envoy" : "sim"` turned every
+ * misspelling into the simulator — so `FAILURE_MODE=envy` ran the sim script
+ * against real Envoy replicas and reported nothing wrong, which is the same
+ * failure the aggregator's `--source` was made strict to prevent.
+ */
+const FAILURE_MODE = ((raw): "sim" | "envoy" => {
+  if (raw === undefined || raw === "sim") return "sim";
+  if (raw === "envoy") return "envoy";
+  throw new Error(`FAILURE_MODE must be "sim" or "envoy", got "${raw}"`);
+})(process.env["FAILURE_MODE"]);
 const FLAKY_UPSTREAM = process.env["FLAKY_UPSTREAM"] ?? "http://127.0.0.1";
 const PROMETHEUS = process.env["PROMETHEUS"] ?? "";
 
