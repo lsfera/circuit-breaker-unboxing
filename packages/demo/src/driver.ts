@@ -462,27 +462,27 @@ const run = (settings: Settings) => {
 const demo = Command.make(
   "demo",
   {
-    api: Argument.string("api").pipe(
+    api: Argument.String("api").pipe(
       Argument.withDefault("payments-provider"),
       Argument.withDescription("Which API to drive the script against"),
     ),
-    aggregator: Flag.string("aggregator").pipe(
-      Flag.withFallbackConfig(Config.nonEmptyString("AGGREGATOR")),
+    aggregator: Flag.String("aggregator").pipe(
+      Flag.withFallbackConfig(Config.NonEmptyString("AGGREGATOR")),
       Flag.withDefault("http://127.0.0.1:8088"),
       Flag.withDescription("Comma-separated instances; the leader is resolved among them"),
     ),
-    failureMode: Flag.choice("failure-mode", ["sim", "envoy"] as const).pipe(
-      Flag.withFallbackConfig(Config.literals(["sim", "envoy"], "FAILURE_MODE")),
+    failureMode: Flag.Literals("failure-mode", ["sim", "envoy"] as const).pipe(
+      Flag.withFallbackConfig(Config.Literals(["sim", "envoy"], "FAILURE_MODE")),
       Flag.withDefault("sim" as const),
       Flag.withDescription("Inject failure into the simulator or into a real upstream"),
     ),
-    flakyUpstream: Flag.string("flaky-upstream").pipe(
-      Flag.withFallbackConfig(Config.nonEmptyString("FLAKY_UPSTREAM")),
+    flakyUpstream: Flag.String("flaky-upstream").pipe(
+      Flag.withFallbackConfig(Config.NonEmptyString("FLAKY_UPSTREAM")),
       Flag.withDefault("http://127.0.0.1"),
       Flag.withDescription("Base URL of the upstream to fail (--failure-mode=envoy)"),
     ),
-    prometheus: Flag.string("prometheus").pipe(
-      Flag.withFallbackConfig(Config.nonEmptyString("PROMETHEUS")),
+    prometheus: Flag.String("prometheus").pipe(
+      Flag.withFallbackConfig(Config.NonEmptyString("PROMETHEUS")),
       Flag.withDefault(""),
       Flag.withDescription("Prometheus base URL; enables the fleet step"),
     ),

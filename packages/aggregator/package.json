@@ -17,7 +17,7 @@
     "@grpc/grpc-js": "^1.14.4",
     "@grpc/proto-loader": "^0.8.1",
     "effect": "catalog:",
-    "ioredis": "^5.4.1"
+    "ioredis": "^6.0.0"
   },
   "devDependencies": {
     "testcontainers": "^12.1.0"

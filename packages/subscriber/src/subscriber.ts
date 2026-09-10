@@ -109,8 +109,8 @@ const program = (ORIGIN: string) =>
 const subscriber = Command.make(
   "subscriber",
   {
-    aggregator: Flag.string("aggregator").pipe(
-      Flag.withFallbackConfig(Config.nonEmptyString("AGGREGATOR")),
+    aggregator: Flag.String("aggregator").pipe(
+      Flag.withFallbackConfig(Config.NonEmptyString("AGGREGATOR")),
       Flag.withDefault("http://127.0.0.1:8088"),
       Flag.withDescription("Aggregator to subscribe to; only the leader publishes"),
     ),

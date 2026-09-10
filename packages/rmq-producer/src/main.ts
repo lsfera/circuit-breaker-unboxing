@@ -21,8 +21,8 @@ import { runProducer } from "./producer.ts";
 /** Every setting this process takes, declared once — flags with the environment behind them. */
 const flags = {
   broker: brokerFlag("Broker to publish work onto"),
-  apiId: Flag.string("api-id").pipe(
-    Flag.withFallbackConfig(Config.nonEmptyString("API_ID")),
+  apiId: Flag.String("api-id").pipe(
+    Flag.withFallbackConfig(Config.NonEmptyString("API_ID")),
     Flag.withDefault("payments-provider"),
     Flag.withDescription("Whose work queue to fill"),
   ),
@@ -30,7 +30,7 @@ const flags = {
    * Fixed, and deliberately never lowered in reaction to the circuit — the
    * backlog this builds during an outage is the thing the fleet has to survive.
    */
-  ratePerSecond: Flag.integer("rate").pipe(
+  ratePerSecond: Flag.Int("rate").pipe(
     Flag.withSchema(PositiveInt),
     Flag.withFallbackConfig(Config.schema(PositiveInt, "RATE_PER_SECOND")),
     Flag.withDefault(200),

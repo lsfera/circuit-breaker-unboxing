@@ -14,7 +14,7 @@ import { brokerAddress, PositiveInt } from "../src/Settings.ts";
 const settings = Config.all({
   fleetSize: Config.schema(PositiveInt, "FLEET_SIZE").pipe(Config.withDefault(5)),
   index: Config.schema(Schema.Natural, "DAEMON_INDEX").pipe(Config.withDefault(0)),
-  redriveOnClose: Config.boolean("REDRIVE_ON_CLOSE").pipe(Config.withDefault(false)),
+  redriveOnClose: Config.Boolean("REDRIVE_ON_CLOSE").pipe(Config.withDefault(false)),
   broker: brokerAddress("RMQ").pipe(Config.withDefault({ host: "127.0.0.1", port: 5672 })),
 });
 

@@ -22,12 +22,15 @@ export const VERSION: string = manifest.version;
  */
 export const PositiveInt = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)));
 
+/**
+ * A port as a *schema*, for the template parser below. `Config.Port` is the
+ * config reader, not the schema it reads with — the runtime stopped exporting
+ * the latter — and this package is where "what a port is" belongs anyway.
+ */
+const Port = Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 1, maximum: 65535 })));
+
 /** `host:port`, both halves required — a bare host is rejected rather than given a default port. */
-const BrokerAddress = Schema.TemplateLiteralParser([
-  Schema.NonEmptyString,
-  ":",
-  Config.Port,
-]);
+const BrokerAddress = Schema.TemplateLiteralParser([Schema.NonEmptyString, ":", Port]);
 
 type BrokerAddress = { readonly host: string; readonly port: number };
 
@@ -44,7 +47,7 @@ const decodeBroker = Schema.decodeUnknownOption(BrokerAddress);
  * optional and everything else falls back to `RMQ`. Composing one declaration
  * is what keeps "what an address is" from being restated per entry point.
  */
-export const rmqFlag = Flag.string("rmq").pipe(
+export const rmqFlag = Flag.String("rmq").pipe(
   Flag.filterMap(
     (raw) => O.map(decodeBroker(raw), ([host, , port]) => ({ host, port })),
     (raw) => `expected host:port, got ${raw}`,
@@ -58,8 +61,8 @@ export const brokerFlag = (description: string) =>
     Flag.withDescription(description),
   );
 
-export const metricsPortFlag = Flag.integer("metrics-port").pipe(
-  Flag.withFallbackConfig(Config.port("METRICS_PORT")),
+export const metricsPortFlag = Flag.Int("metrics-port").pipe(
+  Flag.withFallbackConfig(Config.Port("METRICS_PORT")),
   Flag.withDefault(9464),
   Flag.withDescription("Port /metrics is served on"),
 );

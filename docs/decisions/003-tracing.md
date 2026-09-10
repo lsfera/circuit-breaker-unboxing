@@ -10,9 +10,10 @@ tracing conditional on the package existing for this repo's pinned Effect.
 
 ## The gate
 
-It exists. `@effect/opentelemetry` publishes `4.0.0-rc.112`, the exact version
-`pnpm-workspace.yaml` pins for `effect` and `@effect/platform-node`. So the
-reason not to do it cannot be "we cannot".
+It exists. `@effect/opentelemetry` publishes the same `4.0.0-rc.*` version
+`pnpm-workspace.yaml` pins for `effect` and `@effect/platform-node` — they move
+in lockstep, and its peer range requires it. So the reason not to do it cannot
+be "we cannot".
 
 ## The decision
 

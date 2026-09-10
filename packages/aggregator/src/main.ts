@@ -30,29 +30,29 @@ import type { RedisLike } from "./Coordination.ts";
  * Envoy replicas. See docs/decisions/008-configuration-is-a-boundary.md.
  */
 const flags = {
-  port: Flag.integer("port").pipe(
+  port: Flag.Int("port").pipe(
     Flag.withDefault(8088),
     Flag.withDescription("Port for the console, API and /metrics"),
   ),
-  source: Flag.choice("source", ["sim", "envoy", "envoy-push"] as const).pipe(
+  source: Flag.Literals("source", ["sim", "envoy", "envoy-push"] as const).pipe(
     Flag.withDefault("sim" as const),
     Flag.withDescription("Where replica reports come from"),
   ),
-  replicas: Flag.integer("replicas").pipe(
+  replicas: Flag.Int("replicas").pipe(
     Flag.withSchema(PositiveInt),
     Flag.withDefault(5),
     Flag.withDescription("Simulated replica count (--source=sim only)"),
   ),
-  apis: Flag.integer("apis").pipe(
+  apis: Flag.Int("apis").pipe(
     Flag.withSchema(Schema.Natural),
     Flag.withDefault(0),
     Flag.withDescription("Replace the three named APIs with N synthetic ones; 0 keeps them"),
   ),
-  pushPort: Flag.integer("push-port").pipe(
+  pushPort: Flag.Int("push-port").pipe(
     Flag.withDefault(9900),
     Flag.withDescription("Where Envoy pushes stats (--source=envoy-push)"),
   ),
-  envoy: Flag.string("envoy").pipe(
+  envoy: Flag.String("envoy").pipe(
     Flag.withDefault("http://127.0.0.1:9901"),
     Flag.withDescription("Comma-separated Envoy admin URLs (--source=envoy)"),
   ),
@@ -61,23 +61,23 @@ const flags = {
     Flag.optional,
     Flag.withDescription("host:port of the broker to publish circuit.control to"),
   ),
-  noWebhook: Flag.boolean("no-webhook").pipe(
+  noWebhook: Flag.Boolean("no-webhook").pipe(
     Flag.withDefault(false),
     Flag.withDescription("Drop the webhook sink, leaving only --rmq"),
   ),
-  ha: Flag.choice("ha", ["memory", "redis"] as const).pipe(
+  ha: Flag.Literals("ha", ["memory", "redis"] as const).pipe(
     Flag.withDefault("memory" as const),
     Flag.withDescription("Coordination backend for the publishing lease"),
   ),
-  redis: Flag.string("redis").pipe(
+  redis: Flag.String("redis").pipe(
     Flag.withDefault("redis://127.0.0.1:6379"),
     Flag.withDescription("Redis URL (--ha=redis)"),
   ),
-  instanceId: Flag.string("instance-id").pipe(
+  instanceId: Flag.String("instance-id").pipe(
     Flag.withDefault(randomUUID()),
     Flag.withDescription("Identity in the lease; must differ between instances"),
   ),
-  leaseTtlMs: Flag.integer("lease-ttl-ms").pipe(
+  leaseTtlMs: Flag.Int("lease-ttl-ms").pipe(
     Flag.withSchema(PositiveInt),
     Flag.withDefault(5000),
     Flag.withDescription("How long a lease survives without renewal"),

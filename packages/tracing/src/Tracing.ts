@@ -29,7 +29,7 @@ import {
  * the empty string rather than omitting it, so a present-but-empty endpoint
  * would install an exporter pointed at nowhere.
  */
-const endpoint = Config.string("OTEL_EXPORTER_OTLP_ENDPOINT").pipe(
+const endpoint = Config.String("OTEL_EXPORTER_OTLP_ENDPOINT").pipe(
   Config.map((raw) => raw.trim()),
   Config.option,
   Config.map(O.filter((raw) => raw !== "")),

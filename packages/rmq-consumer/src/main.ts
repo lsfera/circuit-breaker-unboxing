@@ -32,8 +32,8 @@ import { runDaemon } from "./daemon.ts";
  */
 const flags = {
   broker: brokerFlag("Broker to consume work and circuit.control from"),
-  apiId: Flag.string("api-id").pipe(
-    Flag.withFallbackConfig(Config.nonEmptyString("API_ID")),
+  apiId: Flag.String("api-id").pipe(
+    Flag.withFallbackConfig(Config.NonEmptyString("API_ID")),
     Flag.withDefault("payments-provider"),
     Flag.withDescription("Which API's work queue and control events this daemon follows"),
   ),
@@ -41,7 +41,7 @@ const flags = {
    * `Natural`, not `PositiveInt`: this one is a 0-based position, and index 0
    * is the daemon that stays active longest. Below zero it is nothing.
    */
-  index: Flag.integer("index").pipe(
+  index: Flag.Int("index").pipe(
     Flag.withSchema(Schema.Natural),
     Flag.withFallbackConfig(Config.schema(Schema.Natural, "DAEMON_INDEX")),
     Flag.withDefault(0),
@@ -53,41 +53,41 @@ const flags = {
    * every daemon idled while the queue filled — five containers up, healthy, and
    * doing nothing.
    */
-  fleetSize: Flag.integer("fleet-size").pipe(
+  fleetSize: Flag.Int("fleet-size").pipe(
     Flag.withSchema(PositiveInt),
     Flag.withFallbackConfig(Config.schema(PositiveInt, "FLEET_SIZE")),
     Flag.withDefault(5),
     Flag.withDescription("How many daemons the fleet has; every one must agree"),
   ),
-  instanceId: Flag.string("instance-id").pipe(
-    Flag.withFallbackConfig(Config.nonEmptyString("INSTANCE_ID")),
+  instanceId: Flag.String("instance-id").pipe(
+    Flag.withFallbackConfig(Config.NonEmptyString("INSTANCE_ID")),
     Flag.withDefault(randomUUID()),
     Flag.withDescription("Names this daemon's own control queue"),
   ),
-  egressAddr: Flag.string("egress-addr").pipe(
-    Flag.withFallbackConfig(Config.nonEmptyString("EGRESS_ADDR")),
+  egressAddr: Flag.String("egress-addr").pipe(
+    Flag.withFallbackConfig(Config.NonEmptyString("EGRESS_ADDR")),
     Flag.withDefault("http://envoy:10000"),
     Flag.withDescription("One address; the daemon never learns Envoy is a fleet"),
   ),
-  apiPath: Flag.string("api-path").pipe(
-    Flag.withFallbackConfig(Config.nonEmptyString("API_PATH")),
+  apiPath: Flag.String("api-path").pipe(
+    Flag.withFallbackConfig(Config.NonEmptyString("API_PATH")),
     Flag.withDefault("/payments"),
     Flag.withDescription("Route on that address for this API"),
   ),
   /** Zero is excluded with everything else: the consumer would hold no deliveries. */
-  maxInFlight: Flag.integer("max-in-flight").pipe(
+  maxInFlight: Flag.Int("max-in-flight").pipe(
     Flag.withSchema(PositiveInt),
     Flag.withFallbackConfig(Config.schema(PositiveInt, "MAX_IN_FLIGHT")),
     Flag.withDefault(32),
     Flag.withDescription("Concurrent third-party calls, applied as the work consumer's prefetch"),
   ),
-  redriveOnClose: Flag.boolean("redrive-on-close").pipe(
-    Flag.withFallbackConfig(Config.boolean("REDRIVE_ON_CLOSE")),
+  redriveOnClose: Flag.Boolean("redrive-on-close").pipe(
+    Flag.withFallbackConfig(Config.Boolean("REDRIVE_ON_CLOSE")),
     Flag.withDefault(false),
     Flag.withDescription("Replay the dead-letter queue when the circuit closes"),
   ),
   /** The bound a redrive pass respects. Unbounded, it republished two messages 17,703 times. */
-  redriveMax: Flag.integer("redrive-max").pipe(
+  redriveMax: Flag.Int("redrive-max").pipe(
     Flag.withSchema(PositiveInt),
     Flag.withFallbackConfig(Config.schema(PositiveInt, "REDRIVE_MAX")),
     Flag.withDefault(5000),

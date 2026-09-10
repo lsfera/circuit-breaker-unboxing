@@ -267,16 +267,23 @@ Then open <http://localhost:8088>. For the full thing — three real Envoy
 replicas, two aggregators, a real broker and the daemon fleet — see
 [Running against real Envoy](docs/operations.md#running-against-real-envoy).
 
-Built on **Effect 4 (4.0.0-rc.112)**. Requires Node 22.6+ and TypeScript 5.9+.
+Built on **Effect 4 (4.0.0-rc.113)**. Requires Node 22.6+ and TypeScript 5.9+.
 TypeScript runs natively via Node's type stripping, so there is still no build
 step — but `tsc --noEmit` is now load-bearing, because Effect's guarantees are
 type-level.
 
-> Effect 4 is a release candidate. Versions are pinned exactly (`effect` and
-> `@effect/platform-node` ship in lockstep at the same version now) because RC
-> APIs still move — `ServiceMap` was renamed back to `Context`, and `Effect.fork`
-> was replaced by explicit `forkChild`/`forkScoped`/`forkIn`, between beta and
-> rc.112.
+> Effect 4 is a release candidate. Versions are pinned exactly (`effect`,
+> `@effect/platform-node` and `@effect/opentelemetry` ship in lockstep at the
+> same version) because RC APIs still move — `ServiceMap` was renamed back to
+> `Context` and `Effect.fork` became explicit `forkChild`/`forkScoped`/`forkIn`
+> between beta and rc.112, and rc.113 moved every `Flag`, `Argument` and
+> `Config` constructor to PascalCase (`Flag.string` → `Flag.String`,
+> `Flag.integer` → `Flag.Int`, `Flag.choice` → `Flag.Literals`) and stopped
+> exporting `Config.Port` as a schema.
+>
+> Note for anyone running `npm view effect version`: the `latest` dist-tag is
+> the **v3** line. This repo tracks the `rc` tag, so "upgrade to latest" here
+> means the newest `4.0.0-rc.*`, not `3.x` — which would not be an upgrade.
 
 ## Demo script
 
