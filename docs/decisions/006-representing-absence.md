@@ -161,6 +161,11 @@ acquisition and rehydrated the registry. `sameToken` says what was always
 meant. Nothing in the compiler would have caught that — it is the kind of thing
 a primitive lets you get away with until the day it doesn't.
 
+(`justAcquired` itself is gone: rehydration turned out to need only "no breaker
+for this API yet", and coupling it to the acquisition tick as well is what made
+the checkpoint unreadable under a push-based source. See `docs/findings.md`.
+The equality lesson above is why this paragraph stays.)
+
 ## Consequences
 
 - Three call sites in `Aggregator.test.ts` compare with `assert.deepEqual(x,

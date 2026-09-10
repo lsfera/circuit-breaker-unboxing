@@ -662,3 +662,37 @@ it is one more pair of things that have to agree.
   across a restart and which the one test that restarts had to remember by
   hand; and `asRedisLike`, the adapter the README advertises as one line, which
   existed as two.
+- **The verdict was read through a cast.** The demo driver prints
+  `duplicates=N gaps=N` as its delivery-contract result and then checks
+  `sub.duplicates > 0`. It read `/api/subscriber` through
+  `as Promise<{...}>`, so a field that went missing arrived as `undefined` —
+  and `undefined > 0` is false. A drifted contract would have passed the
+  contract check silently, printed `duplicates=undefined`, and been read as a
+  pass. Same shape as the webhook endpoint two passes earlier, in the script
+  whose whole claim is that what it prints *is* the published contract.
+  Decoded now, and the four cases were checked rather than assumed: a healthy
+  reading decodes, a real violation decodes, and both a missing `duplicates`
+  and a renamed `gaps` are rejected naming the key.
+
+## Where this leaves the sweep
+
+The patterns this review kept finding are, as of this pass, absent from
+`packages/*/src`:
+
+| Pattern | Remaining |
+| --- | --- |
+| `process.exit` outside a composition root | none anywhere |
+| Bare `Effect.runFork` / `runPromise` / `runSync` | none |
+| `console.warn` / `console.error` bypassing the logger | none |
+| `Effect.forever(sleep >> act)` / `setInterval` | none |
+| `Effect.clockWith((c) => c.currentTimeMillis)` | none |
+| `JSON.parse` | one, inside `readerFor`, which is the point of it |
+| Exports unused outside their module | one, a public function's own result type |
+
+That is not "nothing left to improve" — it is that the specific rules this
+review established are now applied everywhere they apply. The recurring finding
+was never a particular API; it was **a rule written down in one module and
+applied to only some of the places it covers**, which accounted for most of the
+defects above, including the two that mattered: a checkpoint written every
+transition and read back never, and an endpoint quoting numbers it had not
+checked.

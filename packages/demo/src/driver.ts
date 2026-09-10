@@ -42,6 +42,16 @@ type CircuitEventData = CircuitEvent["data"];
 
 const decodeEvent = Schema.decodeUnknownOption(CircuitEvent);
 
+/** What `/api/subscriber` answers with — the delivery-contract reading. */
+const SubscriberReport = Schema.Struct({
+  received: Schema.Natural,
+  snapshots: Schema.Natural,
+  duplicates: Schema.Natural,
+  gaps: Schema.Array(Schema.String),
+});
+
+const decodeSubscriber = Schema.decodeUnknownEffect(SubscriberReport);
+
 type Settings = {
   readonly api: string;
   readonly aggregator: string;
@@ -115,13 +125,17 @@ const run = (settings: Settings) => {
     ),
   );
 
+  /**
+   * Decoded, not cast, for the same reason `/subscriber/webhook` is: these four
+   * numbers are the verdict this script prints, and the check below is
+   * `duplicates > 0`. A field that went missing would read as `undefined`, and
+   * `undefined > 0` is false — so a drifted contract would pass the contract
+   * check silently. It fails naming the field instead.
+   */
   const getSubscriber = Effect.tryPromise({
-    try: () =>
-      fetch(`${ORIGIN}/api/subscriber`).then(
-        (r) => r.json() as Promise<{ received: number; snapshots: number; duplicates: number; gaps: ReadonlyArray<string> }>,
-      ),
+    try: () => fetch(`${ORIGIN}/api/subscriber`).then((r) => r.json() as Promise<unknown>),
     catch: (cause) => new Error(`GET /api/subscriber failed: ${String(cause)}`),
-  });
+  }).pipe(Effect.flatMap(decodeSubscriber));
 
   const setFailureRate = (apiId: string, rate: number) => {
     if (FAILURE_MODE === "sim") {
