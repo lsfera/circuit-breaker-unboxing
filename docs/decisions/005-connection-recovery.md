@@ -156,6 +156,25 @@ channel's `close` arrives before the connection's `disconnect`, so it still says
 `true` while a rebuild is being decided, and only says `false` by the time that
 rebuild's attach rejects, which is where it is read.
 
+One boolean for one log line invites deleting it, so here is what that costs,
+measured on a client holding the four consumers a daemon really has. Every
+broker restart then logs:
+
+```
+[rmq] disconnected (…CONNECTION-FORCED…) — recovering
+[rmq] consumer on payments.work: repair failed — Connection closed
+[rmq] consumer on payments.control.daemon-0: repair failed — Connection closed
+[rmq] consumer on payments.probe-trigger: repair failed — Connection closed
+[rmq] consumer on payments.redrive-trigger: repair failed — Connection closed
+[rmq] reconnected — 4 topology entries and 4 consumer(s) restored
+```
+
+Four warnings per process, around thirty across this fleet, each announcing a
+failure that the next line contradicts. There is nothing to query instead:
+amqplib's `Connection` is `{ serverProperties }` and exposes no state, so the
+alternatives are matching on the text of a library's error or keeping the flag.
+The flag stays.
+
 A broker-initiated cancel (`message === null`, the queue was deleted) cannot be
 rebuilt and is now logged instead of returned from in silence.
 
