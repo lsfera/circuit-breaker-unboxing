@@ -1,4 +1,4 @@
-import { Effect, Option as O, Ref } from "effect";
+import { Duration, Effect, Option as O, Ref, Schedule } from "effect";
 import { withParent } from "@egress/rmq/Trace.ts";
 import { randomUUID } from "node:crypto";
 import type { Consumer, RmqService, Settlement } from "@egress/rmq/Client.ts";
@@ -30,6 +30,11 @@ type RedriveOptions = {
   readonly consumer: Ref.Ref<O.Option<Consumer>>;
   readonly gate: Semaphore;
 };
+
+/** A pass is bounded three ways: how often it looks, how long it tolerates no replays, and how long it may run at all. */
+const PASS_POLL = Duration.millis(200);
+const PASS_IDLE_MS = 2000;
+const PASS_DEADLINE = Duration.seconds(60);
 
 export const makeRedrive = (opts: RedriveOptions) => {
   /** Stamped onto anything the redrive moves within the dead-letter queue, so its origin survives the republish that loses the broker's own annotations. */
@@ -157,30 +162,30 @@ export const makeRedrive = (opts: RedriveOptions) => {
 
     yield* opts.gate.withPermit(Ref.set(opts.consumer, O.some(consumer)));
 
-    const deadline = Date.now() + 60_000;
-    let reason = "deadline";
-    while (true) {
-      yield* Effect.sleep("200 millis");
-      if (!(yield* opts.isClosed)) {
-        reason = "circuit reopened";
-        break;
-      }
-      if (moved >= opts.maxPerPass) {
-        reason = "cap reached";
-        break;
-      }
-      if (cycled) {
-        reason = "came full circle";
-        break;
-      }
+    /**
+     * Every way a pass ends, as one total function polled on a schedule — the
+     * deadline is the timeout around it rather than a sixth branch, so no
+     * `reason` can be reached without saying which one it was.
+     */
+    const finished = Effect.gen(function* () {
+      if (!(yield* opts.isClosed)) return O.some("circuit reopened");
+      if (moved >= opts.maxPerPass) return O.some("cap reached");
+      if (cycled) return O.some("came full circle");
       // Idle is measured on *replays* rather than on deliveries, so a pass
-      // that is only being handed things it will not replay still ends.
-      if (Date.now() - lastReplayAt > 2000) {
-        reason = parked > 0 ? "nothing left to replay" : "drained";
-        break;
+      // that is only being handed things it will not replay still ends. On
+      // `Date.now()` at both ends deliberately: what is being measured is how
+      // long the broker has gone without handing over work.
+      if (Date.now() - lastReplayAt > PASS_IDLE_MS) {
+        return O.some(parked > 0 ? "nothing left to replay" : "drained");
       }
-      if (Date.now() > deadline) break;
-    }
+      return O.none<string>();
+    });
+
+    const reason = yield* finished.pipe(
+      Effect.repeat({ schedule: Schedule.spaced(PASS_POLL), until: O.isSome }),
+      Effect.map(O.getOrElse(() => "deadline")),
+      Effect.timeoutOrElse({ duration: PASS_DEADLINE, orElse: () => Effect.succeed("deadline") }),
+    );
 
     // Close *this pass's* channel, and only clear the Ref if it still points
     // at it. Closing whatever the Ref happens to hold is not the same thing:

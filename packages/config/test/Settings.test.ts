@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Config, ConfigProvider, Result, Schema } from "effect";
-import { brokerAddress, parse, PositiveInt } from "../src/Settings.ts";
+import { Config, ConfigProvider, Effect, Result, Schema } from "effect";
+import { brokerAddress, PositiveInt } from "../src/Settings.ts";
 
 /**
  * The rules a process's settings are read by, with no process.
@@ -20,10 +20,13 @@ const settings = Config.all({
 
 /** The parsed settings, or the message a failure would print. */
 const read = (env: Record<string, string>) =>
-  Result.match(parse(settings, ConfigProvider.fromEnvRecord(env)), {
-    onSuccess: (s) => s as Record<string, unknown> | string,
-    onFailure: (message) => message,
-  });
+  Result.match(
+    Effect.runSync(Effect.result(settings.parse(ConfigProvider.fromEnvRecord(env)))),
+    {
+      onSuccess: (s) => s as Record<string, unknown> | string,
+      onFailure: (error) => error.message,
+    },
+  );
 
 test("an unset variable takes its default", () => {
   assert.deepEqual(read({}), {

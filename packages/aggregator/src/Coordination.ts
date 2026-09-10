@@ -1,5 +1,6 @@
-import { Context, Data, Duration, Effect, Layer, Option as O, Ref, Schema } from "effect";
-import { ReasonSchema, StateSchema } from "@egress/domain/Model.ts";
+import { Context, Data, Duration, Effect, Layer, Option as O, Ref, Result, Schema } from "effect";
+import { readerFor, ReasonSchema, StateSchema } from "@egress/domain/Model.ts";
+import { randomUUID } from "node:crypto";
 
 /**
  * What makes N aggregator instances safe to run at once: exactly one may publish
@@ -31,8 +32,12 @@ export type LeaseToken = {
   readonly counter: number;
 };
 
-/** Fresh identity for a coordinator that has no state to inherit. */
-const newEpoch = (): string => Math.random().toString(36).slice(2, 10);
+/**
+ * Fresh identity for a coordinator that has no state to inherit. A UUID rather
+ * than a short random string: an epoch that collides with one it is supposed to
+ * be unrecognisable to is a fencing token that fails open.
+ */
+const newEpoch = (): string => randomUUID();
 
 /**
  * The wire form, declared once rather than split across a parser and a formatter
@@ -127,7 +132,7 @@ export type HaSettings = {
 };
 
 const defaultHaSettings: HaSettings = {
-  instanceId: `solo-${Math.random().toString(36).slice(2, 10)}`,
+  instanceId: `solo-${randomUUID()}`,
   leaseTtlMs: 5000,
 };
 
@@ -287,11 +292,12 @@ export const InMemoryCoordinationLayer: Layer.Layer<LeaderElection | CheckpointS
 // ---------------------------------------------------------------------------
 
 /**
- * A checkpoint read back is untrusted input, whatever wrote it. Decoding rather
- * than casting means anything malformed reads as "no checkpoint" — a cold start,
- * which is handled — instead of seeding the breaker with `undefined`.
+ * A checkpoint read back is untrusted input, whatever wrote it. Through the
+ * same reader the event contract uses, so "malformed" means one thing across
+ * this system: anything that does not decode reads as "no checkpoint" — a cold
+ * start, which is handled — instead of seeding the breaker with `undefined`.
  */
-const decodeCheckpoint = Schema.decodeUnknownOption(CheckpointFromJson);
+const readCheckpoint = readerFor(CheckpointFromJson);
 
 export type RedisLike = {
   readonly eval: (
@@ -469,26 +475,17 @@ export const RedisCoordinationLayer = (
             // costs one API its sequence continuity — and *that* is caught
             // downstream, because a sequence starting over is exactly what the
             // delivery contract check is watching for. What it must not be is
-            // silent, which it was: both branches below returned `None` with
-            // no trace of the difference.
-            const unreadable = (why: string) =>
-              Effect.as(
-                Effect.logWarning(
-                  `checkpoint for ${apiId} ${why} — resuming that API from nothing`,
+            // silent.
+            return Result.match(readCheckpoint(raw), {
+              onSuccess: (checkpoint) => Effect.succeed(O.some(checkpoint)),
+              onFailure: (why) =>
+                Effect.as(
+                  Effect.logWarning(
+                    `checkpoint for ${apiId} is ${why} — resuming that API from nothing`,
+                  ),
+                  O.none<Checkpoint>(),
                 ),
-                O.none<Checkpoint>(),
-              );
-
-            let parsed: unknown;
-            try {
-              parsed = JSON.parse(raw);
-            } catch {
-              return unreadable("is not JSON");
-            }
-            const decoded = decodeCheckpoint(parsed);
-            return O.isNone(decoded)
-              ? unreadable("does not match the checkpoint schema")
-              : Effect.succeed(decoded);
+            });
           }),
         ),
     }),

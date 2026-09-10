@@ -1,12 +1,11 @@
-import { Config, ConfigProvider, Effect, Option as O, Result, Schema } from "effect";
+import { Config, Option as O, Schema } from "effect";
 import { Flag } from "effect/unstable/cli";
 
 /**
- * Settings for every process here: one declaration, decoded at boot, and a
- * value the process cannot use stops it before it opens a socket.
- *
- * See docs/decisions/008-configuration-is-a-boundary.md for what each mistyped
- * variable used to do instead.
+ * The settings more than one process here takes, declared once: one
+ * declaration, decoded at boot, and a value the process cannot use stops it
+ * before it opens a socket. See
+ * docs/decisions/008-configuration-is-a-boundary.md.
  */
 
 /**
@@ -16,7 +15,7 @@ import { Flag } from "effect/unstable/cli";
 export const PositiveInt = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)));
 
 /** `host:port`, both halves required — a bare host is rejected rather than given a default port. */
-export const BrokerAddress = Schema.TemplateLiteralParser([
+const BrokerAddress = Schema.TemplateLiteralParser([
   Schema.NonEmptyString,
   ":",
   Config.Port,
@@ -24,37 +23,28 @@ export const BrokerAddress = Schema.TemplateLiteralParser([
 
 type BrokerAddress = { readonly host: string; readonly port: number };
 
+/** The environment side of the address. */
 export const brokerAddress = (name: string): Config.Config<BrokerAddress> =>
   Config.schema(BrokerAddress, name).pipe(
     Config.map(([host, , port]) => ({ host, port })),
   );
 
-/** Decode, or say which variable was wrong. Separate from `load` so the rules are testable. */
-export const parse = <A>(
-  settings: Config.Config<A>,
-  provider: ConfigProvider.ConfigProvider,
-): Result.Result<A, string> =>
-  Result.match(Effect.runSync(Effect.result(settings.parse(provider))), {
-    onSuccess: (value) => Result.succeed(value),
-    onFailure: (error) => Result.fail(error.message),
-  });
-
 const decodeBroker = Schema.decodeUnknownOption(BrokerAddress);
 
 /**
- * The two settings every process that speaks to the broker takes, declared here
- * rather than once per `main.ts`.
- *
- * Both were copied between the daemon and the producer, which meant the
- * *definition* of a broker address existed twice on the flag side while
- * `brokerAddress` above was its single definition on the environment side.
+ * The flag side of the same address, undecorated: the aggregator makes it
+ * optional and everything else falls back to `RMQ`. Composing one declaration
+ * is what keeps "what an address is" from being restated per entry point.
  */
+export const rmqFlag = Flag.string("rmq").pipe(
+  Flag.filterMap(
+    (raw) => O.map(decodeBroker(raw), ([host, , port]) => ({ host, port })),
+    (raw) => `expected host:port, got ${raw}`,
+  ),
+);
+
 export const brokerFlag = (description: string) =>
-  Flag.string("rmq").pipe(
-    Flag.filterMap(
-      (raw) => O.map(decodeBroker(raw), ([host, , port]) => ({ host, port })),
-      (raw) => `expected host:port, got ${raw}`,
-    ),
+  rmqFlag.pipe(
     Flag.withFallbackConfig(brokerAddress("RMQ")),
     Flag.withDefault({ host: "127.0.0.1", port: 5672 }),
     Flag.withDescription(description),
@@ -65,4 +55,3 @@ export const metricsPortFlag = Flag.integer("metrics-port").pipe(
   Flag.withDefault(9464),
   Flag.withDescription("Port /metrics is served on"),
 );
-

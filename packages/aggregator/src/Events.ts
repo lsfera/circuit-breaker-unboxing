@@ -62,12 +62,9 @@ export const snapshotEvent = (snap: ApiSnapshot) =>
   build("egress.circuit.snapshot", snap, null);
 
 // ---------------------------------------------------------------------------
-// EventBus — one PubSub, many subscribers.
-//
-// In v1 this was an ad-hoc Set of callbacks plus a hand-rolled ring buffer.
-// PubSub gives backpressure and per-subscriber cursors for free, and each SSE
-// client becomes a Stream rather than a registered listener that must be
-// remembered and cleaned up.
+// EventBus — one PubSub, many subscribers. Backpressure and per-subscriber
+// cursors come with it, and each SSE client is a Stream that ends with its
+// request scope rather than a listener something has to remember to remove.
 // ---------------------------------------------------------------------------
 
 export class EventBus extends Context.Service<

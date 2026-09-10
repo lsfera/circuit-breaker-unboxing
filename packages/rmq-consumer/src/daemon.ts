@@ -433,11 +433,8 @@ export const runDaemon = (cfg: DaemonConfig) =>
 
     /**
      * Every counter this daemon publishes, and which field of a delta feeds it.
-     *
-     * One table, two readers: the flush below and the zeroing at startup. They
-     * used to be a chain of `if (delta.x > 0)` and a separate list of the same
-     * metrics, so a new counter was three edits — the delta, the flush, the
-     * zeroing — and the one that got missed was whichever you did not think of.
+     * One table, two readers — the flush below and the zeroing at startup — so
+     * a new counter is one edit and cannot be added to one of them only.
      */
     const counters = [
       ["ok", Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "ok" })],

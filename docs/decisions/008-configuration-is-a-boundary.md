@@ -71,22 +71,21 @@ from it that a fallback cannot give:
 
 ## What is shared, and why it is a package
 
-`@egress/config` holds three things, for the same reason `@egress/tracing`
-exists: every process here needs them, and one declaration beats three that
-have to agree.
+`@egress/config` holds what more than one process needs, for the same reason
+`@egress/tracing` exists: one declaration beats three that have to agree.
 
 - **`PositiveInt`.** Zero is excluded deliberately rather than left to
   `Natural`. Every value using it is a *capacity*, and zero capacity is the
   same silent stall a `NaN` produces — `MAX_IN_FLIGHT=0` deadlocks the gate
   exactly as `abc` does, and is far easier to type by accident.
-- **`brokerAddress`.** `host:port` as a `TemplateLiteralParser`, the same shape
-  as the lease token's wire form. It replaces `Number(addr.split(":")[1])`,
+- **The broker address.** `host:port` as a `TemplateLiteralParser`, the same
+  shape as the lease token's wire form. It replaces `Number(addr.split(":")[1])`,
   which gave `NaN` on `rabbitmq:abc`, and `host ?? "127.0.0.1"`, which never
   fired for `RMQ=:5672` because an empty string is not nullish. Both halves are
   required now: a bare `RMQ=rabbitmq` used to mean "and assume 5672", and
-  assuming is what this pass removes.
-- **`load`.** Parse now, or log one fatal line and exit 1. `parse` is separate
-  from it so the rules are testable without a process to kill.
+  assuming is what this pass removes. One schema, and one `rmqFlag` built from
+  it that every entry point decorates rather than restates.
+- **`metricsPortFlag`.** The one port every process serves `/metrics` on.
 
 ## What this does not change
 

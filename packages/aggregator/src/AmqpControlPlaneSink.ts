@@ -10,7 +10,6 @@ import { DeliveryFailed } from "@egress/domain/Model.ts";
 import { DEAD_LETTER_BUFFER } from "./Events.ts";
 import type { SinkImpl } from "./Events.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
-import type { Publisher } from "@egress/rmq/Client.ts";
 
 /**
  * A peer to WebhookSink, publishing the same CircuitEvent to
@@ -20,10 +19,9 @@ import type { Publisher } from "@egress/rmq/Client.ts";
  * forked off the hot path so a slow or unreachable broker never stalls the
  * tick loop.
  *
- * One publisher per apiId, declared lazily on first delivery and cached —
- * this library's publisher binds a fixed (exchange, routingKey) at creation
- * (see Client.ts's module doc), so a publisher per apiId is the natural
- * shape, not a workaround.
+ * One publisher per apiId, built per delivery: a `Publisher` in this client is
+ * the (exchange, routingKey) pair a send is addressed with, not a resource, so
+ * there is nothing to keep.
  *
  * Concurrency safety is the client's job, not this sink's: `@egress/rmq`
  * serializes every operation on the connection it owns, because creating
@@ -37,21 +35,9 @@ export const makeAmqpControlPlaneSink: Effect.Effect<SinkImpl, RmqError, Rmq> = 
     yield* rmq.declareTopicExchange(CONTROL_EXCHANGE, CONTROL_EXCHANGE_OPTIONS);
 
     const dead = yield* Ref.make<ReadonlyArray<DeliveryFailed>>([]);
-    const publishers = yield* Ref.make(new Map<string, Publisher>());
-
-    const publisherFor = (apiId: string) =>
-      Ref.get(publishers).pipe(
-        Effect.flatMap((map) => {
-          const existing = map.get(apiId);
-          if (existing) return Effect.succeed(existing);
-          return rmq.publisherToExchange(CONTROL_EXCHANGE, routingKeyFor(apiId)).pipe(
-            Effect.tap((pub) => Ref.update(publishers, (m) => new Map(m).set(apiId, pub))),
-          );
-        }),
-      );
 
     const publish = (event: CircuitEvent) =>
-      publisherFor(event.data.apiId).pipe(
+      rmq.publisherToExchange(CONTROL_EXCHANGE, routingKeyFor(event.data.apiId)).pipe(
         Effect.flatMap((pub) => rmq.send(pub, encodeCircuitEvent(event))),
         Effect.mapError(
           (e: RmqError) =>

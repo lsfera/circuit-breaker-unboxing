@@ -404,3 +404,57 @@ it is one more pair of things that have to agree.
   happen to agree. The encoder's bytes were compared before the swap and are
   identical, which is what made it a safe change rather than a hopeful one.
 
+- **A cache that memoised an object literal, and a doc that explained why it
+  was there.** `AmqpControlPlaneSink` kept a `Ref<Map<string, Publisher>>` with
+  a get-or-create around it, under a comment about publishers being "declared
+  lazily on first delivery and cached". A `Publisher` in `@egress/rmq` is
+  `{ exchange, routingKey }` and `publisherToExchange` is `Effect.succeed` of
+  one — no channel, no declare, no I/O. The cache existed because the comment
+  said it should, and the comment described a client this repo does not have.
+  Deleted: the sink addresses each send directly.
+- **The one module that read `process.env` was the one telling everything else
+  not to.** `@egress/tracing` hand-parsed both of its variables —
+  `Number(process.env[...] ?? "1")` plus a range check that silently coerced
+  anything invalid back to 1 — while
+  [decisions/008](decisions/008-configuration-is-a-boundary.md) had just
+  established that a value a process cannot use must stop it. Both are `Config`
+  now, so `OTEL_TRACES_SAMPLER_ARG=banana` says
+  `Expected a string representing a finite number at ["OTEL_TRACES_SAMPLER_ARG"]`
+  instead of exporting everything and calling it the default. Verified across
+  all four paths, including the one the hand-rolled version was written for:
+  docker-compose interpolates an unset variable to the empty string, and an
+  empty endpoint still means "no tracer" rather than "an exporter pointed at
+  nowhere".
+- **A test kept a production function alive.** `Settings.parse` — a `Result`
+  wrapper over `Config.parse` — had no caller left after the CLI pass except
+  the test that tested it. The rules it existed to make testable are the
+  `Config`s themselves, so the test now parses them directly and the wrapper is
+  gone.
+- **Three declarations of what a broker address is.** The schema, then
+  `Flag.filterMap(decodeBroker, ...)` in `@egress/config`, then the same
+  `Flag.filterMap(decodeBroker, ...)` copied into the aggregator because its
+  flag is optional rather than defaulted. One `rmqFlag` now, decorated at each
+  entry point — the duplication `brokerFlag` was introduced to remove had
+  simply moved up a level.
+- **`Date.now()` arithmetic where the runtime has a combinator.** Three
+  hand-rolled deadline loops — two in the demo driver, one bounding a redrive
+  pass — each with a `while (true)`, a `Date.now() + timeoutMs` baseline and a
+  mutable accumulator. The driver's two were the same twenty lines written
+  twice; they are one `awaitOn` over `Schedule.spaced` and `timeoutOrElse`, and
+  the transition wait now tolerates a transient scrape failure the way the
+  fleet wait always did. The redrive pass keeps `Date.now()` for its idle timer
+  on purpose — that measures how long the *broker* has gone without handing
+  over work — but its five stop conditions are one total function polled on a
+  schedule, with the deadline as the timeout around it rather than a sixth
+  branch that could exit with no reason recorded.
+- **A fencing epoch minted from `Math.random().toString(36).slice(2, 10)`.**
+  Eight base-36 characters, in the one value whose entire job is to be
+  unrecognisable to a coordinator that lost its state. A collision there is a
+  fencing token that fails open. `randomUUID`, which the redrive already used
+  two packages over for pass ids that matter less.
+- **A fourth hand-written JSON reader.** `@egress/domain`'s `readerFor` was
+  introduced to give one definition of "parse, then decode, and say which step
+  failed", and two more `try { JSON.parse } catch` blocks were still sitting
+  behind it — the checkpoint load and the outbox's list parser. Both go through
+  it now, which is why the Redis suite's warnings read `malformed-json` and
+  `schema-mismatch`: the same two words the daemon's undecodable metric uses.

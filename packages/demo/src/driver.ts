@@ -1,4 +1,4 @@
-import { Config, Duration, Effect } from "effect";
+import { Config, Duration, Effect, Option as O, Schedule } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { NodeRuntime, NodeServices } from "@effect/platform-node";
 
@@ -31,9 +31,8 @@ import { NodeRuntime, NodeServices } from "@effect/platform-node";
  * pointed at an API no fleet is running for, that step is skipped rather
  * than failed.
  *
- * Flags or the environment, whichever suits — `--failure-mode=envoy` and
- * `FAILURE_MODE=envoy` are the same instruction, so the `demo:*` scripts still
- * read as they did. `--help` is the list; this comment used to be it.
+ * Flags or the environment, whichever suits: `--failure-mode=envoy` and
+ * `FAILURE_MODE=envoy` are the same instruction. `--help` is the full list.
  */
 
 type Settings = {
@@ -44,14 +43,7 @@ type Settings = {
   readonly prometheus: string;
 };
 
-/**
- * The whole script, as a function of what it was asked to do.
- *
- * Everything below used to be module scope reading `process.env` directly,
- * which is why `ORIGIN` and `peakWork` were mutable state belonging to no one.
- * They are locals now; the identifiers are unchanged, so the body reads exactly
- * as it did.
- */
+/** The whole script, as a function of what it was asked to do. */
 const run = (settings: Settings) => {
   /**
    * One or more comma-separated aggregator instances. Only the leader publishes,
@@ -218,36 +210,60 @@ const run = (settings: Settings) => {
     `target=${f.target}/${f.size} pulling=${f.active} work=${f.work} dead-lettered=${f.dead}`;
 
   /**
+   * Polls `probe` every `everyMs` until it yields something, or dies saying
+   * what it was waiting for and what it last saw. Both waits below are this
+   * shape: a condition the system reaches on its own clock, not a sleep long
+   * enough to hope it has.
+   */
+  const awaitOn = <A, E>(
+    probe: Effect.Effect<O.Option<A>, E>,
+    everyMs: number,
+    timeoutMs: number,
+    describe: () => string,
+  ): Effect.Effect<A> =>
+    probe.pipe(
+      // "Not yet" is a failure so that one `retry` covers it and a transient
+      // fetch error alike — a blip against a live stack is not a verdict.
+      Effect.flatMap(
+        O.match({
+          onNone: () => Effect.fail("pending" as const),
+          onSome: (found: A) => Effect.succeed(found),
+        }),
+      ),
+      Effect.retry(Schedule.spaced(Duration.millis(everyMs))),
+      Effect.timeoutOrElse({
+        duration: Duration.millis(timeoutMs),
+        orElse: () => Effect.die(`timed out after ${timeoutMs}ms ${describe()}`),
+      }),
+      Effect.orDie,
+    );
+
+  /**
    * Polls Prometheus until the fleet satisfies `predicate`. Scrape interval is
    * 2s and the daemons publish once a second, so anything asserted here is
    * necessarily a few seconds behind the event that caused it — which is why
    * this waits for a condition rather than reading once after a sleep.
    */
-  const awaitFleet = (predicate: (f: Fleet) => boolean, what: string, timeoutMs: number) =>
-    Effect.gen(function* () {
-      const deadline = Date.now() + timeoutMs;
-      let last: Fleet | null = null;
-      while (true) {
-        // A transient scrape failure is not a demo failure. `sampleFleet`
-        // already ignores them; without the same treatment here a single blip
-        // ends the run with a stack trace instead of a verdict.
-        const now = yield* fleetSnapshot.pipe(
-          Effect.map((f): Fleet | null => f),
-          Effect.catchCause(() => Effect.succeed(null)),
-        );
-        if (now !== null) {
-          last = now;
-          if (predicate(now)) return now;
-        }
-        if (Date.now() > deadline) {
-          return yield* Effect.die(
-            `timed out after ${timeoutMs}ms waiting for ${what} — ` +
-              `last saw ${last === null ? "no readable fleet metrics at all" : describeFleet(last)}`,
-          );
-        }
-        yield* Effect.sleep(Duration.millis(500));
-      }
-    });
+  const awaitFleet = (predicate: (f: Fleet) => boolean, what: string, timeoutMs: number) => {
+    let last: Fleet | null = null;
+    return awaitOn(
+      // A transient scrape failure is not a demo failure. `sampleFleet`
+      // already ignores them; without the same treatment here a single blip
+      // ends the run with a stack trace instead of a verdict.
+      fleetSnapshot.pipe(
+        Effect.map((f) => {
+          last = f;
+          return predicate(f) ? O.some(f) : O.none();
+        }),
+        Effect.catchCause(() => Effect.succeed(O.none<Fleet>())),
+      ),
+      500,
+      timeoutMs,
+      () =>
+        `waiting for ${what} — ` +
+        `last saw ${last === null ? "no readable fleet metrics at all" : describeFleet(last)}`,
+    );
+  };
 
   /** Picks whichever candidate currently holds the publishing lease. */
   const resolveLeader = Effect.gen(function* () {
@@ -289,31 +305,30 @@ const run = (settings: Settings) => {
    * the caller cares about, so this reports every one it sees on the way.
    */
   const awaitTransition = (apiId: string, after: number, baseTimeoutMs: number) =>
-    Effect.gen(function* () {
-      const timeoutMs = baseTimeoutMs * TIMEOUT_SCALE;
-      const deadline = Date.now() + timeoutMs;
-      while (true) {
-        if (Date.now() > deadline) {
-          return yield* Effect.die(
-            `timed out after ${timeoutMs}ms waiting for ${apiId} to publish past seq=${after}`,
-          );
-        }
-        const { events } = yield* getEvents;
-        const next = events
-          .filter(
-            (e): e is { type: "egress.circuit.state_changed"; data: CircuitEventData } =>
-              e.type === "egress.circuit.state_changed" &&
-              e.data.apiId === apiId &&
-              e.data.sequence > after,
-          )
-          .sort((a, b) => a.data.sequence - b.data.sequence);
-        if (next.length > 0) {
-          for (const e of next) yield* narrate(e.data);
-          return next[next.length - 1]!.data.sequence;
-        }
-        yield* Effect.sleep(Duration.millis(300));
-      }
-    });
+    awaitOn(
+      getEvents.pipe(
+        Effect.flatMap(({ events }) => {
+          const next = events
+            .filter(
+              (e): e is { type: "egress.circuit.state_changed"; data: CircuitEventData } =>
+                e.type === "egress.circuit.state_changed" &&
+                e.data.apiId === apiId &&
+                e.data.sequence > after,
+            )
+            .sort((a, b) => a.data.sequence - b.data.sequence);
+          const latest = next[next.length - 1];
+          return latest === undefined
+            ? Effect.succeed(O.none<number>())
+            : Effect.as(
+                Effect.forEach(next, (e) => narrate(e.data)),
+                O.some(latest.data.sequence),
+              );
+        }),
+      ),
+      300,
+      baseTimeoutMs * TIMEOUT_SCALE,
+      () => `waiting for ${apiId} to publish past seq=${after}`,
+    );
 
   const program = Effect.gen(function* () {
     yield* resolveLeader;

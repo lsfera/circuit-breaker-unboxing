@@ -35,7 +35,7 @@ the boundary and never travels further.
 | Where | Why |
 | --- | --- |
 | `CircuitEvent.previousState` | `Schema.NullOr` — the published wire contract. JSON has `null`, not `None`, and the first event for an API genuinely has no predecessor. Changing this would break every subscriber. |
-| `RedisLike.eval` → `Promise<string \| number \| null>` | ioredis's own signature. `Outbox.parseList` consumes it and returns `Option`/arrays from there on. |
+| `RedisLike.eval` → `Promise<string \| number \| null>` | ioredis's own signature. `Outbox.stringList` consumes it and returns arrays from there on. |
 | `grpc.ServiceError \| null` in `EnvoyPushSource` | The gRPC callback signature. |
 | `packages/demo/src/driver.ts` | A standalone script parsing HTTP JSON where `null` is the payload's own shape. It depends on nothing and nothing depends on it. |
 
@@ -60,9 +60,9 @@ the boundary and never travels further.
 Two idioms worth naming, because they are what made the conversions read better
 rather than worse:
 
-- `O.toArray` as the filter-map. `parseList(result).flatMap((raw) =>
-  O.toArray(parseEvent(raw)))` drops what did not parse without a `.filter`
-  and a type predicate to keep in step with it.
+- `O.toArray` as the filter-map. `stringList(result).flatMap((raw) =>
+  O.toArray(Result.getSuccess(decodeCircuitEvent(raw))))` drops what did not
+  decode without a `.filter` and a type predicate to keep in step with it.
 - `O.fromUndefinedOr` at a lookup boundary — `O.fromUndefinedOr(map.get(k)?.x)`
   converts once, at the edge, rather than letting `undefined` travel.
 

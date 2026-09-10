@@ -165,9 +165,8 @@ export const HttpLive = HttpRouter.use((router) =>
     );
 
     // Two independent streams merged into one SSE body: periodic state frames
-    // for the console, and the event tape as it is published. In the pre-Effect
-    // version this was a Set of response objects plus a setInterval that had to
-    // be torn down by hand; here the stream ends with the request scope.
+    // for the console, and the event tape as it is published. Both end with the
+    // request scope, so a client that disconnects needs no tear-down of ours.
     yield* router.add(
       "GET",
       "/api/stream",

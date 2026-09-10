@@ -10,7 +10,7 @@ import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
 import { RmqLive } from "@egress/rmq/Client.ts";
-import { BrokerAddress, PositiveInt } from "@egress/config/Settings.ts";
+import { PositiveInt, rmqFlag } from "@egress/config/Settings.ts";
 import { Aggregator, AggregatorLayer } from "./Aggregator.ts";
 import { makeAmqpControlPlaneSink } from "./AmqpControlPlaneSink.ts";
 import { HaSettings, InMemoryCoordinationLayer, RedisCoordinationLayer } from "./Coordination.ts";
@@ -24,23 +24,10 @@ import type { ApiSpec } from "./FleetSource.ts";
 import type { RedisLike } from "./Coordination.ts";
 
 /**
- * Every flag this process takes, decoded before anything is built. The mode
- * literals matter more than the numbers: anything unrecognised would otherwise
- * silently *be* the default, and a misspelled `--source` would run in `sim`
- * against real Envoy replicas without complaint.
- */
-const decodeBroker = Schema.decodeUnknownOption(BrokerAddress);
-
-/**
- * Every flag this process takes, declared once — `effect/unstable/cli`, which
- * ships in the runtime this repo already pins.
- *
- * What that buys over a record of `Config`s read from a hand-parsed argv: a
- * flag this process does not take is refused rather than ignored, and `--help`
- * lists the lot. `--sorce=envoy-push` used to leave `source` at its default and
- * run the simulator against real Envoy replicas reporting nothing wrong — the
- * same failure the mode literals were made strict to prevent, one level up,
- * where the misspelling lands on the flag's name instead of its value.
+ * Every flag this process takes, declared once. A flag this process does not
+ * take is refused rather than ignored — `--sorce=envoy-push` stops the process
+ * instead of leaving `source` at `sim` and pointing the simulator at real
+ * Envoy replicas. See docs/decisions/008-configuration-is-a-boundary.md.
  */
 const flags = {
   port: Flag.integer("port").pipe(
@@ -70,13 +57,7 @@ const flags = {
     Flag.withDescription("Comma-separated Envoy admin URLs (--source=envoy)"),
   ),
   /** Absent means "no control-plane sink", which is a different thing from a bad address. */
-  rmq: Flag.string("rmq").pipe(
-    // The same `host:port` declaration the daemons read from their environment,
-    // so the two ways into this system cannot disagree on what an address is.
-    Flag.filterMap(
-      (raw) => O.map(decodeBroker(raw), ([host, , port]) => ({ host, port })),
-      (raw) => `expected host:port, got ${raw}`,
-    ),
+  rmq: rmqFlag.pipe(
     Flag.optional,
     Flag.withDescription("host:port of the broker to publish circuit.control to"),
   ),

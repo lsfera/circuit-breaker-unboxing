@@ -1,7 +1,7 @@
-import { Context, Effect, Layer, Ref, Option as O, Result } from "effect";
+import { Context, Effect, Layer, Ref, Option as O, Result, Schema } from "effect";
 import { CoordinationUnavailable } from "./Coordination.ts";
 import type { RedisLike } from "./Coordination.ts";
-import { decodeCircuitEvent } from "@egress/domain/Model.ts";
+import { decodeCircuitEvent, readerFor } from "@egress/domain/Model.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 
 /**
@@ -143,25 +143,16 @@ const evalGuarded = (
   });
 
 /**
- * A stored entry that cannot be decoded is dropped rather than replayed:
- * garbage here is a version skew or a corrupt write, and handing it to a
- * subscriber that trusts the schema is worse than losing it.
- *
- * Through the contract's own reader, so what this replays and what the daemons
- * accept are the same definition of a valid event.
+ * What every list-returning script above encodes: a JSON array of strings.
+ * Anything else — a Lua error string, a `{}` from an empty table, a number —
+ * reads as an empty list rather than as elements nobody checked the type of.
  */
-const parseEvent = (raw: unknown): O.Option<CircuitEvent> =>
-  typeof raw === "string" ? Result.getSuccess(decodeCircuitEvent(raw)) : O.none();
+const readStringList = readerFor(Schema.Array(Schema.String));
 
-const parseList = (result: string | number | null): ReadonlyArray<unknown> => {
-  if (typeof result !== "string") return [];
-  try {
-    const parsed = JSON.parse(result) as unknown;
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-};
+const stringList = (result: string | number | null): ReadonlyArray<string> =>
+  typeof result === "string"
+    ? Result.getOrElse(readStringList(result), () => [])
+    : [];
 
 export const RedisOutboxLayer = (redis: RedisLike, keyPrefix = "egress:aggregator") =>
   Layer.succeed(Outbox, {
@@ -176,10 +167,13 @@ export const RedisOutboxLayer = (redis: RedisLike, keyPrefix = "egress:aggregato
         keys: [`${keyPrefix}:outbox:${apiId}`],
         args: [String(limit)],
       }).pipe(
-        // `O.toArray` on each is the filterMap: an event that did not parse
-        // contributes nothing rather than a hole someone has to remember to
-        // filter out.
-        Effect.map((result) => parseList(result).flatMap((raw) => O.toArray(parseEvent(raw)))),
+        // A stored entry that cannot be decoded is dropped rather than
+        // replayed: garbage here is a version skew or a corrupt write, and
+        // handing it to a subscriber that trusts the schema is worse than
+        // losing it. `O.toArray` is the filterMap.
+        Effect.map((result) =>
+          stringList(result).flatMap((raw) => O.toArray(Result.getSuccess(decodeCircuitEvent(raw)))),
+        ),
       ),
 
     commit: (apiId, count) =>
@@ -191,9 +185,7 @@ export const RedisOutboxLayer = (redis: RedisLike, keyPrefix = "egress:aggregato
     apis: evalGuarded(redis, "outbox.apis", APIS_SCRIPT, {
       keys: [`${keyPrefix}:outbox:apis`],
       args: [],
-    }).pipe(
-      Effect.map((result) => parseList(result).filter((x): x is string => typeof x === "string")),
-    ),
+    }).pipe(Effect.map(stringList)),
 
     depth: (apiId) =>
       evalGuarded(redis, "outbox.depth", `return redis.call("LLEN", KEYS[1])`, {

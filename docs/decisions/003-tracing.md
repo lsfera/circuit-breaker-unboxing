@@ -119,6 +119,21 @@ installs none of its dependencies and fails at runtime with
 `@effect/opentelemetry` at the package root pulls `WebSdk`, which needs a
 browser-only package; importing `@effect/opentelemetry/NodeSdk` does not.
 
+### Its two variables read the same way as everything else's
+
+Added 2026-09-10. Both were hand-parsed here — `process.env[...]`, a `trim()`,
+a `Number()` and a range check — while
+[008](008-configuration-is-a-boundary.md) had already established that a value
+a process cannot use must stop it. `OTEL_TRACES_SAMPLER_ARG=banana` silently
+became 1, which is the export-everything default: the one wrong value that
+looks exactly like working.
+
+They are `Config`s now, so a bad ratio names the variable and exits. The one
+thing worth keeping from the hand-rolled version is kept and tested: an empty
+endpoint means *unset*, because docker-compose interpolates
+`${OTEL_EXPORTER_OTLP_ENDPOINT-}` to the empty string rather than omitting it,
+and `=== undefined` would have installed an exporter pointed at nowhere.
+
 ### Still open
 
 Tracing is visible only when someone opens Jaeger. There is no alert on it and
