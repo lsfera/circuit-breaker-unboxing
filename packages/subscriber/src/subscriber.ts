@@ -1,10 +1,15 @@
-import { Config, Effect, Ref, Result, Stream } from "effect";
+import { Config, Effect, Option as O, Ref, Result, Stream } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { Sse } from "effect/unstable/encoding";
 import { NodeRuntime, NodeServices } from "@effect/platform-node";
 import { VERSION } from "@egress/config/Settings.ts";
-import { decodeCircuitEvent, State } from "@egress/domain/Model.ts";
-import type { State as StateType } from "@egress/domain/Model.ts";
+import {
+  classifySequence,
+  decodeCircuitEvent,
+  SEQUENCED_EVENT,
+  State,
+} from "@egress/domain/Model.ts";
+import type { CircuitEvent, State as StateType } from "@egress/domain/Model.ts";
 
 /**
  * A downstream consumer (`npm run subscribe`), demonstrating the three properties
@@ -18,6 +23,9 @@ import type { State as StateType } from "@egress/domain/Model.ts";
 
 
 type Known = { readonly state: StateType; readonly sequence: number };
+
+/** One line of output: the event, and how it read against what was already known. */
+type Row = { readonly tag: string; readonly event: CircuitEvent };
 
 const program = (ORIGIN: string) =>
   Effect.gen(function* () {
@@ -42,48 +50,58 @@ const program = (ORIGIN: string) =>
       Stream.decodeText(),
       Stream.pipeThroughChannel(Sse.decode()),
       Stream.filter((frame) => frame.event === "cloudevent"),
-      Stream.mapEffect((frame) =>
-        Effect.suspend(() => {
+      // `filterMapEffect`, so a frame this cannot use contributes nothing —
+      // rather than an `undefined` travelling down the stream for whoever
+      // consumes it to remember to check for. `Result.fail` is this
+      // combinator's "skip". See docs/decisions/006-representing-absence.md.
+      Stream.filterMapEffect((frame) =>
+        Effect.suspend((): Effect.Effect<Result.Result<Row, Sse.Event>> => {
           // Through the contract's own reader: a frame that is not JSON at all is
           // a failure to report, not an exception to escape into the stream.
           const decoded = decodeCircuitEvent(frame.data);
           if (Result.isFailure(decoded)) {
             // Loud, not silently dropped: this is contract drift.
-            return Effect.logError(`undecodable event: ${frame.data}`).pipe(
-              Effect.as(undefined),
+            return Effect.as(
+              Effect.logError(`undecodable event: ${frame.data}`),
+              Result.fail(frame),
             );
           }
           const event = decoded.success;
           return Ref.modify(known, (map) => {
-              const { apiId, sequence, state } = event.data;
-              const current = map.get(apiId);
+            const { apiId, sequence, state } = event.data;
+            const highest = O.map(O.fromUndefinedOr(map.get(apiId)), (k) => k.sequence);
 
+            // The same rule the aggregator's own observer and the daemon fleet
+            // apply, from a third vantage point. Reimplementing it here — in the
+            // subscriber this repo offers as the shape a real one should take —
+            // is how three readings of one guarantee end up disagreeing.
+            switch (classifySequence(highest, sequence)) {
               // Idempotent: an already-applied sequence is a no-op.
-              if (current && sequence <= current.sequence) {
+              case "duplicate":
                 return ["sync", map] as const;
-              }
-              const gapped =
-                current !== undefined &&
-                event.type === "egress.circuit.state_changed" &&
-                sequence > current.sequence + 1;
-
-            const next = new Map(map);
-            next.set(apiId, { state, sequence });
-            return [gapped ? "GAP!" : "    ", next] as const;
-          }).pipe(Effect.map((tag) => ({ tag, event })));
+              case "gap":
+                // Snapshots deliberately republish ahead of the last
+                // state_changed, so only that type can reveal a real gap.
+                return [
+                  event.type === SEQUENCED_EVENT ? "GAP!" : "    ",
+                  new Map(map).set(apiId, { state, sequence }),
+                ] as const;
+              case "first":
+              case "next":
+                return ["    ", new Map(map).set(apiId, { state, sequence })] as const;
+            }
+          }).pipe(Effect.map((tag) => Result.succeed({ tag, event })));
         }),
       ),
-      Stream.runForEach((result) =>
-        result === undefined
-          ? Effect.void
-          : Effect.sync(() => {
-              const d = result.event.data;
-              console.log(
-                `${result.tag} ${d.apiId.padEnd(18)} seq=${String(d.sequence).padEnd(3)} ` +
-                  `${d.state.padEnd(10)} ${d.reason.toLowerCase().replace(/_/g, " ")}` +
-                  (d.state === State.OPEN ? "   << stop calling this API" : ""),
-              );
-            }),
+      Stream.runForEach(({ tag, event }) =>
+        Effect.sync(() => {
+          const d = event.data;
+          console.log(
+            `${tag} ${d.apiId.padEnd(18)} seq=${String(d.sequence).padEnd(3)} ` +
+              `${d.state.padEnd(10)} ${d.reason.toLowerCase().replace(/_/g, " ")}` +
+              (d.state === State.OPEN ? "   << stop calling this API" : ""),
+          );
+        }),
       ),
     );
   });

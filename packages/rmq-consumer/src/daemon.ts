@@ -1,4 +1,4 @@
-import { Effect, Metric, Option as O, Ref, Result, Semaphore } from "effect";
+import { Clock, Effect, Metric, Option as O, Ref, Result, Semaphore } from "effect";
 import type { Tracer } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
 import { withParent } from "@egress/rmq/Trace.ts";
@@ -103,7 +103,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
      * `Ref.modify` over one value keeps each transition atomic against the
      * concurrent AMQP callbacks that drive it.
      */
-    const now = yield* Effect.clockWith((c) => c.currentTimeMillis);
+    const now = yield* Clock.currentTimeMillis;
     const state = yield* Ref.make<DaemonState>(initialState(cfg.fleetSize, now));
 
     /** The churning channels — the "actual" side `plan` compares the desired shape against. */
@@ -156,11 +156,16 @@ export const runDaemon = (cfg: DaemonConfig) =>
 
     /**
      * Captured so work started from an AMQP callback can still reach them.
-     * `Effect.runPromise` would build a fresh runtime with default services —
-     * for a span that means the no-op tracer, and it goes nowhere.
+     * The bare `Effect.run*` entry points build a fresh runtime with *default*
+     * services: a span goes to the no-op tracer and a log line to the default
+     * logger, neither of which is the one this process configured. Measured —
+     * a bare `runFork(logWarning(...))` never reaches a provided `Logger`.
+     *
+     * Every callback below starts its work through one of these two.
      */
     const services = yield* Effect.context<never>();
     const runInContext = Effect.runPromiseWith(services);
+    const forkInContext = Effect.runForkWith(services);
 
     /**
      * The same call inside a span, only when the message carried a parent. This is
@@ -197,11 +202,11 @@ export const runDaemon = (cfg: DaemonConfig) =>
     const sampleUnreadable = (what: string): Settlement => {
       counts.undecodable++;
       if (counts.undecodable <= UNDECODABLE_SAMPLE) {
-        Effect.runFork(Effect.logWarning(`${label}: ${what}, dead-lettered`));
+        forkInContext(Effect.logWarning(`${label}: ${what}, dead-lettered`));
         return "discard";
       }
       if (counts.undecodable === UNDECODABLE_SAMPLE + 1) {
-        Effect.runFork(
+        forkInContext(
           Effect.logWarning(
             `${label}: ${UNDECODABLE_SAMPLE} unreadable messages already preserved on ` +
               `${deadQueue} — accepting further ones rather than flooding it; ` +
@@ -266,7 +271,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
           (_body, delivery) => {
             if (taken || self === null) return;
             taken = true;
-            Effect.runFork(control.cancelConsumer(self));
+            forkInContext(control.cancelConsumer(self));
             return callEgress(delivery.parent);
           },
           // The state whose contract is "exactly one call" asks for exactly one message.
@@ -341,7 +346,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
     /** Order matters: apply, reconcile, log, and only then publish the triggers. */
     const applyEvent = (circuitState: State, sequence: number, reason: string) =>
       Effect.gen(function* () {
-        const at = yield* Effect.clockWith((c) => c.currentTimeMillis);
+        const at = yield* Clock.currentTimeMillis;
         const { actions } = yield* dispatch({
           _tag: "CircuitChanged",
           state: circuitState,
@@ -370,7 +375,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
 
       contract = observe(contract, type, data.sequence);
 
-      Effect.runFork(
+      forkInContext(
         applyEvent(data.state, data.sequence, data.reason).pipe(
           Effect.catchCause((cause) => Effect.logError(`${label}: applying event failed`, cause)),
         ),
@@ -392,7 +397,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
               : `${what} trigger that does not match the schema`,
           );
         }
-        Effect.runFork(
+        forkInContext(
           dispatch(command(decoded.success.sequence)).pipe(
             Effect.flatMap(({ actions }) => performAll(actions)),
             Effect.catchCause((cause) => Effect.logError(`${label}: ${what} failed`, cause)),
@@ -503,7 +508,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
      * while CLOSED, and only when the target actually changes.
      */
     const advanceRamp = Effect.gen(function* () {
-      const at = yield* Effect.clockWith((c) => c.currentTimeMillis);
+      const at = yield* Clock.currentTimeMillis;
       const { prior, next } = yield* dispatch({ _tag: "RampTick", at });
       if (next.policy.targetActive === prior.policy.targetActive) return;
       yield* reconcile;

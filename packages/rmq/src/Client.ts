@@ -201,6 +201,10 @@ type RmqConnectOptions = {
  * consuming nothing. Exiting hands that to `restart: unless-stopped`.
  */
 const connectionLost = (reason: string) => {
+  // `console.error`, not the logger, and deliberately: this line is the last
+  // thing the process does before `process.exit(1)`, which does not wait for a
+  // logger that batches or writes asynchronously. Every other line in this
+  // module goes through the logger.
   console.error(
     `[rmq] connection lost (${reason}) — exiting so the restart policy can rebuild it`,
   );
@@ -264,6 +268,17 @@ export const makeRmq = (
   Effect.gen(function* () {
     type OnMessage = Parameters<RmqService["consume"]>[1];
 
+    /**
+     * Everything below runs in an amqplib event handler, off any fiber. Bare
+     * `console.warn` was reaching stderr but not the logger the process
+     * configured — no level, no fiber, and invisible to any sink or filter
+     * that logger has. This is the same capture `@egress/rmq-consumer` makes
+     * for its delivery callbacks, for the same reason.
+     */
+    const services = yield* Effect.context<never>();
+    const forkInContext = Effect.runForkWith(services);
+    const warn = (message: string) => forkInContext(Effect.logWarning(`[rmq] ${message}`));
+
     /** Everything this connection was told to create, so it can be created again. */
     type Topology =
       | { readonly kind: "queue"; readonly name: string; readonly durable: boolean; readonly args: QueueArgs }
@@ -319,7 +334,7 @@ export const makeRmq = (
 
     const watchPublishChannel = (ch: ConfirmChannel) => {
       ch.on("error", (error) => {
-        console.warn(`[rmq] publish channel error: ${error.message}`);
+        warn(`publish channel error: ${error.message}`);
       });
       ch.on("close", () => {
         if (out === ch) out = null;
@@ -338,7 +353,7 @@ export const makeRmq = (
         // consumer is simply not receiving any more, which is worth saying,
         // because the channel stays open and looks healthy.
         if (message === null) {
-          console.warn(`[rmq] broker cancelled the consumer on ${entry.queue} — it receives nothing now`);
+          warn(`broker cancelled the consumer on ${entry.queue} — it receives nothing now`);
           return;
         }
         const onMessage = entry.onMessage;
@@ -384,15 +399,13 @@ export const makeRmq = (
       // shutdown as well as a deliberate close.
       if (!live.has(entry)) return;
       attach(() => connection.createChannel(), entry).then(
-        () => console.warn(`[rmq] consumer channel on ${entry.queue} closed — rebuilt`),
+        () => warn(`consumer channel on ${entry.queue} closed — rebuilt`),
         (error) => {
           // `connected` is false by now if the connection is what went, and
           // `setup` re-attaches everything when it returns. Saying so here would
           // report a failure that is already being handled.
           if (connected) {
-            console.warn(
-              `[rmq] consumer on ${entry.queue} closed and could not be rebuilt: ${String(error)}`,
-            );
+            warn(`consumer on ${entry.queue} closed and could not be rebuilt: ${String(error)}`);
           }
         },
       );
@@ -402,7 +415,7 @@ export const makeRmq = (
     const attach = async (open: () => Promise<Channel>, entry: Live) => {
       const ch = await open();
       ch.on("error", (error) => {
-        console.warn(`[rmq] consumer channel error on ${entry.queue}: ${error.message}`);
+        warn(`consumer channel error on ${entry.queue}: ${error.message}`);
       });
       ch.on("close", () => rebuild(entry));
       await ch.prefetch(entry.prefetch);
@@ -486,18 +499,18 @@ export const makeRmq = (
     );
 
     connection.on("error", (error) => {
-      console.warn(`[rmq] connection error: ${error.message}`);
+      warn(`connection error: ${error.message}`);
     });
     connection.on("disconnect", (error) => {
       connected = false;
-      console.warn(`[rmq] disconnected (${error?.message ?? "no reason given"}) — recovering`);
+      warn(`disconnected (${error?.message ?? "no reason given"}) — recovering`);
     });
     connection.on("reconnect-scheduled", ({ attempt, delay }) => {
-      console.warn(`[rmq] reconnect attempt ${attempt} in ${delay}ms`);
+      warn(`reconnect attempt ${attempt} in ${delay}ms`);
     });
     connection.on("connect", () => {
-      console.warn(
-        `[rmq] reconnected — ${topology.length} topology entries and ${live.size} consumer(s) restored`,
+      warn(
+        `reconnected — ${topology.length} topology entries and ${live.size} consumer(s) restored`,
       );
     });
     // Recovery has given up. Everything below this line is the old crash-fast

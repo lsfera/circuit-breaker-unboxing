@@ -489,3 +489,45 @@ it is one more pair of things that have to agree.
   would leave a subscriber and a broker disagreeing about how long an outage
   has to last before an event is given up on — a difference nobody would have
   chosen. One `DELIVERY_RETRY`.
+- **The module that documents the hazard had five instances of it.**
+  `daemon.ts` explains, above its context capture, that a bare `Effect.run*`
+  builds a fresh runtime with *default* services — which is why
+  [003](decisions/003-tracing.md) records a span that reached the no-op tracer
+  and never left the process. That fix was applied to the one `runPromise` path
+  and to nothing else: five `Effect.runFork` calls in AMQP callbacks below it
+  kept the naive form, three of them starting real broker work rather than a
+  log line. Measured rather than reasoned about: a bare
+  `runFork(logWarning(...))` never reaches a provided `Logger`, it goes to the
+  default one. All five go through `Effect.runForkWith(services)` now.
+- **The one module whose logs are about the thing most likely to be wrong at
+  3am was the one not using the logger.** `@egress/rmq` reported connection
+  loss, reconnect attempts, restored topology, broker-side consumer
+  cancellation and every channel rebuild through `console.warn` — ten of them.
+  They reached stderr, so they looked fine in `docker compose logs`, and they
+  were invisible to any level filter or sink the process's logger has, with no
+  level, timestamp or fiber of their own. Same root cause as the entry above,
+  same fix, and now verified in the broker suite's own output:
+  `[13:55:44.350] WARN (#16): [rmq] consumer channel on … closed — rebuilt`.
+  One `console.error` stays, in `connectionLost`, because it is the last thing
+  before `process.exit(1)` and a logger that batches would lose it.
+- **A third copy of the sequence rule, in the module offered as exemplary.**
+  The pass before this one found the delivery contract implemented twice and
+  gave it one definition; `@egress/subscriber` had a third, open-coded —
+  `sequence <= current.sequence` for a duplicate and `sequence >
+  current.sequence + 1` for a gap, with the event type spelled as a string
+  literal rather than `SEQUENCED_EVENT`. It is the file whose own doc offers it
+  as what a real subscriber should look like, which is the second time that
+  claim has turned out to describe the thing that had drifted. Three observers
+  now read one rule.
+- **`undefined` as a sentinel travelling down a Stream.** The same subscriber
+  mapped an undecodable frame to `undefined` and then checked for it in
+  `runForEach` — precisely what
+  [006](decisions/006-representing-absence.md) rules out, in a repo that has an
+  ADR about it. `Stream.filterMapEffect` drops what it cannot use; the consumer
+  no longer has a case to remember.
+- **A sweep that was not a sweep.** The previous pass reported replacing
+  `Effect.clockWith((c) => c.currentTimeMillis)` "seven times". It was eleven —
+  the script ran over a hand-written list of aggregator files rather than a
+  grep of the tree, so four in `@egress/rmq-consumer` and one in a test stayed.
+  Worth recording because the mistake is the same shape as everything else
+  here: a list maintained by hand alongside the thing it is supposed to cover.

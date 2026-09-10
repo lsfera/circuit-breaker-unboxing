@@ -178,3 +178,29 @@ The flag stays.
 A broker-initiated cancel (`message === null`, the queue was deleted) cannot be
 rebuilt and is now logged instead of returned from in silence.
 
+
+## Where those lines go
+
+Added 2026-09-10. The transcripts above are verbatim, and their `[rmq] …` lines
+were `console.warn`. Every one of them now goes through the process's logger
+instead, so they carry a level and a timestamp and reach whatever sink that
+logger has:
+
+```
+[13:55:44.350] WARN (#16): [rmq] consumer channel on idle-election… closed — rebuilt
+```
+
+The transcripts are left as they were recorded rather than reformatted, because
+a measurement rewritten after the fact is not one.
+
+The reason it was `console.warn` is the same reason
+[003](003-tracing.md) gives for a span that reached nothing: these run in
+amqplib event handlers, off any fiber, and the bare `Effect.run*` entry points
+build a fresh runtime with *default* services. `@egress/rmq-consumer` had
+already captured its context for exactly this; the client had not. Measured
+before changing it — a bare `runFork(logWarning(...))` never reaches a provided
+`Logger`, it goes to the default one.
+
+One line stays on `console.error`, and says so: `connectionLost` is the last
+thing the process does before `process.exit(1)`, which will not wait for a
+logger that batches or writes asynchronously.

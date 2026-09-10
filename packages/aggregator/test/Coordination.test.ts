@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Duration, Effect, Fiber, Layer, Option as O, Ref } from "effect";
+import { Clock, Duration, Effect, Fiber, Layer, Option as O, Ref } from "effect";
 import { TestClock } from "effect/testing";
 import { Aggregator, AggregatorLayer } from "../src/Aggregator.ts";
 import {
@@ -296,7 +296,7 @@ test("a re-promoted instance resumes from the checkpoint, not its own stale sequ
             state: "CLOSED",
             reason: "PROBE_SUCCEEDED",
             sequence: advanced,
-            changedAt: yield* Effect.clockWith((c) => c.currentTimeMillis),
+            changedAt: yield* Clock.currentTimeMillis,
             openBackoffMs: CFG.openMs,
           });
 
