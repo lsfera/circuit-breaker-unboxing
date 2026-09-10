@@ -1,9 +1,15 @@
+import { Option as O } from "effect";
+import { classifySequence, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
+
 /**
  * The delivery contract, observed from the consumer's side of the broker.
  *
  * `/api/subscriber` checks the same property over HTTP from inside the
- * publishing process; this checks it over AMQP from five processes the publisher
- * does not control, which is what makes the two independent evidence.
+ * publishing process; this checks it over AMQP from five processes the
+ * publisher does not control. The vantage points are what make the two
+ * independent — the rule itself is `classifySequence`, shared, because two
+ * observers of one guarantee disagreeing about what a violation is would make
+ * both readings worthless rather than corroborating.
  */
 
 export type ContractState = {
@@ -23,30 +29,22 @@ export const initialContract: ContractState = {
   duplicates: 0,
 };
 
-/** The event type that carries the guarantee. Snapshots deliberately repeat the current sequence, so they are exempt. */
-export const SEQUENCED_EVENT = "egress.circuit.state_changed";
-
-/**
- * Fold one control-plane event into the observation.
- *
- * `<=` rather than `===` for duplicates is deliberate: a sequence that goes
- * *backwards* reuses a number just as surely as one that repeats it, and a
- * leadership bug produces exactly that — an instance resuming from stale
- * in-memory state republishes numbers a later leader already used.
- */
+/** Fold one control-plane event into the observation. */
 export const observe = (
   self: ContractState,
   eventType: string,
   sequence: number,
 ): ContractState => {
   if (eventType !== SEQUENCED_EVENT) return self;
-  if (self.lastSequence < 0) return { ...self, lastSequence: sequence };
-  if (sequence <= self.lastSequence) {
-    return { ...self, duplicates: self.duplicates + 1 };
+  const highest = self.lastSequence < 0 ? O.none() : O.some(self.lastSequence);
+  switch (classifySequence(highest, sequence)) {
+    case "first":
+      return { ...self, lastSequence: sequence };
+    case "duplicate":
+      return { ...self, duplicates: self.duplicates + 1 };
+    case "gap":
+      return { ...self, lastSequence: sequence, gaps: self.gaps + 1 };
+    case "next":
+      return { ...self, lastSequence: sequence };
   }
-  return {
-    ...self,
-    lastSequence: sequence,
-    gaps: sequence > self.lastSequence + 1 ? self.gaps + 1 : self.gaps,
-  };
 };

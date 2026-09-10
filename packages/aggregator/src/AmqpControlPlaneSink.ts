@@ -1,4 +1,4 @@
-import { Duration, Effect, Ref, Schedule } from "effect";
+import { Effect, Ref } from "effect";
 import { Rmq, RmqError } from "@egress/rmq/Client.ts";
 import {
   CONTROL_EXCHANGE,
@@ -7,7 +7,7 @@ import {
   routingKeyFor,
 } from "@egress/rmq/ControlPlane.ts";
 import { DeliveryFailed } from "@egress/domain/Model.ts";
-import { DEAD_LETTER_BUFFER } from "./Events.ts";
+import { DEAD_LETTER_BUFFER, DELIVERY_RETRY } from "./Events.ts";
 import type { SinkImpl } from "./Events.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 
@@ -48,7 +48,7 @@ export const makeAmqpControlPlaneSink: Effect.Effect<SinkImpl, RmqError, Rmq> = 
     const deliver = (event: CircuitEvent) => {
       const apiId = event.data.apiId;
       return publish(event).pipe(
-        Effect.retry({ schedule: Schedule.exponential(Duration.millis(100)), times: 3 }),
+        Effect.retry(DELIVERY_RETRY),
         Effect.catchCause((cause) =>
           // Bounded for the same reason WebhookSink's is: a broker that stays
           // unreachable would otherwise grow this list for the life of the

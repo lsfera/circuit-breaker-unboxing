@@ -9,6 +9,7 @@ import {
   Schedule,
   Stream,
 } from "effect";
+import { randomUUID } from "node:crypto";
 import { DeliveryFailed } from "@egress/domain/Model.ts";
 import { Outbox, OUTBOX_DRAIN_LIMIT } from "./Outbox.ts";
 import * as Telemetry from "./Telemetry.ts";
@@ -26,17 +27,41 @@ export const SOURCE = "egress-proxy/control-plane";
  */
 export const DEAD_LETTER_BUFFER = 200;
 
+/**
+ * How hard any sink tries before dead-lettering. One declaration because both
+ * sinks had it written out: a subscriber and a broker that disagree about how
+ * long an outage has to last before an event is given up on is a difference
+ * nobody chose.
+ *
+ * Low on purpose. Delivery is forked off the tick loop, so a longer retry does
+ * not stall anything — but the outbox behind the webhook sink is the durable
+ * answer to a subscriber that stays down, and retrying into one that is gone is
+ * just latency before the durable path takes over.
+ */
+export const DELIVERY_RETRY = {
+  schedule: Schedule.exponential(Duration.millis(100)),
+  times: 3,
+} as const;
+
+/**
+ * `now` is passed in rather than read here. Every other instant this system
+ * publishes comes from the Effect clock — `observedSince` included, two lines
+ * down — and a `new Date()` in this one field meant a tick carried two clocks:
+ * simulated time in the payload and wall time in the envelope, which is also
+ * why no test could assert what `time` should be.
+ */
 const build = (
   type: CircuitEvent["type"],
   snap: ApiSnapshot,
   previousState: State | null,
+  now: number,
 ): CircuitEvent => ({
   specversion: "1.0",
   type,
   source: SOURCE,
   subject: `api://${snap.apiId}`,
-  id: crypto.randomUUID(),
-  time: new Date().toISOString(),
+  id: randomUUID(),
+  time: new Date(now).toISOString(),
   datacontenttype: "application/json",
   data: {
     apiId: snap.apiId,
@@ -55,11 +80,11 @@ const build = (
 // published event. JSON has null, subscribers parse null, and the first event
 // for an API genuinely has no predecessor — see
 // docs/decisions/006-representing-absence.md.
-export const stateChanged = (snap: ApiSnapshot, previous: State | null) =>
-  build("egress.circuit.state_changed", snap, previous);
+export const stateChanged = (snap: ApiSnapshot, previous: State | null, now: number) =>
+  build("egress.circuit.state_changed", snap, previous, now);
 
-export const snapshotEvent = (snap: ApiSnapshot) =>
-  build("egress.circuit.snapshot", snap, null);
+export const snapshotEvent = (snap: ApiSnapshot, now: number) =>
+  build("egress.circuit.snapshot", snap, null, now);
 
 // ---------------------------------------------------------------------------
 // EventBus — one PubSub, many subscribers. Backpressure and per-subscriber
@@ -181,10 +206,7 @@ export const makeWebhookSink = (url: string): Effect.Effect<SinkImpl, never, Out
       const deliver = (event: CircuitEvent) => {
         const apiId = event.data.apiId;
         const attempt = post(event).pipe(
-          Effect.retry({
-            schedule: Schedule.exponential(Duration.millis(100)),
-            times: 3,
-          }),
+          Effect.retry(DELIVERY_RETRY),
           Effect.tapError(() => Metric.update(Metric.withAttributes(Telemetry.webhookFailed, { apiId }), 1)),
         );
         return Effect.timed(attempt).pipe(

@@ -458,3 +458,34 @@ it is one more pair of things that have to agree.
   behind it — the checkpoint load and the outbox's list parser. Both go through
   it now, which is why the Redis suite's warnings read `malformed-json` and
   `schema-mismatch`: the same two words the daemon's undecodable metric uses.
+- **The delivery contract was checked twice and stated twice.** Two observers
+  watch the guarantee this repo exists to make — the aggregator's own webhook
+  subscriber over HTTP, and five daemons over AMQP — and each carried its own
+  `sequence <= last` comparison under its own paragraph explaining why it is
+  `<=` rather than `===`. That comment is there because checking only for
+  equality *was* a bug: a sequence going backwards reuses a number just as
+  surely as one repeating it, and that is the shape a leadership bug produces.
+  Having the fix in two places is having it in neither. The rule is
+  `classifySequence` in `@egress/domain` now; what stays local is the shape
+  each observer needs, a per-API map on one side and a single last sequence on
+  the other. The vantage points were always the independent part, and they
+  still are.
+- **The one instant that skipped the clock was the one that got published.**
+  The aggregator is `TestClock`-driven throughout — its loop is a `Schedule`
+  precisely so a simulated minute costs microseconds — and `Events.build` read
+  `new Date()` for the CloudEvent's `time`. Each tick emitted an event whose
+  payload was in simulated time and whose envelope was in wall time. Production
+  never noticed, because there the two agree; the test did, and could say
+  nothing stronger than `Date.parse(e.time) > 0`. `build` takes the `now` its
+  caller already held, and the assertion is now that `time` lands inside the
+  window the clock was advanced through — checked to fail when `new Date()` is
+  put back, because a strengthened assertion that cannot fail is not one.
+- **`Effect.clockWith((c) => c.currentTimeMillis)`, seven times.** The runtime
+  exports that exact effect as `Clock.currentTimeMillis`. Nothing subtle — it
+  is worth listing only because it is the same shape as the rest of this pass:
+  a thing written by hand often enough to look like the idiom.
+- **Two sinks, two retry budgets.** The webhook and AMQP sinks both wrote out
+  `Schedule.exponential(100ms)` with `times: 3`. Tuning one and not the other
+  would leave a subscriber and a broker disagreeing about how long an outage
+  has to last before an event is given up on — a difference nobody would have
+  chosen. One `DELIVERY_RETRY`.

@@ -1,4 +1,4 @@
-import { Effect, Layer, Metric } from "effect";
+import { Clock, Effect, Layer, Metric } from "effect";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import { dirname, join } from "node:path";
@@ -163,7 +163,7 @@ export const EnvoyPushFleetLayer = (
       yield* Effect.logInfo(`envoy metrics sink listening on 0.0.0.0:${port}`);
 
       const poll = Effect.gen(function* () {
-        const now = yield* Effect.clockWith((c) => c.currentTimeMillis);
+        const now = yield* Clock.currentTimeMillis;
 
         const unidentified = anonymous;
         anonymous = 0;

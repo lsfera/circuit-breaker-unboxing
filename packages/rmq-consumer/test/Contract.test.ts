@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { initialContract, observe, SEQUENCED_EVENT } from "../src/Contract.ts";
+import { SEQUENCED_EVENT } from "@egress/domain/Model.ts";
+import { initialContract, observe } from "../src/Contract.ts";
 import type { ContractState } from "../src/Contract.ts";
 
 const fold = (

@@ -126,3 +126,43 @@ A subscriber outside this repo that needs to survive vocabulary additions it
 has not deployed for. The fix then is a schema that decodes a known reason and
 keeps an unknown one as an explicit "unrecognised" case — not a return to
 `Schema.String`, which does not distinguish the two.
+
+## One rule, two observers
+
+Added 2026-09-10. The guarantee this record is about — per-API sequences are
+gapless and never repeat — was *checked* in two places and *stated* in two
+places, which are not the same thing.
+
+`Http.record` watches the webhook subscriber over HTTP from inside the
+publishing process; `Contract.observe` watches over AMQP from five daemons the
+publisher does not control. Both had their own `<=`-not-`===` comparison and
+their own paragraph explaining why it is `<=`. The vantage points are what make
+the two independent evidence; the rule is not, and two observers of one
+guarantee disagreeing about what a violation *is* would make both readings
+worthless rather than corroborating.
+
+`classifySequence` in `@egress/domain` is the rule, returning `first` /
+`duplicate` / `gap` / `next` against the highest sequence already seen. What
+stays local is the shape each observer needs: one highest-sequence-per-API map
+in the aggregator, which watches every API at once, and a single
+`lastSequence` in a daemon fleet that serves one. Both were checked against
+their previous implementations over 240,000 random transitions each before the
+old code was deleted.
+
+`SEQUENCED_EVENT` moved with it. It was a named constant on the daemon side and
+a repeated string literal on the aggregator's.
+
+## The published `time` came from a different clock
+
+Added 2026-09-10. Every instant this system reasons about comes from the Effect
+clock, which is what lets `TestClock` drive a simulated minute in microseconds
+— and `Events.build` read `new Date()` for the envelope's `time` field. A tick
+therefore carried two clocks: `observedSince` in simulated time two lines below
+`time` in wall time.
+
+Nothing was wrong in production, where the two agree. What it cost was the
+test: `assert.ok(Date.parse(e.time) > 0)` was as much as could be said about a
+value that had nothing to do with the run. `build` takes `now` from the caller,
+which already had it, and the assertion is now that every published `time`
+falls inside the window the test clock was advanced through. Confirmed to fail
+when `new Date()` is put back.

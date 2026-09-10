@@ -1,4 +1,4 @@
-import { Context, Data, Duration, Effect, Layer, Option as O, Ref, Result, Schema } from "effect";
+import { Clock, Context, Data, Duration, Effect, Layer, Option as O, Ref, Result, Schema } from "effect";
 import { readerFor, ReasonSchema, StateSchema } from "@egress/domain/Model.ts";
 import { randomUUID } from "node:crypto";
 
@@ -218,7 +218,7 @@ export const makeInMemoryCoordination = Effect.gen(function* () {
   const checkpoints = yield* Ref.make(new Map<string, Checkpoint>());
 
   const tryAcquireOrRenew = (holderId: string, ttlMs: number) =>
-    Effect.clockWith((c) => c.currentTimeMillis).pipe(
+    Clock.currentTimeMillis.pipe(
       Effect.flatMap((now) =>
         Ref.modify(lock, (current) => {
           const held = O.getOrUndefined(current);

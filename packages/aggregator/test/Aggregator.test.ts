@@ -13,8 +13,7 @@ import type { CircuitEvent } from "@egress/domain/Model.ts";
 
 /**
  * The whole pipeline under TestClock: no sleeps, no flakiness, and a simulated
- * minute costs microseconds. In the pre-Effect version this same coverage was a
- * shell script full of `sleep 6`.
+ * minute costs microseconds.
  */
 
 const SPECS = [
@@ -24,13 +23,10 @@ const SPECS = [
 
 const CFG = { ...defaultConfig, dwellMs: 500, minStateMs: 500, openMs: 1000 };
 
-// TestClock starts at the epoch, which would make a genuine "we published
-// 1970" bug indistinguishable from normal test time. Start at a realistic
-// instant so epoch leakage is unambiguous.
-
 /**
- * TestClock starts at the epoch. Anchoring it to a realistic instant keeps
- * published timestamps meaningful and lets us assert that nothing leaks 1970.
+ * TestClock starts at the epoch, which would make a genuine "we published
+ * 1970" bug indistinguishable from normal test time. Anchoring it to a
+ * realistic instant makes epoch leakage unambiguous.
  */
 const T0 = Date.parse("2026-09-02T12:00:00.000Z");
 
@@ -157,7 +153,13 @@ test("every published event is a valid CloudEvent carrying full state", async ()
     assert.equal(e.specversion, "1.0");
     assert.equal(e.subject, `api://${e.data.apiId}`);
     assert.equal(e.datacontenttype, "application/json");
-    assert.ok(Date.parse(e.time) > 0);
+    // The tick's own instant, not the wall clock. Under TestClock every
+    // published `time` is at or after T0 and never ahead of where the clock
+    // has been advanced to — which is only assertable because the envelope
+    // and the payload now read the same clock.
+    const t = Date.parse(e.time);
+    assert.ok(t >= T0, `${e.time} is before the clock was anchored`);
+    assert.ok(t <= T0 + 40 * CFG.tickMs, `${e.time} is ahead of the test clock`);
     // Full state, not a delta — a subscriber can sync from any single event.
     assert.equal(typeof e.data.healthyEndpoints, "number");
     assert.equal(typeof e.data.totalEndpoints, "number");

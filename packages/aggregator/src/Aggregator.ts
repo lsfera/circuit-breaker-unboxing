@@ -1,4 +1,4 @@
-import { Context, Duration, Effect, Layer, Metric, Option as O, Ref, Schedule } from "effect";
+import { Clock, Context, Duration, Effect, Layer, Metric, Option as O, Ref, Schedule } from "effect";
 import * as Breaker from "@egress/domain/Breaker.ts";
 import { Config } from "@egress/domain/Model.ts";
 import { CheckpointStore, HaSettings, LeaderElection } from "./Coordination.ts";
@@ -128,7 +128,7 @@ export const AggregatorLayer = Layer.effect(
     const attemptTick = Effect.gen(
       function* () {
         yield* Metric.update(Telemetry.ticks, 1);
-        yield* Effect.clockWith((c) => c.currentTimeMillis).pipe(
+        yield* Clock.currentTimeMillis.pipe(
           Effect.flatMap((now) => Ref.set(lastTick, now)),
         );
         const tokenOpt = yield* leader.tryAcquireOrRenew(ha.instanceId, ha.leaseTtlMs);
@@ -159,7 +159,7 @@ export const AggregatorLayer = Layer.effect(
 
         const [pollDuration, reports] = yield* Effect.timed(fleet.poll);
         yield* Metric.update(Telemetry.fleetPollDuration, pollDuration);
-        const now = yield* Effect.clockWith((c) => c.currentTimeMillis);
+        const now = yield* Clock.currentTimeMillis;
 
         // On a fresh acquisition, rehydrate any API this instance has not
         // seen yet from its last published checkpoint, so `sequence`
@@ -195,14 +195,14 @@ export const AggregatorLayer = Layer.effect(
             breakers.set(apiId, after);
 
             if (O.isSome(change)) {
-              out.push(stateChanged(Breaker.snapshot(after), change.value.from));
+              out.push(stateChanged(Breaker.snapshot(after), change.value.from, now));
               lastSnapshotAt.set(apiId, now);
               continue;
             }
             const last = lastSnapshotAt.get(apiId) ?? 0;
             if (now - last >= cfg.snapshotMs) {
               lastSnapshotAt.set(apiId, now);
-              out.push(snapshotEvent(Breaker.snapshot(after)));
+              out.push(snapshotEvent(Breaker.snapshot(after), now));
             }
           }
           return [out as ReadonlyArray<CircuitEvent>, { breakers, lastSnapshotAt }];

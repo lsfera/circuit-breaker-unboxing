@@ -1,6 +1,7 @@
-import { Effect, Metric, Ref, Schedule, Stream } from "effect";
+import { Clock, Effect, Metric, Option as O, Ref, Schedule, Stream } from "effect";
 import { HttpMiddleware, HttpRouter, HttpServerResponse } from "effect/unstable/http";
 import { Sse } from "effect/unstable/encoding";
+import { classifySequence, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
 import { metricsResponse } from "@egress/tracing/Metrics.ts";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -50,30 +51,32 @@ export const emptyIntegrity: Integrity = {
 export const record = (self: Integrity, event: CircuitEvent): Integrity => {
   const recent = [event, ...self.recent].slice(0, 100);
   const base = { ...self, received: self.received + 1, recent };
-  if (event.type !== "egress.circuit.state_changed") {
+  if (event.type !== SEQUENCED_EVENT) {
     return { ...base, snapshots: self.snapshots + 1 };
   }
   const { apiId, sequence } = event.data;
-  const seen = self.bySequence.get(apiId);
-  const bySequence = new Map(self.bySequence);
-  if (seen === undefined || sequence > seen) bySequence.set(apiId, sequence);
-  if (seen === undefined) return { ...base, bySequence };
-  // `<=`, not `===`. A sequence that goes *backwards* is the same violation
-  // as one that repeats — a number was reused — and it is the shape a
-  // leadership bug actually produces: an instance that resumes from stale
-  // in-memory state republishes numbers a later leader already used. Testing
-  // only for equality left that case falling through this function
-  // uncounted, which made the one check that is supposed to prove the
-  // contract blind to the most likely way of breaking it.
-  if (sequence <= seen) return { ...base, bySequence, duplicates: self.duplicates + 1 };
-  if (sequence > seen + 1) {
-    return {
-      ...base,
-      bySequence,
-      gaps: [...self.gaps, `${apiId}: jumped ${seen} -> ${sequence}`].slice(-GAP_BUFFER),
-    };
+  const last = self.bySequence.get(apiId);
+  const highest = O.fromUndefinedOr(last);
+  const advanced = () => new Map(self.bySequence).set(apiId, sequence);
+  // The rule lives in @egress/domain, shared with the daemon fleet's own
+  // observer. What is local here is the shape: one highest sequence per API,
+  // because this process watches all of them at once.
+  switch (classifySequence(highest, sequence)) {
+    case "duplicate":
+      return { ...base, bySequence: self.bySequence, duplicates: self.duplicates + 1 };
+    case "gap":
+      return {
+        ...base,
+        bySequence: advanced(),
+        gaps: [
+          ...self.gaps,
+          `${apiId}: jumped ${last} -> ${sequence}`,
+        ].slice(-GAP_BUFFER),
+      };
+    case "first":
+    case "next":
+      return { ...base, bySequence: advanced() };
   }
-  return { ...base, bySequence };
 };
 
 /**
@@ -204,7 +207,7 @@ export const HttpLive = HttpRouter.use((router) =>
      */
     const health = Effect.gen(function* () {
       const [now, last, leader] = yield* Effect.all([
-        Effect.clockWith((c) => c.currentTimeMillis),
+        Clock.currentTimeMillis,
         agg.lastTickAt,
         agg.isLeader,
       ]);

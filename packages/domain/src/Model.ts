@@ -1,4 +1,4 @@
-import { Context, Data, Result, Schema } from "effect";
+import { Context, Data, Option as O, Result, Schema } from "effect";
 
 /**
  * The vocabulary, declared once each.
@@ -166,6 +166,41 @@ export const readerFor = <S extends Schema.ConstraintDecoder<unknown>>(schema: S
  */
 export const decodeCircuitEvent: (body: string) => Result.Result<CircuitEvent, DecodeFailure> =
   readerFor(CircuitEvent);
+
+/**
+ * The one event type carrying the delivery guarantee. Snapshots deliberately
+ * republish the current sequence so a late subscriber can sync, which is why
+ * they are exempt rather than counted as duplicates.
+ */
+export const SEQUENCED_EVENT = "egress.circuit.state_changed";
+
+/** What a sequence means against the highest already seen for that API. */
+export type SequenceVerdict = "first" | "duplicate" | "gap" | "next";
+
+/**
+ * The published guarantee as one function: per-API sequences are gapless and
+ * never repeat.
+ *
+ * `duplicate` on `<=`, not `===`. A sequence that goes *backwards* reuses a
+ * number just as surely as one that repeats it, and that is the shape a
+ * leadership bug actually produces: an instance resuming from stale in-memory
+ * state republishes numbers a later leader already used. Checking only for
+ * equality let that case fall through uncounted, which made the check that
+ * exists to prove the contract blind to the likeliest way of breaking it.
+ *
+ * Two observers apply this — the aggregator's own webhook subscriber over HTTP,
+ * and the daemon fleet over AMQP. They watch from genuinely different places;
+ * they should not disagree about what a violation is.
+ */
+export const classifySequence = (
+  highest: O.Option<number>,
+  sequence: number,
+): SequenceVerdict =>
+  O.match(highest, {
+    onNone: () => "first" as const,
+    onSome: (last) =>
+      sequence <= last ? "duplicate" : sequence > last + 1 ? "gap" : "next",
+  });
 
 export class DeliveryFailed extends Data.TaggedError("DeliveryFailed")<{
   readonly sink: string;

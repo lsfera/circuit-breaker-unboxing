@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Metric, Ref } from "effect";
+import { Clock, Context, Effect, Layer, Metric, Ref } from "effect";
 import { StatsUnavailable } from "@egress/domain/Model.ts";
 import * as Telemetry from "./Telemetry.ts";
 import type { ReplicaReport } from "@egress/domain/Model.ts";
@@ -194,7 +194,7 @@ export const SimFleetLayer = (
       const poll = Effect.gen(function* () {
         // Clock comes from the runtime, so TestClock drives the simulation
         // deterministically in tests.
-        const now = yield* Effect.clockWith((c) => c.currentTimeMillis);
+        const now = yield* Clock.currentTimeMillis;
         const prev = yield* Ref.getAndSet(lastAt, now);
         const dt = prev === 0 ? 250 : Math.max(1, now - prev);
         const specs = yield* Ref.get(specsRef);
@@ -380,7 +380,7 @@ export const EnvoyFleetLayer = (
 
       const pollOne = (replica: EnvoyReplica) =>
         Effect.gen(function* () {
-          const now = yield* Effect.clockWith((c) => c.currentTimeMillis);
+          const now = yield* Clock.currentTimeMillis;
           const res = yield* Effect.tryPromise({
             try: (signal) =>
               fetch(`${replica.adminUrl}/stats?format=json`, { signal }),
