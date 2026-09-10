@@ -3,13 +3,17 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Effect } from "effect";
-import { Redis } from "ioredis";
-import { GenericContainer, Wait } from "testcontainers";
+import {
+  asRedisLike,
+  freshPrefix,
+  redis,
+  skipIfNoDocker,
+  startRedis,
+  stopRedis,
+} from "./harness.ts";
 import type { Server } from "node:http";
-import type { StartedTestContainer } from "testcontainers";
 import { makeWebhookSink, SOURCE } from "../../src/Events.ts";
 import { Outbox, RedisOutboxLayer } from "../../src/Outbox.ts";
-import type { RedisLike } from "../../src/Coordination.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 
 /**
@@ -25,9 +29,6 @@ import type { CircuitEvent } from "@egress/domain/Model.ts";
  * as RedisCoordination.test.ts — Docker, real sockets, real wall clock.
  */
 
-let container: StartedTestContainer | null = null;
-let client: Redis | null = null;
-let dockerAvailable = true;
 
 /** The subscriber. Flips between refusing and accepting, and records what it took. */
 let server: Server | null = null;
@@ -36,22 +37,10 @@ let accepting = false;
 let received: Array<{ apiId: string; sequence: number }> = [];
 
 before(async () => {
-  try {
-    container = await new GenericContainer("redis:7-alpine")
-      .withExposedPorts(6379)
-      .withWaitStrategy(Wait.forLogMessage(/Ready to accept connections/))
-      .start();
-  } catch {
-    dockerAvailable = false;
-    return;
-  }
-  client = new Redis({
-    host: container.getHost(),
-    port: container.getMappedPort(6379),
-    maxRetriesPerRequest: 1,
-  });
-  await client.ping();
+  await startRedis();
 
+  // The subscriber this outbox exists to survive: a real HTTP endpoint that
+  // can be switched off mid-test.
   server = createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
@@ -74,24 +63,11 @@ before(async () => {
 
 after(async () => {
   await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
-  await client?.quit().catch(() => {});
-  await container?.stop().catch(() => {});
+  await stopRedis();
 });
 
-const skipIfNoDocker = (t: { skip: (reason: string) => void }): boolean => {
-  if (dockerAvailable) return false;
-  t.skip("Docker is not available in this environment");
-  return true;
-};
-
-const asRedisLike = (redis: Redis): RedisLike => ({
-  eval: (script, { keys, args }) =>
-    redis.eval(script, keys.length, ...keys, ...args) as Promise<string | number | null>,
-});
-
-let prefixCounter = 0;
 const freshOutbox = () =>
-  RedisOutboxLayer(asRedisLike(client!), `test:${Date.now()}:${prefixCounter++}`);
+  RedisOutboxLayer(asRedisLike(redis()), freshPrefix());
 
 const event = (apiId: string, sequence: number): CircuitEvent => ({
   specversion: "1.0",

@@ -1,8 +1,14 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Effect, Option as O } from "effect";
-import { GenericContainer, Wait } from "testcontainers";
-import type { StartedTestContainer } from "testcontainers";
+import {
+  broker,
+  restartBroker,
+  skipIfNoDocker,
+  startBroker,
+  stopBroker,
+  waitFor,
+} from "./harness.ts";
 import { Rmq, RmqLive } from "../../src/Client.ts";
 import {
   deadLetterQueueFor,
@@ -30,61 +36,12 @@ import { TRACEPARENT } from "../../src/Trace.ts";
  * and a test that fails half the time teaches nobody anything.
  */
 
-let container: StartedTestContainer | null = null;
-let host = "";
-let port = 0;
-let dockerAvailable = true;
-
-before(async () => {
-  try {
-    container = await new GenericContainer("rabbitmq:4.0-management-alpine")
-      .withExposedPorts(5672)
-      .withWaitStrategy(Wait.forLogMessage(/Server startup complete/))
-      .start();
-  } catch {
-    dockerAvailable = false;
-    return;
-  }
-  host = container.getHost();
-  port = container.getMappedPort(5672);
-});
-
-after(async () => {
-  await container?.stop().catch(() => {});
-});
-
-const skipIfNoDocker = (t: { skip: (reason: string) => void }): boolean => {
-  if (dockerAvailable) return false;
-  t.skip("Docker is not available in this environment");
-  return true;
-};
-
-/**
- * Poll until `done()` or the deadline, instead of sleeping a fixed amount and
- * hoping.
- *
- * The fixed sleeps elsewhere in this file are fine because those tests are
- * the only thing touching the broker at that moment. The ones that use this
- * are not: they run immediately after the stranding test above, which leaves
- * the broker cleaning up thousands of stranded deliveries across a dozen
- * closed links, and a two-second budget that is generous in isolation stops
- * being generous behind that. Waiting for the condition is what makes them
- * deterministic rather than usually-true.
- */
-const waitFor = (done: () => boolean, timeoutMs = 15_000) =>
-  Effect.promise(async () => {
-    const deadline = Date.now() + timeoutMs;
-    while (!done() && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    // A short settle after the condition, so a test asserting "exactly N"
-    // would still see an N+1 that was already on its way.
-    await new Promise((r) => setTimeout(r, 250));
-  });
+before(startBroker);
+after(stopBroker);
 
 const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(
-    Effect.scoped(Effect.provide(program, RmqLive({ host, port }))) as Effect.Effect<A>,
+    Effect.scoped(Effect.provide(program, RmqLive({ host: broker.host, port: broker.port }))) as Effect.Effect<A>,
   );
 
 /**
@@ -292,10 +249,7 @@ test("a durable queue keeps its messages across a broker restart; a transient on
     }),
   );
 
-  await container!.restart();
-  await new Promise((r) => setTimeout(r, 3000));
-  host = container!.getHost();
-  port = container!.getMappedPort(5672);
+  await restartBroker();
 
   const { kept, lost } = await run(
     Effect.gen(function* () {

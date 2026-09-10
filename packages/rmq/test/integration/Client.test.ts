@@ -1,8 +1,14 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Effect, Exit, Scope } from "effect";
-import { GenericContainer, Wait } from "testcontainers";
-import type { StartedTestContainer } from "testcontainers";
+import {
+  broker,
+  brokerExec,
+  skipIfNoDocker,
+  startBroker,
+  stopBroker,
+  waitFor,
+} from "./harness.ts";
 import { makeRmq, Rmq, RmqLive } from "../../src/Client.ts";
 import type { Consumer } from "../../src/Client.ts";
 
@@ -16,54 +22,18 @@ import type { Consumer } from "../../src/Client.ts";
  * are no publisher links to race, so they pass by construction; they stay
  * because "by construction" is a claim, and this is the thing that checks it.
  *
- * Opt-in (`pnpm run test:rmq`), same shape as @egress/aggregator's
- * Redis integration test: needs Docker, uses a real
- * `rabbitmq:4.0-management-alpine`, and skips rather than fails when Docker
- * is unavailable. The skip is checked inside each test body, not as a
- * static `test(...)` option, because Docker availability is only known
- * after `before()` has run.
+ * Opt-in (`pnpm run test:rmq`), same shape as @egress/aggregator's Redis
+ * integration test: needs Docker, runs against a real broker, and skips
+ * rather than fails when Docker is unavailable. `harness.ts` owns which
+ * broker and how the skip works.
  */
 
-let container: StartedTestContainer | null = null;
-let host = "";
-let port = 0;
-let dockerAvailable = true;
-
-before(async () => {
-  try {
-    container = await new GenericContainer("rabbitmq:4.0-management-alpine")
-      .withExposedPorts(5672)
-      .withWaitStrategy(Wait.forLogMessage(/Server startup complete/))
-      .start();
-  } catch {
-    dockerAvailable = false;
-    return;
-  }
-  host = container.getHost();
-  port = container.getMappedPort(5672);
-});
-
-after(async () => {
-  await container?.stop().catch(() => {});
-});
-
-const skipIfNoDocker = (t: { skip: (reason: string) => void }): boolean => {
-  if (dockerAvailable) return false;
-  t.skip("Docker is not available in this environment");
-  return true;
-};
-
-const waitFor = (done: () => boolean, timeoutMs = 15_000) =>
-  Effect.promise(async () => {
-    const deadline = Date.now() + timeoutMs;
-    while (!done() && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 100));
-    }
-  });
+before(startBroker);
+after(stopBroker);
 
 const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(
-    Effect.scoped(Effect.provide(program, RmqLive({ host, port }))) as Effect.Effect<A>,
+    Effect.scoped(Effect.provide(program, RmqLive({ host: broker.host, port: broker.port }))) as Effect.Effect<A>,
   );
 
 test("concurrent publisher creation routes each message to its own binding", async (t) => {
@@ -162,7 +132,7 @@ test("a killed connection comes back with its consumers still registered", async
 
       // Severs every connection the broker holds, ours included.
       yield* Effect.promise(() =>
-        container!.exec(["rabbitmqctl", "close_all_connections", "recovery test"]),
+        brokerExec(["rabbitmqctl", "close_all_connections", "recovery test"]),
       );
 
       // Publishing is what proves it: `send` opens a publish channel on the
@@ -278,7 +248,7 @@ test("a consumer closed on purpose is not resurrected by a reconnect", async (t)
       yield* rmq.closeConsumer(consumer);
 
       yield* Effect.promise(() =>
-        container!.exec(["rabbitmqctl", "close_all_connections", "retired consumer test"]),
+        brokerExec(["rabbitmqctl", "close_all_connections", "retired consumer test"]),
       );
       yield* waitFor(() => false, 3000);
 
@@ -462,7 +432,7 @@ test("closing a consumer with deliveries in flight leaves the rest of the connec
         const conn =
           scope === null
             ? rmq
-            : yield* Effect.provideService(makeRmq({ host, port }), Scope.Scope, scope);
+            : yield* Effect.provideService(makeRmq({ host: broker.host, port: broker.port }), Scope.Scope, scope);
 
         // Exactly daemon.ts's ordering: the consumer is cancelled inline,
         // which is what stops delivery at the first message, and the

@@ -2,16 +2,20 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Effect, Option as O } from "effect";
-import { Redis } from "ioredis";
-import { GenericContainer, Wait } from "testcontainers";
-import type { StartedTestContainer } from "testcontainers";
+import {
+  asRedisLike,
+  freshPrefix,
+  redis,
+  skipIfNoDocker,
+  startRedis,
+  stopRedis,
+} from "./harness.ts";
 import {
   CheckpointStore,
   LeaderElection,
   RedisCoordinationLayer,
 } from "../../src/Coordination.ts";
 import type { LeaseToken } from "../../src/Coordination.ts";
-import type { RedisLike } from "../../src/Coordination.ts";
 
 /**
  * Everything in Coordination.test.ts runs against the in-memory layer and is
@@ -34,61 +38,14 @@ import type { RedisLike } from "../../src/Coordination.ts";
  * CJS package with ESM-shaped types), but the named export does.
  */
 
-let container: StartedTestContainer | null = null;
-let client: Redis | null = null;
-let dockerAvailable = true;
 
-before(async () => {
-  try {
-    container = await new GenericContainer("redis:7-alpine")
-      .withExposedPorts(6379)
-      .withWaitStrategy(Wait.forLogMessage(/Ready to accept connections/))
-      .start();
-  } catch {
-    // No Docker daemon reachable in this environment — skip, don't fail.
-    dockerAvailable = false;
-    return;
-  }
-  client = new Redis({
-    host: container.getHost(),
-    port: container.getMappedPort(6379),
-    maxRetriesPerRequest: 1,
-  });
-  await client.ping();
-});
-
-after(async () => {
-  await client?.quit().catch(() => { });
-  await container?.stop().catch(() => { });
-});
-
-/**
- * Docker availability is only known once `before()` has run, which happens
- * before any test body executes but *after* `test(...)` registration — a
- * static `{ skip }` option evaluated at registration time would always see
- * the initial `true` and never actually skip. Checking inside the test body
- * (which node:test guarantees runs after `before()`) is what makes this
- * correct; confirmed by pointing Docker at a nonexistent socket and watching
- * this skip cleanly instead of failing with a null-client error.
- */
-const skipIfNoDocker = (t: { skip: (reason: string) => void }): boolean => {
-  if (dockerAvailable) return false;
-  t.skip("Docker is not available in this environment");
-  return true;
-};
+before(startRedis);
+after(stopRedis);
 
 /** ioredis -> RedisLike, exactly the one-line adapter the README promises. */
-const asRedisLike = (redis: Redis): RedisLike => ({
-  eval: (script, { keys, args }) =>
-    redis.eval(script, keys.length, ...keys, ...args) as Promise<string | number | null>,
-});
-
-// A fresh key prefix per test so tests do not interfere with each other on
-// the one shared container.
-let prefixCounter = 0;
 const freshLayer = () => {
-  const prefix = `test:${Date.now()}:${prefixCounter++}`;
-  return RedisCoordinationLayer(asRedisLike(client!), prefix);
+  const prefix = freshPrefix();
+  return RedisCoordinationLayer(asRedisLike(redis()), prefix);
 };
 
 test("acquire, renew keeps the token, real TTL expiry allows a strictly higher one", async (t) => {
@@ -205,7 +162,7 @@ test("a corrupt checkpoint reads as absent, not as garbage state", async (t) => 
   if (skipIfNoDocker(t)) return;
 
   const prefix = `test:${Date.now()}:corrupt`;
-  const layer = RedisCoordinationLayer(asRedisLike(client!), prefix);
+  const layer = RedisCoordinationLayer(asRedisLike(redis()), prefix);
 
   const { valid, truncated, notJson, wrongShape } = await Effect.runPromise(
     Effect.provide(
@@ -226,7 +183,7 @@ test("a corrupt checkpoint reads as absent, not as garbage state", async (t) => 
         // Written straight past the store, the way a truncated write or an
         // older build's format would actually arrive.
         const put = (api: string, raw: string) =>
-          Effect.promise(() => client!.set(`${prefix}:checkpoint:${api}`, raw));
+          Effect.promise(() => redis().set(`${prefix}:checkpoint:${api}`, raw));
         yield* put("truncated", '{"state":"OPEN","sequence":');
         yield* put("garbage", "not json at all");
         yield* put("shape", '{"state":"NOPE","sequence":"seven"}');
@@ -270,7 +227,7 @@ test("a coordinator that loses its state does not let a stale leader win", async
   if (skipIfNoDocker(t)) return;
 
   const prefix = `test:${Date.now()}:wipe`;
-  const layer = RedisCoordinationLayer(asRedisLike(client!), prefix);
+  const layer = RedisCoordinationLayer(asRedisLike(redis()), prefix);
 
   const { staleWrite, freshWrite } = await Effect.runPromise(
     Effect.provide(
@@ -293,7 +250,7 @@ test("a coordinator that loses its state does not let a stale leader win", async
         // a failover to an empty replica. Nothing about this is exotic — it
         // is the default configuration of the Redis in this repo's compose.
         yield* Effect.promise(() =>
-          client!.del(
+          redis().del(
             `${prefix}:leader:holder`,
             `${prefix}:leader:token`,
             `${prefix}:leader:epoch`,

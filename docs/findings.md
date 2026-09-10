@@ -632,3 +632,33 @@ it is one more pair of things that have to agree.
   because "we tried it and it was not worth it" is more useful than silence,
   and because the reasoning is what to re-read if a send ever does need a
   timeout.
+- **A regression of this review's own making, and how it was caught.** Moving
+  `process.exit(1)` out of `@egress/rmq` left the aggregator with a `lost` that
+  nothing awaited: its control-plane broker could die for good and the process
+  would keep serving 200s while the daemon fleet silently stopped hearing state
+  changes — the exact failure the fatal stance exists to prevent, reintroduced
+  by removing the mechanism that prevented it. Found by asking what now
+  observes `lost` rather than by a test, which is worth recording: nothing in
+  the suite covers "a broker that never comes back", because the only honest
+  test for it takes five minutes of real retries.
+
+  The aggregator now has one fatal channel for both ways it ends itself — a
+  dead control loop and a lost control plane — and there is no `process.exit`
+  left anywhere in `packages/`. Verified the five-minute way: broker stopped,
+  60 attempts, then `FATAL: aggregator-1: control plane lost` followed by
+  `Fatal: control plane lost: connection: recovery gave up: getaddrinfo
+  ENOTFOUND rabbitmq`, both instances restarted by the policy, and the sequence
+  resumed at its checkpoint when the broker came back.
+- **Two container images, each declared twice.** The four integration suites
+  each carried their own `before`/`after`, their own `skipIfNoDocker`, their
+  own `waitFor`, and their own copy of the image tag — so
+  `rabbitmq:4.0-management-alpine` and `redis:7-alpine` each existed in two
+  files, and bumping one would have left two suites testing different brokers
+  with nothing to say so. Two `harness.ts` modules now own that, 141 lines
+  lighter, with the tags in one place each.
+
+  Two things moved into the harness rather than staying inline because they are
+  knowledge, not setup: `restartBroker` re-reads the mapped port, which changes
+  across a restart and which the one test that restarts had to remember by
+  hand; and `asRedisLike`, the adapter the README advertises as one line, which
+  existed as two.

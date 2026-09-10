@@ -2,14 +2,14 @@
 // (the breaker's tuning knobs) and both belong in this file. `Flags` is also
 // the honest name here: this process is configured by argv, not the
 // environment — see the provider at the bottom of the settings block.
-import { Effect, Layer, Option as O, Schema } from "effect";
+import { Data, Deferred, Effect, Layer, Option as O, Schema } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { HttpRouter } from "effect/unstable/http";
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
-import { RmqLive } from "@egress/rmq/Client.ts";
+import { Rmq, RmqLive } from "@egress/rmq/Client.ts";
 import { PositiveInt, rmqFlag, VERSION } from "@egress/config/Settings.ts";
 import { Aggregator, AggregatorLayer } from "./Aggregator.ts";
 import { makeAmqpControlPlaneSink } from "./AmqpControlPlaneSink.ts";
@@ -116,7 +116,28 @@ const syntheticApis = (count: number): ReadonlyArray<ApiSpec> =>
  * the failure is reported by `runMain` like any other startup failure, rather
  * than by a library module calling `process.exit` while being imported.
  */
+/** Why this process stopped, when it stops itself. */
+class Fatal extends Data.TaggedError("Fatal")<{ readonly reason: string }> {
+  override get message(): string {
+    return this.reason;
+  }
+}
+
 const aggregator = Command.make("aggregator", flags, (settings) => {
+  /**
+   * The two ways this process ends itself, in one place: a control loop that
+   * died, and a control-plane broker it can no longer reach.
+   *
+   * Both used to be `process.exit(1)` — one here, one inside `@egress/rmq`.
+   * The client's is gone (docs/decisions/005-connection-recovery.md) and this
+   * is the other half: a fiber forked into a scope cannot end `Layer.launch`,
+   * measured, so the fatal signal has to reach the fiber that launched. That
+   * is what this is.
+   */
+  const fatal = Deferred.makeUnsafe<never, Fatal>();
+  const stop = (reason: string) =>
+    Effect.sync(() => Deferred.doneUnsafe(fatal, Effect.fail(new Fatal({ reason }))));
+
   const APIS: ReadonlyArray<ApiSpec> =
     settings.apis > 0 ? syntheticApis(settings.apis) : NAMED_APIS;
 
@@ -163,6 +184,19 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
         Effect.gen(function* () {
           const impls = webhookEnabled ? [yield* makeWebhookSink(webhookUrl)] : [];
           impls.push(yield* makeAmqpControlPlaneSink);
+          // A control plane this instance can no longer publish to is the same
+          // silent failure a dead control loop is: it keeps serving 200s and
+          // the daemon fleet simply stops hearing about state changes. The
+          // client reports it rather than acting on it, so somebody here has
+          // to be listening.
+          const rmq = yield* Rmq;
+          yield* Effect.forkScoped(
+            Effect.catch(rmq.lost, (error) =>
+              Effect.logFatal(`${settings.instanceId}: control plane lost`, error).pipe(
+                Effect.andThen(stop(`control plane lost: ${error.message}`)),
+              ),
+            ),
+          );
           return impls.length === 1 ? impls[0]! : combineSinks(impls);
         }),
       ).pipe(Layer.provide(RmqLive(settings.rmq.value)))
@@ -271,9 +305,7 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
             Effect.logFatal(
               `${settings.instanceId}: control loop died, restarting the process`,
               defect,
-            ).pipe(
-              Effect.andThen(Effect.sync(() => process.exit(1))),
-            ),
+            ).pipe(Effect.andThen(stop("control loop died"))),
           ),
         ),
       );
@@ -290,9 +322,17 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
     }),
   );
 
-  return Layer.launch(
-    HttpRouter.serve(Layer.provideMerge(AggregatorDaemon, AppLayer)).pipe(
-      Layer.provide(NodeHttpServer.layer(createServer, { port: settings.port })),
+  // `Layer.build` and then wait, rather than `Layer.launch`, which waits
+  // forever: the difference is that this process can now end itself through
+  // the ordinary failure path instead of calling `process.exit`.
+  return Effect.scoped(
+    Effect.flatMap(
+      Layer.build(
+        HttpRouter.serve(Layer.provideMerge(AggregatorDaemon, AppLayer)).pipe(
+          Layer.provide(NodeHttpServer.layer(createServer, { port: settings.port })),
+        ),
+      ),
+      () => Deferred.await(fatal),
     ),
   );
 });
