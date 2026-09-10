@@ -313,10 +313,26 @@ it is one more pair of things that have to agree.
   from under it against a real broker: the next message never arrived, and not
   one line was logged. The same deaf daemon this repo has an alert and a runbook
   for, reached without any connection loss. Consumers are rebuilt on a fresh
-  channel now, bounded by a rebuild budget that a delivery resets so a channel
-  the broker keeps rejecting stops instead of spinning, and skipped entirely
-  when the connection is the thing that went — `setup` owns that case. Both
-  directions are pinned: a channel that dies alone comes back, and a consumer
-  retired on purpose is *not* resurrected by a reconnect, which was the other
-  half of this and had no test either.
+  channel now. Both directions are pinned: a channel that dies alone comes back,
+  and a consumer retired on purpose is *not* resurrected by a reconnect, which
+  was the other half of this and had no test either.
+- **A repair budget that punished the queues it was meant to protect.** The
+  rebuild above first shipped with a bound — five attempts, reset by a delivery —
+  and a guard that skipped the repair when the connection was what went. Both
+  were reasoned, not measured, and measuring them found the reasoning wrong in
+  opposite directions. The guard never fired: a channel's `close` arrives before
+  the connection's `disconnect`, so the flag still read `true` at the moment it
+  was consulted, and the rebuild attempt it was meant to prevent happened anyway
+  — harmlessly, because `createChannel` on a closed connection rejects at once.
+  The budget did fire, on exactly the wrong queues. The two SAC election queues
+  are idle *by design* — being registered and empty is their whole job — so a
+  budget reset by deliveries never reset on them, and six channel deaths over
+  the life of a process dropped that daemon out of the election for good, over a
+  condition the next rebuild fixed immediately. Measured: after the sixth close
+  the consumer was abandoned and the election trigger that followed was never
+  received; unbounded, the same run receives it. The repair is unbounded now,
+  deliberate shutdown is expressed with the `live`/`forget` bookkeeping that
+  already existed rather than a second flag, and the flag survives only where it
+  is honest — deciding whether a *failed* rebuild is worth reporting, which runs
+  late enough for it to be true.
 

@@ -68,10 +68,11 @@ export const makeRedrive = (opts: RedriveOptions) => {
         return "requeue";
       }
 
-      // Where it came from: the broker's annotation on first sight, our own
-      // stamp once an earlier pass moved it, and "unknown" for anything
-      // published straight onto this queue by something else. Only work is
-      // ever replayed, so anything unattributable is kept, not guessed at.
+      // Where it came from: 
+      // - the broker's annotation on first sight, 
+      // - our own stamp once an earlier pass moved it,
+      // -  "unknown" for anything published straight onto this queue by something else.
+      //Only work is ever replayed, so anything unattributable is kept, not guessed at.
       const death = O.getOrUndefined(delivery.deadLetter);
       const originQueue = death?.queue ?? delivery.properties[ORIGIN_PROPERTY] ?? "unknown";
       const originReason =
@@ -161,7 +162,7 @@ export const makeRedrive = (opts: RedriveOptions) => {
     if (parked > 0) {
       yield* Effect.logWarning(
         `${opts.label}: left ${parked} non-work message(s) on ${opts.deadQueue} — ` +
-          `dead-lettered from somewhere other than ${opts.workQueue}, so not replayed as work`,
+        `dead-lettered from somewhere other than ${opts.workQueue}, so not replayed as work`,
       );
     }
     return { moved, parked, reason };
@@ -193,7 +194,7 @@ export const makeRedrive = (opts: RedriveOptions) => {
     }
     yield* Effect.log(
       `${opts.label}: redrive stopped after ${REDRIVE_MAX_PASSES} passes — ${total} replayed; ` +
-        `whatever is left will be picked up by the next recovery`,
+      `whatever is left will be picked up by the next recovery`,
     );
   });
 

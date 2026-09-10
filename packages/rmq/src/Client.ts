@@ -288,16 +288,18 @@ export const makeRmq = (
       readonly queue: string;
       readonly onMessage: OnMessage;
       readonly prefetch: number;
-      /** Consecutive rebuilds, reset by a delivery. Bounds a channel the broker keeps closing. */
-      rebuilds: number;
     };
     const live = new Set<Live>();
 
     /**
      * Whether the connection is usable, tracked from amqplib's own events.
      *
-     * A channel closing because the connection went is not a channel to rebuild:
-     * `setup` re-attaches every live consumer once the connection is back.
+     * Only honest at the point a rebuild *fails*, which is the one place it is
+     * read: a channel's 'close' arrives before the connection's 'disconnect',
+     * so this still says `true` while a rebuild is being decided, and says
+     * `false` by the time that rebuild's attach rejects. That is enough to tell
+     * "this channel died and I could not put it back" from "the connection went
+     * and `setup` is about to put everything back".
      */
     let connected = true;
 
@@ -339,10 +341,6 @@ export const makeRmq = (
           console.warn(`[rmq] broker cancelled the consumer on ${entry.queue} — it receives nothing now`);
           return;
         }
-        // A delivery is proof the consumer works, which is what makes the
-        // rebuild budget a bound on *failing* rebuilds rather than on the
-        // lifetime of the process.
-        entry.rebuilds = 0;
         const onMessage = entry.onMessage;
         // A handler that throws synchronously would escape into amqplib's
         // delivery callback. Every handler in this repo is careful, which is
@@ -363,13 +361,6 @@ export const makeRmq = (
       };
 
     /**
-     * How many times a consumer may be rebuilt before it is abandoned. A queue
-     * that has gone, or arguments the broker keeps rejecting, would otherwise
-     * rebuild in a loop for the life of the process.
-     */
-    const MAX_REBUILDS = 5;
-
-    /**
      * Put a consumer back after its channel closed under it.
      *
      * amqplib recovers *connections*; a channel that dies on its own — a
@@ -377,23 +368,27 @@ export const makeRmq = (
      * seen — takes its consumer with it and leaves the connection healthy, so
      * nothing else here would ever notice. The handle its caller holds still
      * looks live, which is how a process goes deaf while reporting itself well.
+     *
+     * Unbounded on purpose. Every failure seen here either stops itself — a
+     * queue that is gone makes `attach` reject, and a rejection leaves no
+     * channel to close again — or makes progress. A count of attempts was worse
+     * than nothing: the election queues are idle by design, so a budget reset by
+     * deliveries never reset on them, and the daemon left the election for good
+     * over a condition the next rebuild would have fixed. If a genuine spin ever
+     * turns up, the answer is a delay, not a limit on how often a consumer may
+     * be repaired.
      */
     const rebuild = (entry: Live) => {
-      // Retired deliberately: both teardown paths forget the entry first.
+      // Retired deliberately. Both teardown paths forget their consumer, and
+      // closing the connection forgets all of them, so this covers a deliberate
+      // shutdown as well as a deliberate close.
       if (!live.has(entry)) return;
-      // The connection went, not the channel. `setup` re-attaches everything.
-      if (!connected) return;
-      if (entry.rebuilds >= MAX_REBUILDS) {
-        console.warn(
-          `[rmq] consumer on ${entry.queue} closed ${entry.rebuilds} times without ` +
-            `delivering — abandoning it`,
-        );
-        return;
-      }
-      entry.rebuilds += 1;
       attach(() => connection.createChannel(), entry).then(
         () => console.warn(`[rmq] consumer channel on ${entry.queue} closed — rebuilt`),
         (error) => {
+          // `connected` is false by now if the connection is what went, and
+          // `setup` re-attaches everything when it returns. Saying so here would
+          // report a failure that is already being handled.
           if (connected) {
             console.warn(
               `[rmq] consumer on ${entry.queue} closed and could not be rebuilt: ${String(error)}`,
@@ -450,10 +445,7 @@ export const makeRmq = (
     const setup = async (model: ChannelModel) => {
       await applyTopology(() => model.createChannel());
       out = watchPublishChannel(await model.createConfirmChannel());
-      for (const entry of live) {
-        entry.rebuilds = 0;
-        await attach(() => model.createChannel(), entry);
-      }
+      for (const entry of live) await attach(() => model.createChannel(), entry);
       connected = true;
     };
 
@@ -482,12 +474,13 @@ export const makeRmq = (
       // closes connections constantly. A broker that has already gone makes
       // `close` reject, and a rejection here would fail the teardown rather
       // than complete it. Closing also stops recovery, which is what a
-      // deliberate teardown should do — including the per-channel rebuild
-      // below, hence the flag: every consumer channel is about to close, and
-      // none of them wants putting back.
+      // deliberate teardown should do. Forgetting every consumer first is what
+      // stops the channel closes this causes from being read as consumers to
+      // repair — the same bookkeeping `closeConsumer` uses, for all of them at
+      // once.
       (conn) =>
         Effect.promise(() => {
-          connected = false;
+          live.clear();
           return conn.close().then(() => {}, () => {});
         }),
     );
@@ -621,7 +614,6 @@ export const makeRmq = (
             queue,
             onMessage,
             prefetch: options.prefetch ?? DEFAULT_PREFETCH,
-            rebuilds: 0,
           };
           await attach(() => connection.createChannel(), entry);
           live.add(entry);

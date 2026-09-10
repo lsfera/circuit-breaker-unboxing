@@ -40,19 +40,19 @@ export const deadLetterQueueFor = (apiId: string): string => `${apiId}.work.dead
  * Must be declared identically by every process that touches a queue: RabbitMQ
  * rejects a redeclare whose arguments differ, and container startup is unordered.
  */
-export const deadLetterArgs = (apiId: string): Record<string, unknown> => ({
+const deadLetterArgs = (apiId: string): Record<string, unknown> => ({
   "x-dead-letter-exchange": "",
   "x-dead-letter-routing-key": deadLetterQueueFor(apiId),
 });
 
 /** Identical to `deadLetterArgs` today; named separately because here it is designed behaviour, not a backstop. */
-export const workQueueArgs = deadLetterArgs;
+const workQueueArgs = deadLetterArgs;
 
 /**
  * A single-active-consumer queue that also dead-letters, so a malformed trigger
  * is kept. The dead-letter queue itself gets no target — that would be a cycle.
  */
-export const sacQueueArgs = (apiId: string): Record<string, unknown> => ({
+const sacQueueArgs = (apiId: string): Record<string, unknown> => ({
   ...deadLetterArgs(apiId),
   "x-single-active-consumer": true,
 });

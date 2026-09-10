@@ -217,6 +217,40 @@ test("a consumer whose channel dies alone is put back", async (t) => {
 });
 
 /**
+ * A repair budget was worse than no budget, and this is the case that showed it.
+ *
+ * The election queues are idle by design — being registered and empty *is* their
+ * job — so a budget reset by deliveries never reset on them. Six channel deaths
+ * over the life of a process and the daemon left the election for good, over a
+ * condition the next rebuild fixed immediately.
+ */
+test("a consumer on a queue that never delivers is still repaired", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const queue = `idle-election.${Date.now()}`;
+  const seen: string[] = [];
+
+  await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(queue, { durable: true });
+      const pub = yield* rmq.publisherToQueue(queue);
+      const consumer = yield* rmq.consume(queue, (body) => void seen.push(body));
+
+      for (let i = 0; i < 6; i++) {
+        yield* Effect.promise(() => consumer.channel.close().then(() => {}, () => {}));
+        yield* waitFor(() => false, 400);
+      }
+
+      yield* rmq.send(pub, "trigger");
+      yield* waitFor(() => seen.length >= 1, 5000);
+    }),
+  );
+
+  assert.deepEqual(seen, ["trigger"], "an idle consumer must still be a candidate after repairs");
+});
+
+/**
  * The other half of that: a consumer retired on purpose must stay retired.
  *
  * Recovery rebuilds every consumer the client still considers live, so the

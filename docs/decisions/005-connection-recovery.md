@@ -131,12 +131,30 @@ anything. That is the deaf-daemon failure this repo has an alert and a runbook
 for, reachable without any connection loss at all.
 
 A consumer whose channel closes while the client still considers it live is now
-rebuilt on a fresh channel. The bound is `MAX_REBUILDS`, reset by a delivery, so
-a channel the broker keeps rejecting stops rather than spins — and the same
-`live`/`forget` bookkeeping that keeps a deliberately retired consumer from
-being resurrected keeps it from being rebuilt here. Two tests pin both
-directions: a channel that dies alone comes back, and a consumer closed on
-purpose does not.
+rebuilt on a fresh channel. The same `live`/`forget` bookkeeping that keeps a
+deliberately retired consumer from being resurrected keeps it from being rebuilt
+here, and closing the connection forgets all of them at once, so a deliberate
+shutdown is covered by the mechanism that was already there rather than by a
+second one.
+
+**The repair is deliberately unbounded**, and the first version was not. It
+carried a budget of five attempts, reset by a delivery, on the reasoning that a
+channel the broker keeps rejecting should stop rather than spin. Measured, that
+reasoning was backwards. Every failure seen here either stops itself — a queue
+that is gone makes `attach` reject, and a rejection leaves no channel to close
+again — or makes progress. What the budget did instead was punish the queues
+that are *idle by design*: the two SAC election queues exist to hold registered,
+empty candidates, so a budget reset by deliveries never reset on them. Six
+channel deaths over the life of a process and that daemon left the election
+permanently, over a condition the next rebuild fixed immediately. A test pins
+that case now. If a genuine spin ever turns up, the answer is a delay, not a
+limit on how often a consumer may be repaired.
+
+The `connected` flag survives in exactly one place — deciding whether a *failed*
+rebuild is worth reporting. It is not usable as a guard before the attempt: a
+channel's `close` arrives before the connection's `disconnect`, so it still says
+`true` while a rebuild is being decided, and only says `false` by the time that
+rebuild's attach rejects, which is where it is read.
 
 A broker-initiated cancel (`message === null`, the queue was deleted) cannot be
 rebuilt and is now logged instead of returned from in silence.
