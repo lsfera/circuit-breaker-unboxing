@@ -1,4 +1,4 @@
-import { Context, Data, Effect, Layer, Option as O, Scope, Tracer } from "effect";
+import { Context, Data, Deferred, Effect, Layer, Option as O, Scope, Tracer } from "effect";
 import * as amqp from "amqplib";
 import { parentFrom, TRACEPARENT, traceparent } from "./Trace.ts";
 import type { ChannelModel, ConfirmChannel, ConsumeMessage, Channel } from "amqplib";
@@ -39,7 +39,16 @@ export type Publisher = { readonly exchange: string; readonly routingKey: string
 export class RmqError extends Data.TaggedError("RmqError")<{
   readonly operation: string;
   readonly cause: unknown;
-}> {}
+}> {
+  /**
+   * `Data.TaggedError` prints its `message`, and without one every line reads
+   * `RmqError:` and nothing else — which is what the fatal log looked like the
+   * first time a connection was actually lost through this path.
+   */
+  override get message(): string {
+    return `${this.operation}: ${String(this.cause)}`;
+  }
+}
 
 type QueueArgs = Record<string, unknown>;
 
@@ -155,6 +164,20 @@ export interface RmqService {
    * queue, which is how a daemon abandons work wholesale when the circuit moves.
    */
   readonly closeConsumer: (c: Consumer) => Effect.Effect<void>;
+  /**
+   * Never completes while the connection is usable; fails once recovery has
+   * given up on it.
+   *
+   * A lost connection is fatal, and that is a considered decision rather than
+   * laziness: every consumer on it is gone and nothing in the process notices,
+   * so it keeps reporting itself active while consuming nothing. What changed
+   * is who acts on it. This module used to call `process.exit(1)` itself —
+   * docs/decisions/008-configuration-is-a-boundary.md had already removed
+   * exactly that from `@egress/config`, on the grounds that fail-fast is right
+   * and owning the process's fate from inside a library is not. `launch` below
+   * is the one place that turns this into an exit.
+   */
+  readonly lost: Effect.Effect<never, RmqError>;
 }
 
 export class Rmq extends Context.Service<Rmq, RmqService>()("Rmq") {}
@@ -185,30 +208,6 @@ type RmqConnectOptions = {
   readonly port: number;
   readonly username?: string;
   readonly password?: string;
-  /**
-   * What to do when the connection goes away without anyone here asking it to.
-   *
-   * The default is to exit, and that is the considered choice rather than
-   * laziness — see `connectionLost`. Tests that deliberately take a broker away
-   * override it.
-   */
-  readonly onLost?: (reason: string) => void;
-};
-
-/**
- * A lost connection is fatal by default: every consumer on it is gone, and
- * nothing in the process notices — it keeps reporting itself active while
- * consuming nothing. Exiting hands that to `restart: unless-stopped`.
- */
-const connectionLost = (reason: string) => {
-  // `console.error`, not the logger, and deliberately: this line is the last
-  // thing the process does before `process.exit(1)`, which does not wait for a
-  // logger that batches or writes asynchronously. Every other line in this
-  // module goes through the logger.
-  console.error(
-    `[rmq] connection lost (${reason}) — exiting so the restart policy can rebuild it`,
-  );
-  process.exit(1);
 };
 
 const describe = (delivery: ConsumeMessage): DeliveryInfo => {
@@ -259,8 +258,9 @@ const describe = (delivery: ConsumeMessage): DeliveryInfo => {
  * matters — topology first, since a transient queue does not survive a broker
  * restart and its consumer would fail NOT_FOUND; publish channel; consumers.
  *
- * Bounded: past `maxRetries` the process exits and the restart policy takes over.
- * See docs/decisions/005-connection-recovery.md.
+ * Bounded: past `maxRetries` recovery gives up and `lost` fails, which is what
+ * `launchWithRmq` turns into a stopped process for the restart policy to pick
+ * up. See docs/decisions/005-connection-recovery.md.
  */
 export const makeRmq = (
   opts: RmqConnectOptions,
@@ -277,6 +277,9 @@ export const makeRmq = (
      */
     const services = yield* Effect.context<never>();
     const forkInContext = Effect.runForkWith(services);
+
+    /** Completed once, by the 'reconnect-failed' handler below. */
+    const lost = Deferred.makeUnsafe<never, RmqError>();
     const warn = (message: string) => forkInContext(Effect.logWarning(`[rmq] ${message}`));
 
     /** Everything this connection was told to create, so it can be created again. */
@@ -513,11 +516,16 @@ export const makeRmq = (
         `reconnected — ${topology.length} topology entries and ${live.size} consumer(s) restored`,
       );
     });
-    // Recovery has given up. Everything below this line is the old crash-fast
-    // stance, unchanged: a process that cannot reach its broker is no use, and
-    // the restart policy is what gets it looked at.
+    // Recovery has given up. The stance is unchanged — a process that cannot
+    // reach its broker is no use, and the restart policy is what gets it looked
+    // at — but it is now a failure that travels, not an exit taken here.
     connection.on("reconnect-failed", (error) => {
-      (opts.onLost ?? connectionLost)(`recovery gave up: ${error.message}`);
+      Deferred.doneUnsafe(
+        lost,
+        Effect.fail(
+          new RmqError({ operation: "connection", cause: `recovery gave up: ${error.message}` }),
+        ),
+      );
     });
 
     /** The live publish channel, opening one if the last was closed under us. */
@@ -546,15 +554,20 @@ export const makeRmq = (
      * the channel it arrives on — cannot take the publish path down with it.
      */
     const onFreshChannel = <A>(operation: string, use: (ch: Channel) => Promise<A>) =>
-      wrap(operation, async () => {
-        const ch = await connection.createChannel();
-        ch.on("error", () => {});
-        try {
-          return await use(ch);
-        } finally {
-          await ch.close().catch(() => {});
-        }
-      });
+      Effect.acquireUseRelease(
+        wrap(operation, () =>
+          connection.createChannel().then((ch) => {
+            // A declare that fails closes its channel, and an unhandled 'error'
+            // on it would reach the process. The failure is the rejection below.
+            ch.on("error", () => {});
+            return ch;
+          }),
+        ),
+        (ch) => wrap(operation, () => use(ch)),
+        // Closing is best effort by definition: the channel this runs on may be
+        // the one the broker just closed under us.
+        (ch) => Effect.promise(() => ch.close().then(() => {}, () => {})),
+      );
 
     /**
      * Resolves when the broker has confirmed the message, and not before.
@@ -667,8 +680,27 @@ export const makeRmq = (
           forget(c);
           return c.channel.close().then(() => {}, () => {});
         }),
+      lost: Deferred.await(lost),
     };
   });
 
 /** The process-lifetime connection: one per layer instance, closed with the layer's scope. */
 export const RmqLive = (opts: RmqConnectOptions) => Layer.effect(Rmq, makeRmq(opts));
+
+/**
+ * Build `layer` and run until its scope ends or the broker connection is lost,
+ * whichever comes first — `Layer.launch` for a graph that contains an `Rmq`.
+ *
+ * This exists so the fatal-on-lost-connection decision has exactly one call
+ * site. `Layer.launch` alone blocks forever, and a fiber forked into the
+ * layer's scope cannot end it: measured, a defect in one leaves `Layer.launch`
+ * running. So the guarantee has to be on the fiber that launches, and putting
+ * it here rather than in each `main.ts` is the difference between a rule and
+ * three places that have to remember it.
+ */
+export const launchWithRmq = <ROut, E, RIn>(
+  layer: Layer.Layer<ROut | Rmq, E, RIn>,
+): Effect.Effect<never, E | RmqError, RIn> =>
+  Effect.scoped(
+    Effect.flatMap(Layer.build(layer), (context) => Context.get(context, Rmq).lost),
+  );

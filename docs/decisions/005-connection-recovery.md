@@ -204,3 +204,37 @@ before changing it — a bare `runFork(logWarning(...))` never reaches a provide
 One line stays on `console.error`, and says so: `connectionLost` is the last
 thing the process does before `process.exit(1)`, which will not wait for a
 logger that batches or writes asynchronously.
+
+## Fatal, but not by `process.exit`
+
+Added 2026-09-10. The stance above is unchanged: past `maxRetries` a process
+that cannot reach its broker is no use, and stopping hands it to
+`restart: unless-stopped`. What changed is who does the stopping.
+
+`@egress/rmq` called `process.exit(1)` from inside the client. That is exactly
+what [008](008-configuration-is-a-boundary.md) removed from `@egress/config`,
+for a reason that applies here word for word: fail-fast is right, and owning
+the process's fate from inside a library module is not. It also had an escape
+hatch, `onLost`, whose comment said "tests that deliberately take a broker away
+override it" — no caller anywhere passed it, including those tests.
+
+The service exposes `lost: Effect<never, RmqError>` instead: never completes
+while the connection is usable, fails once recovery gives up. `launchWithRmq`
+builds a layer graph and blocks on it, so a lost connection ends the program
+the way every other failure does.
+
+It has to be the launching fiber that observes this, and that was measured
+rather than assumed: a defect in a fiber forked into the layer's scope does
+**not** end `Layer.launch` — a probe with a 1200 ms timeout ran the full 1200 ms
+either way. Hence one helper rather than a rule each `main.ts` has to remember.
+
+Verified end to end: with the broker stopped, the daemon retries on schedule
+(`[rmq] reconnect attempt 38 in 5423ms`, logged through the logger), and past
+the budget the process stops for the restart policy to pick up.
+
+`@egress/aggregator` is deliberately not converted. Its `Rmq` is optional —
+`--rmq` may be absent — and lives inside the control-plane sink's own layer
+rather than the top-level graph, so `launchWithRmq` does not fit it without
+reshaping how that sink is provided. Its remaining `process.exit(1)` is in a
+`main.ts`, which is a composition root and the one place that may legitimately
+end a process.

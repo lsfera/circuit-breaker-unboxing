@@ -4,7 +4,7 @@ import { HttpRouter } from "effect/unstable/http";
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { RmqLive } from "@egress/rmq/Client.ts";
+import { launchWithRmq, RmqLive } from "@egress/rmq/Client.ts";
 import { brokerFlag, metricsPortFlag, PositiveInt, VERSION } from "@egress/config/Settings.ts";
 import { MetricsRoute } from "@egress/tracing/Metrics.ts";
 import { TracingLive } from "@egress/tracing/Tracing.ts";
@@ -110,14 +110,16 @@ const flags = {
 const daemon = Command.make("rmq-daemon", flags, (settings) => {
   const Daemon = Layer.effectDiscard(Effect.forkScoped(Effect.orDie(runDaemon(settings))));
 
-  return Layer.launch(
-    HttpRouter.serve(
-      Layer.provideMerge(Daemon, MetricsRoute).pipe(Layer.provide(RmqLive(settings.broker))),
-    ).pipe(
+  // `launchWithRmq`, not `Layer.launch`: a broker this process can no longer
+  // reach ends it, and `provideMerge` is what keeps the one connection visible
+  // to the launcher rather than sealed inside the graph.
+  return launchWithRmq(
+    HttpRouter.serve(Layer.provideMerge(Daemon, MetricsRoute)).pipe(
       Layer.provide(NodeHttpServer.layer(createServer, { port: settings.metricsPort })),
       // All five daemons report as one service: which daemon is an attribute of
       // a span, not a different system.
       Layer.provide(TracingLive("rmq-daemon")),
+      Layer.provideMerge(RmqLive(settings.broker)),
     ),
   );
 });

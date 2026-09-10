@@ -599,3 +599,36 @@ it is one more pair of things that have to agree.
   daemon's gauges carry real numbers from startup rather than after a second,
   and the first heartbeat lands next to the "up" line instead of fifteen
   seconds later.
+- **The AMQP client owned the process's fate, and its escape hatch was
+  fiction.** `@egress/rmq` called `process.exit(1)` when recovery gave up —
+  the same thing [008](decisions/008-configuration-is-a-boundary.md) had
+  already removed from `@egress/config`, on the grounds that fail-fast is right
+  and owning the process's fate from inside a library is not. It offered
+  `onLost` to override it, documented as what "tests that deliberately take a
+  broker away" use; no caller in the repo ever passed it, those tests included.
+  The service exposes `lost: Effect<never, RmqError>` now, and one helper,
+  `launchWithRmq`, turns it into a stopped process.
+
+  The shape of that helper was decided by measurement, not taste. The obvious
+  move — fork a fiber into the layer's scope and let it die — does not work: a
+  probe showed `Layer.launch` running its full 1200 ms timeout whether or not a
+  scoped fiber had died. Only the launching fiber can end it, which is also why
+  this is one helper rather than a rule each `main.ts` has to remember.
+- **What was deliberately left imperative, including one change that was
+  written and then dropped.** Most of this client is `ch.on(...)` and callback
+  plumbing over amqplib. Converting that to `Ref` would mean reading state from
+  an event handler through `runSync`, which is worse rather than more
+  Effect-shaped, so the mutable `live`/`topology` bookkeeping and the `null`
+  channel slots stay — with the module's existing note on why `null` and not
+  `Option` there.
+
+  The publish confirm was converted to a `Deferred` and then reverted. It is a
+  hand-rolled `new Promise` plus a `Set` of reject callbacks, and a `Deferred`
+  would deregister on interruption where the promise leaves its rejector until
+  the channel happens to close. That leak is real, bounded, and has never cost
+  anything; the change was two dozen lines in the hottest path in the client,
+  the one every message goes through. It fixed no bug anyone had hit, which by
+  this review's own standard is spelling rather than behaviour. Recorded
+  because "we tried it and it was not worth it" is more useful than silence,
+  and because the reasoning is what to re-read if a send ever does need a
+  timeout.
