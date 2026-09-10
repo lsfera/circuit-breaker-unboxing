@@ -1,5 +1,6 @@
 import { Config, Effect, Ref, Result, Stream } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
+import { Sse } from "effect/unstable/encoding";
 import { NodeRuntime, NodeServices } from "@effect/platform-node";
 import { decodeCircuitEvent, State } from "@egress/domain/Model.ts";
 import type { State as StateType } from "@egress/domain/Model.ts";
@@ -17,25 +18,6 @@ import type { State as StateType } from "@egress/domain/Model.ts";
 
 type Known = { readonly state: StateType; readonly sequence: number };
 
-/** Split an SSE byte stream into complete frames. */
-const frames = (body: ReadableStream<Uint8Array>) =>
-  Stream.fromAsyncIterable(
-    (async function* () {
-      const reader = body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) return;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() ?? "";
-        for (const part of parts) yield part;
-      }
-    })(),
-    (cause) => new Error(String(cause)),
-  );
-
 const program = (ORIGIN: string) =>
   Effect.gen(function* () {
     const known = yield* Ref.make(new Map<string, Known>());
@@ -44,18 +26,29 @@ const program = (ORIGIN: string) =>
     if (!res.body) return yield* Effect.die(`cannot reach aggregator at ${ORIGIN}`);
     yield* Effect.log(`subscribed to ${ORIGIN}`);
 
-    yield* frames(res.body).pipe(
-      Stream.filter((f) => f.includes("event: cloudevent")),
-      Stream.map((f) => f.split("\n").find((l) => l.startsWith("data: "))),
-      Stream.filter((l): l is string => l !== undefined),
-      Stream.mapEffect((line) =>
+    /**
+     * `Sse.decode` rather than splitting on a blank line, which is what this did
+     * and which only ever worked against this server: SSE separates on `\r\n\r\n`
+     * and `\r\r` too, `data:` may span lines or omit the space, and a stream that
+     * never separates grew the buffer without bound. A subscriber this repo
+     * offers as the shape a real one should take had a parser that fit exactly
+     * one publisher.
+     */
+    yield* Stream.fromReadableStream({
+      evaluate: () => res.body!,
+      onError: (cause) => new Error(String(cause)),
+    }).pipe(
+      Stream.decodeText(),
+      Stream.pipeThroughChannel(Sse.decode()),
+      Stream.filter((frame) => frame.event === "cloudevent"),
+      Stream.mapEffect((frame) =>
         Effect.suspend(() => {
           // Through the contract's own reader: a frame that is not JSON at all is
           // a failure to report, not an exception to escape into the stream.
-          const decoded = decodeCircuitEvent(line.slice(6));
+          const decoded = decodeCircuitEvent(frame.data);
           if (Result.isFailure(decoded)) {
             // Loud, not silently dropped: this is contract drift.
-            return Effect.logError(`undecodable event: ${line}`).pipe(
+            return Effect.logError(`undecodable event: ${frame.data}`).pipe(
               Effect.as(undefined),
             );
           }

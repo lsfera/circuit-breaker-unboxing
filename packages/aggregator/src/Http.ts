@@ -1,5 +1,6 @@
 import { Effect, Metric, Ref, Schedule, Stream } from "effect";
 import { HttpMiddleware, HttpRouter, HttpServerResponse } from "effect/unstable/http";
+import { Sse } from "effect/unstable/encoding";
 import { metricsResponse } from "@egress/tracing/Metrics.ts";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -75,8 +76,18 @@ export const record = (self: Integrity, event: CircuitEvent): Integrity => {
   return { ...base, bySequence };
 };
 
-const sse = (event: string, data: unknown) =>
-  `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+/**
+ * One `Sse.Event`, encoded by `Sse.encode` below rather than by a template
+ * string here. The bytes are identical — checked — and the point is that
+ * @egress/subscriber decodes with the same module, so the wire format has one
+ * definition instead of an encoder and a parser that happen to agree.
+ */
+const sse = (event: string, data: unknown): Sse.Event => ({
+  _tag: "Event",
+  event,
+  id: undefined,
+  data: JSON.stringify(data),
+});
 
 export const HttpLive = HttpRouter.use((router) =>
   Effect.gen(function* () {
@@ -169,7 +180,10 @@ export const HttpLive = HttpRouter.use((router) =>
           Stream.map((e) => sse("cloudevent", e)),
         );
         return HttpServerResponse.stream(
-          Stream.merge(states, events).pipe(Stream.encodeText),
+          Stream.merge(states, events).pipe(
+            Stream.pipeThroughChannel(Sse.encode()),
+            Stream.encodeText,
+          ),
           {
             contentType: "text/event-stream",
             headers: { "cache-control": "no-cache", connection: "keep-alive" },

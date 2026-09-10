@@ -391,4 +391,16 @@ it is one more pair of things that have to agree.
   that keeps its durable state in RabbitMQ and Redis. What would reopen it is
   named: work that is more than one step, where an unacked delivery cannot say
   how far it got.
+- **A subscriber offered as exemplary had a parser that fit one publisher.**
+  `@egress/subscriber`'s own doc calls it "a downstream consumer, written the
+  way a real one should be", and it read the SSE stream by splitting on a blank
+  line: `buffer.split("\n\n")`. That works against this aggregator and only
+  against this aggregator. The format also separates on `\r\n\r\n` and `\r\r`,
+  `data:` may span several lines or omit the space after the colon, `id:`,
+  `retry:` and comment lines exist, and a stream that never separates grows the
+  buffer without bound — the last of which the runtime's own decoder has an
+  error for (`EventTooLarge`). Both ends use `effect/unstable/encoding/Sse` now,
+  so the wire format has one definition rather than an encoder and a parser that
+  happen to agree. The encoder's bytes were compared before the swap and are
+  identical, which is what made it a safe change rather than a hopeful one.
 
