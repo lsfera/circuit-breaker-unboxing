@@ -353,4 +353,26 @@ it is one more pair of things that have to agree.
   avoid. There is one reader now, in `@egress/domain` beside the schema it
   reads, and all three hops go through it — so the tests that pin what a valid
   event is now guard three call sites instead of one.
+- **The work most worth tracing was the only work that arrived untraced.** A
+  redrive replays messages that failed their third-party call and spent their
+  delivery budget — the ones someone would actually want to follow — and it
+  republished the body alone. The `traceparent` was not missing: RabbitMQ keeps
+  application headers through dead-lettering, so it was sitting on the message,
+  readable, and thrown away on the way out. The replay then arrived at a daemon
+  with no parent, took the untraced fast path, and looked like a brand new unit
+  of work with no history. A replayed message now rejoins the trace that
+  produced it, under a `work.redrive` span, and only a message that carried a
+  parent pays for one — the same gate the daemon's egress call uses. Measured
+  both halves: a dead-lettered message still reports a parent, a republish of
+  the body alone does not, and one carrying the header does. Also measured, and
+  the reason the span is safe as the mechanism: `Effect.withSpan` inherits the
+  parent's trace id and yields a valid `traceparent` even with **no tracer
+  installed**, which is the default here — so the link survives in deployments
+  that export nothing.
+- **`Effect.runPromise` inside a message handler builds a runtime per message.**
+  `daemon.ts` documents this and captures its context once
+  (`Effect.runPromiseWith(services)`); `Redrive.ts`, extracted from it, kept the
+  naive form and paid it on every message a pass moves — thousands. Fixed by
+  capturing the context the same way, which is also what makes the span above
+  reach a real tracer rather than the default no-op one.
 

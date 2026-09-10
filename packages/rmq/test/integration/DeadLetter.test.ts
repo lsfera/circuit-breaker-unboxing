@@ -11,6 +11,7 @@ import {
   workQueueFor,
   workQueueOptions,
 } from "../../src/ControlPlane.ts";
+import { TRACEPARENT } from "../../src/Trace.ts";
 
 /**
  * Dead-lettering: what a rejection does, what it carries, and what survives a
@@ -337,6 +338,74 @@ test("a durable queue keeps its messages across a broker restart; a transient on
  * that republish, deliberately, because that interaction is the part someone
  * reading `WORK_DELIVERY_LIMIT` would get wrong.
  */
+/**
+ * A redrive replays the work that failed — which is the work most worth
+ * following, and was the only work that arrived untraceable.
+ *
+ * The trace context survives being dead-lettered, because RabbitMQ keeps
+ * application headers. Republishing the body alone therefore does not lose a
+ * trace that was unavailable; it throws away one that was right there.
+ */
+test("a traceparent survives dead-lettering, and only a republish that carries it keeps it", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const apiId = `trace-${Date.now()}`;
+  const work = workQueueFor(apiId);
+  const dead = deadLetterQueueFor(apiId);
+  const carried = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+  const { onDead, replayed } = await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(dead, deadLetterQueueOptions());
+      yield* rmq.declareQueue(work, workQueueOptions(apiId));
+      const into = yield* rmq.publisherToQueue(work);
+
+      const onDead: boolean[] = [];
+      const replayed: Array<{ how: string; parent: boolean }> = [];
+
+      // Two independent messages, each dead-lettered once and replayed once —
+      // "alone" the way the redrive used to, "carrying" the way it does now.
+      const deadSeen = new Map<string, number>();
+      yield* rmq.consume(dead, (body, delivery) => {
+        const n = (deadSeen.get(body) ?? 0) + 1;
+        deadSeen.set(body, n);
+        if (n > 1) return "accept" as const;
+        onDead.push(O.isSome(delivery.parent));
+        const props =
+          body === "alone" ? undefined : { [TRACEPARENT]: delivery.properties[TRACEPARENT]! };
+        return Effect.runPromise(rmq.send(into, body, props)).then(() => "accept" as const);
+      });
+
+      const workSeen = new Map<string, number>();
+      yield* rmq.consume(work, (body, delivery) => {
+        const n = (workSeen.get(body) ?? 0) + 1;
+        workSeen.set(body, n);
+        if (n === 2) replayed.push({ how: body, parent: O.isSome(delivery.parent) });
+        return "discard" as const;
+      });
+
+      yield* rmq.send(into, "alone", { [TRACEPARENT]: carried });
+      yield* rmq.send(into, "carrying", { [TRACEPARENT]: carried });
+      yield* waitFor(() => replayed.length >= 2);
+      return { onDead, replayed };
+    }),
+  );
+
+  assert.deepEqual(
+    onDead,
+    [true, true],
+    "the traceparent must still be readable once the message is dead-lettered",
+  );
+  assert.deepEqual(
+    [...replayed].sort((a, b) => a.how.localeCompare(b.how)),
+    [
+      { how: "alone", parent: false },
+      { how: "carrying", parent: true },
+    ],
+  );
+});
+
 test("the work queue parks a message at the delivery limit, and a redrive republish grants a fresh budget", async (t) => {
   if (skipIfNoDocker(t)) return;
 

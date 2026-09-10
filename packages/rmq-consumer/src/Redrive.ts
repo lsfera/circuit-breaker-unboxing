@@ -1,4 +1,5 @@
 import { Effect, Option as O, Ref } from "effect";
+import { withParent } from "@egress/rmq/Trace.ts";
 import { randomUUID } from "node:crypto";
 import type { Consumer, RmqService, Settlement } from "@egress/rmq/Client.ts";
 import type { Semaphore } from "effect/Semaphore";
@@ -40,6 +41,14 @@ export const makeRedrive = (opts: RedriveOptions) => {
     const conn = opts.rmq;
     const into = yield* conn.publisherToQueue(opts.workQueue);
     const back = yield* conn.publisherToQueue(opts.deadQueue);
+
+    /**
+     * Captured for the same reason daemon.ts captures it: the handler below is a
+     * plain AMQP callback, and `Effect.runPromise` would build a fresh runtime
+     * with default services for every message a pass moves — thousands of them.
+     */
+    const services = yield* Effect.context<never>();
+    const runInContext = Effect.runPromiseWith(services);
 
     const passId = randomUUID();
     let moved = 0;
@@ -85,7 +94,7 @@ export const makeRedrive = (opts: RedriveOptions) => {
         // not lost with them.
         parked++;
         try {
-          await Effect.runPromise(
+          await runInContext(
             conn.send(back, body, {
               [ORIGIN_PROPERTY]: originQueue,
               [ORIGIN_REASON_PROPERTY]: originReason,
@@ -110,7 +119,31 @@ export const makeRedrive = (opts: RedriveOptions) => {
       // accepting first would lose it outright. Duplicates are recoverable and
       // losses are not, and the premise of this queue is that the work matters.
       try {
-        await Effect.runPromise(conn.send(into, body));
+        // A replayed message rejoins the trace that produced it. The
+        // `traceparent` survives being dead-lettered — RabbitMQ keeps
+        // application headers — and republishing the body alone was throwing it
+        // away, so the one message worth following, the one that failed and was
+        // retried, arrived looking like a brand new one with no history.
+        //
+        // Only a message that carried a parent pays for a span, same as the
+        // daemon's egress call: an untraced replay takes the plain path.
+        await runInContext(
+          O.isNone(delivery.parent)
+            ? conn.send(into, body)
+            : withParent(
+                delivery.parent,
+                conn.send(into, body).pipe(
+                  Effect.withSpan("work.redrive", {
+                    attributes: {
+                      "messaging.system": "rabbitmq",
+                      "messaging.operation.name": "redrive",
+                      "messaging.destination.name": opts.workQueue,
+                      "egress.origin_reason": originReason,
+                    },
+                  }),
+                ),
+              ),
+        );
       } catch {
         // The work queue is unreachable; leave the message where it is
         // rather than accepting it into nothing.
