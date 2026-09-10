@@ -186,11 +186,15 @@ both. Nothing in docker-compose.yml changed.
 `ChildProcessSpawner`, which `NodeServices.layer` provides in one. Verified in
 containers with no TTY, which was the risk worth checking.
 
-Not converted: `packages/demo/src/driver.ts`. It is a 410-line script run by
-hand, its six settings are referenced 68 times across helpers and a *mutable*
-`ORIGIN` resolved against the live leader, and many of those matches are the
-words in prose. The refactor is disproportionate to a script the stack never
-runs. Its one real defect was fixed in place instead: `FAILURE_MODE` was
-`=== "envoy" ? "envoy" : "sim"`, so every misspelling silently selected the
-simulator — exactly what `--source` was made strict to prevent.
+`packages/demo/src/driver.ts` was converted last and needed a different move.
+Its six settings are referenced 68 times across helpers and a *mutable* `ORIGIN`
+resolved against the live leader, and many of those matches are the words in
+prose — a rename would have edited the comments. So nothing was renamed: the
+whole script became `const run = (settings: Settings) => { ... }` with the six
+identifiers rebound from `settings` at the top, and the body reads exactly as it
+did. `ORIGIN` and `peakWork` stopped being module-level mutable state on the way
+past, which they never should have been.
+
+It takes a positional argument as well as flags — `demo payments-provider
+--failure-mode=envoy` — so `Argument.string` earns its place alongside `Flag`.
 
