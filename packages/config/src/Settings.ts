@@ -1,4 +1,4 @@
-import { Config, ConfigProvider, Effect, Result, Schema } from "effect";
+import { Config, ConfigProvider, Data, Effect, Result, Schema } from "effect";
 
 /**
  * Settings for every process here: one declaration, decoded at boot, and a
@@ -38,19 +38,30 @@ export const parse = <A>(
     onFailure: (error) => Result.fail(error.message),
   });
 
+/** `message` is the field `Error` reads, so the failure prints as itself. */
+export class SettingsUnreadable extends Data.TaggedError("SettingsUnreadable")<{
+  readonly message: string;
+}> {}
+
 /**
- * Read the settings, or exit 1. Eagerly, at module load: nothing should open a
- * broker connection and register consumers on configuration it could not read.
+ * Read the settings as an Effect that fails, rather than a value that exits.
+ *
+ * Still fail-fast — a layer that cannot be built builds nothing below it, so
+ * nothing opens a socket on configuration it could not read — but the failure
+ * now travels the way every other startup failure does, reported by
+ * `NodeRuntime.runMain` with a non-zero exit. Reading it at module load meant a
+ * library module owned the process's fate, and importing it was enough to end
+ * one.
  */
-export const load = <A>(
+export const read = <A>(
   processName: string,
   settings: Config.Config<A>,
   provider: ConfigProvider.ConfigProvider = ConfigProvider.fromEnv(),
-): A =>
-  Result.match(parse(settings, provider), {
-    onSuccess: (value) => value,
-    onFailure: (message) => {
-      Effect.runSync(Effect.logFatal(`${processName}: ${message}`));
-      return process.exit(1);
-    },
-  });
+): Effect.Effect<A, SettingsUnreadable> =>
+  Effect.suspend(() =>
+    Result.match(parse(settings, provider), {
+      onSuccess: (value) => Effect.succeed(value),
+      onFailure: (message) =>
+        Effect.fail(new SettingsUnreadable({ message: `${processName}: ${message}` })),
+    }),
+  );

@@ -4,7 +4,7 @@ import { PrometheusMetrics } from "effect/unstable/observability";
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node";
 import { createServer } from "node:http";
 import { RmqLive } from "@egress/rmq/Client.ts";
-import { brokerAddress, load, PositiveInt } from "@egress/config/Settings.ts";
+import { brokerAddress, PositiveInt, read } from "@egress/config/Settings.ts";
 import { TracingLive } from "@egress/tracing/Tracing.ts";
 import { runProducer } from "./producer.ts";
 
@@ -17,22 +17,18 @@ import { runProducer } from "./producer.ts";
  * and never reads the circuit state, which is the point of the scenario.
  */
 
-const settings = load(
-  "rmq-producer",
-  Config.all({
-    broker: brokerAddress("RMQ").pipe(Config.withDefault({ host: "127.0.0.1", port: 5672 })),
-    apiId: Config.nonEmptyString("API_ID").pipe(Config.withDefault("payments-provider")),
-    /**
-     * Fixed, and deliberately never lowered in reaction to the circuit — the
-     * backlog this builds during an outage is the thing the fleet has to
-     * survive.
-     */
-    ratePerSecond: Config.schema(PositiveInt, "RATE_PER_SECOND").pipe(Config.withDefault(200)),
-    metricsPort: Config.port("METRICS_PORT").pipe(Config.withDefault(9464)),
-  }),
-);
-
-const program = runProducer(settings);
+/** Every variable this process takes, declared once. */
+const settings = Config.all({
+  broker: brokerAddress("RMQ").pipe(Config.withDefault({ host: "127.0.0.1", port: 5672 })),
+  apiId: Config.nonEmptyString("API_ID").pipe(Config.withDefault("payments-provider")),
+  /**
+   * Fixed, and deliberately never lowered in reaction to the circuit — the
+   * backlog this builds during an outage is the thing the fleet has to
+   * survive.
+   */
+  ratePerSecond: Config.schema(PositiveInt, "RATE_PER_SECOND").pipe(Config.withDefault(200)),
+  metricsPort: Config.port("METRICS_PORT").pipe(Config.withDefault(9464)),
+});
 
 /**
  * Identical to the aggregator's and the daemon's `/metrics` route: one
@@ -61,15 +57,20 @@ const MetricsRoute = HttpRouter.use((router) =>
  * queue redeclared with different arguments — is a defect rather than something
  * to recover from, hence `orDie` and the restart policy on the container.
  */
-const Producer = Layer.effectDiscard(Effect.forkScoped(Effect.orDie(program)));
+const MainLayer = Layer.unwrap(
+  Effect.gen(function* () {
+    const cfg = yield* read("rmq-producer", settings);
+    const Producer = Layer.effectDiscard(Effect.forkScoped(Effect.orDie(runProducer(cfg))));
 
-const MainLayer = HttpRouter.serve(
-  Layer.provideMerge(Producer, MetricsRoute).pipe(Layer.provide(RmqLive(settings.broker))),
-).pipe(
-  Layer.provide(NodeHttpServer.layer(createServer, { port: settings.metricsPort })),
-  // Every trace in this repo starts in this process. Without an OTLP endpoint
-  // this installs no tracer at all — see @egress/tracing.
-  Layer.provide(TracingLive("rmq-producer")),
+    return HttpRouter.serve(
+      Layer.provideMerge(Producer, MetricsRoute).pipe(Layer.provide(RmqLive(cfg.broker))),
+    ).pipe(
+      Layer.provide(NodeHttpServer.layer(createServer, { port: cfg.metricsPort })),
+      // Every trace in this repo starts in this process. Without an OTLP
+      // endpoint this installs no tracer at all — see @egress/tracing.
+      Layer.provide(TracingLive("rmq-producer")),
+    );
+  }),
 );
 
 NodeRuntime.runMain(Layer.launch(MainLayer));

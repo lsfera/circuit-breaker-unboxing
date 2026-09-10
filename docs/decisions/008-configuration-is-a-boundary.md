@@ -111,3 +111,44 @@ A deployment that was quietly wrong now fails to start. That is the intent, and
 it is a real behaviour change: `RMQ=rabbitmq` and `REDRIVE_ON_CLOSE=1` used to
 start and misbehave, and now stop with a message. Every deployment in this repo
 already writes values that decode.
+
+## Read as a dependency, not at module load
+
+Added 2026-09-10, applying EffectPatterns'
+[access-config-in-context](https://github.com/PaulJPhilp/EffectPatterns/blob/main/content/published/patterns/core-concepts/access-config-in-context.mdx).
+
+The half of that pattern this repo already had: `Config` and `HaSettings` are
+`Context.Reference`s with defaults, `Aggregator.ts` does `const cfg = yield*
+Config`, and tests override them with `Effect.provideService`. Config that is
+read *at depth* was already a dependency rather than an argument.
+
+The half it did not: process settings were read at module load by a `load` that
+called `process.exit(1)` on a bad value. Fail-fast was right; owning the
+process's fate from inside a library module was not. Importing
+`@egress/config/Settings.ts` — or any `main.ts` — was enough to end a process,
+which is also why none of them could be imported by a test.
+
+`read` returns an `Effect` that fails with `SettingsUnreadable`, and each
+composition root is `Layer.unwrap(Effect.gen(...))` around the graph it builds
+from those settings. Nothing below an unbuilt layer is built, so a bad value
+still stops the process before a socket is opened; the difference is that the
+failure now travels the way every other startup failure does. Measured:
+
+```
+$ FLEET_SIZE=five node --experimental-strip-types src/main.ts
+ERROR (#2): SettingsUnreadable: rmq-daemon: SchemaError(Expected a string
+  representing a finite number at ["FLEET_SIZE"])
+exit=1
+```
+
+Same outcome as before, one difference worth knowing: `runMain` prints a stack
+with it, where `logFatal` printed one line. The variable is still named on the
+first line.
+
+What was *not* adopted: settings as a service every module yields. The pure
+cores take their configuration as arguments on purpose — that is what makes
+them total functions testable with plain assertions — and `makeRedrive`'s
+options are the coupling written down deliberately. Passing values into a layer
+at the composition root is dependency injection; it is not the prop-drilling the
+pattern warns about.
+
