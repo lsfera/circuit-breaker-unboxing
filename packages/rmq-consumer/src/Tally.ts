@@ -1,3 +1,4 @@
+import { Array as Arr, Result } from "effect";
 import type { ContractState } from "./Contract.ts";
 import type { EventType } from "@egress/domain/Model.ts";
 
@@ -86,11 +87,14 @@ type Delta = {
 };
 
 export const since = (published: Snapshot, current: Snapshot): Delta => {
-  const byType: Array<readonly [EventType, number]> = [];
-  for (const [type, count] of current.byType) {
+  // Only types seen since the last publish carry a delta; the rest are absent
+  // rather than zero, so nothing republishes a counter that has not moved.
+  // `Result.fail` is this combinator's "skip" — see subscriber.ts for the same
+  // note. A type that has not moved since the last publish is absent, not zero.
+  const byType = Arr.filterMap(current.byType, ([type, count]) => {
     const seen = count - (published.byType.get(type) ?? 0);
-    if (seen > 0) byType.push([type, seen] as const);
-  }
+    return seen > 0 ? Result.succeed([type, seen] as const) : Result.fail(type);
+  });
   return {
     ok: current.ok - published.ok,
     failed: current.failed - published.failed,

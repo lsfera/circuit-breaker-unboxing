@@ -1,4 +1,4 @@
-import { Option as O } from "effect";
+import { Array as Arr, Option as O, Result } from "effect";
 import { Reason, State, Vote } from "./Model.ts";
 import type { AggregatorConfig, ApiSnapshot, ReplicaReport } from "./Model.ts";
 
@@ -84,14 +84,14 @@ export const ingest = (
   return { ...self, replicas };
 };
 
-const voteOf = (slot: ReplicaSlot): Vote => {
-  const { healthy, total } = slot.report;
-  if (total > 0 && healthy === 0) return Vote.DOWN;
-  if (healthy < total) return Vote.DEGRADED;
-  // No hosts ejected, but the replica is shedding on its own thresholds.
-  if (slot.overflowSinceTick > 0) return Vote.DEGRADED;
-  return Vote.OK;
-};
+const voteOf = ({ report: { healthy, total }, overflowSinceTick }: ReplicaSlot): Vote =>
+  total > 0 && healthy === 0
+    ? Vote.DOWN
+    : // Either some hosts are ejected, or none are and the replica is still
+      // shedding on its own thresholds. Both are the same vote.
+      healthy < total || overflowSinceTick > 0
+      ? Vote.DEGRADED
+      : Vote.OK;
 
 const transition = (
   self: BreakerState,
@@ -237,55 +237,65 @@ export const step = (
   now: number,
   cfg: AggregatorConfig,
 ): [BreakerState, O.Option<Transition>] => {
-  const replicas = new Map<string, ReplicaSlot>();
-  for (const [id, slot] of self.replicas) {
-    if (now - slot.report.observedAt > cfg.replicaTimeoutMs) continue;
-    replicas.set(id, slot);
-  }
-  // Nothing is reporting: hold the last verdict rather than invent one from
-  // an empty fleet.
-  if (replicas.size === 0) return [{ ...self, replicas }, O.none()];
+  // Each surviving replica keeps its vote for this tick, and its accumulated
+  // overflow is consumed by being counted here.
+  const voted = Arr.filterMap([...self.replicas], ([id, slot]) =>
+    now - slot.report.observedAt > cfg.replicaTimeoutMs
+      ? Result.fail(id)
+      : Result.succeed([id, { ...slot, vote: voteOf(slot), overflowSinceTick: 0 }] as const),
+  );
 
-  const votes: Record<Vote, number> = { OK: 0, DEGRADED: 0, DOWN: 0 };
-  let healthy = 0;
-  let total = 0;
-  let overflowDrove = false;
+  return Arr.match(voted, {
+    // Nothing is reporting: hold the last verdict rather than invent one from
+    // an empty fleet.
+    onEmpty: () => [{ ...self, replicas: new Map() }, O.none()],
+    onNonEmpty: (live) => {
+      const { votes, healthy, total, overflowDrove } = Arr.reduce(
+        live,
+        {
+          votes: { OK: 0, DEGRADED: 0, DOWN: 0 } as Record<Vote, number>,
+          healthy: 0,
+          total: 0,
+          overflowDrove: false,
+        },
+        (acc, [, slot]) => ({
+          votes: { ...acc.votes, [slot.vote]: acc.votes[slot.vote] + 1 },
+          healthy: acc.healthy + slot.report.healthy,
+          total: acc.total + slot.report.total,
+          // No hosts ejected, yet the replica still votes DEGRADED: the
+          // impairment came from its own shedding thresholds.
+          overflowDrove:
+            acc.overflowDrove ||
+            (slot.vote === Vote.DEGRADED && slot.report.healthy === slot.report.total),
+        }),
+      );
 
-  for (const [id, slot] of replicas) {
-    const vote = voteOf(slot);
-    votes[vote] += 1;
-    if (vote === Vote.DEGRADED && slot.report.healthy === slot.report.total) {
-      overflowDrove = true;
-    }
-    healthy += slot.report.healthy;
-    total += slot.report.total;
-    replicas.set(id, { ...slot, vote, overflowSinceTick: 0 }); // consumed
-  }
+      const reporting = live.length;
+      const candidate: Candidate =
+        votes.DOWN / reporting >= cfg.quorum
+          ? State.OPEN
+          : (votes.DOWN + votes.DEGRADED) / reporting >= cfg.quorum
+            ? State.DEGRADED
+            : State.CLOSED;
 
-  const reporting = replicas.size;
-  const candidate: Candidate =
-    votes.DOWN / reporting >= cfg.quorum
-      ? State.OPEN
-      : (votes.DOWN + votes.DEGRADED) / reporting >= cfg.quorum
-        ? State.DEGRADED
-        : State.CLOSED;
+      const next: BreakerState = {
+        ...self,
+        replicas: new Map(live),
+        lastVotes: votes,
+        lastHealthy: Math.round(healthy / reporting),
+        lastTotal: Math.round(total / reporting),
+        candidate,
+        candidateSince: candidate !== self.candidate ? now : self.candidateSince,
+      };
 
-  const next: BreakerState = {
-    ...self,
-    replicas,
-    lastVotes: votes,
-    lastHealthy: Math.round(healthy / reporting),
-    lastTotal: Math.round(total / reporting),
-    candidate,
-    candidateSince: candidate !== self.candidate ? now : self.candidateSince,
-  };
-
-  return RESOLVE[next.state][candidate](next, now, {
-    cfg,
-    dwelled: now - next.candidateSince >= cfg.dwellMs,
-    settled: now - next.changedAt >= cfg.minStateMs,
-    allGone: votes.DOWN === reporting,
-    overflowDrove,
+      return RESOLVE[next.state][candidate](next, now, {
+        cfg,
+        dwelled: now - next.candidateSince >= cfg.dwellMs,
+        settled: now - next.changedAt >= cfg.minStateMs,
+        allGone: votes.DOWN === reporting,
+        overflowDrove,
+      });
+    },
   });
 };
 

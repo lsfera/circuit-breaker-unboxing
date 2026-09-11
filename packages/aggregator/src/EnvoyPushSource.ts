@@ -1,4 +1,4 @@
-import { Clock, Effect, Layer, Metric } from "effect";
+import { Array as Arr, Clock, Effect, Layer, Metric, Option as O, Result } from "effect";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import { dirname, join } from "node:path";
@@ -50,19 +50,23 @@ type StreamMetricsMessage = {
  * shared. Turning that option on shortens the names and the shared regex then
  * matches nothing at all.
  */
-const flatten = (families: ReadonlyArray<MetricFamily>) => {
-  const stats: Array<{ name: string; value: number }> = [];
-  for (const family of families) {
-    const name = family.name;
-    if (name === undefined) continue;
-    for (const entry of family.metric ?? []) {
-      const value = entry.counter?.value ?? entry.gauge?.value;
-      if (value === undefined) continue;
-      stats.push({ name, value: Number(value) });
-    }
-  }
-  return { stats };
-};
+const flatten = (families: ReadonlyArray<MetricFamily>) => ({
+  // A family with no name, and an entry that is neither a counter nor a gauge,
+  // are both absences rather than zeroes — `filterMap` drops them where the
+  // loops used to `continue` past them.
+  stats: Arr.flatMap(families, (family) =>
+    O.match(O.fromUndefinedOr(family.name), {
+      onNone: () => [],
+      onSome: (name) =>
+        Arr.filterMap(family.metric ?? [], (entry) => {
+          const value = entry.counter?.value ?? entry.gauge?.value;
+          return value === undefined
+            ? Result.fail(name)
+            : Result.succeed({ name, value: Number(value) });
+        }),
+    }),
+  ),
+});
 
 type Snapshot = {
   readonly stats: ReadonlyArray<{ name: string; value: number }>;

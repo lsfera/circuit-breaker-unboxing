@@ -1,4 +1,15 @@
-import { Clock, Context, Duration, Effect, Layer, Metric, Option as O, Ref, Schedule } from "effect";
+import {
+  Array as Arr,
+  Clock,
+  Context,
+  Duration,
+  Effect,
+  Layer,
+  Metric,
+  Option as O,
+  Ref,
+  Schedule,
+} from "effect";
 import * as Breaker from "@egress/domain/Breaker.ts";
 import { Config, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
 import { CheckpointStore, HaSettings, LeaderElection } from "./Coordination.ts";
@@ -6,7 +17,7 @@ import { EventBus, EventSink, snapshotEvent, stateChanged } from "./Events.ts";
 import { FleetSource } from "./FleetSource.ts";
 import * as Telemetry from "./Telemetry.ts";
 import { formatToken } from "./Coordination.ts";
-import type { Checkpoint, LeaseToken } from "./Coordination.ts";
+import type { Checkpoint, CoordinationUnavailable, LeaseToken } from "./Coordination.ts";
 import type { ApiSnapshot, CircuitEvent, State } from "@egress/domain/Model.ts";
 
 type Registry = {
@@ -148,10 +159,13 @@ export const AggregatorLayer = Layer.effect(
           Effect.flatMap((now) => Ref.set(lastTick, now)),
         );
         const tokenOpt = yield* leader.tryAcquireOrRenew(ha.instanceId, ha.leaseTtlMs);
-        if (!(yield* Ref.get(coordinationOk))) {
-          yield* Ref.set(coordinationOk, true);
-          yield* Effect.logInfo(`${ha.instanceId}: coordination is reachable again`);
-        }
+        yield* Ref.getAndSet(coordinationOk, true).pipe(
+          Effect.flatMap((wasOk) =>
+            wasOk
+              ? Effect.void
+              : Effect.logInfo(`${ha.instanceId}: coordination is reachable again`),
+          ),
+        );
         yield* Metric.update(Telemetry.isLeader, O.isSome(tokenOpt) ? 1 : 0);
 
         if (O.isNone(tokenOpt)) {
@@ -196,45 +210,57 @@ export const AggregatorLayer = Layer.effect(
         const checkpointByApi = new Map(rehydrated);
 
         const events = yield* Ref.modify(registry, (reg) => {
-          const breakers = new Map(reg.breakers);
-          const lastSnapshotAt = new Map(reg.lastSnapshotAt);
-
-          for (const report of reports) {
-            const current =
-              breakers.get(report.apiId) ??
-              seedFromCheckpoint(
-                report.apiId,
-                checkpointByApi.get(report.apiId) ?? O.none(),
-                cfg,
-                now,
-              );
-            breakers.set(report.apiId, Breaker.ingest(current, report));
-          }
-
-          const out = [...breakers].flatMap(([apiId, before]) => {
-            const [after, change] = Breaker.step(before, now, cfg);
-            breakers.set(apiId, after);
-
-            // A transition wins over the heartbeat snapshot: both carry the
-            // same state, and only the transition carries where it came from.
-            const event = O.orElse(
-              O.map(change, (transition) =>
-                stateChanged(Breaker.snapshot(after), transition.from, now),
+          // Several replicas report the same API, so this is a left fold and
+          // not a map: each report folds into the breaker the last one left.
+          const ingested = Arr.reduce(reports, new Map(reg.breakers), (acc, report) =>
+            acc.set(
+              report.apiId,
+              Breaker.ingest(
+                acc.get(report.apiId) ??
+                  seedFromCheckpoint(
+                    report.apiId,
+                    checkpointByApi.get(report.apiId) ?? O.none(),
+                    cfg,
+                    now,
+                  ),
+                report,
               ),
-              () =>
-                now - (lastSnapshotAt.get(apiId) ?? 0) >= cfg.snapshotMs
-                  ? O.some(snapshotEvent(Breaker.snapshot(after), now))
-                  : O.none(),
-            );
+            ),
+          );
 
-            // Anything published restarts the snapshot clock, so a transition
-            // is not followed by a redundant heartbeat. Stated once: the two
-            // branches used to stamp it separately.
-            const emitted = O.toArray(event);
-            if (emitted.length > 0) lastSnapshotAt.set(apiId, now);
-            return emitted;
+          const stepped = Arr.map([...ingested], ([apiId, before]) => {
+            const [after, change] = Breaker.step(before, now, cfg);
+            return {
+              apiId,
+              after,
+              // A transition wins over the heartbeat snapshot: both carry the
+              // same state, and only the transition carries where it came from.
+              event: O.orElse(
+                O.map(change, (transition) =>
+                  stateChanged(Breaker.snapshot(after), transition.from, now),
+                ),
+                () =>
+                  now - (reg.lastSnapshotAt.get(apiId) ?? 0) >= cfg.snapshotMs
+                    ? O.some(snapshotEvent(Breaker.snapshot(after), now))
+                    : O.none(),
+              ),
+            };
           });
-          return [out as ReadonlyArray<CircuitEvent>, { breakers, lastSnapshotAt }];
+
+          return [
+            Arr.flatMap(stepped, ({ event }) => O.toArray(event)) as ReadonlyArray<CircuitEvent>,
+            {
+              breakers: new Map(Arr.map(stepped, ({ apiId, after }) => [apiId, after] as const)),
+              // Anything published restarts that API's snapshot clock, so a
+              // transition is not followed by a redundant heartbeat.
+              lastSnapshotAt: Arr.reduce(
+                stepped,
+                new Map(reg.lastSnapshotAt),
+                (acc, { apiId, event }) =>
+                  O.match(event, { onNone: () => acc, onSome: () => acc.set(apiId, now) }),
+              ),
+            },
+          ];
         });
 
         // Checkpoint every transition under this tick's token before telling
@@ -243,50 +269,70 @@ export const AggregatorLayer = Layer.effect(
         // let a demoted instance keep talking; the remaining events in this
         // tick are dropped, not queued, since the new leader will re-derive
         // them itself from the next poll.
-        const publishable: CircuitEvent[] = [];
-        for (const e of events) {
-          if (e.type === SEQUENCED_EVENT) {
-            const after = (yield* Ref.get(registry)).breakers.get(e.data.apiId);
-            const checkpoint: Checkpoint = {
-              state: e.data.state,
-              // No cast: the published event's `reason` is the vocabulary
-              // itself now, so what decodes off the wire is already a Reason.
-              reason: e.data.reason,
-              sequence: e.data.sequence,
-              changedAt: now,
-              openBackoffMs: after?.openBackoffMs ?? cfg.openMs,
-            };
-            const fenced = yield* checkpoints.save(e.data.apiId, token, checkpoint).pipe(
-              Effect.as(false),
-              Effect.catchTag("CheckpointFenced", (err) =>
-                Effect.andThen(
-                  Effect.logWarning(
-                    `lost leadership publishing ${e.data.apiId}: ` +
-                    `token ${formatToken(err.attempted)} superseded by ` +
-                    O.match(err.current, {
-                      onNone: () => "an unreadable one",
-                      onSome: formatToken,
-                    }),
-                  ),
-                  Effect.succeed(true),
-                ),
-              ),
-            );
-            if (fenced) {
-              // Same demotion as losing the lease outright, registry drop
-              // included — being fenced *is* how this instance finds out
-              // someone else has already moved the sequence on.
-              yield* demote;
-              yield* Metric.update(Telemetry.isLeader, 0);
-              yield* Metric.update(
-                Metric.withAttributes(Telemetry.fencingConflicts, { apiId: e.data.apiId }),
-                1,
-              );
-              break;
-            }
-          }
-          publishable.push(e);
-        }
+        type Publishing = {
+          readonly publishable: ReadonlyArray<CircuitEvent>;
+          readonly fenced: boolean;
+        };
+        const { publishable } = yield* Effect.reduce(
+          events,
+          (): Publishing => ({ publishable: [], fenced: false }),
+          (acc, e): Effect.Effect<Publishing, CoordinationUnavailable> =>
+            // Once fenced, the remaining events are dropped rather than
+            // queued: the new leader re-derives them from its own next poll.
+            acc.fenced
+              ? Effect.succeed(acc)
+              : e.type !== SEQUENCED_EVENT
+                ? Effect.succeed({ ...acc, publishable: Arr.append(acc.publishable, e) })
+                : Effect.gen(function* () {
+                    const after = (yield* Ref.get(registry)).breakers.get(e.data.apiId);
+                    const checkpoint: Checkpoint = {
+                      state: e.data.state,
+                      // No cast: the published event's `reason` is the vocabulary
+                      // itself now, so what decodes off the wire is already a Reason.
+                      reason: e.data.reason,
+                      sequence: e.data.sequence,
+                      changedAt: now,
+                      openBackoffMs: after?.openBackoffMs ?? cfg.openMs,
+                    };
+                    const fenced = yield* checkpoints.save(e.data.apiId, token, checkpoint).pipe(
+                      Effect.as(false),
+                      Effect.catchTag("CheckpointFenced", (err) =>
+                        Effect.andThen(
+                          Effect.logWarning(
+                            `lost leadership publishing ${e.data.apiId}: ` +
+                            `token ${formatToken(err.attempted)} superseded by ` +
+                            O.match(err.current, {
+                              onNone: () => "an unreadable one",
+                              onSome: formatToken,
+                            }),
+                          ),
+                          Effect.succeed(true),
+                        ),
+                      ),
+                    );
+                    // Same demotion as losing the lease outright, registry drop
+                    // included — being fenced *is* how this instance finds out
+                    // someone else has already moved the sequence on.
+                    return yield* fenced
+                      ? Effect.as(
+                          Effect.all(
+                            [
+                              demote,
+                              Metric.update(Telemetry.isLeader, 0),
+                              Metric.update(
+                                Metric.withAttributes(Telemetry.fencingConflicts, {
+                                  apiId: e.data.apiId,
+                                }),
+                                1,
+                              ),
+                            ],
+                            { discard: true },
+                          ),
+                          { ...acc, fenced: true },
+                        )
+                      : Effect.succeed({ ...acc, publishable: Arr.append(acc.publishable, e) });
+                  }),
+        );
 
         // Gauges reflect the fleet's current view every tick, whether or not
         // anything published — a dashboard watching mid-dwell should not look
@@ -338,23 +384,21 @@ export const AggregatorLayer = Layer.effect(
           ),
         );
 
-        for (const e of publishable) {
-          if (e.type === SEQUENCED_EVENT) {
-            yield* Metric.update(
-              Metric.withAttributes(Telemetry.circuitTransitions, {
-                apiId: e.data.apiId,
-                reason: e.data.reason,
-                state: e.data.state,
-              }),
+        yield* Effect.forEach(
+          publishable,
+          (e) =>
+            Metric.update(
+              e.type === SEQUENCED_EVENT
+                ? Metric.withAttributes(Telemetry.circuitTransitions, {
+                    apiId: e.data.apiId,
+                    reason: e.data.reason,
+                    state: e.data.state,
+                  })
+                : Metric.withAttributes(Telemetry.circuitSnapshots, { apiId: e.data.apiId }),
               1,
-            );
-          } else {
-            yield* Metric.update(
-              Metric.withAttributes(Telemetry.circuitSnapshots, { apiId: e.data.apiId }),
-              1,
-            );
-          }
-        }
+            ),
+          { discard: true },
+        );
 
         // Publish to the in-process bus first (the console), then hand to the
         // sink, which forks delivery so a slow subscriber cannot stall the loop.
@@ -399,13 +443,16 @@ export const AggregatorLayer = Layer.effect(
           // cannot fire on a metric that is absent. Found by partitioning one
           // instance from Redis and watching the gauge vanish instead of drop.
           yield* Metric.update(Telemetry.isLeader, 0);
-          if (yield* Ref.get(coordinationOk)) {
-            yield* Ref.set(coordinationOk, false);
-            yield* Effect.logWarning(
-              `${ha.instanceId}: coordination unavailable during ${err.operation}, ` +
-              `standing down until it returns — ${err.cause}`,
-            );
-          }
+          yield* Ref.getAndSet(coordinationOk, false).pipe(
+            Effect.flatMap((wasOk) =>
+              wasOk
+                ? Effect.logWarning(
+                    `${ha.instanceId}: coordination unavailable during ${err.operation}, ` +
+                    `standing down until it returns — ${err.cause}`,
+                  )
+                : Effect.void,
+            ),
+          );
           return [] as ReadonlyArray<CircuitEvent>;
         }),
       ),
@@ -435,9 +482,8 @@ export const AggregatorLayer = Layer.effect(
      * Best effort: if the coordinator is unreachable the lease expires the old
      * way, and failing here would only make a clean shutdown noisy.
      */
-    const releaseOnShutdown = Effect.gen(function* () {
-      if (!(yield* Ref.get(leadership)).isLeader) return;
-      yield* leader.release(ha.instanceId).pipe(
+    const releaseOnShutdown = Effect.when(
+      leader.release(ha.instanceId).pipe(
         Effect.flatMap(() =>
           Effect.logInfo(`${ha.instanceId}: lease released on shutdown`),
         ),
@@ -447,8 +493,9 @@ export const AggregatorLayer = Layer.effect(
             `(${err.operation}) — it will expire instead`,
           ),
         ),
-      );
-    });
+      ),
+      Ref.get(leadership).pipe(Effect.map((held) => held.isLeader)),
+    ).pipe(Effect.asVoid);
 
     // The loop is a Schedule, not a setInterval. That is what lets TestClock
     // drive thousands of simulated seconds instantly and deterministically,

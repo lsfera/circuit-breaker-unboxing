@@ -497,12 +497,12 @@ export const runDaemon = (cfg: DaemonConfig) =>
         { discard: true },
       );
 
-      for (const [type, seen] of delta.byType) {
-        yield* Metric.update(
-          Metric.withAttributes(Telemetry.controlEvents, { ...attrs, type }),
-          seen,
-        );
-      }
+      yield* Effect.forEach(
+        delta.byType,
+        ([type, seen]) =>
+          Metric.update(Metric.withAttributes(Telemetry.controlEvents, { ...attrs, type }), seen),
+        { discard: true },
+      );
     });
 
     /**
