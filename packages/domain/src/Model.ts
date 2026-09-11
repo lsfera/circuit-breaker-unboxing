@@ -168,11 +168,26 @@ export const decodeCircuitEvent: (body: string) => Result.Result<CircuitEvent, D
   readerFor(CircuitEvent);
 
 /**
+ * The CloudEvents types this control plane publishes, closed by the schema that
+ * publishes them: anything holding one of these is typed against the union
+ * rather than `string`, so a misspelling is a compile error rather than an
+ * event that silently matches nothing.
+ */
+export type EventType = CircuitEvent["type"];
+
+/**
  * The one event type carrying the delivery guarantee. Snapshots deliberately
  * republish the current sequence so a late subscriber can sync, which is why
  * they are exempt rather than counted as duplicates.
+ *
+ * `satisfies`, not an annotation: the literal type is what lets
+ * `event.type === SEQUENCED_EVENT` narrow, and the check is what keeps the
+ * constant honest if the schema's union changes.
  */
-export const SEQUENCED_EVENT = "egress.circuit.state_changed";
+export const SEQUENCED_EVENT = "egress.circuit.state_changed" satisfies EventType;
+
+/** The heartbeat, exempt from the sequence rule for the reason above. */
+export const SNAPSHOT_EVENT = "egress.circuit.snapshot" satisfies EventType;
 
 /** What a sequence means against the highest already seen for that API. */
 export type SequenceVerdict = "first" | "duplicate" | "gap" | "next";

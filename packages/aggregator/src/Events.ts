@@ -11,10 +11,10 @@ import {
   Stream,
 } from "effect";
 import { randomUUID } from "node:crypto";
-import { DeliveryFailed } from "@egress/domain/Model.ts";
+import { DeliveryFailed, SEQUENCED_EVENT, SNAPSHOT_EVENT } from "@egress/domain/Model.ts";
 import { Outbox, OUTBOX_DRAIN_LIMIT } from "./Outbox.ts";
 import * as Telemetry from "./Telemetry.ts";
-import type { ApiSnapshot, CircuitEvent, State } from "@egress/domain/Model.ts";
+import type { ApiSnapshot, CircuitEvent, EventType, State } from "@egress/domain/Model.ts";
 
 export const SOURCE = "egress-proxy/control-plane";
 
@@ -52,7 +52,7 @@ export const DELIVERY_RETRY = {
  * why no test could assert what `time` should be.
  */
 const build = (
-  type: CircuitEvent["type"],
+  type: EventType,
   snap: ApiSnapshot,
   previousState: State | null,
   now: number,
@@ -82,10 +82,10 @@ const build = (
 // for an API genuinely has no predecessor — see
 // docs/decisions/006-representing-absence.md.
 export const stateChanged = (snap: ApiSnapshot, previous: State | null, now: number) =>
-  build("egress.circuit.state_changed", snap, previous, now);
+  build(SEQUENCED_EVENT, snap, previous, now);
 
 export const snapshotEvent = (snap: ApiSnapshot, now: number) =>
-  build("egress.circuit.snapshot", snap, null, now);
+  build(SNAPSHOT_EVENT, snap, null, now);
 
 // ---------------------------------------------------------------------------
 // EventBus — one PubSub, many subscribers. Backpressure and per-subscriber

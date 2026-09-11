@@ -1,6 +1,6 @@
 import { Clock, Context, Duration, Effect, Layer, Metric, Option as O, Ref, Schedule } from "effect";
 import * as Breaker from "@egress/domain/Breaker.ts";
-import { Config } from "@egress/domain/Model.ts";
+import { Config, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
 import { CheckpointStore, HaSettings, LeaderElection } from "./Coordination.ts";
 import { EventBus, EventSink, snapshotEvent, stateChanged } from "./Events.ts";
 import { FleetSource } from "./FleetSource.ts";
@@ -245,7 +245,7 @@ export const AggregatorLayer = Layer.effect(
         // them itself from the next poll.
         const publishable: CircuitEvent[] = [];
         for (const e of events) {
-          if (e.type === "egress.circuit.state_changed") {
+          if (e.type === SEQUENCED_EVENT) {
             const after = (yield* Ref.get(registry)).breakers.get(e.data.apiId);
             const checkpoint: Checkpoint = {
               state: e.data.state,
@@ -339,7 +339,7 @@ export const AggregatorLayer = Layer.effect(
         );
 
         for (const e of publishable) {
-          if (e.type === "egress.circuit.state_changed") {
+          if (e.type === SEQUENCED_EVENT) {
             yield* Metric.update(
               Metric.withAttributes(Telemetry.circuitTransitions, {
                 apiId: e.data.apiId,

@@ -786,3 +786,34 @@ correct-looking pieces of code, which no grep finds.
   `switch (classifySequence(...))` stays a `switch`: it matches a string union,
   not a tagged type, and `Match` over it would be heavier than the thing it
   replaced.
+
+- **The constant existed so the rule would have one name; four call sites spelt
+  it out instead.** `SEQUENCED_EVENT` is the published delivery guarantee's one
+  name, and `docs/decisions/007` argues at length that the rule must not be
+  written twice. The *string* was written five times anyway: in `Events.ts`
+  building both event kinds, twice in `Aggregator.ts` deciding what to
+  checkpoint and publish, and in `driver.ts` — which already imports
+  `SEQUENCED_EVENT` and uses it correctly sixty lines away.
+
+  Nothing was broken, and that is the point: a misspelling at any of them
+  compiles and matches nothing, so the aggregator would simply stop
+  checkpointing, or the driver would report seq=0 and read it as a pass.
+
+  `EventType = CircuitEvent["type"]` closes the union at the schema that
+  publishes it, and both constants are `satisfies EventType` rather than
+  annotated — the annotation would widen them to the union and break the
+  narrowing that `event.type === SEQUENCED_EVENT` relies on. Both failure modes
+  are now compile errors, measured:
+
+      build("egress.circuit.state_change", ...)  -> TS2345 not assignable to
+                                                    the schema's union
+      SNAPSHOT_EVENT = "egress.circuit.snapshots" -> TS1360 does not satisfy
+
+  `Contract.observe(self, eventType, sequence)` and `Tally`'s `byType` maps took
+  the union too; they were `string`, which is how an event type that matches no
+  branch gets counted under its own misspelling.
+
+  Not a tagged union: the discriminator here is CloudEvents' `type` field, which
+  is the wire contract. `Schema.TaggedStruct` puts `_tag` in the *encoded* form,
+  so tagging these would either change what every subscriber receives or need a
+  transform on both sides — for exhaustiveness the closed union already gives.

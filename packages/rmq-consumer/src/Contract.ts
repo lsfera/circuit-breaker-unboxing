@@ -1,5 +1,6 @@
 import { Option as O } from "effect";
 import { classifySequence, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
+import type { EventType } from "@egress/domain/Model.ts";
 
 /**
  * The delivery contract, observed from the consumer's side of the broker.
@@ -32,7 +33,7 @@ export const initialContract: ContractState = {
 /** Fold one control-plane event into the observation. */
 export const observe = (
   self: ContractState,
-  eventType: string,
+  eventType: EventType,
   sequence: number,
 ): ContractState => {
   if (eventType !== SEQUENCED_EVENT) return self;

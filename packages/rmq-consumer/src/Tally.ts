@@ -1,4 +1,5 @@
 import type { ContractState } from "./Contract.ts";
+import type { EventType } from "@egress/domain/Model.ts";
 
 /**
  * Counting for the metrics registry: plain numbers on the hot path, flushed
@@ -18,7 +19,7 @@ type Counts = {
   redriven: number;
   undecodable: number;
   /** Control-plane events by CloudEvents type. */
-  readonly byType: Map<string, number>;
+  readonly byType: Map<EventType, number>;
 };
 
 export const zero = (): Counts => ({
@@ -30,7 +31,7 @@ export const zero = (): Counts => ({
   byType: new Map(),
 });
 
-export const observed = (counts: Counts, type: string): void => {
+export const observed = (counts: Counts, type: EventType): void => {
   counts.byType.set(type, (counts.byType.get(type) ?? 0) + 1);
 };
 
@@ -47,7 +48,7 @@ type Snapshot = {
   readonly undecodable: number;
   readonly gaps: number;
   readonly duplicates: number;
-  readonly byType: ReadonlyMap<string, number>;
+  readonly byType: ReadonlyMap<EventType, number>;
 };
 
 export const nothing: Snapshot = {
@@ -81,11 +82,11 @@ type Delta = {
   readonly undecodable: number;
   readonly gaps: number;
   readonly duplicates: number;
-  readonly byType: ReadonlyArray<readonly [type: string, count: number]>;
+  readonly byType: ReadonlyArray<readonly [type: EventType, count: number]>;
 };
 
 export const since = (published: Snapshot, current: Snapshot): Delta => {
-  const byType: Array<readonly [string, number]> = [];
+  const byType: Array<readonly [EventType, number]> = [];
   for (const [type, count] of current.byType) {
     const seen = count - (published.byType.get(type) ?? 0);
     if (seen > 0) byType.push([type, seen] as const);

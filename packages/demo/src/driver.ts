@@ -406,7 +406,7 @@ const run = (settings: Settings) => {
     yield* setFailureRate(API, 0);
     const s0 = yield* getEvents;
     const start =
-      s0.events.find((e) => e.type === "egress.circuit.state_changed" && e.data.apiId === API)
+      s0.events.find((e) => e.type === SEQUENCED_EVENT && e.data.apiId === API)
         ?.data.sequence ?? 0;
     console.log(`  waiting a moment so the console reads as calm before the incident starts...`);
     yield* Effect.sleep(Duration.seconds(2));

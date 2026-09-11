@@ -1,12 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Option as O } from "effect";
-import { SEQUENCED_EVENT } from "@egress/domain/Model.ts";
+import { SEQUENCED_EVENT, SNAPSHOT_EVENT } from "@egress/domain/Model.ts";
+import type { EventType } from "@egress/domain/Model.ts";
 import { initialContract, observe } from "../src/Contract.ts";
 import type { ContractState } from "../src/Contract.ts";
 
 const fold = (
-  events: ReadonlyArray<readonly [type: string, sequence: number]>,
+  events: ReadonlyArray<readonly [type: EventType, sequence: number]>,
 ): ContractState => events.reduce((s, [type, seq]) => observe(s, type, seq), initialContract);
 
 const changes = (...sequences: ReadonlyArray<number>) =>
@@ -51,8 +52,8 @@ test("a sequence that goes backwards is a duplicate, and does not rewind the hig
 test("snapshots repeat the current sequence and are exempt", () => {
   const c = fold([
     [SEQUENCED_EVENT, 1],
-    ["egress.circuit.snapshot", 1],
-    ["egress.circuit.snapshot", 1],
+    [SNAPSHOT_EVENT, 1],
+    [SNAPSHOT_EVENT, 1],
     [SEQUENCED_EVENT, 2],
   ]);
   assert.equal(c.duplicates, 0, "a snapshot repeating the sequence is the contract, not a breach");
