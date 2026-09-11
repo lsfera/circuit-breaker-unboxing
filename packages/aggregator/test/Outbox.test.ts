@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Effect } from "effect";
+import { Effect, Option as O } from "effect";
 import { makeInMemoryOutbox, OUTBOX_MAX_PER_API } from "../src/Outbox.ts";
 import { SOURCE } from "../src/Events.ts";
+import type { Entry } from "../src/Outbox.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 
 /**
@@ -32,6 +33,14 @@ const event = (apiId: string, sequence: number): CircuitEvent => ({
   },
 });
 
+/**
+ * `peek` returns positions, not just events. `None` is an entry that no longer
+ * decodes, which only the Redis outbox can produce — in memory it would be a
+ * bug, so it reads as -1 rather than being quietly skipped.
+ */
+const sequenceOf = (entry: Entry): number =>
+  O.match(entry, { onNone: () => -1, onSome: (e) => e.data.sequence });
+
 test("entries come back in the order they were appended, per API", async () => {
   const seen = await Effect.runPromise(
     Effect.gen(function* () {
@@ -41,7 +50,7 @@ test("entries come back in the order they were appended, per API", async () => {
 
       const payments = yield* outbox.peek("payments", 10);
       const apis = yield* outbox.apis;
-      return { payments: payments.map((e) => e.data.sequence), apis: [...apis].sort() };
+      return { payments: payments.map(sequenceOf), apis: [...apis].sort() };
     }),
   );
 
@@ -57,7 +66,7 @@ test("commit removes only what was delivered, and leaves the rest at the head", 
 
       // Two delivered, the third failed: exactly two may go.
       yield* outbox.commit("payments", 2);
-      const afterCommit = (yield* outbox.peek("payments", 10)).map((e) => e.data.sequence);
+      const afterCommit = (yield* outbox.peek("payments", 10)).map(sequenceOf);
       const depth = yield* outbox.depth("payments");
 
       yield* outbox.commit("payments", 1);
@@ -85,7 +94,7 @@ test("the bound drops the oldest entries and says how many", async () => {
       const head = yield* outbox.peek("payments", 1);
       return {
         dropped,
-        first: head[0]?.data.sequence,
+        first: head[0] === undefined ? undefined : sequenceOf(head[0]),
         depth: yield* outbox.depth("payments"),
       };
     }),

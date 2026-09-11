@@ -4,6 +4,7 @@ import {
   Effect,
   Layer,
   Metric,
+  Option as O,
   PubSub,
   Ref,
   Schedule,
@@ -287,17 +288,37 @@ export const makeWebhookSink = (url: string): Effect.Effect<SinkImpl, never, Out
         let replayed = 0;
         for (const apiId of apis) {
           const pending = yield* outbox.peek(apiId, OUTBOX_DRAIN_LIMIT);
+          // `consumed` is what the commit trims, and counts entries this pass
+          // is done with — delivered or unreadable. `delivered` is what the
+          // subscriber actually took. They differ only when an entry no longer
+          // decodes, and conflating them is what leaves a delivered event in
+          // place to be sent twice.
+          let consumed = 0;
           let delivered = 0;
-          for (const event of pending) {
-            const ok = yield* post(event).pipe(
+          let unreadable = 0;
+          for (const entry of pending) {
+            if (O.isNone(entry)) {
+              consumed++;
+              unreadable++;
+              continue;
+            }
+            const ok = yield* post(entry.value).pipe(
               Effect.as(true),
               Effect.catchCause(() => Effect.succeed(false)),
             );
             if (!ok) break;
+            consumed++;
             delivered++;
           }
+          if (unreadable > 0) {
+            yield* Effect.logWarning(
+              `dropped ${unreadable} undeliverable outbox entr(ies) for ${apiId}: no longer decodable`,
+            );
+          }
+          if (consumed > 0) {
+            yield* outbox.commit(apiId, consumed);
+          }
           if (delivered > 0) {
-            yield* outbox.commit(apiId, delivered);
             yield* Metric.update(
               Metric.withAttributes(Telemetry.outboxReplayed, { apiId }),
               delivered,

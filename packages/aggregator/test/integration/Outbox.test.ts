@@ -2,7 +2,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
-import { Effect } from "effect";
+import { Effect, Option as O } from "effect";
 import {
   asRedisLike,
   freshPrefix,
@@ -177,7 +177,9 @@ test("a drain stops at the first event it cannot deliver, rather than skipping a
         const firstPass = yield* sink.drainOutbox;
         clearInterval(stopAfterTwo);
 
-        const stillPending = (yield* outbox.peek("payments", 10)).map((e) => e.data.sequence);
+        const stillPending = (yield* outbox.peek("payments", 10)).map((e) =>
+          O.match(e, { onNone: () => -1, onSome: (x) => x.data.sequence }),
+        );
 
         accepting = true;
         const secondPass = yield* sink.drainOutbox;
@@ -199,4 +201,59 @@ test("a drain stops at the first event it cannot deliver, rather than skipping a
     "and across both passes the subscriber sees every event exactly once, in order",
   );
   assert.equal(firstPass + secondPass, 3, "each event is committed exactly once");
+});
+
+/**
+ * The drain commits by count, and `peek` used to filter undecodable entries out
+ * of the list it returned — so the count no longer lined up with the stored
+ * positions the commit trims. An entry written by a replica on a different
+ * schema version (the realistic case: a rolling upgrade, sharing one Redis)
+ * therefore shifted every delivered event one place to the right, and the trim
+ * stopped short of the last one.
+ *
+ * Measured before the fix: an undecodable head in front of sequences 2 and 3
+ * delivered `[2, 3, 3]` — the duplicate this entire system exists to prevent,
+ * manufactured by the code that protects it. Alone, it was worse: the drain
+ * replayed 0 forever and the API never left the pending set.
+ */
+test("an entry that no longer decodes is dropped and committed past, not stepped around", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  accepting = true;
+  received = [];
+  const prefix = freshPrefix();
+  const key = `${prefix}:outbox:payments`;
+  const layer = RedisOutboxLayer(asRedisLike(redis()), prefix);
+
+  const { depthAfter, apisAfter, replayed } = await Effect.runPromise(
+    Effect.provide(
+      Effect.gen(function* () {
+        const outbox = yield* Outbox;
+        const sink = yield* makeWebhookSink(subscriberUrl);
+
+        for (const seq of [2, 3]) yield* outbox.append(event("payments", seq));
+        // Ahead of both: a well-formed JSON entry this version cannot decode.
+        yield* Effect.promise(() =>
+          redis().lpush(key, JSON.stringify({ specversion: "1.0", type: "from.the.future" })),
+        );
+
+        const replayed = yield* sink.drainOutbox;
+        return {
+          replayed,
+          depthAfter: yield* outbox.depth("payments"),
+          apisAfter: yield* outbox.apis,
+        };
+      }),
+      layer,
+    ),
+  );
+
+  assert.deepEqual(
+    received.map((r) => r.sequence),
+    [2, 3],
+    "the readable events go exactly once — the unreadable one must not shift them",
+  );
+  assert.equal(replayed, 2, "and only the delivered ones are counted as replayed");
+  assert.equal(depthAfter, 0, "the entry nobody can read is trimmed rather than retried forever");
+  assert.deepEqual(apisAfter, [], "so the API stops being listed instead of wedging the drain");
 });

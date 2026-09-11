@@ -696,3 +696,34 @@ applied to only some of the places it covers**, which accounted for most of the
 defects above, including the two that mattered: a checkpoint written every
 transition and read back never, and an endpoint quoting numbers it had not
 checked.
+
+## After the sweep: a rule the sweep could not see
+
+The table above is about *patterns*. This one was a disagreement between two
+correct-looking pieces of code, which no grep finds.
+
+- **The outbox drain committed by a count it no longer had.** `Outbox.peek`
+  filtered out entries that fail to decode — a deliberate choice, argued in a
+  comment: an event a subscriber cannot parse is worse than an event it never
+  sees. `drainPass` then delivered what came back and committed `delivered`,
+  and `commit` is an `LTRIM` over the *stored* list. Filtering broke the
+  correspondence between the two: every entry dropped on the way up shifted a
+  delivered event one position right, and the trim stopped short of it.
+
+  Measured against a real Redis before touching anything. An undecodable entry
+  ahead of sequences 2 and 3 delivered **`[2, 3, 3]`** — the duplicate the whole
+  system exists to prevent, produced by the code that protects it. An
+  undecodable entry alone was worse: `replayed 0` on every pass, forever, with
+  the API never leaving the pending set and its depth gauge stuck at 1 — an
+  alert that can never clear.
+
+  This is not hypothetical. The entries are written by whichever replica held
+  the lease, into a Redis all of them share, so an undecodable entry is what a
+  rolling upgrade that changes the event schema *produces*.
+
+  Fixed by making the absence explicit rather than erasing it: `peek` returns
+  `ReadonlyArray<Entry>` where `Entry = Option<CircuitEvent>`, so an unreadable
+  entry keeps its position, and the drain commits `consumed` — delivered plus
+  unreadable — rather than `delivered`. ADR 006's rule, applied to the one
+  place that had quietly dropped it: an absence that occupies a position must
+  be represented, not filtered away.

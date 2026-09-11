@@ -29,6 +29,17 @@ export const OUTBOX_MAX_PER_API = 500;
 /** How many entries one drain pass may replay per API. Bounded for the same reason the redrive is: a recovery must not become its own thundering herd. */
 export const OUTBOX_DRAIN_LIMIT = 50;
 
+/**
+ * One stored entry, in list order. `None` is an entry that no longer decodes —
+ * a version skew, or a corrupt write.
+ *
+ * It keeps its position rather than being filtered out on the way up, because
+ * a drain commits by *count*: an entry that vanished here would take a
+ * delivered event's position with it, and the trim would stop short and leave
+ * that event to be sent a second time.
+ */
+export type Entry = O.Option<CircuitEvent>;
+
 export class Outbox extends Context.Service<
   Outbox,
   {
@@ -38,8 +49,8 @@ export class Outbox extends Context.Service<
     readonly peek: (
       apiId: string,
       limit: number,
-    ) => Effect.Effect<ReadonlyArray<CircuitEvent>, CoordinationUnavailable>;
-    /** Drop the first `count` entries for one API — called only after they have actually been delivered. */
+    ) => Effect.Effect<ReadonlyArray<Entry>, CoordinationUnavailable>;
+    /** Drop the first `count` entries for one API — called only after they have been delivered, or found undeliverable. */
     readonly commit: (apiId: string, count: number) => Effect.Effect<void, CoordinationUnavailable>;
     /** Which APIs currently have anything pending. */
     readonly apis: Effect.Effect<ReadonlyArray<string>, CoordinationUnavailable>;
@@ -63,7 +74,9 @@ export const makeInMemoryOutbox = Effect.gen(function* () {
     });
 
   const peek = (apiId: string, limit: number) =>
-    Ref.get(entries).pipe(Effect.map((map) => (map.get(apiId) ?? []).slice(0, limit)));
+    Ref.get(entries).pipe(
+      Effect.map((map) => (map.get(apiId) ?? []).slice(0, limit).map(O.some)),
+    );
 
   const commit = (apiId: string, count: number) =>
     Ref.update(entries, (map) => {
@@ -167,12 +180,12 @@ export const RedisOutboxLayer = (redis: RedisLike, keyPrefix = "egress:aggregato
         keys: [`${keyPrefix}:outbox:${apiId}`],
         args: [String(limit)],
       }).pipe(
-        // A stored entry that cannot be decoded is dropped rather than
-        // replayed: garbage here is a version skew or a corrupt write, and
-        // handing it to a subscriber that trusts the schema is worse than
-        // losing it. `O.toArray` is the filterMap.
+        // A stored entry that cannot be decoded is not replayed: garbage here
+        // is a version skew or a corrupt write, and handing it to a subscriber
+        // that trusts the schema is worse than losing it. It still comes back
+        // as a `None` in its own position — see `Entry`.
         Effect.map((result) =>
-          stringList(result).flatMap((raw) => O.toArray(Result.getSuccess(decodeCircuitEvent(raw)))),
+          stringList(result).map((raw) => Result.getSuccess(decodeCircuitEvent(raw))),
         ),
       ),
 

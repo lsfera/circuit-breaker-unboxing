@@ -166,6 +166,21 @@ for this API yet", and coupling it to the acquisition tick as well is what made
 the checkpoint unreadable under a push-based source. See `docs/findings.md`.
 The equality lesson above is why this paragraph stays.)
 
+## The corollary: an absence that occupies a position
+
+`Outbox.peek` filtered undecodable entries out of the array it returned. That
+is the same choice as returning `undefined` — the absence was erased instead of
+represented — except the cost was not a type-level one. The caller committed by
+*count* against a stored list, so a filtered entry took a delivered event's
+position with it and the event was sent twice. Measured: `[2, 3, 3]`.
+
+`peek` now returns `ReadonlyArray<Entry>`, `Entry = Option<CircuitEvent>`. The
+rule this ADR states has a corollary worth writing down explicitly: **when the
+absence sits inside a sequence whose positions mean something, filtering it out
+is not a simplification, it is a silent renumbering.** `flatMap` over
+`O.toArray` is a filterMap, and a filterMap is exactly the wrong operation on a
+list whose indices are the contract. See `docs/findings.md`.
+
 ## Consequences
 
 - Three call sites in `Aggregator.test.ts` compare with `assert.deepEqual(x,
