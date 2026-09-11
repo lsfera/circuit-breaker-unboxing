@@ -752,10 +752,14 @@ correct-looking pieces of code, which no grep finds.
   into "a transition that forgets to restart the snapshot clock".
 
   `Redrive`'s provenance was a `??` chain over `getOrUndefined`, written out
-  twice for queue and reason. `O.firstSomeOf` is what a priority chain of
-  optional values is called, and writing it once makes the order — broker
-  annotation, then our own stamp, then `"unknown"` — a stated rule rather than
-  a repeated accident.
+  twice for queue and reason. The first rewrite reached for `O.firstSomeOf`
+  behind a higher-order helper taking a field picker and a property key, and
+  that was worse than what it replaced — a correction worth recording, because
+  it is the failure mode of this whole exercise: reaching for the combinator
+  with the matching name rather than the one that fits. Both fields come from
+  the same `Option` and are present or absent together, so it is one
+  `O.getOrElse` over the pair, destructured. The `??`s that remain are between
+  two plain `string | undefined` properties, where `??` is the right tool.
 
   What is deliberately left: `O.isSome` where the answer really is a boolean
   (a gauge, a log line, `until: O.isSome`), and two `O.isNone` guards whose

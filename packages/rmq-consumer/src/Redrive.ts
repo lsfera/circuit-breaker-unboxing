@@ -81,23 +81,18 @@ export const makeRedrive = (opts: RedriveOptions) => {
         return "requeue";
       }
 
-      // Where it came from, in priority order: the broker's annotation on first
-      // sight, our own stamp once an earlier pass moved it, and "unknown" for
-      // anything published straight onto this queue by something else. Only work
-      // is ever replayed, so anything unattributable is kept, not guessed at.
-      const provenance = (
-        annotated: (death: { readonly queue: string; readonly reason: string }) => string,
-        stamped: string,
-      ) =>
-        O.getOrElse(
-          O.firstSomeOf([
-            O.map(delivery.deadLetter, annotated),
-            O.fromUndefinedOr(delivery.properties[stamped]),
-          ]),
-          () => "unknown",
-        );
-      const originQueue = provenance((death) => death.queue, ORIGIN_PROPERTY);
-      const originReason = provenance((death) => death.reason, ORIGIN_REASON_PROPERTY);
+      // Where it came from: the broker's annotation while it still has one, our
+      // own stamp once an earlier pass moved it and the annotation was lost, and
+      // "unknown" for anything published straight onto this queue by something
+      // else. Only work is ever replayed, so anything unattributable is kept,
+      // not guessed at. One fold, because both fields come or go together.
+      const { queue: originQueue, reason: originReason } = O.getOrElse(
+        delivery.deadLetter,
+        () => ({
+          queue: delivery.properties[ORIGIN_PROPERTY] ?? "unknown",
+          reason: delivery.properties[ORIGIN_REASON_PROPERTY] ?? "unknown",
+        }),
+      );
 
       if (originQueue !== opts.workQueue) {
         // Moved to the tail rather than released, because releasing puts it
