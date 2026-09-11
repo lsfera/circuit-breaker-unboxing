@@ -867,3 +867,25 @@ correct-looking pieces of code, which no grep finds.
   property of: a DEGRADED fleet means the same thing whether it is reached from
   CLOSED or out of a probe. Missing an arm is a compile error, measured the same
   way as the table above.
+
+- **The producer backed off exactly when its comment said it must not.**
+  `runProducer` publishes a batch of `ratePerSecond / 10` every 100ms and its
+  module comment is explicit about why it must not adapt: *"a producer that
+  backed off would hide the backlog the fleet has to survive."* It used
+  `Schedule.spaced(100ms)`, which delays 100ms **after** each batch completes,
+  so the period is 100ms plus however long the broker took to confirm twenty
+  messages.
+
+  Measured against the running stack, configured at 200/s:
+  `rate(egress_producer_published_total[2m])` = **189.49/s** — a 5.3% shortfall,
+  and the shortfall grows with broker latency, so the producer slows down
+  precisely when the queue is deepest and the demo's arrival-versus-completion
+  story is being made. `Schedule.fixed` keeps the cadence and skips a tick only
+  if one overruns. Same query after: **200.00/s**.
+
+  The distinction generalises, and the other seven periodic schedules here were
+  checked against it: a *poller* should space, because leaving the interval
+  after a slow call is politeness toward the thing being polled — the
+  aggregator's tick against Envoy admin, the redrive pass, the SSE keepalive.
+  A *rate source* should be fixed, because the rate is the contract. Exactly one
+  site in this repo has a rate contract, and it was the one that was wrong.

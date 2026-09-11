@@ -36,6 +36,7 @@ export const runProducer = (cfg: ProducerConfig) =>
     // messages a second the scheduling overhead of the latter dominates, and
     // nothing downstream can tell the difference.
     const perTick = Math.max(1, Math.round(cfg.ratePerSecond / 10));
+    const TICK = Duration.millis(100);
     let sent = 0;
 
     yield* Effect.log(`${cfg.apiId}/producer: up — ${cfg.ratePerSecond}/s onto ${queue}`);
@@ -81,5 +82,12 @@ export const runProducer = (cfg: ProducerConfig) =>
       if (sent % (cfg.ratePerSecond * 10) < perTick) {
         yield* Effect.log(`${cfg.apiId}/producer: ${sent} messages published`);
       }
-    }).pipe(Effect.repeat(Schedule.spaced(Duration.millis(100))));
+      // `fixed`, not `spaced`: spaced waits the interval *after* each batch
+      // finishes, so the period becomes 100ms plus however long the broker took
+      // to confirm, and the configured rate is never the rate produced. Worse,
+      // the shortfall grows with broker latency — the producer would quietly
+      // back off exactly when the queue is deepest, which is the one thing the
+      // comment above says it must not do. `fixed` keeps the cadence and skips
+      // a tick if one ever overruns.
+    }).pipe(Effect.repeat(Schedule.fixed(TICK)));
   });
