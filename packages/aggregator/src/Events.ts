@@ -1,4 +1,5 @@
 import {
+  Array as Arr,
   Context,
   Duration,
   Effect,
@@ -13,6 +14,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { DeliveryFailed, SEQUENCED_EVENT, SNAPSHOT_EVENT } from "@egress/domain/Model.ts";
 import { Outbox, OUTBOX_DRAIN_LIMIT } from "./Outbox.ts";
+import type { CoordinationUnavailable } from "./Coordination.ts";
 import * as Telemetry from "./Telemetry.ts";
 import type { ApiSnapshot, CircuitEvent, EventType, State } from "@egress/domain/Model.ts";
 
@@ -283,48 +285,58 @@ export const makeWebhookSink = (url: string): Effect.Effect<SinkImpl, never, Out
        * everything at once.
        */
       const draining = yield* Ref.make(false);
-      const drainPass = Effect.gen(function* () {
-        const apis = yield* outbox.apis;
-        let replayed = 0;
-        for (const apiId of apis) {
+      /**
+       * `consumed` is what the commit trims, and counts entries this pass is
+       * done with — delivered or unreadable. `delivered` is what the subscriber
+       * actually took. They differ only when an entry no longer decodes, and
+       * conflating them is what leaves a delivered event in place to be sent
+       * twice. `stopped` is the old `break`: once an entry cannot be delivered,
+       * nothing behind it is posted or consumed.
+       */
+      type Pass = {
+        readonly consumed: number;
+        readonly delivered: number;
+        readonly unreadable: number;
+        readonly stopped: boolean;
+      };
+
+      const drainApi = (apiId: string) =>
+        Effect.gen(function* () {
           const pending = yield* outbox.peek(apiId, OUTBOX_DRAIN_LIMIT);
-          // `consumed` is what the commit trims, and counts entries this pass
-          // is done with — delivered or unreadable. `delivered` is what the
-          // subscriber actually took. They differ only when an entry no longer
-          // decodes, and conflating them is what leaves a delivered event in
-          // place to be sent twice.
-          let consumed = 0;
-          let delivered = 0;
-          let unreadable = 0;
-          for (const entry of pending) {
-            if (O.isNone(entry)) {
-              consumed++;
-              unreadable++;
-              continue;
-            }
-            const ok = yield* post(entry.value).pipe(
-              Effect.as(true),
-              Effect.catchCause(() => Effect.succeed(false)),
-            );
-            if (!ok) break;
-            consumed++;
-            delivered++;
-          }
-          if (unreadable > 0) {
-            yield* Effect.logWarning(
-              `dropped ${unreadable} undeliverable outbox entr(ies) for ${apiId}: no longer decodable`,
-            );
-          }
-          if (consumed > 0) {
-            yield* outbox.commit(apiId, consumed);
-          }
-          if (delivered > 0) {
-            yield* Metric.update(
-              Metric.withAttributes(Telemetry.outboxReplayed, { apiId }),
-              delivered,
-            );
-            replayed += delivered;
-          }
+          const { consumed, delivered, unreadable } = yield* Effect.reduce(
+            pending,
+            (): Pass => ({ consumed: 0, delivered: 0, unreadable: 0, stopped: false }),
+            (acc, entry): Effect.Effect<Pass, CoordinationUnavailable> =>
+              acc.stopped
+                ? Effect.succeed(acc)
+                : O.match(entry, {
+                    onNone: () =>
+                      Effect.succeed({
+                        ...acc,
+                        consumed: acc.consumed + 1,
+                        unreadable: acc.unreadable + 1,
+                      }),
+                    onSome: (event) =>
+                      post(event).pipe(
+                        Effect.as({
+                          ...acc,
+                          consumed: acc.consumed + 1,
+                          delivered: acc.delivered + 1,
+                        }),
+                        Effect.catchCause(() => Effect.succeed({ ...acc, stopped: true })),
+                      ),
+                  }),
+          );
+
+          yield* unreadable > 0
+            ? Effect.logWarning(
+                `dropped ${unreadable} undeliverable outbox entr(ies) for ${apiId}: no longer decodable`,
+              )
+            : Effect.void;
+          yield* consumed > 0 ? outbox.commit(apiId, consumed) : Effect.void;
+          yield* delivered > 0
+            ? Metric.update(Metric.withAttributes(Telemetry.outboxReplayed, { apiId }), delivered)
+            : Effect.void;
           yield* outbox
             .depth(apiId)
             .pipe(
@@ -332,10 +344,15 @@ export const makeWebhookSink = (url: string): Effect.Effect<SinkImpl, never, Out
                 Metric.update(Metric.withAttributes(Telemetry.outboxDepth, { apiId }), d),
               ),
             );
-        }
-        if (replayed > 0) {
-          yield* Effect.logInfo(`replayed ${replayed} event(s) from the outbox`);
-        }
+          return delivered;
+        });
+
+      const drainPass = Effect.gen(function* () {
+        const apis = yield* outbox.apis;
+        const replayed = Arr.reduce(yield* Effect.forEach(apis, drainApi), 0, (a, b) => a + b);
+        yield* replayed > 0
+          ? Effect.logInfo(`replayed ${replayed} event(s) from the outbox`)
+          : Effect.void;
         return replayed;
       });
 

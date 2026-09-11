@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 import { FleetSource, makeIncompleteReporter, parseStats } from "./FleetSource.ts";
 import * as Telemetry from "./Telemetry.ts";
 import type { ApiSpec } from "./FleetSource.ts";
-import type { ReplicaReport } from "@egress/domain/Model.ts";
 
 /**
  * Envoy pushing its stats here, instead of this process polling admin ports.
@@ -183,29 +182,44 @@ export const EnvoyPushFleetLayer = (
           );
         }
 
-        const reports: ReplicaReport[] = [];
-        for (const [replicaId, snapshot] of latest) {
-          if (now - snapshot.receivedAt > staleMs) {
-            // Removed rather than skipped, so the departure is announced once rather
-            // than re-discovered every tick.
-            latest.delete(replicaId);
-            yield* Effect.logWarning(
-              `envoy metrics: ${replicaId} stopped pushing ${staleMs}ms ago and no ` +
-                `longer counts toward any quorum`,
-            );
-            yield* Metric.update(
-              Metric.withAttributes(Telemetry.replicasLost, { reason: "went-quiet" }),
-              1,
-            );
-            continue;
-          }
-          // `observedAt` is the tick's clock, not the push's: downstream ages reports
-          // against the loop's own time.
-          const parsed = parseStats(replicaId, snapshot, now, (c) => known.has(c));
-          yield* noteIncomplete(replicaId, parsed.incomplete);
-          reports.push(...parsed.reports);
-        }
-        return reports;
+        const [quiet, live] = Arr.separate(
+          Arr.map([...latest], ([replicaId, snapshot]) =>
+            now - snapshot.receivedAt > staleMs
+              ? Result.fail(replicaId)
+              : Result.succeed([replicaId, snapshot] as const),
+          ),
+        );
+
+        // Removed rather than skipped, so the departure is announced once rather
+        // than re-discovered every tick.
+        yield* Effect.forEach(
+          quiet,
+          (replicaId) =>
+            Effect.all(
+              [
+                Effect.sync(() => latest.delete(replicaId)),
+                Effect.logWarning(
+                  `envoy metrics: ${replicaId} stopped pushing ${staleMs}ms ago and no ` +
+                    `longer counts toward any quorum`,
+                ),
+                Metric.update(
+                  Metric.withAttributes(Telemetry.replicasLost, { reason: "went-quiet" }),
+                  1,
+                ),
+              ],
+              { discard: true },
+            ),
+          { discard: true },
+        );
+
+        // `observedAt` is the tick's clock, not the push's: downstream ages reports
+        // against the loop's own time.
+        return Arr.flatten(
+          yield* Effect.forEach(live, ([replicaId, snapshot]) => {
+            const parsed = parseStats(replicaId, snapshot, now, (c) => known.has(c));
+            return Effect.as(noteIncomplete(replicaId, parsed.incomplete), parsed.reports);
+          }),
+        );
       });
 
       return {

@@ -1,4 +1,4 @@
-import { Clock, Context, Effect, Layer, Metric, Ref } from "effect";
+import { Array as Arr, Clock, Context, Effect, Layer, Metric, Ref, Result } from "effect";
 import { StatsUnavailable } from "@egress/domain/Model.ts";
 import * as Telemetry from "./Telemetry.ts";
 import type { ReplicaReport } from "@egress/domain/Model.ts";
@@ -261,48 +261,56 @@ export const parseStats = (
   now: number,
   keep: (cluster: string) => boolean,
 ): ParsedStats => {
-  const byCluster = new Map<string, Record<string, number>>();
-  for (const stat of body.stats ?? []) {
-    const m = PATTERN.exec(stat.name);
-    if (!m) continue;
-    const cluster = m[1];
-    const suffix = m[2];
-    if (cluster === undefined || suffix === undefined) continue;
-    if (!keep(cluster)) continue;
-    const slot = byCluster.get(cluster) ?? {};
-    // A stat that matched the pattern but carried no value is the same as one
-    // that never arrived — it is not a zero.
-    if (stat.value !== undefined) slot[suffix] = stat.value;
-    byCluster.set(cluster, slot);
-  }
+  // One slot per cluster, built from the stats whose name matches the pattern
+  // and whose cluster we were asked to keep.
+  const byCluster = Arr.reduce(
+    Arr.filterMap(body.stats ?? [], (stat) => {
+      const matched = PATTERN.exec(stat.name);
+      const cluster = matched?.[1];
+      const suffix = matched?.[2];
+      return cluster === undefined || suffix === undefined || !keep(cluster)
+        ? Result.fail(stat.name)
+        : Result.succeed({ cluster, suffix, value: stat.value });
+    }),
+    new Map<string, Record<string, number>>(),
+    (acc, { cluster, suffix, value }) =>
+      acc.set(cluster, {
+        ...(acc.get(cluster) ?? {}),
+        // A stat that matched the pattern but carried no value is the same as
+        // one that never arrived — it is not a zero.
+        ...(value === undefined ? {} : { [suffix]: value }),
+      }),
+  );
 
-  const reports: ReplicaReport[] = [];
-  const incomplete: string[] = [];
-  for (const [apiId, s] of byCluster) {
-    const healthy = s["membership_healthy"];
-    const total = s["membership_total"];
-    if (healthy === undefined || total === undefined) {
-      incomplete.push(apiId);
-      continue;
-    }
-    reports.push({
-      replicaId,
-      apiId,
-      healthy,
-      total,
-      // These four keep their zero default, and it is safe where the two
-      // above were not: `ejectionsActive` is surfaced rather than voted on,
-      // and the overflow counters are edge-detected as a delta, so a zero
-      // reads as "nothing new" instead of as a state. They cannot reach here
-      // without the membership pair anyway, which is the point of the guard.
-      ejectionsActive: s["outlier_detection.ejections_active"] ?? 0,
-      overflowTotal:
-        (s["upstream_rq_pending_overflow"] ?? 0) +
-        (s["upstream_cx_overflow"] ?? 0) +
-        (s["upstream_rq_retry_overflow"] ?? 0),
-      observedAt: now,
-    });
-  }
+  // One rule, two outputs: a cluster missing either half of the membership pair
+  // is `incomplete`, everything else is a report. `Result` is what keeps the
+  // two from being decided by two separately-maintained conditions.
+  const [incomplete, reports] = Arr.separate(
+    Arr.map([...byCluster], ([apiId, s]): Result.Result<ReplicaReport, string> => {
+      const healthy = s["membership_healthy"];
+      const total = s["membership_total"];
+      return healthy === undefined || total === undefined
+        ? Result.fail(apiId)
+        : Result.succeed({
+            replicaId,
+            apiId,
+            healthy,
+            total,
+            // These four keep their zero default, and it is safe where the two
+            // above were not: `ejectionsActive` is surfaced rather than voted
+            // on, and the overflow counters are edge-detected as a delta, so a
+            // zero reads as "nothing new" instead of as a state. They cannot
+            // reach here without the membership pair anyway, which is the point
+            // of the guard.
+            ejectionsActive: s["outlier_detection.ejections_active"] ?? 0,
+            overflowTotal:
+              (s["upstream_rq_pending_overflow"] ?? 0) +
+              (s["upstream_cx_overflow"] ?? 0) +
+              (s["upstream_rq_retry_overflow"] ?? 0),
+            observedAt: now,
+          });
+    }),
+  );
   return { reports, incomplete };
 };
 
