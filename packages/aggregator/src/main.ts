@@ -178,8 +178,11 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
   // provides its own Rmq dependency internally (Layer.provide, scoped to just
   // this sink) rather than threading Rmq through the outer AppLayer graph, so
   // the two branches below have the same RIn = never shape either way.
-  const SinkLayer = O.isSome(settings.rmq)
-    ? Layer.effect(
+  const SinkLayer = O.match(settings.rmq, {
+    onNone: () =>
+      webhookEnabled ? Layer.effect(EventSink, makeWebhookSink(webhookUrl)) : NoopSinkLayer,
+    onSome: (broker) =>
+      Layer.effect(
         EventSink,
         Effect.gen(function* () {
           const impls = webhookEnabled ? [yield* makeWebhookSink(webhookUrl)] : [];
@@ -199,10 +202,8 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
           );
           return impls.length === 1 ? impls[0]! : combineSinks(impls);
         }),
-      ).pipe(Layer.provide(RmqLive(settings.rmq.value)))
-    : webhookEnabled
-      ? Layer.effect(EventSink, makeWebhookSink(webhookUrl))
-      : NoopSinkLayer;
+      ).pipe(Layer.provide(RmqLive(broker))),
+  });
 
   /**
    * Solo by default: one instance that always wins its own lease. That is not

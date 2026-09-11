@@ -211,22 +211,29 @@ export const AggregatorLayer = Layer.effect(
             breakers.set(report.apiId, Breaker.ingest(current, report));
           }
 
-          const out: CircuitEvent[] = [];
-          for (const [apiId, before] of breakers) {
+          const out = [...breakers].flatMap(([apiId, before]) => {
             const [after, change] = Breaker.step(before, now, cfg);
             breakers.set(apiId, after);
 
-            if (O.isSome(change)) {
-              out.push(stateChanged(Breaker.snapshot(after), change.value.from, now));
-              lastSnapshotAt.set(apiId, now);
-              continue;
-            }
-            const last = lastSnapshotAt.get(apiId) ?? 0;
-            if (now - last >= cfg.snapshotMs) {
-              lastSnapshotAt.set(apiId, now);
-              out.push(snapshotEvent(Breaker.snapshot(after), now));
-            }
-          }
+            // A transition wins over the heartbeat snapshot: both carry the
+            // same state, and only the transition carries where it came from.
+            const event = O.orElse(
+              O.map(change, (transition) =>
+                stateChanged(Breaker.snapshot(after), transition.from, now),
+              ),
+              () =>
+                now - (lastSnapshotAt.get(apiId) ?? 0) >= cfg.snapshotMs
+                  ? O.some(snapshotEvent(Breaker.snapshot(after), now))
+                  : O.none(),
+            );
+
+            // Anything published restarts the snapshot clock, so a transition
+            // is not followed by a redundant heartbeat. Stated once: the two
+            // branches used to stamp it separately.
+            const emitted = O.toArray(event);
+            if (emitted.length > 0) lastSnapshotAt.set(apiId, now);
+            return emitted;
+          });
           return [out as ReadonlyArray<CircuitEvent>, { breakers, lastSnapshotAt }];
         });
 

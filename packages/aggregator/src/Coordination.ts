@@ -221,34 +221,43 @@ export const makeInMemoryCoordination = Effect.gen(function* () {
     Clock.currentTimeMillis.pipe(
       Effect.flatMap((now) =>
         Ref.modify(lock, (current) => {
-          const held = O.getOrUndefined(current);
-          if (held !== undefined && held.expiresAt > now && held.holderId !== holderId) {
-            return [O.none<LeaseToken>(), current]; // someone else holds a live lease
-          }
-          if (held !== undefined && held.holderId === holderId && held.expiresAt > now) {
-            // Renewal: same token, extended TTL.
-            return [
-              O.some<LeaseToken>({ epoch, counter: held.counter }),
-              O.some({ ...held, expiresAt: now + ttlMs }),
-            ];
-          }
-          // Expired or never held: a genuine handoff, counter strictly increases.
-          const next = (held?.counter ?? 0) + 1;
-          return [
-            O.some<LeaseToken>({ epoch, counter: next }),
-            O.some({ holderId, counter: next, expiresAt: now + ttlMs }),
+          type Outcome = readonly [O.Option<LeaseToken>, O.Option<Lock>];
+          /** Someone else holds a live lease: no token, and the lock is left alone. */
+          const deny: Outcome = [O.none(), current];
+          /** Same holder, same token, extended TTL. */
+          const renew = (held: Lock): Outcome => [
+            O.some({ epoch, counter: held.counter }),
+            O.some({ ...held, expiresAt: now + ttlMs }),
           ];
+          /** Expired or never held: a genuine handoff, counter strictly increases. */
+          const handOver = (previous: number): Outcome => [
+            O.some({ epoch, counter: previous + 1 }),
+            O.some({ holderId, counter: previous + 1, expiresAt: now + ttlMs }),
+          ];
+          return O.match(current, {
+            onNone: () => handOver(0),
+            onSome: (held) =>
+              held.expiresAt <= now
+                ? handOver(held.counter)
+                : held.holderId === holderId
+                  ? renew(held)
+                  : deny,
+          });
         }),
       ),
     );
 
   const release = (holderId: string) =>
-    Ref.update(lock, (current) =>
-      O.getOrUndefined(current)?.holderId === holderId ? O.none() : current,
-    );
+    Ref.update(lock, O.filter((held) => held.holderId !== holderId));
 
   const currentToken = Ref.get(lock).pipe(
-    Effect.map((l): LeaseToken => ({ epoch, counter: O.getOrUndefined(l)?.counter ?? 0 })),
+    Effect.map((l): LeaseToken => ({
+      epoch,
+      counter: O.getOrElse(
+        O.map(l, (held) => held.counter),
+        () => 0,
+      ),
+    })),
   );
 
   const save = (apiId: string, token: LeaseToken, checkpoint: Checkpoint) =>

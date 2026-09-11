@@ -81,14 +81,23 @@ export const makeRedrive = (opts: RedriveOptions) => {
         return "requeue";
       }
 
-      // Where it came from: the broker's annotation on first sight, our own
-      // stamp once an earlier pass moved it, and "unknown" for anything
-      // published straight onto this queue by something else. Only work is
-      // ever replayed, so anything unattributable is kept, not guessed at.
-      const death = O.getOrUndefined(delivery.deadLetter);
-      const originQueue = death?.queue ?? delivery.properties[ORIGIN_PROPERTY] ?? "unknown";
-      const originReason =
-        death?.reason ?? delivery.properties[ORIGIN_REASON_PROPERTY] ?? "unknown";
+      // Where it came from, in priority order: the broker's annotation on first
+      // sight, our own stamp once an earlier pass moved it, and "unknown" for
+      // anything published straight onto this queue by something else. Only work
+      // is ever replayed, so anything unattributable is kept, not guessed at.
+      const provenance = (
+        annotated: (death: { readonly queue: string; readonly reason: string }) => string,
+        stamped: string,
+      ) =>
+        O.getOrElse(
+          O.firstSomeOf([
+            O.map(delivery.deadLetter, annotated),
+            O.fromUndefinedOr(delivery.properties[stamped]),
+          ]),
+          () => "unknown",
+        );
+      const originQueue = provenance((death) => death.queue, ORIGIN_PROPERTY);
+      const originReason = provenance((death) => death.reason, ORIGIN_REASON_PROPERTY);
 
       if (originQueue !== opts.workQueue) {
         // Moved to the tail rather than released, because releasing puts it
@@ -190,7 +199,7 @@ export const makeRedrive = (opts: RedriveOptions) => {
     // channel had already been retired and replaced by a newer one would tear
     // down the newer pass's live consumer on its way out.
     yield* opts.gate.withPermit(
-      Ref.update(opts.consumer, (c) => (O.getOrUndefined(c) === consumer ? O.none() : c)),
+      Ref.update(opts.consumer, O.filter((held) => held !== consumer)),
     );
     yield* conn.closeConsumer(consumer);
 

@@ -727,3 +727,39 @@ correct-looking pieces of code, which no grep finds.
   unreadable — rather than `delivered`. ADR 006's rule, applied to the one
   place that had quietly dropped it: an absence that occupies a position must
   be represented, not filtered away.
+
+- **`Option` was being asked whether, rather than told what to do.** A sweep of
+  every `Option` site in `packages/*/src`, prompted by one `O.isNone`-then-
+  `.value` in `seedFromCheckpoint` that turned out not to be alone. Eleven
+  sites left `Option` immediately after entering it, and three of them were
+  hiding something:
+
+  `makeInMemoryCoordination`'s lease decision tested `held !== undefined`
+  twice and reconstructed "expired *or* never held" as a fallthrough past both
+  `if`s. As an `O.match`, `onNone` and an expired `onSome` are visibly the same
+  branch — `handOver` — which is what the code always meant.
+
+  `release` was `O.getOrUndefined(current)?.holderId === holderId ? O.none() :
+  current`. That is `O.filter((held) => held.holderId !== holderId)`: drop the
+  lease only if this holder still owns it. The `Ref.update` is now point-free
+  and the test name — "release only removes the lease if the caller still holds
+  it" — is the code.
+
+  The aggregator's step loop stamped `lastSnapshotAt` in two places, once per
+  emitting branch. Composing the choice instead — `O.orElse(transition,
+  () => heartbeat-if-due)` — makes the precedence explicit (a transition wins;
+  it is the one carrying `from`) and leaves one stamp, so the two cannot drift
+  into "a transition that forgets to restart the snapshot clock".
+
+  `Redrive`'s provenance was a `??` chain over `getOrUndefined`, written out
+  twice for queue and reason. `O.firstSomeOf` is what a priority chain of
+  optional values is called, and writing it once makes the order — broker
+  annotation, then our own stamp, then `"unknown"` — a stated rule rather than
+  a repeated accident.
+
+  What is deliberately left: `O.isSome` where the answer really is a boolean
+  (a gauge, a log line, `until: O.isSome`), and two `O.isNone` guards whose
+  narrowing makes the following `.value` checked — `attemptTick`'s standby
+  return, and the outbox drain, which `break`s at the first undeliverable entry
+  and so cannot be a fold. A fold is right where a value comes out; a guard
+  clause is right where control flow does.
