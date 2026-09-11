@@ -821,3 +821,38 @@ correct-looking pieces of code, which no grep finds.
   is the wire contract. `Schema.TaggedStruct` puts `_tag` in the *encoded* form,
   so tagging these would either change what every subscriber receives or need a
   transform on both sides — for exhaustiveness the closed union already gives.
+
+- **HALF_OPEN with a DEGRADED verdict was a state the machine could enter and
+  never leave.** `step` resolved the graph as a chain of `if`s, and the
+  HALF_OPEN branch ended `return [{ ...next, probeStreak: 0 }, O.none()]` —
+  every pair that had not matched above meant "stay put". Two pairs reached it:
+  `candidate === OPEN && !dwelled`, which should stay put, and
+  `candidate === DEGRADED`, which should not.
+
+  Measured before touching anything, three replicas reporting 3 of 6 hosts
+  healthy: **600 ticks in HALF_OPEN, zero transitions published.** No timeout
+  rescues it — `openBackoffMs` is only consulted in the OPEN branch — and if
+  every replica goes quiet the empty-fleet guard returns early and leaves the
+  state alone.
+
+  The cost is in `DaemonPolicy.step`: HALF_OPEN means `targetActive: 1`, one
+  SAC-elected prober on `prefetch: 1`; DEGRADED means `ceil(fleetSize / 2)`.
+  So a persistently half-healthy upstream — the most ordinary failure there is —
+  pinned the fleet at one message at a time while the state that exists for
+  exactly that case sat unreachable, and published nothing, so nothing
+  downstream could notice.
+
+  The graph is now a `Record<State, Record<Candidate, Resolve>>` — every state
+  against every verdict the fleet can return, twelve cells, each named.
+  `Candidate` excludes HALF_OPEN because replicas cannot report it. Falling
+  through is spelt `hold`, so it is a choice rather than the absence of one.
+
+  Worth being precise about what that buys: a *missing* pair is now a compile
+  error (measured: `TS2741: Property 'DEGRADED' is missing`), but a pair wired
+  to the *wrong* resolution still compiles. Pointing HALF_OPEN × DEGRADED back
+  at `hold` typechecks clean and fails the new test. The table makes the graph
+  legible and closes one failure mode; the test is what holds the behaviour.
+
+  Dropped in the same pass: `live`, an array built alongside `replicas` holding
+  the same slots and read only for `.length`, at five sites that all mean
+  `replicas.size`.

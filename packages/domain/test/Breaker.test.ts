@@ -110,6 +110,42 @@ test("a failed probe reopens and doubles the backoff", () => {
   );
 });
 
+/**
+ * The probe landing on a half-healthy fleet used to fall off the end of the
+ * HALF_OPEN branch and mean "stay put", so a partially recovered upstream held
+ * the circuit in HALF_OPEN indefinitely — and HALF_OPEN tells the daemon fleet
+ * to run exactly one prober, while DEGRADED, the state that exists for this,
+ * tells it to run half of them. Measured before the fix: 600 ticks, no
+ * transition, no event published for anything downstream to act on.
+ */
+test("a probe that finds the fleet half-healthy settles into DEGRADED, not HALF_OPEN forever", () => {
+  // All hosts gone: long enough to open, not long enough to time out into a probe.
+  const [open, toOpen] = drive(fresh(), 1000, 1200, [0, 0, 0, 0, 0]);
+  assert.equal(open.state, State.OPEN);
+  assert.deepEqual(toOpen.map((m) => m.to), [State.OPEN]);
+
+  // The upstream comes back at half strength and stays there for a minute.
+  const [settled, moves] = drive(open, 2200, 60_000, [2, 2, 2, 2, 2]);
+  assert.deepEqual(
+    moves.map((m) => m.to),
+    [State.HALF_OPEN, State.DEGRADED],
+    "the probe must resolve: a half-healthy fleet is a verdict, not an inconclusive result",
+  );
+  assert.equal(settled.state, State.DEGRADED);
+  assert.equal(settled.sequence, 3, "sequence numbers must stay gapless");
+
+  // The backoff it earned is kept, so a relapse does not probe optimistically
+  // the way a full recovery is allowed to.
+  assert.ok(
+    settled.openBackoffMs >= open.openBackoffMs,
+    "a partial recovery must not reset the backoff",
+  );
+
+  // And a full recovery still closes it from there.
+  const [closed] = drive(settled, 63_000, 4000, [4, 4, 4, 4, 4]);
+  assert.equal(closed.state, State.CLOSED);
+});
+
 test("backoff is capped at maxOpenMs", () => {
   const [s] = drive(fresh(), 1000, 120_000, [0, 0, 0, 0, 0], 250);
   assert.ok(s.openBackoffMs <= CFG.maxOpenMs);

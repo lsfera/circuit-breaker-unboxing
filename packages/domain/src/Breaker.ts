@@ -111,6 +111,125 @@ const transition = (
 ];
 
 /**
+ * The fleet's verdict for this tick. Never `HALF_OPEN`: that is a state this
+ * machine puts itself into to probe, not something replicas can report.
+ */
+type Candidate = Exclude<State, typeof State.HALF_OPEN>;
+
+/** Everything a resolution needs beyond the state itself, derived once per tick. */
+type Tick = {
+  readonly cfg: AggregatorConfig;
+  /** Has the candidate held long enough to be believed? */
+  readonly dwelled: boolean;
+  /** Has the current state been in place long enough to leave? */
+  readonly settled: boolean;
+  /** Every reporting replica sees zero hosts, not merely a quorum of them. */
+  readonly allGone: boolean;
+  /** The impairment came from replicas shedding on their own thresholds. */
+  readonly overflowDrove: boolean;
+};
+
+/** One cell of the table below: what this (state, candidate) pair does. */
+type Resolve = (
+  self: BreakerState,
+  now: number,
+  tick: Tick,
+) => [BreakerState, O.Option<Transition>];
+
+const hold: Resolve = (self) => [self, O.none()];
+
+/** OPEN ignores the fleet entirely until its backoff elapses, then probes. */
+const waitOutBackoff: Resolve = (self, now) =>
+  now - self.changedAt >= self.openBackoffMs
+    ? transition(self, now, State.HALF_OPEN, Reason.OPEN_TIMEOUT_ELAPSED)
+    : [self, O.none()];
+
+/** The probe found the fleet still down: back to OPEN, waiting twice as long. */
+const probeFailed: Resolve = (self, now, { dwelled, cfg }) => {
+  const reset = { ...self, probeStreak: 0 };
+  return dwelled
+    ? transition(
+        { ...reset, openBackoffMs: Math.min(self.openBackoffMs * 2, cfg.maxOpenMs) },
+        now,
+        State.OPEN,
+        Reason.PROBE_FAILED,
+      )
+    : [reset, O.none()];
+};
+
+/** The probe found the fleet healthy — `probeSuccesses` times before believing it. */
+const probeSucceeded: Resolve = (self, now, { cfg }) => {
+  const probeStreak = self.probeStreak + 1;
+  return probeStreak >= cfg.probeSuccesses
+    ? transition(
+        { ...self, probeStreak, openBackoffMs: cfg.openMs },
+        now,
+        State.CLOSED,
+        Reason.PROBE_SUCCEEDED,
+      )
+    : [{ ...self, probeStreak }, O.none()];
+};
+
+/**
+ * The probe found the fleet partly healthy, which is a verdict and not an
+ * inconclusive result: DEGRADED is the state that says "keep pulling, at
+ * reduced rate", and the daemon fleet acts on it (half the daemons, against
+ * exactly one prober for HALF_OPEN).
+ *
+ * `openBackoffMs` is deliberately not reset the way PROBE_SUCCEEDED resets it.
+ * The upstream is still impaired, so if this relapses to OPEN it should wait
+ * out the backoff it had already earned rather than start over optimistically.
+ */
+const probeDegraded: Resolve = (self, now, { dwelled, overflowDrove }) => {
+  const reset = { ...self, probeStreak: 0 };
+  return dwelled
+    ? transition(
+        reset,
+        now,
+        State.DEGRADED,
+        overflowDrove ? Reason.THRESHOLD_OVERFLOW : Reason.OUTLIER_EJECTION,
+      )
+    : [reset, O.none()];
+};
+
+/** A settled state moving to a different settled state, once both timers allow. */
+const settleInto =
+  (to: Candidate): Resolve =>
+  (self, now, { dwelled, settled, allGone, overflowDrove }) => {
+    if (!dwelled || !settled) return [self, O.none()];
+    const reason =
+      to === State.OPEN
+        ? allGone
+          ? Reason.ALL_ENDPOINTS_EJECTED
+          : Reason.OUTLIER_EJECTION
+        : to === State.DEGRADED
+          ? overflowDrove
+            ? Reason.THRESHOLD_OVERFLOW
+            : Reason.OUTLIER_EJECTION
+          : Reason.HEALTHY;
+    return transition(self, now, to, reason);
+  };
+
+/**
+ * The whole graph, as a table rather than a chain of `if`s: every state this
+ * machine can be in, against every verdict the fleet can return.
+ *
+ * `Record<State, Record<Candidate, Resolve>>` is what makes it total. The
+ * previous shape let a pair fall off the end of the HALF_OPEN branch and mean
+ * "stay put", which is how HALF_OPEN x DEGRADED became a state the machine
+ * could enter and never leave — a half-healthy upstream held the fleet at one
+ * prober indefinitely while DEGRADED, the state that exists for exactly that,
+ * sat unreachable. Falling through is now spelt `hold`, and a missing pair is
+ * a compile error.
+ */
+const RESOLVE: Record<State, Record<Candidate, Resolve>> = {
+  OPEN: { CLOSED: waitOutBackoff, DEGRADED: waitOutBackoff, OPEN: waitOutBackoff },
+  HALF_OPEN: { CLOSED: probeSucceeded, DEGRADED: probeDegraded, OPEN: probeFailed },
+  CLOSED: { CLOSED: hold, DEGRADED: settleInto(State.DEGRADED), OPEN: settleInto(State.OPEN) },
+  DEGRADED: { CLOSED: settleInto(State.CLOSED), DEGRADED: hold, OPEN: settleInto(State.OPEN) },
+};
+
+/**
  * Advance the machine one tick. Returns the next state and, if the fleet's
  * verdict changed, the transition that should be published.
  */
@@ -120,13 +239,13 @@ export const step = (
   cfg: AggregatorConfig,
 ): [BreakerState, O.Option<Transition>] => {
   const replicas = new Map<string, ReplicaSlot>();
-  const live: ReplicaSlot[] = [];
   for (const [id, slot] of self.replicas) {
     if (now - slot.report.observedAt > cfg.replicaTimeoutMs) continue;
-    live.push(slot);
     replicas.set(id, slot);
   }
-  if (live.length === 0) return [{ ...self, replicas }, O.none()];
+  // Nothing is reporting: hold the last verdict rather than invent one from
+  // an empty fleet.
+  if (replicas.size === 0) return [{ ...self, replicas }, O.none()];
 
   const votes: Record<Vote, number> = { OK: 0, DEGRADED: 0, DOWN: 0 };
   let healthy = 0;
@@ -144,80 +263,31 @@ export const step = (
     replicas.set(id, { ...slot, vote, overflowSinceTick: 0 }); // consumed
   }
 
-  const downFrac = votes.DOWN / live.length;
-  const impairedFrac = (votes.DOWN + votes.DEGRADED) / live.length;
-  const candidate: State =
-    downFrac >= cfg.quorum
+  const reporting = replicas.size;
+  const candidate: Candidate =
+    votes.DOWN / reporting >= cfg.quorum
       ? State.OPEN
-      : impairedFrac >= cfg.quorum
+      : (votes.DOWN + votes.DEGRADED) / reporting >= cfg.quorum
         ? State.DEGRADED
         : State.CLOSED;
 
-  let next: BreakerState = {
+  const next: BreakerState = {
     ...self,
     replicas,
     lastVotes: votes,
-    lastHealthy: Math.round(healthy / live.length),
-    lastTotal: Math.round(total / live.length),
+    lastHealthy: Math.round(healthy / reporting),
+    lastTotal: Math.round(total / reporting),
     candidate,
-    candidateSince:
-      candidate !== self.candidate ? now : self.candidateSince,
+    candidateSince: candidate !== self.candidate ? now : self.candidateSince,
   };
 
-  const dwelled = now - next.candidateSince >= cfg.dwellMs;
-  const settled = now - next.changedAt >= cfg.minStateMs;
-
-  // --- OPEN: wait out the backoff, then probe. ---------------------------
-  if (next.state === State.OPEN) {
-    return now - next.changedAt >= next.openBackoffMs
-      ? transition(next, now, State.HALF_OPEN, Reason.OPEN_TIMEOUT_ELAPSED)
-      : [next, O.none()];
-  }
-
-  // --- HALF_OPEN: exactly one owner probes. ------------------------------
-  if (next.state === State.HALF_OPEN) {
-    if (candidate === State.OPEN && dwelled) {
-      next = {
-        ...next,
-        probeStreak: 0,
-        openBackoffMs: Math.min(next.openBackoffMs * 2, cfg.maxOpenMs),
-      };
-      return transition(next, now, State.OPEN, Reason.PROBE_FAILED);
-    }
-    if (candidate === State.CLOSED) {
-      const probeStreak = next.probeStreak + 1;
-      next = { ...next, probeStreak };
-      if (probeStreak >= cfg.probeSuccesses) {
-        next = { ...next, openBackoffMs: cfg.openMs };
-        return transition(next, now, State.CLOSED, Reason.PROBE_SUCCEEDED);
-      }
-      return [next, O.none()];
-    }
-    return [{ ...next, probeStreak: 0 }, O.none()];
-  }
-
-  // --- CLOSED / DEGRADED -------------------------------------------------
-  if (candidate === next.state || !dwelled || !settled) return [next, O.none()];
-
-  if (candidate === State.OPEN) {
-    // Unanimous, not merely quorate: every reporting replica sees zero hosts.
-    const allGone = votes.DOWN === live.length;
-    return transition(
-      next,
-      now,
-      State.OPEN,
-      allGone ? Reason.ALL_ENDPOINTS_EJECTED : Reason.OUTLIER_EJECTION,
-    );
-  }
-  if (candidate === State.DEGRADED) {
-    return transition(
-      next,
-      now,
-      State.DEGRADED,
-      overflowDrove ? Reason.THRESHOLD_OVERFLOW : Reason.OUTLIER_EJECTION,
-    );
-  }
-  return transition(next, now, State.CLOSED, Reason.HEALTHY);
+  return RESOLVE[next.state][candidate](next, now, {
+    cfg,
+    dwelled: now - next.candidateSince >= cfg.dwellMs,
+    settled: now - next.changedAt >= cfg.minStateMs,
+    allGone: votes.DOWN === reporting,
+    overflowDrove,
+  });
 };
 
 export const snapshot = (self: BreakerState): ApiSnapshot => ({
