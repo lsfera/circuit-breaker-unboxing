@@ -45,7 +45,7 @@ export class Aggregator extends Context.Service<
     /** The loop's interval, so a health check can say what "stalled" means in its own terms. */
     readonly tickMs: number;
   }
->()("Aggregator") {}
+>()("Aggregator") { }
 
 /**
  * Rebuild a BreakerState from its last published checkpoint rather than
@@ -53,9 +53,18 @@ export class Aggregator extends Context.Service<
  * `changedAt`/`openBackoffMs` are restored — see Checkpoint's doc comment
  * for why the rest is safe to let repopulate from the next few polls.
  *
- * The `Partial` annotation is load-bearing: without it, a mistyped field name
- * spreads harmlessly and that field silently keeps its `initial` value — which
- * for `sequence` is the failover bug this function exists to prevent.
+ * Two things here are load-bearing rather than ceremony, because spread
+ * properties escape excess-property checking and tsc stays silent for both:
+ *
+ * - `getOrElse` leaves `Option` before the spread. Spreading the `Option`
+ *   itself compiles, and contributes its one own key — `value` — so every
+ *   restored field is dropped and a failover silently resumes from sequence 0.
+ * - `Partial<Breaker.BreakerState>` types the overlay. Without it a mistyped
+ *   field name spreads harmlessly and keeps its `initial` value, which is the
+ *   same bug by a different route.
+ *
+ * Both were measured, and `Aggregator.test.ts`'s three checkpoint cases are
+ * what catch them: the type system does not.
  */
 const seedFromCheckpoint = (
   apiId: string,
@@ -64,18 +73,21 @@ const seedFromCheckpoint = (
   now: number,
 ): Breaker.BreakerState => ({
   ...Breaker.initial(apiId, cfg, now),
-  ...O.map(
-    checkpoint,
-    (cp): Partial<Breaker.BreakerState> => ({
-      state: cp.state,
-      reason: cp.reason,
-      sequence: cp.sequence,
-      changedAt: cp.changedAt,
-      candidate: cp.state,
-      candidateSince: cp.changedAt,
-      openBackoffMs: cp.openBackoffMs,
-    }),
-  ).pipe(O.getOrElse(() => ({}))),
+  ...O.getOrElse(
+    O.map(
+      checkpoint,
+      (cp): Partial<Breaker.BreakerState> => ({
+        state: cp.state,
+        reason: cp.reason,
+        sequence: cp.sequence,
+        changedAt: cp.changedAt,
+        candidate: cp.state,
+        candidateSince: cp.changedAt,
+        openBackoffMs: cp.openBackoffMs,
+      }),
+    ),
+    () => ({}),
+  ),
 });
 
 export const AggregatorLayer = Layer.effect(
@@ -243,11 +255,11 @@ export const AggregatorLayer = Layer.effect(
                 Effect.andThen(
                   Effect.logWarning(
                     `lost leadership publishing ${e.data.apiId}: ` +
-                      `token ${formatToken(err.attempted)} superseded by ` +
-                        O.match(err.current, {
-                          onNone: () => "an unreadable one",
-                          onSome: formatToken,
-                        }),
+                    `token ${formatToken(err.attempted)} superseded by ` +
+                    O.match(err.current, {
+                      onNone: () => "an unreadable one",
+                      onSome: formatToken,
+                    }),
                   ),
                   Effect.succeed(true),
                 ),
@@ -384,7 +396,7 @@ export const AggregatorLayer = Layer.effect(
             yield* Ref.set(coordinationOk, false);
             yield* Effect.logWarning(
               `${ha.instanceId}: coordination unavailable during ${err.operation}, ` +
-                `standing down until it returns — ${err.cause}`,
+              `standing down until it returns — ${err.cause}`,
             );
           }
           return [] as ReadonlyArray<CircuitEvent>;
@@ -425,7 +437,7 @@ export const AggregatorLayer = Layer.effect(
         Effect.catch((err) =>
           Effect.logWarning(
             `${ha.instanceId}: could not release the lease on shutdown ` +
-              `(${err.operation}) — it will expire instead`,
+            `(${err.operation}) — it will expire instead`,
           ),
         ),
       );
