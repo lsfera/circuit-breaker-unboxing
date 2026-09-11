@@ -49,15 +49,3 @@ export const parentFrom = (header: string | undefined): O.Option<Tracer.External
   return O.some(Tracer.externalSpan({ traceId: match[1]!, spanId: match[2]! }));
 };
 
-/**
- * Run `effect` as a child of a span that arrived over the broker, or as its
- * own root when nothing did.
- */
-export const withParent = <A, E, R>(
-  parent: O.Option<Tracer.ExternalSpan>,
-  effect: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E, R> =>
-  O.match(parent, {
-    onNone: () => effect,
-    onSome: (span) => Effect.withParentSpan(effect, span),
-  });

@@ -1,7 +1,6 @@
 import { Clock, Duration, Effect, Metric, Option as O, Ref, Result, Schedule, Semaphore } from "effect";
 import type { Tracer } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
-import { withParent } from "@egress/rmq/Trace.ts";
 import {
   CONTROL_EXCHANGE,
   CONTROL_EXCHANGE_OPTIONS,
@@ -173,27 +172,28 @@ export const runDaemon = (cfg: DaemonConfig) =>
     const forkInContext = Effect.runForkWith(services);
 
     /**
-     * The same call inside a span, only when the message carried a parent. This is
-     * the hottest path in the process, so the untraced case stays one null check.
+     * The same call inside a span, only when the message carried a parent:
+     * the parent mapped to a traced call, or the raw one. Untraced is the
+     * common case and stays a plain `fetch` with no Effect runtime around it.
      */
     const callEgress = (parent: O.Option<Tracer.ExternalSpan>): Promise<Settlement> =>
-      O.isNone(parent)
-        ? rawCall()
-        : runInContext(
-            Effect.promise(rawCall).pipe(
-              Effect.tap((outcome) =>
-                Effect.annotateCurrentSpan({ "egress.settlement": outcome }),
-              ),
-              Effect.withSpan("work.call", {
-                attributes: {
-                  "egress.api_id": cfg.apiId,
-                  "egress.path": cfg.apiPath,
-                  "egress.daemon_index": cfg.index,
-                },
-              }),
-              (call) => withParent(parent, call),
+      O.map(parent, (span) =>
+        runInContext(
+          Effect.promise(rawCall).pipe(
+            Effect.tap((outcome) =>
+              Effect.annotateCurrentSpan({ "egress.settlement": outcome }),
             ),
-          );
+            Effect.withSpan("work.call", {
+              attributes: {
+                "egress.api_id": cfg.apiId,
+                "egress.path": cfg.apiPath,
+                "egress.daemon_index": cfg.index,
+              },
+            }),
+            Effect.withParentSpan(span),
+          ),
+        ),
+      ).pipe(O.getOrElse(rawCall));
 
     /**
      * Unreadable messages preserved before the rest are let go. Control events fan

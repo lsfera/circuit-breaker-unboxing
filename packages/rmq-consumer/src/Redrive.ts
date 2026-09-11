@@ -1,5 +1,4 @@
 import { Duration, Effect, Option as O, Ref, Schedule } from "effect";
-import { withParent } from "@egress/rmq/Trace.ts";
 import { randomUUID } from "node:crypto";
 import type { Consumer, RmqService, Settlement } from "@egress/rmq/Client.ts";
 import type { Semaphore } from "effect/Semaphore";
@@ -131,22 +130,21 @@ export const makeRedrive = (opts: RedriveOptions) => {
         //
         // Only a message that carried a parent pays for a span, same as the
         // daemon's egress call: an untraced replay takes the plain path.
+        const send = conn.send(into, body);
         await runInContext(
-          O.isNone(delivery.parent)
-            ? conn.send(into, body)
-            : withParent(
-                delivery.parent,
-                conn.send(into, body).pipe(
-                  Effect.withSpan("work.redrive", {
-                    attributes: {
-                      "messaging.system": "rabbitmq",
-                      "messaging.operation.name": "redrive",
-                      "messaging.destination.name": opts.workQueue,
-                      "egress.origin_reason": originReason,
-                    },
-                  }),
-                ),
-              ),
+          O.map(delivery.parent, (span) =>
+            send.pipe(
+              Effect.withSpan("work.redrive", {
+                attributes: {
+                  "messaging.system": "rabbitmq",
+                  "messaging.operation.name": "redrive",
+                  "messaging.destination.name": opts.workQueue,
+                  "egress.origin_reason": originReason,
+                },
+              }),
+              Effect.withParentSpan(span),
+            ),
+          ).pipe(O.getOrElse(() => send)),
         );
       } catch {
         // The work queue is unreachable; leave the message where it is
