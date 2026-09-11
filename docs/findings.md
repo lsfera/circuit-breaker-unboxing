@@ -763,3 +763,26 @@ correct-looking pieces of code, which no grep finds.
   return, and the outbox drain, which `break`s at the first undeliverable entry
   and so cannot be a fold. A fold is right where a value comes out; a guard
   clause is right where control flow does.
+
+- **The same shape, one construct over.** `Result` was being read exactly the
+  way `Option` had been: `Result.isFailure(decoded)` as a guard, then
+  `decoded.failure` to pick a message and `decoded.success` to get the value —
+  in the daemon's control consumer, in `onTrigger`, and in the subscriber's SSE
+  reader. `Coordination.ts` already folded its checkpoint read with
+  `Result.match`, so these three were an inconsistency rather than a style
+  preference, and the fold turns "decode, then either report or act" into what
+  it always was: one expression with two named branches.
+
+  `perform` was a `switch` over `Action["_tag"]` returning an Effect per case —
+  a total mapping from tag to behaviour, which is what `Match.typeTags` is for.
+  It also destructures `sequence` per branch, so the two publishing cases stop
+  repeating `action.sequence`.
+
+  Where the constructs sweep stopped: the imperative loops in `FleetSource`,
+  `EnvoyPushSource`, `Tally` and the outbox drain accumulate across `break`s,
+  early `continue`s and mutable counters that outlive the iteration. Rewriting
+  those as folds would move the mutation into a closure rather than remove it,
+  and they are parsing and accumulation code where the step order is the point.
+  `switch (classifySequence(...))` stays a `switch`: it matches a string union,
+  not a tagged type, and `Match` over it would be heavier than the thing it
+  replaced.

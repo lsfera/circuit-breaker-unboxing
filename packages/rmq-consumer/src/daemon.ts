@@ -1,4 +1,15 @@
-import { Clock, Duration, Effect, Metric, Option as O, Ref, Result, Schedule, Semaphore } from "effect";
+import {
+  Clock,
+  Duration,
+  Effect,
+  Match,
+  Metric,
+  Option as O,
+  Ref,
+  Result,
+  Schedule,
+  Semaphore,
+} from "effect";
 import type { Tracer } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
@@ -318,21 +329,14 @@ export const runDaemon = (cfg: DaemonConfig) =>
       });
 
     /** The shell half of the reducer: what an Action actually does. */
-    const perform = (action: Action) => {
-      switch (action._tag) {
-        case "PublishProbeTrigger":
-          return control.send(trigger, encodeElectionTrigger({ sequence: action.sequence }));
-        case "PublishRedriveTrigger":
-          return control.send(
-            redriveTrigger,
-            encodeElectionTrigger({ sequence: action.sequence }),
-          );
-        case "Probe":
-          return probeOnce;
-        case "Redrive":
-          return redriveOnce;
-      }
-    };
+    const perform = Match.typeTags<Action>()({
+      PublishProbeTrigger: ({ sequence }) =>
+        control.send(trigger, encodeElectionTrigger({ sequence })),
+      PublishRedriveTrigger: ({ sequence }) =>
+        control.send(redriveTrigger, encodeElectionTrigger({ sequence })),
+      Probe: () => probeOnce,
+      Redrive: () => redriveOnce,
+    });
 
     const performAll = (actions: ReadonlyArray<Action>) =>
       Effect.forEach(actions, perform, { discard: true });
@@ -363,29 +367,32 @@ export const runDaemon = (cfg: DaemonConfig) =>
         yield* performAll(actions);
       });
 
-    yield* control.consume(controlQueue, (body) => {
-      const decoded = decodeCircuitEvent(body);
-      if (Result.isFailure(decoded)) {
+    yield* control.consume(controlQueue, (body) =>
+      Result.match(decodeCircuitEvent(body), {
         // Never half-applied: rejected, so it lands on the dead-letter queue rather
         // than existing only as a log line. Bounded by UNDECODABLE_SAMPLE.
-        return sampleUnreadable(
-          decoded.failure === "malformed-json"
-            ? "control message that is not JSON"
-            : "control message that does not match the published schema",
-        );
-      }
-      const { data, type } = decoded.success;
-      if (data.apiId !== cfg.apiId) return; // belt and braces; the binding already filters
-      Tally.observed(counts, type);
+        onFailure: (why) =>
+          sampleUnreadable(
+            why === "malformed-json"
+              ? "control message that is not JSON"
+              : "control message that does not match the published schema",
+          ),
+        onSuccess: ({ data, type }) => {
+          if (data.apiId !== cfg.apiId) return; // belt and braces; the binding already filters
+          Tally.observed(counts, type);
 
-      contract = observe(contract, type, data.sequence);
+          contract = observe(contract, type, data.sequence);
 
-      forkInContext(
-        applyEvent(data.state, data.sequence, data.reason).pipe(
-          Effect.catchCause((cause) => Effect.logError(`${label}: applying event failed`, cause)),
-        ),
-      );
-    });
+          forkInContext(
+            applyEvent(data.state, data.sequence, data.reason).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logError(`${label}: applying event failed`, cause),
+              ),
+            ),
+          );
+        },
+      }),
+    );
 
     /**
      * Both elections read their trigger the same way, through `ElectionTrigger`.
@@ -394,20 +401,21 @@ export const runDaemon = (cfg: DaemonConfig) =>
      */
     const onTrigger =
       (what: string, command: (sequence: number) => Command) => (body: string) => {
-        const decoded = decodeElectionTrigger(body);
-        if (Result.isFailure(decoded)) {
-          return sampleUnreadable(
-            decoded.failure === "malformed-json"
-              ? `${what} trigger that is not JSON`
-              : `${what} trigger that does not match the schema`,
-          );
-        }
-        forkInContext(
-          dispatch(command(decoded.success.sequence)).pipe(
-            Effect.flatMap(({ actions }) => performAll(actions)),
-            Effect.catchCause((cause) => Effect.logError(`${label}: ${what} failed`, cause)),
-          ),
-        );
+        Result.match(decodeElectionTrigger(body), {
+          onFailure: (why) =>
+            sampleUnreadable(
+              why === "malformed-json"
+                ? `${what} trigger that is not JSON`
+                : `${what} trigger that does not match the schema`,
+            ),
+          onSuccess: ({ sequence }) =>
+            forkInContext(
+              dispatch(command(sequence)).pipe(
+                Effect.flatMap(({ actions }) => performAll(actions)),
+                Effect.catchCause((cause) => Effect.logError(`${label}: ${what} failed`, cause)),
+              ),
+            ),
+        });
       };
 
     // Registered for the life of the process and idle almost all of it: SAC promotion

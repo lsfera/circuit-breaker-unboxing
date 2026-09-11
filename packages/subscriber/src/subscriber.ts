@@ -55,43 +55,43 @@ const program = (ORIGIN: string) =>
       // consumes it to remember to check for. `Result.fail` is this
       // combinator's "skip". See docs/decisions/006-representing-absence.md.
       Stream.filterMapEffect((frame) =>
-        Effect.suspend((): Effect.Effect<Result.Result<Row, Sse.Event>> => {
-          // Through the contract's own reader: a frame that is not JSON at all is
-          // a failure to report, not an exception to escape into the stream.
-          const decoded = decodeCircuitEvent(frame.data);
-          if (Result.isFailure(decoded)) {
+        // Through the contract's own reader: a frame that is not JSON at all is
+        // a failure to report, not an exception to escape into the stream.
+        Effect.suspend((): Effect.Effect<Result.Result<Row, Sse.Event>> =>
+          Result.match(decodeCircuitEvent(frame.data), {
             // Loud, not silently dropped: this is contract drift.
-            return Effect.as(
-              Effect.logError(`undecodable event: ${frame.data}`),
-              Result.fail(frame),
-            );
-          }
-          const event = decoded.success;
-          return Ref.modify(known, (map) => {
-            const { apiId, sequence, state } = event.data;
-            const highest = O.map(O.fromUndefinedOr(map.get(apiId)), (k) => k.sequence);
+            onFailure: () =>
+              Effect.as(
+                Effect.logError(`undecodable event: ${frame.data}`),
+                Result.fail(frame),
+              ),
+            onSuccess: (event) =>
+              Ref.modify(known, (map) => {
+                const { apiId, sequence, state } = event.data;
+                const highest = O.map(O.fromUndefinedOr(map.get(apiId)), (k) => k.sequence);
 
-            // The same rule the aggregator's own observer and the daemon fleet
-            // apply, from a third vantage point. Reimplementing it here — in the
-            // subscriber this repo offers as the shape a real one should take —
-            // is how three readings of one guarantee end up disagreeing.
-            switch (classifySequence(highest, sequence)) {
-              // Idempotent: an already-applied sequence is a no-op.
-              case "duplicate":
-                return ["sync", map] as const;
-              case "gap":
-                // Snapshots deliberately republish ahead of the last
-                // state_changed, so only that type can reveal a real gap.
-                return [
-                  event.type === SEQUENCED_EVENT ? "GAP!" : "    ",
-                  new Map(map).set(apiId, { state, sequence }),
-                ] as const;
-              case "first":
-              case "next":
-                return ["    ", new Map(map).set(apiId, { state, sequence })] as const;
-            }
-          }).pipe(Effect.map((tag) => Result.succeed({ tag, event })));
-        }),
+                // The same rule the aggregator's own observer and the daemon fleet
+                // apply, from a third vantage point. Reimplementing it here — in the
+                // subscriber this repo offers as the shape a real one should take —
+                // is how three readings of one guarantee end up disagreeing.
+                switch (classifySequence(highest, sequence)) {
+                  // Idempotent: an already-applied sequence is a no-op.
+                  case "duplicate":
+                    return ["sync", map] as const;
+                  case "gap":
+                    // Snapshots deliberately republish ahead of the last
+                    // state_changed, so only that type can reveal a real gap.
+                    return [
+                      event.type === SEQUENCED_EVENT ? "GAP!" : "    ",
+                      new Map(map).set(apiId, { state, sequence }),
+                    ] as const;
+                  case "first":
+                  case "next":
+                    return ["    ", new Map(map).set(apiId, { state, sequence })] as const;
+                }
+              }).pipe(Effect.map((tag) => Result.succeed({ tag, event }))),
+          }),
+        ),
       ),
       Stream.runForEach(({ tag, event }) =>
         Effect.sync(() => {
