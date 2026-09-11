@@ -856,3 +856,14 @@ correct-looking pieces of code, which no grep finds.
   Dropped in the same pass: `live`, an array built alongside `replicas` holding
   the same slots and read only for `.length`, at five sites that all mean
   `replicas.size`.
+
+  A second pass over the result found the same shape one level down, introduced
+  by the fix itself: `settleInto` chose its `Reason` with a nested ternary on
+  `to`, and its DEGRADED arm — `overflowDrove ? THRESHOLD_OVERFLOW :
+  OUTLIER_EJECTION` — was character-for-character the expression in
+  `probeDegraded`. One rule, two copies, a day old. `REASON` is now a
+  `Record<Candidate, (tick) => Reason>` read by both, keyed by the verdict
+  rather than by the state being left, because that is what the reason is a
+  property of: a DEGRADED fleet means the same thing whether it is reached from
+  CLOSED or out of a probe. Missing an arm is a compile error, measured the same
+  way as the table above.

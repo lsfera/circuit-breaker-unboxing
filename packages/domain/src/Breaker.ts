@@ -129,6 +129,20 @@ type Tick = {
   readonly overflowDrove: boolean;
 };
 
+/**
+ * Why a verdict is what it is, keyed by the verdict itself rather than by the
+ * state being left: a DEGRADED fleet means THRESHOLD_OVERFLOW or
+ * OUTLIER_EJECTION whether it is reached from CLOSED or out of a probe, and
+ * writing that rule once is the difference between the two agreeing and the
+ * two being kept in step by hand.
+ */
+const REASON: Record<Candidate, (tick: Tick) => Reason> = {
+  OPEN: ({ allGone }) => (allGone ? Reason.ALL_ENDPOINTS_EJECTED : Reason.OUTLIER_EJECTION),
+  DEGRADED: ({ overflowDrove }) =>
+    overflowDrove ? Reason.THRESHOLD_OVERFLOW : Reason.OUTLIER_EJECTION,
+  CLOSED: () => Reason.HEALTHY,
+};
+
 /** One cell of the table below: what this (state, candidate) pair does. */
 type Resolve = (
   self: BreakerState,
@@ -180,35 +194,20 @@ const probeSucceeded: Resolve = (self, now, { cfg }) => {
  * The upstream is still impaired, so if this relapses to OPEN it should wait
  * out the backoff it had already earned rather than start over optimistically.
  */
-const probeDegraded: Resolve = (self, now, { dwelled, overflowDrove }) => {
+const probeDegraded: Resolve = (self, now, tick) => {
   const reset = { ...self, probeStreak: 0 };
-  return dwelled
-    ? transition(
-        reset,
-        now,
-        State.DEGRADED,
-        overflowDrove ? Reason.THRESHOLD_OVERFLOW : Reason.OUTLIER_EJECTION,
-      )
+  return tick.dwelled
+    ? transition(reset, now, State.DEGRADED, REASON.DEGRADED(tick))
     : [reset, O.none()];
 };
 
 /** A settled state moving to a different settled state, once both timers allow. */
 const settleInto =
   (to: Candidate): Resolve =>
-  (self, now, { dwelled, settled, allGone, overflowDrove }) => {
-    if (!dwelled || !settled) return [self, O.none()];
-    const reason =
-      to === State.OPEN
-        ? allGone
-          ? Reason.ALL_ENDPOINTS_EJECTED
-          : Reason.OUTLIER_EJECTION
-        : to === State.DEGRADED
-          ? overflowDrove
-            ? Reason.THRESHOLD_OVERFLOW
-            : Reason.OUTLIER_EJECTION
-          : Reason.HEALTHY;
-    return transition(self, now, to, reason);
-  };
+  (self, now, tick) =>
+    tick.dwelled && tick.settled
+      ? transition(self, now, to, REASON[to](tick))
+      : [self, O.none()];
 
 /**
  * The whole graph, as a table rather than a chain of `if`s: every state this
