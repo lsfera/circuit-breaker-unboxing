@@ -349,15 +349,39 @@ export const makeWebhookSink = (url: string): Effect.Effect<SinkImpl, never, Out
        * The flag is released only by the pass that took it, which is why this
        * is not a plain `ensuring` around the whole thing.
        */
+      const drainable = yield* Ref.make(true);
       const drainOutbox = Ref.getAndSet(draining, true).pipe(
         Effect.flatMap((busy) =>
           busy
             ? Effect.succeed(0)
-            : drainPass.pipe(Effect.ensuring(Ref.set(draining, false))),
+            : drainPass.pipe(
+                Effect.ensuring(Ref.set(draining, false)),
+                Effect.tap(() =>
+                  Ref.getAndSet(drainable, true).pipe(
+                    Effect.flatMap((was) =>
+                      was ? Effect.void : Effect.logInfo("the outbox is readable again"),
+                    ),
+                  ),
+                ),
+              ),
         ),
         // The outbox being unreachable is a reason to try again next tick, not
-        // a reason to end the loop that is trying.
-        Effect.catchCause(() => Effect.succeed(0)),
+        // a reason to end the loop that is trying — but not a reason to say
+        // nothing either. The append path warns per event it could not persist;
+        // this half had no voice at all, so an outbox holding undelivered
+        // events for a subscriber that has since recovered could fail to
+        // replay them on every tick, forever, in silence. Edge-triggered, the
+        // way coordination reachability is: once on the way down, once back.
+        Effect.catchCause((cause) =>
+          Ref.getAndSet(drainable, false).pipe(
+            Effect.flatMap((was) =>
+              was
+                ? Effect.logWarning("could not replay the outbox", cause)
+                : Effect.void,
+            ),
+            Effect.as(0),
+          ),
+        ),
       );
 
       return { name: "webhook", deliver, deadLetters: Ref.get(dead), drainOutbox };

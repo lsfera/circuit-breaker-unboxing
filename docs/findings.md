@@ -889,3 +889,21 @@ correct-looking pieces of code, which no grep finds.
   aggregator's tick against Envoy admin, the redrive pass, the SSE keepalive.
   A *rate source* should be fixed, because the rate is the contract. Exactly one
   site in this repo has a rate contract, and it was the one that was wrong.
+
+- **The outbox drain was the one swallowed cause in the aggregator.**
+  `drainOutbox` ended `Effect.catchCause(() => Effect.succeed(0))` — correct in
+  refusing to end the loop, but it logged nothing, so an outbox that could not
+  be replayed said so nowhere.
+
+  Worth being precise about the scope, because the obvious scenario is already
+  covered: a total Redis outage fails `tryAcquireOrRenew` first, and the tick is
+  abandoned with a "coordination unavailable, standing down" warning before the
+  drain is reached. What is silent is an outbox failing while the lease does
+  not — a separate Redis for the outbox, a memory limit hit on write, an error
+  on the read itself — where the instance stays leader, keeps publishing, and
+  simply never replays what a recovered subscriber is owed.
+
+  Edge-triggered the way coordination reachability already is. Measured with a
+  stub outbox that fails on demand: three consecutive failing passes emit one
+  warning, recovery emits one "readable again", and `drainOutbox` still returns
+  0 without failing, so the tick loop is untouched.
