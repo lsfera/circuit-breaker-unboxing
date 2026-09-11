@@ -52,27 +52,31 @@ export class Aggregator extends Context.Service<
  * `Breaker.initial`, when one exists. Only `state`/`reason`/`sequence`/
  * `changedAt`/`openBackoffMs` are restored — see Checkpoint's doc comment
  * for why the rest is safe to let repopulate from the next few polls.
+ *
+ * The `Partial` annotation is load-bearing: without it, a mistyped field name
+ * spreads harmlessly and that field silently keeps its `initial` value — which
+ * for `sequence` is the failover bug this function exists to prevent.
  */
 const seedFromCheckpoint = (
   apiId: string,
   checkpoint: O.Option<Checkpoint>,
   cfg: Parameters<typeof Breaker.initial>[1],
   now: number,
-): Breaker.BreakerState => {
-  const base = Breaker.initial(apiId, cfg, now);
-  if (O.isNone(checkpoint)) return base;
-  const cp = checkpoint.value;
-  return {
-    ...base,
-    state: cp.state,
-    reason: cp.reason,
-    sequence: cp.sequence,
-    changedAt: cp.changedAt,
-    candidate: cp.state,
-    candidateSince: cp.changedAt,
-    openBackoffMs: cp.openBackoffMs,
-  };
-};
+): Breaker.BreakerState => ({
+  ...Breaker.initial(apiId, cfg, now),
+  ...O.map(
+    checkpoint,
+    (cp): Partial<Breaker.BreakerState> => ({
+      state: cp.state,
+      reason: cp.reason,
+      sequence: cp.sequence,
+      changedAt: cp.changedAt,
+      candidate: cp.state,
+      candidateSince: cp.changedAt,
+      openBackoffMs: cp.openBackoffMs,
+    }),
+  ).pipe(O.getOrElse(() => ({}))),
+});
 
 export const AggregatorLayer = Layer.effect(
   Aggregator,
