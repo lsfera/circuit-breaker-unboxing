@@ -2,6 +2,11 @@ name: Site
 
 # Builds docs/ into the project site and publishes it to GitHub Pages.
 #
+# The build is `docs/Dockerfile`, and what is deployed is extracted from the
+# image it produces. That image is also how the site is read offline
+# (`pnpm run site`), so there is one build rather than two that are supposed to
+# match.
+#
 # The build runs on pull requests too, without deploying, because the site is
 # the documentation: a diagram that stops rendering or a page that stops
 # building is a documentation regression, and this is where it gets caught.
@@ -37,16 +42,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: "3.3"
-          bundler-cache: true
-          working-directory: docs
-
-      - name: Build
-        working-directory: docs
+      - name: Build the site image
         env:
-          JEKYLL_ENV: production
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
         run: |
@@ -57,18 +54,29 @@ jobs:
           base=""
           if [ "$REPO" != "$OWNER.github.io" ]; then base="/$REPO"; fi
           echo "building with baseurl '$base'"
-          bundle exec jekyll build --destination ../_site --baseurl "$base"
+          docker build --build-arg BASEURL="$base" -t egress-site:ci docs
 
-      - name: Check the build produced the pages it should
+      - name: Take the site out of the image
+        # What gets published is what the image serves, extracted from it —
+        # not a second build that happens to agree. The image is the artefact;
+        # `docker run -p 8080:80 egress-site` is the same site offline.
         run: |
-          # A Jekyll build succeeds happily having rendered nothing. These are
-          # the two failures that would otherwise ship silently: documents that
-          # stopped being converted, and the landing page disappearing.
+          id=$(docker create egress-site:ci)
+          mkdir -p _site
+          docker cp "$id:/usr/share/nginx/html/." _site
+          docker rm "$id" >/dev/null
+
+      - name: Check the image produced the pages it should
+        # The Dockerfile asserts this too, on the build side. Re-checking here
+        # covers the step in between: an extraction that copied nothing at all
+        # leaves an empty directory and deploys a blank site.
+        run: |
           pages=$(find _site -name '*.html' | wc -l)
           echo "$pages pages"
-          test "$pages" -ge 30 || { echo "::error::only $pages pages built, expected 30+"; exit 1; }
+          test "$pages" -ge 30 || { echo "::error::only $pages pages extracted, expected 30+"; exit 1; }
           test -f _site/index.html || { echo "::error::no landing page"; exit 1; }
           test -f _site/assets/site.css || { echo "::error::stylesheet missing"; exit 1; }
+          test -s _site/assets/vendor/mermaid.min.js || { echo "::error::mermaid not vendored"; exit 1; }
 
       - uses: actions/upload-pages-artifact@v3
         with:

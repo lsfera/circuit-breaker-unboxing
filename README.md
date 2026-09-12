@@ -508,6 +508,7 @@ docs/                        one document per job — see "Where to read next" b
   findings.md                the long form of everything running it surfaced
   what-if.md                 environments this was not measured against, and what breaks
   _config.yml, _layouts/     the same documents, served as a site — see "Reading this as a site"
+  Dockerfile, nginx.conf     that site as an image, for reading it offline
   security.md                what is missing and what production must do, with line references
   effect-notes.md            what Effect bought, and what an RC pin costs
   decisions/                 decision records: what was chosen, and the measurement it rests on
@@ -539,7 +540,26 @@ Links that leave `docs/` — source files, this README, the Dockerfile — have 
 page on the site, so the layout rewrites them to the repository at their real
 paths rather than letting them 404.
 
-To build it locally:
+The site is also an image, so the documentation travels:
+
+```
+pnpm run site                 # build it and serve on http://localhost:8080
+pnpm run site:build           # just the image
+```
+
+Mermaid is vendored into that image rather than loaded from a CDN — four of
+these documents explain themselves with a diagram, and an image whose point is
+reading offline cannot fetch a renderer at page load. Web fonts still come from
+Google, so offline the pages fall back to Georgia and the system sans, which
+they are designed to do.
+
+**CI deploys what that image serves.** `.github/workflows/pages.yml` builds
+`docs/Dockerfile`, copies the site straight out of the container, and publishes
+that — so the published site and the one in your hand are one build rather than
+two that are meant to agree. The only difference between them is `BASEURL`,
+which a project site needs and `localhost` must not have.
+
+Without Docker, Jekyll directly still works:
 
 ```
 cd docs && bundle install && bundle exec jekyll serve
