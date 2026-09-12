@@ -346,20 +346,45 @@ export const HttpLive = HttpRouter.use((router) =>
         // as proof of the contract was the one not applying it.
         const event = yield* HttpServerRequest.schemaBodyJson(CircuitEvent);
         const apiId = event.data.apiId;
-        // Diffed rather than derived from `event` alone: gap/duplicate is a
-        // property of this event against what the subscriber already holds.
-        const [before, after] = yield* Ref.modify(integrity, (i) => {
-          const next = record(i, event);
-          return [[i, next] as const, next];
+
+        // Only APIs this aggregator actually serves. `apiId` is an unconstrained
+        // string on an endpoint published to the host, and every distinct value
+        // that reaches `record` costs a permanent entry in the per-API
+        // high-water map *and* two Prometheus series — measured at 2000 ids:
+        // 37 series became 4037 and /metrics went to 240KB, scraped every two
+        // seconds. The heap barely moved; the cardinality is what does the
+        // damage, and unlike the heap it outlives a restart because Prometheus
+        // has already stored it.
+        //
+        // Nothing legitimate is turned away: published apiIds come from Envoy
+        // cluster names filtered against these same specs, so the set this
+        // checks is the set that can be published.
+        const served = yield* fleet.specs.pipe(
+          Effect.map((specs) => specs.some((spec) => spec.apiId === apiId)),
+        );
+        const rejectUnknown = HttpServerResponse.jsonUnsafe(
+          { accepted: false, reason: `unknown apiId: ${apiId}` },
+          { status: 404 },
+        );
+
+        const accept = Effect.gen(function* () {
+          // Diffed rather than derived from `event` alone: gap/duplicate is a
+          // property of this event against what the subscriber already holds.
+          const [before, after] = yield* Ref.modify(integrity, (i) => {
+            const next = record(i, event);
+            return [[i, next] as const, next];
+          });
+          yield* Metric.update(Metric.withAttributes(Telemetry.subscriberReceived, { apiId }), 1);
+          yield* after.gaps.length > before.gaps.length
+            ? Metric.update(Metric.withAttributes(Telemetry.subscriberGaps, { apiId }), 1)
+            : Effect.void;
+          yield* after.duplicates > before.duplicates
+            ? Metric.update(Metric.withAttributes(Telemetry.subscriberDuplicates, { apiId }), 1)
+            : Effect.void;
+          return HttpServerResponse.jsonUnsafe({ accepted: true }, { status: 202 });
         });
-        yield* Metric.update(Metric.withAttributes(Telemetry.subscriberReceived, { apiId }), 1);
-        if (after.gaps.length > before.gaps.length) {
-          yield* Metric.update(Metric.withAttributes(Telemetry.subscriberGaps, { apiId }), 1);
-        }
-        if (after.duplicates > before.duplicates) {
-          yield* Metric.update(Metric.withAttributes(Telemetry.subscriberDuplicates, { apiId }), 1);
-        }
-        return HttpServerResponse.jsonUnsafe({ accepted: true }, { status: 202 });
+
+        return yield* served ? accept : Effect.succeed(rejectUnknown);
       }).pipe(
         Effect.catchCause(() =>
           Effect.succeed(HttpServerResponse.jsonUnsafe({ accepted: false }, { status: 400 })),

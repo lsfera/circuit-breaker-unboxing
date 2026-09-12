@@ -944,3 +944,33 @@ correct-looking pieces of code, which no grep finds.
 
   Two live runs after: six transitions each, two per section, both ending
   `HALF_OPEN -> CLOSED PROBE_SUCCEEDED`.
+
+- **`/subscriber/webhook` let an unauthenticated caller mint Prometheus series.**
+  `apiId` is `Schema.String` in `CircuitEventData` — unconstrained — and the
+  endpoint is published on the host. Every distinct value that reached `record`
+  cost a permanent entry in the per-API high-water map *and* two Prometheus
+  series.
+
+  Measured with 2000 distinct ids:
+
+      series on /metrics:   37 -> 4037
+      /metrics payload:          240 KB, scraped every 2s
+      aggregator RSS:     99.8 -> 101.3 MiB   (~750 B per id)
+      POST latency:       34.9ms -> 1.5ms     (no degradation)
+
+  The heap is the least of it: 750 bytes an id means a million of them costs
+  under a gigabyte, and the per-event `new Map(bySequence)` copy never showed up
+  in latency. The cardinality is the damage, and unlike the heap it *outlives
+  the process* — Prometheus had already scraped and stored the 4000 series, and
+  a restart of the aggregator does not take them back.
+
+  Fixed by checking the apiId against `fleet.specs`, the same set the
+  series-zeroing block above it already enumerates. Nothing legitimate is turned
+  away: published apiIds come from Envoy cluster names filtered against those
+  same specs, so the set this checks is the set that can be published. Unknown
+  ids get a 404 naming the id rather than a silent drop, because a subscriber
+  posting to the wrong aggregator should be told.
+
+  After, same 2000 ids: **37 series, unchanged**, and a live demo run through
+  the guarded endpoint — six transitions to CLOSED, received=23 duplicates=0
+  gaps=0, a 1838-message backlog drained to zero.
