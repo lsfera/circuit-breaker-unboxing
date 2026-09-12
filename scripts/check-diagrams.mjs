@@ -42,24 +42,32 @@ const diagrams = function* (dir) {
       yield* diagrams(path);
       continue;
     }
-    if (!entry.endsWith(".md")) continue;
-    const source = readFileSync(path, "utf8");
-    let index = 0;
-    for (const block of source.matchAll(/```mermaid\n([\s\S]*?)\n```/g)) {
-      // The line the fence opens on, so a failure names somewhere to look.
-      const line = source.slice(0, block.index).split("\n").length;
-      yield { file: relative(ROOT, path), line, index: index++, text: block[1] };
-    }
+    if (!entry.endsWith(".md") && !entry.endsWith(".html")) continue;
+    yield* diagramsIn(path);
   }
 };
 
-/** The same extraction for a single file. */
+/**
+ * Both ways a diagram is written here: a fenced block in a document, and a
+ * `<pre class="mermaid">` in a hand-written page. The second is how the
+ * overview's architecture diagram is written, and leaving it unscanned would
+ * have put the one diagram everybody sees first outside the check.
+ */
+const PATTERNS = [
+  /```mermaid\n([\s\S]*?)\n```/g,
+  /<pre class="mermaid">\n([\s\S]*?)\n<\/pre>/g,
+];
+
+/** Every diagram in one file, whichever way it is written. */
 const diagramsIn = function* (path) {
   const source = readFileSync(path, "utf8");
   let index = 0;
-  for (const block of source.matchAll(/```mermaid\n([\s\S]*?)\n```/g)) {
-    const line = source.slice(0, block.index).split("\n").length;
-    yield { file: relative(ROOT, path), line, index: index++, text: block[1] };
+  for (const pattern of PATTERNS) {
+    for (const block of source.matchAll(pattern)) {
+      // The line the block opens on, so a failure names somewhere to look.
+      const line = source.slice(0, block.index).split("\n").length;
+      yield { file: relative(ROOT, path), line, index: index++, text: block[1] };
+    }
   }
 };
 

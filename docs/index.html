@@ -43,6 +43,76 @@ description: >-
 </section>
 
 <section>
+  <h2>The whole of it, in one picture</h2>
+  <p>Two planes and a loop. The data plane enforces on the request path, per replica, immediately.
+  The control plane decides once, off that path, and publishes the verdict. The fleet reacts by
+  changing how much work it sends back into the data plane — which is what closes the circle.</p>
+
+<pre class="mermaid">
+flowchart LR
+  classDef enforce fill:#fbe2dd,stroke:#c9432f,stroke-width:1.5px,color:#3a1c17;
+  classDef control fill:#dcf3f1,stroke:#0c8b86,stroke-width:1.5px,color:#04302e;
+  classDef react fill:#fbedd6,stroke:#c07f16,stroke-width:1.5px,color:#3a2c12;
+  classDef store fill:#eaeef6,stroke:#5b6478,stroke-width:1.5px,color:#161d2b;
+  classDef ext fill:transparent,stroke:#5b6478,stroke-width:1.5px,stroke-dasharray:4 3,color:#5b6478;
+
+  Prod["producer"]:::react
+
+  subgraph FLEET["Reacting — five competing consumers, per API"]
+    direction TB
+    Dae["daemon 0 .. 4<br/>pull only as many as the verdict allows"]:::react
+    Redrive["redrive<br/>elected to one"]:::react
+  end
+
+  subgraph BROKER["RabbitMQ"]
+    direction TB
+    Work["work queue<br/>quorum · x-delivery-limit 3"]:::react
+    Dead["dead letters"]:::react
+    Ctrl["circuit.control<br/>topic exchange"]:::control
+  end
+
+  subgraph DATA["Data plane — enforces, on the request path"]
+    direction TB
+    E0["envoy-00"]:::enforce
+    E1["envoy-01"]:::enforce
+    E2["envoy-02"]:::enforce
+  end
+
+  Third[("third-party API<br/>3 to 6 endpoints, ejected individually")]:::ext
+
+  subgraph CONTROL["Control plane — decides once, off the request path"]
+    direction TB
+    Agg["aggregator · leader<br/>quorum of replica votes<br/>one breaker per API"]:::control
+    Standby["aggregator · standby"]:::control
+  end
+
+  Redis[("Redis<br/>lease · fencing · checkpoints · outbox")]:::store
+  Subs["subscribers<br/>status page · billing · on call"]:::control
+
+  Prod -- "publish work" --> Work
+  Work -- "prefetch is the ceiling" --> Dae
+  Dae -- "one egress address" --> DATA
+  DATA -- "the only thing that calls it" --> Third
+  Dae -- "attempts exhausted" --> Dead
+  Dead --> Redrive
+  Redrive -- "replay, on recovery" --> Work
+
+  DATA -- "per-replica stats" --> Agg
+  Agg <--> Redis
+  Standby -. "takes over, fenced" .-> Redis
+  Agg -- "state_changed · gapless per API" --> Ctrl
+  Agg -- "webhook · SSE" --> Subs
+  Ctrl -- "one queue per daemon" --> Dae
+</pre>
+
+  <p>Three things in that picture are the whole design. Enforcement is <strong>local</strong>, so it
+  survives the control plane being down. The verdict is <strong>one</strong>, so five consumers and a
+  status page cannot disagree about whether an API is up. And the arrow from the control plane back to
+  the fleet carries a <strong>contract</strong> — a gapless per-API sequence — so a subscriber can tell
+  a missed event from a quiet one.</p>
+</section>
+
+<section>
   <h2>Written as evidence, not as claims</h2>
   <p>Every number in these documents was measured against a running stack — real Envoy, real RabbitMQ, real Redis, real container kills — and the command behind each one is recorded next to it. Where something was decided against, the measurement that decided it is written down too.</p>
   <dl class="facts">
