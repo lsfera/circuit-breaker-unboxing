@@ -238,3 +238,24 @@ rather than the top-level graph, so `launchWithRmq` does not fit it without
 reshaping how that sink is provided. Its remaining `process.exit(1)` is in a
 `main.ts`, which is a composition root and the one place that may legitimately
 end a process.
+
+### The aggregator, a day later
+
+Added 2026-09-11, correcting the paragraph above rather than leaving it to be
+read as current. Both of its claims are now false.
+
+`@egress/aggregator` **is** converted, just not through `launchWithRmq` — the
+reason that helper does not fit still stands. Its `Rmq` is sealed inside the
+control-plane sink's layer, so nothing outside could observe `lost`, and
+leaving it unobserved is what made a permanently dead broker silent: the
+instance kept serving 200s while the daemon fleet stopped hearing about state
+changes. The sink now forks `Effect.catch(rmq.lost, …)` into its own scope,
+which logs fatal and completes a `Fatal` deferred that `main.ts` blocks on with
+`Deferred.await(fatal)`. Same stance, same fail-fast, reached by the shape that
+suits an optional dependency.
+
+There is also no `process.exit` left to point at. `grep -rn "process.exit"
+packages/*/src` returns five hits and every one is a comment describing what
+used to be there. The two fatal paths — a lost control plane and a failed
+startup — both complete that one deferred, so the program ends the way every
+other failure does.
