@@ -198,6 +198,41 @@ body {
 .nav-group a[aria-current="page"] { border-left-color: var(--accent); }
 .nav-group a[aria-current="page"] .t { color: var(--accent); }
 
+/* The two reference shelves — thirteen decision records, nine runbooks — are
+   looked up rather than read through, so they collapse behind a disclosure
+   styled as the section heading it replaces. A shelf opens itself when the
+   page being read is one of its own, so arriving from a link never leaves the
+   reader without the list they arrived from. */
+/* Block, not the flex column `.nav-group` sets: a `<details>` made a flex
+   container has a history of not hiding its own contents when closed. */
+.nav-drop { display: block; }
+
+.nav-drop > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  cursor: pointer;
+  list-style: none;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--ink-faint);
+}
+.nav-drop > summary::-webkit-details-marker { display: none; }
+.nav-drop > summary:hover { color: var(--accent); }
+
+/* The count is the useful part of a shelf label: it says how long the list is
+   before opening it. */
+.nav-drop > summary .c { font-variant-numeric: tabular-nums; letter-spacing: 0.06em; }
+.nav-drop > summary::after { content: "\25b8"; margin-left: auto; font-size: 0.72rem; line-height: 1; }
+.nav-drop[open] > summary::after { content: "\25be"; }
+
+.nav-drop.is-current > summary { color: var(--accent); }
+.nav-drop > ul { margin-top: 0.7rem; }
+.nav-drop .nav-index .t { color: var(--ink-soft); font-style: italic; }
+
 /* ---------- content ---------- */
 
 /* The measure is for running text. Code, tables and diagrams are not running

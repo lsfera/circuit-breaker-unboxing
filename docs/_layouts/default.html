@@ -22,7 +22,7 @@
     <nav>
       <a href="{{ '/architecture.html' | relative_url }}">Architecture</a>
       <a href="{{ '/operations.html' | relative_url }}">Operating it</a>
-      <a href="{{ '/findings.html' | relative_url }}">Findings</a>
+      <a href="{{ '/measurements.html' | relative_url }}">Measured limits</a>
       <a data-repo-link href="#" hidden>Repository ↗</a>
     </nav>
   </div>
@@ -48,25 +48,43 @@
       </div>
       {% endfor %}
 
-      <div class="nav-group">
-        <h2>Decision records</h2>
+      {% comment %}
+        A decision record and a runbook are looked up, not read in order, and
+        there are twenty-two of them between the two — long enough that as flat
+        lists they pushed everything above them off the screen. Each collapses
+        behind its own disclosure, and opens itself when the page being read is
+        one of its own. The index page leads each list rather than sitting in it
+        under a title identical to the heading above it.
+      {% endcomment %}
+      {% assign adrs = site.pages | where_exp: "p", "p.path contains 'decisions/'" | sort: "path" %}
+      {% assign adr_entries = adrs | where_exp: "p", "p.url != '/decisions/'" %}
+      <details class="nav-group nav-drop{% if page.url contains '/decisions/' %} is-current{% endif %}"{% if page.url contains '/decisions/' %} open{% endif %}>
+        <summary>
+          <span class="t">Decision records</span>
+          <span class="c">{{ adr_entries | size }}</span>
+        </summary>
         <ul>
-          {% assign adrs = site.pages | where_exp: "p", "p.path contains 'decisions/'" | sort: "path" %}
-          {% for adr in adrs %}
+          <li><a class="nav-index" href="{{ '/decisions/' | relative_url }}"{% if page.url == '/decisions/' %} aria-current="page"{% endif %}><span class="t">All {{ adr_entries | size }}, in order</span></a></li>
+          {% for adr in adr_entries %}
           <li><a href="{{ adr.url | relative_url }}"{% if page.url == adr.url %} aria-current="page"{% endif %}><span class="t">{{ adr.title }}</span></a></li>
           {% endfor %}
         </ul>
-      </div>
+      </details>
 
-      <div class="nav-group">
-        <h2>Runbooks</h2>
+      {% assign books = site.pages | where_exp: "p", "p.path contains 'runbooks/'" | sort: "path" %}
+      {% assign book_entries = books | where_exp: "p", "p.url != '/runbooks/'" %}
+      <details class="nav-group nav-drop{% if page.url contains '/runbooks/' %} is-current{% endif %}"{% if page.url contains '/runbooks/' %} open{% endif %}>
+        <summary>
+          <span class="t">Runbooks</span>
+          <span class="c">{{ book_entries | size }}</span>
+        </summary>
         <ul>
-          {% assign books = site.pages | where_exp: "p", "p.path contains 'runbooks/'" | sort: "path" %}
-          {% for book in books %}
+          <li><a class="nav-index" href="{{ '/runbooks/' | relative_url }}"{% if page.url == '/runbooks/' %} aria-current="page"{% endif %}><span class="t">All {{ book_entries | size }}, by alert</span></a></li>
+          {% for book in book_entries %}
           <li><a href="{{ book.url | relative_url }}"{% if page.url == book.url %} aria-current="page"{% endif %}><span class="t">{{ book.title }}</span></a></li>
           {% endfor %}
         </ul>
-      </div>
+      </details>
     </div>
   </details>
 
