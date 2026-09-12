@@ -93,6 +93,13 @@ loss-detection, differently and mostly wrongly.
 These are the real options, in roughly increasing order of how much you build.
 Each is defensible; each fails one of the three constraints above.
 
+They are also, deliberately, only the *architectural* options — the ones that
+answer "where does the verdict come from". The per-call and per-queue
+answers an engineer reaches for first — timeouts, retries, backoff, bulkheads,
+prefetch ceilings, dead-lettering, redrive — are not alternatives to these and
+this repo uses nearly all of them. [docs/approaches.md](docs/approaches.md)
+reviews every layer together, with what each one cannot do.
+
 **A breaker library in every service** — Resilience4j, Polly, opossum,
 gobreaker. Mature, well understood, and the state lives in a variable in one
 process. Ten instances of a service hold ten independent opinions about the

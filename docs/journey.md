@@ -65,6 +65,12 @@ flowchart LR
     class Producer producer
 ```
 
+This picture, and one constraint — **the flaky service is outside your
+control** — is the whole of what was given. Every option that constraint
+leaves open, and where each one stops, is reviewed in
+[the approaches](approaches.md); this document is the path actually taken
+through them.
+
 Nothing here is wrong. This is a correct picture of a work fleet, and it is
 the architecture you should draw if the external system is healthy. Every
 arrow is real and still exists in the final design.
