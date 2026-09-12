@@ -108,6 +108,21 @@ const flags = {
  * hence `orDie` and the restart policy on these containers.
  */
 const daemon = Command.make("rmq-daemon", flags, (settings) => {
+  // A daemon is active when its index falls under the fleet's target, so an
+  // index at or past `fleetSize` is never active — it starts, connects,
+  // consumes nothing and reports healthy for as long as it runs. That is the
+  // shape of a scale-up where `FLEET_SIZE` was raised on the new container and
+  // not on the others, and it is silent, so it is refused here instead.
+  if (settings.index >= settings.fleetSize) {
+    return Effect.die(
+      new Error(
+        `--index ${settings.index} is outside a fleet of ${settings.fleetSize}: ` +
+          `indices are 0-based, so the last one is ${settings.fleetSize - 1}. ` +
+          `Scaling the fleet means raising FLEET_SIZE on every daemon, not only the new one.`,
+      ),
+    );
+  }
+
   const Daemon = Layer.effectDiscard(Effect.forkScoped(Effect.orDie(runDaemon(settings))));
 
   // `launchWithRmq`, not `Layer.launch`: a broker this process can no longer

@@ -520,6 +520,9 @@ docs/                        one document per job — see "Where to read next" b
   measurements.md            scale, chaos and the soak, with the commands behind each number
   findings.md                the long form of everything running it surfaced
   what-if.md                 environments this was not measured against, and what breaks
+  approaches.md              every option the constraint leaves open, and where each stops
+  breaker-library.md         the first answer, measured against this fleet's shape
+  adopting.md                scaling the fleet, and what to take into your own repo
   _config.yml, _layouts/     the same documents, served as a site — see "Reading this as a site"
   Dockerfile, nginx.conf     that site as an image, for reading it offline
   security.md                what is missing and what production must do, with line references

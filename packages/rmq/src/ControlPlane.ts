@@ -94,8 +94,24 @@ export const deadLetterQueueOptions = () => ({
   durable: true,
 });
 
+/**
+ * How long a control queue may sit with no consumer before the broker deletes
+ * it. A daemon that leaves the fleet — a scale-down, a replaced instance id —
+ * otherwise leaves a queue that is still bound to `circuit.control` and still
+ * being published into, with nobody reading it. Measured: three messages in
+ * forty seconds, which is one snapshot interval, growing for as long as the
+ * broker lives.
+ *
+ * Ten minutes, because it has to outlast a reconnect. `@egress/rmq` recovers
+ * for about five minutes before giving up (see ADR 005), and a queue deleted
+ * mid-recovery would be redeclared empty on reconnect — harmless, since these
+ * are transient and a restarting daemon rebuilds from the next snapshot, but
+ * pointless churn.
+ */
+export const CONTROL_QUEUE_EXPIRES_MS = 600_000;
+
 export const controlQueueOptions = (apiId: string) => ({
-  args: deadLetterArgs(apiId),
+  args: { ...deadLetterArgs(apiId), "x-expires": CONTROL_QUEUE_EXPIRES_MS },
   durable: false,
 });
 

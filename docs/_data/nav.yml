@@ -12,6 +12,7 @@
     - { url: /high-availability.html, title: High availability,    note: lease, fencing, epochs, outbox }
     - { url: /rmq-control-plane.html, title: RabbitMQ control plane, note: the fleet, and what the broker taught }
     - { url: /operations.html,        title: Operating it,         note: metrics, dashboards, alerts }
+    - { url: /adopting.html,          title: Scaling and adopting, note: what it costs to grow the fleet, and what to take }
 
 - section: Evidence
   items:
