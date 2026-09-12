@@ -13,6 +13,7 @@
     "test:redis": "pnpm --filter @egress/aggregator test:redis",
     "test:rmq": "pnpm --filter @egress/rmq test:rmq",
     "typecheck": "tsc --noEmit",
+    "check:diagrams": "node scripts/check-diagrams.mjs",
     "check": "pnpm run typecheck && pnpm run test",
     "subscribe": "node --experimental-strip-types packages/subscriber/src/subscriber.ts",
     "demo": "node --experimental-strip-types packages/demo/src/driver.ts",
@@ -22,6 +23,8 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "jsdom": "^25.0.1",
+    "mermaid": "11.17.2",
     "typescript": "^7.0.2"
   }
 }

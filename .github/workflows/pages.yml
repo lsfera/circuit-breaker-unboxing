@@ -42,6 +42,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A diagram mermaid cannot parse does not fail anything: it renders as a
+      # grey "Syntax error in text" box where the explanation should be, and the
+      # rest of the page is fine. Three of these were doing that against the
+      # version the site vendored. So the diagrams are parsed here, against the
+      # pin in docs/Dockerfile rather than against whatever is newest.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check:diagrams
+
       - name: Build the site image
         env:
           OWNER: ${{ github.repository_owner }}

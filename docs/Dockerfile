@@ -41,7 +41,7 @@ RUN bundle config set --local without "" \
 # point is reading offline cannot fetch a renderer at page load. The layout
 # falls back to the CDN if this file is absent, so a bare `jekyll serve` with no
 # vendor step still draws them while online.
-ARG MERMAID_VERSION=11.4.1
+ARG MERMAID_VERSION=11.17.2
 RUN mkdir -p assets/vendor \
  && curl -fsSL --retry 3 \
       "https://cdn.jsdelivr.net/npm/mermaid@${MERMAID_VERSION}/dist/mermaid.min.js" \
