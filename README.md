@@ -513,9 +513,9 @@ Dockerfile                   one image for every process here; deps at build tim
 .dockerignore                keeps the host's node_modules (absolute symlinks) out of the build context
 docs/                        the system as it is — one document per job, and what the
                              site publishes; see "Where to read next" below
-history/                     how it got there: the journey and the long-form findings.
-                             Kept out of docs/ because a record stops being useful the
-                             moment it is edited to stay current
+history/                     how it got there: the journey, the long-form findings, and
+                             what the broker taught. Kept out of docs/ because a record
+                             stops being useful the moment it is edited to stay current
   architecture.md            Envoy, its signals, ingestion, and the published event contract
   high-availability.md       the lease, fencing, epochs, the outbox, the partition
   rmq-control-plane.md       the RabbitMQ scenario: design, live runs, what the broker taught

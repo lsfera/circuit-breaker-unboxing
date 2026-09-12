@@ -13,6 +13,7 @@ to stay true.
 | --- | --- |
 | [journey.md](journey.md) | The design history: each fork, the options that were genuinely available, the one taken and what it cost. Written as it happened. |
 | [findings.md](findings.md) | The long form of every finding running this thing produced, with the measurement behind each one. |
+| [what-the-broker-taught.md](what-the-broker-taught.md) | What building the RabbitMQ control plane surfaced: what was verified and how, the client bugs it exposed, and the live runs. Split out of `docs/rmq-control-plane.md`, which now describes only what the system is. |
 
 Two things follow from these being history:
 
