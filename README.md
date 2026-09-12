@@ -507,6 +507,7 @@ docs/                        one document per job — see "Where to read next" b
   measurements.md            scale, chaos and the soak, with the commands behind each number
   findings.md                the long form of everything running it surfaced
   what-if.md                 environments this was not measured against, and what breaks
+  _config.yml, _layouts/     the same documents, served as a site — see "Reading this as a site"
   security.md                what is missing and what production must do, with line references
   effect-notes.md            what Effect bought, and what an RC pin costs
   decisions/                 decision records: what was chosen, and the measurement it rests on
@@ -516,6 +517,32 @@ docker-compose.yml           wires infra/ and the packages/ entrypoints together
                              suites (`test:redis`, `test:rmq`) in a second job — they
                              are opt-in locally, which makes them the ones most likely
                              to rot unnoticed
+```
+
+### Reading this as a site
+
+Everything under `docs/` is also published as a GitHub Pages site, built by
+`.github/workflows/pages.yml`. Enable it once, in **Settings → Pages → Source:
+GitHub Actions**; nothing else needs configuring, because a project site is
+served from `<owner>.github.io/<repo>/` and the layout derives the repository
+links from that.
+
+The documents are written for GitHub first and were not rewritten for the site.
+Three of them contain `{{ ... }}` that is not Liquid — a `docker inspect -f`
+format string, and mermaid's hexagon-node syntax — which Jekyll 3 silently
+deletes, turning a documented command into `docker inspect -f ''`. That is why
+the site builds from a workflow on Jekyll 4, which can switch Liquid off per
+page, rather than from the `/docs` folder setting. `docs/Gemfile` says so at
+the point where someone would otherwise simplify it back.
+
+Links that leave `docs/` — source files, this README, the Dockerfile — have no
+page on the site, so the layout rewrites them to the repository at their real
+paths rather than letting them 404.
+
+To build it locally:
+
+```
+cd docs && bundle install && bundle exec jekyll serve
 ```
 
 Cross-package imports go through `@egress/domain`'s `package.json#exports`

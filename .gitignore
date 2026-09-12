@@ -2,3 +2,7 @@ node_modules/
 .pnpm-store/
 .DS_Store
 *.log
+_site/
+docs/_site/
+docs/.bundle/
+docs/vendor/

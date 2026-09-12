@@ -1,0 +1,84 @@
+---
+wide: true
+render_with_liquid: true
+title: Overview
+description: >-
+  Per-API egress circuit breaker events: Envoy outlier detection on every
+  replica, a quorum aggregator publishing one gapless event stream per API,
+  and a RabbitMQ daemon fleet that throttles itself from it.
+---
+
+<div class="hero">
+  <div class="kicker">Distributed systems · worked example</div>
+  <h1>Per-API egress circuit breaker events</h1>
+  <p class="standfirst">Services call third parties through a shared egress path. When one of those third parties degrades, everything downstream needs to be <em>told</em> — per API, as discrete events, reliably enough to act on.</p>
+  <p>Protecting the request path and telling the rest of the system about it are different problems with different correct answers, and most of the obvious designs conflate them. This repository separates them, runs both halves against real infrastructure, and writes down what that surfaced.</p>
+  <div class="actions">
+    <a class="btn primary" href="{{ '/journey.html' | relative_url }}">Read the journey</a>
+    <a class="btn" href="{{ '/architecture.html' | relative_url }}">Architecture</a>
+    <a class="btn" data-repo-link href="#" hidden>Source on GitHub</a>
+  </div>
+</div>
+
+<section>
+  <h2>The shape of it</h2>
+  <dl class="flow">
+    <div>
+      <dt>Enforce</dt>
+      <dd><strong>Envoy</strong>Outlier detection on every replica of the egress proxy. One address for callers, no replica names, no admin ports.</dd>
+    </div>
+    <div>
+      <dt>Decide</dt>
+      <dd><strong>Aggregator</strong>Reads each replica's view, takes a quorum, and runs one breaker per API. A lease, fencing tokens and checkpoints make the leader replaceable mid-incident.</dd>
+    </div>
+    <div>
+      <dt>Publish</dt>
+      <dd><strong>CloudEvents</strong>One gapless, non-repeating sequence per API, over webhook, SSE and AMQP — with a durable outbox so a subscriber that was down gets what it missed.</dd>
+    </div>
+    <div>
+      <dt>React</dt>
+      <dd><strong>Daemon fleet</strong>Five competing consumers that throttle themselves from the stream: stop pulling on OPEN, one broker-elected prober on HALF_OPEN, ramp back on CLOSED.</dd>
+    </div>
+  </dl>
+</section>
+
+<section>
+  <h2>Written as evidence, not as claims</h2>
+  <p>Every number in these documents was measured against a running stack — real Envoy, real RabbitMQ, real Redis, real container kills — and the command behind each one is recorded next to it. Where something was decided against, the measurement that decided it is written down too.</p>
+  <dl class="facts">
+    <div><dt>Source</dt><dd>7,000 <small>lines of TypeScript</small></dd></div>
+    <div><dt>Unit tests</dt><dd>92</dd></div>
+    <div><dt>Integration</dt><dd>25 <small>Docker-backed</small></dd></div>
+    <div><dt>Decision records</dt><dd>12</dd></div>
+    <div><dt>Runbooks</dt><dd>9 <small>one per alert</small></dd></div>
+  </dl>
+</section>
+
+<section>
+  <h2>Where to read next</h2>
+  <div class="doc-grid">
+    {% for group in site.data.nav %}{% for item in group.items %}{% unless item.url == '/' %}
+    <a href="{{ item.url | relative_url }}">
+      <span class="t">{{ item.title }}</span>
+      {% if item.note %}<span class="n">{{ item.note | capitalize }}.</span>{% endif %}
+    </a>
+    {% endunless %}{% endfor %}{% endfor %}
+    <a href="{{ '/decisions/001-amqp-client.html' | relative_url }}">
+      <span class="t">Decision records</span>
+      <span class="n">Twelve of them, each resting on a measurement rather than a preference.</span>
+    </a>
+    <a href="{{ '/runbooks/' | relative_url }}">
+      <span class="t">Runbooks</span>
+      <span class="n">One per alert: what fired, what to check, what to do about it.</span>
+    </a>
+  </div>
+</section>
+
+<section>
+  <h2>Running it</h2>
+  <p>One command brings up Envoy, three proxy replicas, two aggregators, RabbitMQ, Redis, Prometheus, Grafana and the daemon fleet, then drives a full incident end to end and prints the delivery contract as read from outside the publishing process.</p>
+  <pre><code>pnpm install
+pnpm start          # the stack, on the simulated fleet
+pnpm demo:envoy     # drive a real incident through real Envoy</code></pre>
+  <p>There is no build step: TypeScript runs natively through Node's type stripping. <code>tsc --noEmit</code> is still load-bearing, because the guarantees this system relies on are type-level. See <a href="{{ '/operations.html' | relative_url }}">Operating it</a> for the metrics, dashboards and alerts that come up with it.</p>
+</section>

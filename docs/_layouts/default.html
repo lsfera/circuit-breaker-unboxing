@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="{{ site.lang | default: 'en' }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% if page.url == '/' %}{{ site.title }}{% else %}{{ page.title }} · {{ site.title }}{% endif %}</title>
+<meta name="description" content="{{ page.description | default: site.description | strip_newlines }}">
+<meta property="og:title" content="{% if page.url == '/' %}{{ site.title }}{% else %}{{ page.title }}{% endif %}">
+<meta property="og:description" content="{{ page.description | default: site.description | strip_newlines }}">
+<meta property="og:type" content="article">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="{{ '/assets/site.css' | relative_url }}">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='5' fill='%23a4680e'/></svg>">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <a class="wordmark" href="{{ '/' | relative_url }}"><span class="dot"></span>egress circuit breaker</a>
+    <nav>
+      <a href="{{ '/architecture.html' | relative_url }}">Architecture</a>
+      <a href="{{ '/operations.html' | relative_url }}">Operating it</a>
+      <a href="{{ '/findings.html' | relative_url }}">Findings</a>
+      <a data-repo-link href="#" hidden>Repository ↗</a>
+    </nav>
+  </div>
+</header>
+
+<div class="shell">
+  <details class="sidebar" open>
+    <summary>Contents</summary>
+    <div class="nav-groups">
+      {% for group in site.data.nav %}
+      <div class="nav-group">
+        <h2>{{ group.section }}</h2>
+        <ul>
+          {% for item in group.items %}
+          <li>
+            <a href="{{ item.url | relative_url }}"{% if page.url == item.url %} aria-current="page"{% endif %}>
+              <span class="t">{{ item.title }}</span>
+              {% if item.note %}<span class="n">{{ item.note }}</span>{% endif %}
+            </a>
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endfor %}
+
+      <div class="nav-group">
+        <h2>Decision records</h2>
+        <ul>
+          {% assign adrs = site.pages | where_exp: "p", "p.path contains 'decisions/'" | sort: "path" %}
+          {% for adr in adrs %}
+          <li><a href="{{ adr.url | relative_url }}"{% if page.url == adr.url %} aria-current="page"{% endif %}><span class="t">{{ adr.title }}</span></a></li>
+          {% endfor %}
+        </ul>
+      </div>
+
+      <div class="nav-group">
+        <h2>Runbooks</h2>
+        <ul>
+          {% assign books = site.pages | where_exp: "p", "p.path contains 'runbooks/'" | sort: "path" %}
+          {% for book in books %}
+          <li><a href="{{ book.url | relative_url }}"{% if page.url == book.url %} aria-current="page"{% endif %}><span class="t">{{ book.title }}</span></a></li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+  </details>
+
+  <main class="content{% if page.wide %} home{% endif %}">
+    {% if page.url != '/' %}<h1>{{ page.title }}</h1>{% endif %}
+    {{ content }}
+
+    <div class="page-foot">
+      <a data-repo-link data-repo-path="blob/HEAD/docs/{{ page.path }}" href="#" hidden>Edit this page on GitHub</a>
+      <span>Every number on this site was measured against a running stack.</span>
+    </div>
+  </main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script>
+  // The documents are written for GitHub first, so two things have to be
+  // reconciled here rather than in the source.
+  (function () {
+    // Where the repository lives. `repo_url` in _config.yml wins — set it for a
+    // custom domain — but a project site served from <owner>.github.io/<repo>/
+    // already names both halves, so the common case needs no configuration.
+    var REPO = {{ site.repo_url | default: '' | jsonify }};
+    if (!REPO) {
+      var owner = location.hostname.match(/^([^.]+)\.github\.io$/);
+      var first = location.pathname.split("/").filter(Boolean)[0];
+      if (owner && first) REPO = "https://github.com/" + owner[1] + "/" + first;
+    }
+
+    document.querySelectorAll("[data-repo-link]").forEach(function (a) {
+      if (!REPO) return;
+      var extra = a.getAttribute("data-repo-path");
+      a.href = extra ? REPO + "/" + extra : REPO;
+      a.hidden = false;
+    });
+
+    var DOC_DIR = "docs/" + {{ page.path | jsonify }}.replace(/[^/]*$/, "");
+
+    // 1. Links that leave docs/ — source files, the README, the Dockerfile —
+    //    have no page on this site. Resolve each one against its own document's
+    //    directory and send it to the repository instead of a 404.
+    if (REPO) {
+      document.querySelectorAll(".content a[href]").forEach(function (a) {
+        var href = a.getAttribute("href");
+        if (!href || /^([a-z]+:|#|\/\/)/i.test(href)) return;
+        var resolved = new URL(href, "https://x/" + DOC_DIR).pathname.slice(1);
+        if (resolved.indexOf("docs/") === 0) return;
+        a.href = REPO + "/blob/HEAD/" + resolved;
+        a.classList.add("offsite");
+      });
+    }
+
+    // 2. Mermaid blocks arrive as highlighted code, and the diagrams have to
+    //    read on whichever ground the visitor's theme paints.
+    var dark = matchMedia("(prefers-color-scheme: dark)").matches &&
+               document.documentElement.dataset.theme !== "light" ||
+               document.documentElement.dataset.theme === "dark";
+    var blocks = document.querySelectorAll('pre > code.language-mermaid, pre.mermaid');
+    blocks.forEach(function (node) {
+      var pre = node.tagName === "CODE" ? node.parentNode : node;
+      var wrap = document.createElement("div");
+      wrap.className = "mermaid-wrap";
+      var box = document.createElement("pre");
+      box.className = "mermaid";
+      box.textContent = node.textContent;
+      wrap.appendChild(box);
+      pre.replaceWith(wrap);
+    });
+    if (blocks.length && window.mermaid) {
+      mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "neutral", securityLevel: "strict" });
+    }
+
+    // 3. Wide tables scroll in their own container rather than the page body.
+    document.querySelectorAll(".content table").forEach(function (t) {
+      var wrap = document.createElement("div");
+      wrap.className = "table-scroll";
+      t.replaceWith(wrap);
+      wrap.appendChild(t);
+    });
+  })();
+</script>
+</body>
+</html>

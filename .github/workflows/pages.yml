@@ -1,0 +1,86 @@
+name: Site
+
+# Builds docs/ into the project site and publishes it to GitHub Pages.
+#
+# The build runs on pull requests too, without deploying, because the site is
+# the documentation: a diagram that stops rendering or a page that stops
+# building is a documentation regression, and this is where it gets caught.
+#
+# Enable once, in Settings → Pages → Source: GitHub Actions. There is no
+# `/docs` folder setting involved — that path pins Jekyll 3, which cannot turn
+# Liquid off per page, and these documents contain `{{ }}` that is not Liquid.
+# See docs/Gemfile for what that costs if you get it wrong.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    paths:
+      - "docs/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and never cancel one in flight: a half-published
+# site is worse than a slightly stale one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+          working-directory: docs
+
+      - name: Build
+        working-directory: docs
+        env:
+          JEKYLL_ENV: production
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          # A project site is served from <owner>.github.io/<repo>/, so every
+          # asset needs that prefix. A user or organisation site — the repo
+          # literally named <owner>.github.io — is served from the root and
+          # must not have one.
+          base=""
+          if [ "$REPO" != "$OWNER.github.io" ]; then base="/$REPO"; fi
+          echo "building with baseurl '$base'"
+          bundle exec jekyll build --destination ../_site --baseurl "$base"
+
+      - name: Check the build produced the pages it should
+        run: |
+          # A Jekyll build succeeds happily having rendered nothing. These are
+          # the two failures that would otherwise ship silently: documents that
+          # stopped being converted, and the landing page disappearing.
+          pages=$(find _site -name '*.html' | wc -l)
+          echo "$pages pages"
+          test "$pages" -ge 30 || { echo "::error::only $pages pages built, expected 30+"; exit 1; }
+          test -f _site/index.html || { echo "::error::no landing page"; exit 1; }
+          test -f _site/assets/site.css || { echo "::error::stylesheet missing"; exit 1; }
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

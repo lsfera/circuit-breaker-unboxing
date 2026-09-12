@@ -1,0 +1,19 @@
+- section: Start here
+  items:
+    - { url: /,                title: Overview }
+    - { url: /journey.html,         title: The journey,            note: every fork, the options, the choice }
+    - { url: /architecture.html,    title: Architecture,           note: Envoy's signals and the event contract }
+
+- section: The system
+  items:
+    - { url: /high-availability.html, title: High availability,    note: lease, fencing, epochs, outbox }
+    - { url: /rmq-control-plane.html, title: RabbitMQ control plane, note: the fleet, and what the broker taught }
+    - { url: /operations.html,        title: Operating it,         note: metrics, dashboards, alerts }
+
+- section: Evidence
+  items:
+    - { url: /measurements.html,    title: Measured limits,        note: scale, chaos, the soak }
+    - { url: /findings.html,        title: What the build surfaced, note: the long form }
+    - { url: /what-if.html,         title: What if,                note: environments this was not measured against }
+    - { url: /security.html,        title: Security,               note: what is missing, and what production needs }
+    - { url: /effect-notes.html,    title: Effect notes,           note: what it bought, what an RC pin costs }
