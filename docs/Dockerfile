@@ -1,7 +1,12 @@
 # The documentation site, as an image you can read on a train.
 #
 #   docker build -t egress-site docs
-#   docker run --rm -p 8080:80 egress-site     # then http://localhost:8080
+#   docker run --rm -p 4000:80 egress-site     # then http://localhost:4000
+#
+# 4000 because it is Jekyll's own default and nothing in docker-compose.yml
+# wants it. 8080 is not free here: flaky-upstream binds 8080-8085 and
+# 8090-8096, so the obvious choice collides with the stack these documents are
+# about. `SITE_PORT=… pnpm run site` moves it.
 #
 # Two stages: Jekyll builds, nginx serves. CI builds this same image and
 # publishes what comes out of it, so the site on GitHub Pages and the site in

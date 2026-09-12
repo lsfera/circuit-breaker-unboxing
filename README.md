@@ -540,11 +540,14 @@ Links that leave `docs/` — source files, this README, the Dockerfile — have 
 page on the site, so the layout rewrites them to the repository at their real
 paths rather than letting them 404.
 
-The site is also an image, so the documentation travels:
+The site is also an image, so the documentation travels. Port 4000 because it
+is Jekyll's own default and nothing in `docker-compose.yml` wants it — 8080
+through 8085 and 8090 through 8096 belong to `flaky-upstream`:
 
 ```
-pnpm run site                 # build it and serve on http://localhost:8080
+pnpm run site                 # build it and serve on http://localhost:4000
 pnpm run site:build           # just the image
+SITE_PORT=4100 pnpm run site  # if 4000 is taken too
 ```
 
 Mermaid is vendored into that image rather than loaded from a CDN — four of

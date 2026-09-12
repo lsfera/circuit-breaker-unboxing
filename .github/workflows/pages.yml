@@ -59,7 +59,7 @@ jobs:
       - name: Take the site out of the image
         # What gets published is what the image serves, extracted from it —
         # not a second build that happens to agree. The image is the artefact;
-        # `docker run -p 8080:80 egress-site` is the same site offline.
+        # `pnpm run site` serves that same image offline.
         run: |
           id=$(docker create egress-site:ci)
           mkdir -p _site
