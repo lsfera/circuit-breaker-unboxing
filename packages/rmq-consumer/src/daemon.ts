@@ -43,9 +43,12 @@ import type { ContractState } from "./Contract.ts";
 import type { Action, Command, DaemonState } from "./DaemonState.ts";
 
 /**
- * One competing-consumer daemon: one process, one index in a fleet of
- * `fleetSize`, coordinating with the others only through the events they all
- * receive on `circuit.control`.
+ * One competing-consumer daemon. It knows its own identity and nothing about
+ * the rest of the fleet — not how many there are, not where it sits among them
+ * — and coordinates with the others only through the events they all receive
+ * on `circuit.control`. What proportion of the fleet should be working is
+ * published; which daemons those are, each decides for itself from its own
+ * position. See docs/decisions/013-the-target-as-a-fraction.md.
  *
  * One AMQP connection, with two classes of channel on it. The control consumer,
  * the two SAC election consumers and the publish channel live for the process;
@@ -489,7 +492,13 @@ export const runDaemon = (cfg: DaemonConfig) =>
      * async function running a few hundred times a second, and a fiber per metric
      * write would be the most expensive thing in it.
      */
-    const attrs = { apiId: cfg.apiId };
+    // The instance id is a label, not only a log prefix. The fleet is one
+    // scaled service discovered by DNS, so Prometheus's own `instance` is an
+    // IP address — without this there is no way to tell from a dashboard which
+    // daemon holds the floor, or which one stopped hearing the control plane.
+    // It is also the container's hostname, which is what makes a daemon
+    // identified here killable by name.
+    const attrs = { apiId: cfg.apiId, daemon: cfg.instanceId };
 
     /** Advanced from the same snapshot the delta came from, never by re-reading — see Tally.ts. */
     let published = Tally.nothing;

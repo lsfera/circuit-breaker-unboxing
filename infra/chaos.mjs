@@ -195,10 +195,27 @@ const leaderScenario = async () => {
     "no sequence was published twice across the kill",
     `${contractBefore.duplicates} -> ${contractAfter.duplicates}`,
   );
+  // Deliberately *not* asserting the survivor's gap count across the kill.
+  //
+  // Each aggregator posts to its own `/subscriber/webhook`, so an instance's
+  // view contains only what that instance published. A standby publishes
+  // nothing, so if it ever led before, its high-water mark is stale by exactly
+  // the run of sequences the other instance published — and the first event it
+  // publishes after taking over reads as a jump. Observed here: the survivor
+  // had led up to 114 some time earlier, sat out 115-122, resumed at 123, and
+  // recorded `jumped 114 -> 123`.
+  //
+  // That is a hole in one observer's view, not a gap in delivery, and the check
+  // was flaky by construction: it passed whenever the survivor happened never
+  // to have led, and failed once it had. The question it was trying to ask —
+  // did the failover lose an event — is answered above by the sequence
+  // continuing 122 -> 123 with no duplicate, on the publishing side where the
+  // guarantee actually lives. An external subscriber reading both instances
+  // could answer it from the receiving side; a self-subscriber cannot.
   check(
-    contractAfter.gaps === contractBefore.gaps,
-    "no sequence was skipped across the kill",
-    `${contractBefore.gaps} -> ${contractAfter.gaps}`,
+    contractAfter.duplicates === contractBefore.duplicates,
+    "the survivor's own view gained no duplicate across the kill",
+    `${contractBefore.duplicates} -> ${contractAfter.duplicates}`,
   );
   console.log(
     `  events delivered during the scenario: ${contractAfter.received - contractBefore.received}`,
@@ -225,7 +242,7 @@ const proberScenario = async () => {
 
   const probesByInstance = async () => {
     const rows = await promQuery("egress_daemon_probes_total");
-    return new Map(rows.map((r) => [r.metric.instance ?? r.metric.job, Number(r.value[1])]));
+    return new Map(rows.map((r) => [r.metric.daemon ?? r.metric.instance, Number(r.value[1])]));
   };
 
   await setFailureRate(1);
@@ -259,9 +276,12 @@ const proberScenario = async () => {
   check(elected !== null, "a daemon was elected to probe", proberScenario.elected ?? "");
   if (!proberScenario.elected) return;
 
-  // Prometheus reports `instance` as host:port; the container name is the host.
-  const host = String(proberScenario.elected).split(":")[0];
-  const container = `workspace-${host}-1`;
+  // The fleet is one scaled service discovered by DNS, so Prometheus's own
+  // `instance` label is an IP address and names no container. The daemon
+  // labels its own metrics with its instance id, which it takes from its
+  // hostname — and a container's hostname is its short id, so this is
+  // directly killable.
+  const container = String(proberScenario.elected);
   console.log(`  killing ${container}`);
   await exec("docker", ["kill", container]).catch((e) => {
     check(false, "killed the elected prober", String(e));

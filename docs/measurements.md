@@ -69,21 +69,37 @@ node infra/chaos.mjs leader   # kill the publishing leader mid-incident
 node infra/chaos.mjs prober   # kill the daemon the broker elected to probe
 ```
 
-Run against the compose stack on 2026-09-06:
+Run against the compose stack on 2026-09-12, on the scaled fleet:
 
-- **leader** — circuit opened in 2.5s, leader killed at `sequence=18`, standby
-  took over in **5063 ms** (the crash path: a killed process hands nothing
+- **leader** — circuit opened in 2.8s, leader killed at `sequence=127`, standby
+  took over in **4820 ms** (the crash path: a killed process hands nothing
   back, so this is the full `leaseTtlMs`, and it is the number
   [releasing the lease on shutdown](high-availability.md) improves on for
-  *planned* stops), rehydrated the API from its checkpoint, resumed at 19, and
-  the surviving subscriber saw **0 duplicates and 0 gaps** across the kill.
-- **prober** — `rmq-daemon-0` was elected by the broker and killed;
-  `rmq-daemon-3` was promoted **7099 ms** later, and the circuit reached
-  `CLOSED` **16719 ms** after the kill with its original prober gone.
+  *planned* stops), rehydrated the API from its checkpoint, and resumed at 128
+  with no sequence published twice.
+- **prober** — the daemon the broker had elected was killed; another was
+  promoted **7619 ms** later, and the circuit reached `CLOSED` **15227 ms**
+  after the kill with its original prober gone. The fleet is one scaled service,
+  so the harness identifies the elected daemon from its own metric label rather
+  than being told which container it is.
 
-The harness needed its own correction first, and it is a good example of why
-absolute counters lie: the first version summed gaps and duplicates across
-both instances, and the run after a kill reported duplicates falling 4 → 0 and
-`-535` events delivered. That is not a contract violation, it is a restarted
-process with fresh in-memory counters. It reads the surviving instance, before
-and after, now.
+The harness has needed correcting twice, and both corrections are the same
+mistake at different depths — asking an observer a question it cannot answer.
+
+The first version summed gaps and duplicates across **both** instances, so the
+run after a kill reported duplicates falling 4 → 0 and `-535` events delivered.
+That is not a contract violation, it is a restarted process with fresh
+in-memory counters. It reads the surviving instance now.
+
+The second was found by the run above. Each aggregator posts to its *own*
+`/subscriber/webhook`, so an instance's view contains only what that instance
+published — and a standby publishes nothing. If the survivor ever led before,
+its high-water mark is stale by exactly the run of sequences the other instance
+published, and the first event it publishes after taking over reads as a jump.
+Observed: `jumped 114 -> 123`, reported as a failed check. That is a hole in one
+observer's view, not a gap in delivery, and the check was **flaky by
+construction** — it passed whenever the survivor happened never to have led.
+The question it was asking is answered on the publishing side, where the
+guarantee lives: the sequence continued 127 → 128 with nothing published twice.
+Only an external subscriber reading both instances could answer it from the
+receiving side, and the harness no longer pretends a self-subscriber can.

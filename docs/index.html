@@ -11,8 +11,14 @@ description: >-
 <div class="hero">
   <div class="kicker">Distributed systems · worked example</div>
   <h1>Per-API egress circuit breaker events</h1>
-  <p class="standfirst">Services call third parties through a shared egress path. When one of those third parties degrades, everything downstream needs to be <em>told</em> — per API, as discrete events, reliably enough to act on.</p>
-  <p>Protecting the request path and telling the rest of the system about it are different problems with different correct answers, and most of the obvious designs conflate them. This repository separates them, runs both halves against real infrastructure, and writes down what that surfaced.</p>
+  <p class="standfirst">Enforce locally, decide once, publish a contract. Envoy ejects failing
+  endpoints on the request path; an aggregator takes a quorum of what every replica sees and runs
+  one breaker per API; the verdict goes out as a gapless per-API event stream that a consumer fleet
+  and a status page both act on.</p>
+  <p>This is the map. <a href="{{ '/readme.html' | relative_url }}">The README</a> states the
+  problem and why the obvious designs conflate two of them;
+  <a href="{{ '/approaches.html' | relative_url }}">the approaches</a> reviews every option the
+  constraint leaves open and where each one stops.</p>
   <div class="actions">
     <a class="btn primary" href="{{ '/architecture.html' | relative_url }}">How it works</a>
     <a class="btn" href="{{ '/approaches.html' | relative_url }}">Why this shape</a>
@@ -150,9 +156,12 @@ flowchart LR
 
 <section>
   <h2>Running it</h2>
-  <p>One command brings up Envoy, three proxy replicas, two aggregators, RabbitMQ, Redis, Prometheus, Grafana and the daemon fleet, then drives a full incident end to end and prints the delivery contract as read from outside the publishing process.</p>
-  <pre><code>pnpm install
-pnpm start          # the stack, on the simulated fleet
-pnpm demo:envoy     # drive a real incident through real Envoy</code></pre>
-  <p>There is no build step: TypeScript runs natively through Node's type stripping. <code>tsc --noEmit</code> is still load-bearing, because the guarantees this system relies on are type-level. See <a href="{{ '/operations.html' | relative_url }}">Operating it</a> for the metrics, dashboards and alerts that come up with it.</p>
+  <p>One command brings up Envoy, three proxy replicas, two aggregators, RabbitMQ, Redis,
+  Prometheus, Grafana and the daemon fleet, then drives a full incident end to end and prints the
+  delivery contract as read from outside the publishing process. There is no build step —
+  TypeScript runs natively through Node's type stripping.</p>
+  <p>The commands, the flags, and what each container is for are in
+  <a href="{{ '/readme.html' | relative_url }}">the README</a>;
+  <a href="{{ '/operations.html' | relative_url }}">Operating it</a> has the metrics, dashboards
+  and alerts that come up with it.</p>
 </section>
