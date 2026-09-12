@@ -59,7 +59,10 @@ Each of those layers is turned on deliberately in
   only ever report `0/1` or `1/1`, so `healthy < total` is unreachable, no
   replica can vote `DEGRADED` from partial ejection, and
   `failure_percentage_*` never evaluates at all
-  (`failure_percentage_minimum_hosts` is 3). `infra/flaky-upstream.mjs` serves
+  (`failure_percentage_minimum_hosts` is 3). That is also what happens to a
+  real API behind a load balancer, and what the breaker does instead — flap,
+  measured at 88 transitions where six endpoints produce one — is in
+  [what-if.md](what-if.md#what-if-the-flaky-api-is-behind-a-load-balancer). `infra/flaky-upstream.mjs` serves
   one port per endpoint.
 - **Active health checking** against `/__health`, which is what makes
   `successful_active_health_check_uneject_host` do anything. The health

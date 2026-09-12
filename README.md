@@ -506,6 +506,7 @@ docs/                        one document per job — see "Where to read next" b
   operations.md              running the stack, every metric, the dashboards, the alerts
   measurements.md            scale, chaos and the soak, with the commands behind each number
   findings.md                the long form of everything running it surfaced
+  what-if.md                 environments this was not measured against, and what breaks
   security.md                what is missing and what production must do, with line references
   effect-notes.md            what Effect bought, and what an RC pin costs
   decisions/                 decision records: what was chosen, and the measurement it rests on
