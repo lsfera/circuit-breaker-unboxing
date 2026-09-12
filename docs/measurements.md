@@ -6,11 +6,69 @@ settled, in [architecture.md](architecture.md#ingestion-push-or-poll-decided-by-
 numbers about *failover* live in
 [high-availability.md](high-availability.md).
 
-## Measured limits
+## What the numbers are measured inside
 
-Every number in this repo before this section came from three APIs and three
-replicas, which is enough to demonstrate the properties and useless for
-predicting anything. `--apis=N` replaces the named APIs with N synthetic ones
+A container with no ceiling is sized by whatever the host had spare, so a
+resource number taken from one is a fact about somebody's laptop. Every service
+in [docker-compose.yml](../docker-compose.yml) declares
+`deploy.resources.limits`, and [`infra/instrument.mjs`](../infra/instrument.mjs)
+refuses to produce a record from a stack that does not —
+[ADR 014](decisions/014-the-measurement-envelope.md) is why, and what it cost
+to find out.
+
+```bash
+docker compose up -d
+node infra/instrument.mjs demo          # the full incident, instrumented
+node infra/instrument.mjs idle --seconds=60
+node infra/instrument.mjs chaos:leader
+node infra/instrument.mjs demo --baseline history/runs/baseline-demo-2026-09-12.json
+```
+
+It reads Docker's own stats stream over the Engine API — one sample per second
+per container, pushed rather than polled — while a scenario runs, and writes a
+JSON record to `history/runs/`. It exits non-zero when the run was not worth
+quoting: a service without a ceiling, a container throttled beyond its budget,
+an OOM kill, or a scenario that failed.
+
+The demo scenario, on 2026-09-12, 16 cpus / arm64 / engine 29.7.2
+(`history/runs/baseline-demo-2026-09-12.json`):
+
+| | peak cpus | mean | peak RSS | of its limit |
+| --- | --- | --- | --- | --- |
+| rmq-daemon (the one running the redrive) | 0.65 | 0.06 | 81 MiB | 16% |
+| rabbitmq | 0.51 | 0.13 | 324 MiB | 15% |
+| traffic | 0.23 | 0.11 | 31 MiB | 12% |
+| envoy (each of three) | 0.12 | 0.05 | 34 MiB | 13% |
+| aggregator (each of two) | 0.09 | 0.04 | 75 MiB | 15% |
+| rmq-producer | 0.07 | 0.02 | 68 MiB | 13% |
+| prometheus | 0.07 | 0.03 | 149 MiB | 19% |
+| redis | 0.01 | 0.00 | 10 MiB | 4% |
+
+**The whole stack, in its busiest single second: 1.65 cpus and 1.3 GiB across
+19 containers**, while the work queue held 1,730 messages and the fleet made
+242 egress calls a second. Summing the per-container peaks gives 3.3 — the
+daemon running the redrive and the broker feeding it do not peak in the same
+second, so the harness buckets samples by the second they were taken in and
+reports an instant that happened rather than an arithmetic one.
+
+One daemon is an order of magnitude above its own mean because exactly one —
+the one the broker elected — runs the redrive, and that burst is what the ramp
+back is made of. It is the only thing here that needs its ceiling.
+
+**Every memory figure further down this page is an upper bound, not a
+measurement of need.** The soak below ran on this stack before it had limits,
+and the scale probe runs the aggregator as a bare host process, which has no
+container to be limited by at all. Both are V8 sizing its heap from what it can
+see: every garbage-collected process here shrank by 28–52% once it could see a
+ceiling, and the two that do not collect — Envoy, Redis — did not move. The
+before and after is in
+[ADR 014](decisions/014-the-measurement-envelope.md).
+
+## At a size nobody runs it at
+
+The section above is this stack: three APIs, three replicas, five daemons,
+which is enough to demonstrate the properties and useless for predicting
+anything. `--apis=N` replaces the named APIs with N synthetic ones
 (`--source=sim` only) and [`infra/scale-probe.mjs`](../infra/scale-probe.mjs)
 samples a running instance:
 

@@ -14,6 +14,7 @@ to stay true.
 | [journey.md](journey.md) | The design history: each fork, the options that were genuinely available, the one taken and what it cost. Written as it happened. |
 | [findings.md](findings.md) | The long form of every finding running this thing produced, with the measurement behind each one. |
 | [what-the-broker-taught.md](what-the-broker-taught.md) | What building the RabbitMQ control plane surfaced: what was verified and how, the client bugs it exposed, and the live runs. Split out of `docs/rmq-control-plane.md`, which now describes only what the system is. |
+| [runs/](runs/) | One JSON record per instrumented run of the stack — what each container cost, inside what limits, while what was happening. Written by [`infra/instrument.mjs`](../infra/instrument.mjs). The baselines the documentation quotes are kept here; the rest are gitignored, because a run is only worth keeping if something cites it. |
 
 Two things follow from these being history:
 

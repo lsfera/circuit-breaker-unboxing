@@ -263,3 +263,40 @@ production — `openMs` in particular is 4s so recovery is watchable.
 `dwellMs` and `minStateMs` are not cosmetic. Without them a marginal upstream
 generates an event storm, and every subscriber ends up debouncing it themselves
 — badly, and differently from each other.
+
+## What each service may use, and how to find out
+
+Every service in [docker-compose.yml](../docker-compose.yml) declares
+`deploy.resources.limits`, in six classes at the top of the file. That is there
+for measurement rather than for safety — a container with no ceiling grows into
+whatever the host had spare, which makes every resource number a fact about the
+machine it was taken on — but it is also the only reason a `docker compose up`
+of this stack cannot quietly take a laptop's entire memory.
+
+```bash
+node infra/instrument.mjs demo     # or: pnpm run measure
+```
+
+samples every container in the project once a second from Docker's own stats
+stream while a scenario runs, prints what each one peaked at against its
+ceiling, and writes a JSON record to `history/runs/`. It exits non-zero when
+the run was not worth quoting — a service without limits, a container
+throttled past its budget, an OOM kill, or a failed scenario.
+
+Two operational readings come out of it that nothing else here gives:
+
+- **What the stack needs**, as the busiest single second across all containers
+  rather than the sum of peaks that never coincided — 1.65 cpus and 1.3 GiB
+  for this one, measured mid-incident.
+- **What is about to be a problem.** The `of limit` columns are the headroom
+  that is left. Anything sitting above about half its ceiling under normal load
+  will throttle or be killed during an incident, which is exactly when it is
+  needed.
+
+Changing a limit changes the numbers, so re-record the baseline when you do:
+`node infra/instrument.mjs demo --baseline history/runs/baseline-demo-2026-09-12.json`
+prints what moved by more than a quarter, folded by service so a scaled fleet
+compares as a fleet. [ADR 014](decisions/014-the-measurement-envelope.md) is
+the reasoning, including the two things sizing them turned up: RabbitMQ does
+not read its own cgroup limit, and a CPU quota clips sub-second bursts a
+container's busiest *second* never reveals.

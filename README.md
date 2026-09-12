@@ -502,9 +502,13 @@ packages/
 
 infra/
   envoy/envoy.yaml           egress config: per-API clusters, outlier detection
+  rabbitmq.conf              the broker's flow-control watermark, declared: it does not
+                             read its own cgroup limit
   traffic-generator.mjs      keeps requests flowing through Envoy so /__fail means something
   scale-probe.mjs            what one instance costs at N APIs — ticks, poll, series, payloads
   chaos.mjs                  kill the leader, kill the elected prober; assertions, not a story
+  instrument.mjs             what the stack costs while it does that — Docker's stats
+                             stream, per container, inside declared limits
   monitoring/                Prometheus scrape config, alert rules + SLOs, Alertmanager
                              routing, and the provisioned Grafana dashboard
   alert-sink.mjs             stands in for Slack: logs what Alertmanager sends it
@@ -516,6 +520,8 @@ docs/                        the system as it is — one document per job, and w
 history/                     how it got there: the journey, the long-form findings, and
                              what the broker taught. Kept out of docs/ because a record
                              stops being useful the moment it is edited to stay current
+  runs/                      one JSON record per instrumented run; the baselines the
+                             documentation quotes are kept, the rest are gitignored
   architecture.md            Envoy, its signals, ingestion, and the published event contract
   high-availability.md       the lease, fencing, epochs, the outbox, the partition
   rmq-control-plane.md       the RabbitMQ scenario: design, live runs, what the broker taught
@@ -531,7 +537,8 @@ history/                     how it got there: the journey, the long-form findin
   effect-notes.md            what Effect bought, and what an RC pin costs
   decisions/                 decision records: what was chosen, and the measurement it rests on
   runbooks/                  one per alert — what fired, what to check, what to do about it
-docker-compose.yml           wires infra/ and the packages/ entrypoints together
+docker-compose.yml           wires infra/ and the packages/ entrypoints together, and
+                             declares what each service may use — see ADR 014
 .github/workflows/ci.yml     `pnpm run check` on every push, and both Docker-backed
                              suites (`test:redis`, `test:rmq`) in a second job — they
                              are opt-in locally, which makes them the ones most likely

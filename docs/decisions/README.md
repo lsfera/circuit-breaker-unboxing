@@ -24,3 +24,4 @@ being right, are both the record.
 | 011 | [The concurrency ceiling belongs to the broker](011-the-ceiling-belongs-to-the-broker.md) | an in-process gate that was the buffer it denied being |
 | 012 | [Durable workflows: evaluated, deliberately not adopted](012-durable-workflows.md) | what Temporal would have replaced, and what it would not |
 | 013 | [The target as a fraction, not a count](013-the-target-as-a-fraction.md) | 5,000 simulated fleets, then a real one: ±60% at five daemons, ±16% at a hundred |
+| 014 | [Every service declares what it may use](014-the-measurement-envelope.md) | the same demo run with and without limits: every garbage-collected process a third smaller |

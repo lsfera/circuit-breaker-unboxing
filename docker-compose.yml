@@ -12,6 +12,53 @@ networks:
     name: devcontainer
     external: true
 
+# ---------------------------------------------------------------------------
+# The measurement envelope.
+#
+# Every number this repo publishes about what the stack costs used to come from
+# a human reading `docker stats` on a machine with nothing limiting it, which
+# makes the number a property of that machine. A container with no ceiling is
+# sized by whatever the host had spare, so the same scenario on sixteen cores
+# and on four produces different numbers and neither of them is wrong.
+#
+# So every service declares one. These are not guesses: each is roughly twice
+# the highest one-second peak `node infra/instrument.mjs demo` measured on
+# 2026-09-12, listed in docs/measurements.md next to the run that produced it.
+# Twice, because a limit that the work actually reaches stops measuring the
+# work and starts measuring the limit — and the harness fails a run in which
+# the kernel throttled anything, precisely so that confusion cannot be quoted.
+#
+# Two of these are sized by something other than headroom:
+#
+# - rabbitmq gets 2g against a 391 MiB peak, because its own flow-control
+#   watermark has to fit *inside* the limit with room to act. The broker does
+#   not read its cgroup limit under cgroup v2 — it sized the watermark from the
+#   host's 48 GiB — so infra/rabbitmq.conf declares 1 GiB explicitly. Without
+#   both numbers the container limit is reached by the OOM killer before the
+#   broker ever refuses a publish, in the one component whose backlog is the
+#   thing being demonstrated.
+# - rmq-daemon gets 1.5 cpus against a fleet-wide mean near 0.03, because
+#   exactly one daemon — the one the broker elected — runs the redrive, and
+#   that burst is what the ramp back is made of. It is the only container here
+#   whose peak is an order of magnitude above its own mean.
+#
+# `deploy.resources` is honoured by `docker compose up` outside swarm; the
+# limits are visible in `docker inspect` as NanoCpus and Memory, and
+# infra/instrument.mjs refuses to produce a record from a stack missing them.
+x-limits-tiny: &limits-tiny { resources: { limits: { cpus: "0.25", memory: 128m } } }
+x-limits-small: &limits-small { resources: { limits: { cpus: "0.50", memory: 256m } } }
+x-limits-node: &limits-node { resources: { limits: { cpus: "1.00", memory: 512m } } }
+x-limits-daemon: &limits-daemon { resources: { limits: { cpus: "2.00", memory: 512m } } }
+# The two load fixtures get a whole core each against peaks of 0.23 and 0.15,
+# and not for headroom's sake: they are what the system under test is measured
+# *through*. A throttled generator sends fewer requests, so Envoy sees a
+# different upstream and the run measures the fixture's ceiling. Both of them
+# throttled at 0.50 — the quota is enforced per 100ms, and a second that
+# averages 0.23 cpus still contains tenths that do not.
+x-limits-driver: &limits-driver { resources: { limits: { cpus: "1.00", memory: 256m } } }
+x-limits-store: &limits-store { resources: { limits: { cpus: "1.00", memory: 768m } } }
+x-limits-broker: &limits-broker { resources: { limits: { cpus: "2.00", memory: 2g } } }
+
 # Shared by every daemon replica. It stayed an anchor after the fleet collapsed
 # into one scaled service because the producer and the daemons still share most
 # of it, and because YAML's `<<:` replaces a key wholesale rather than merging
@@ -75,6 +122,7 @@ services:
     ports: ["8080-8085:8080-8085", "8090-8096:8090-8096"]
     restart: unless-stopped
     networks: [default, devcontainer]
+    deploy: *limits-driver
 
   # envoy-01/02 merge in everything from envoy-00 via the &envoy/<<: anchor —
   # same image, config and command — and only override the admin port mapping,
@@ -102,6 +150,7 @@ services:
       default:
         aliases: [envoy]
       devcontainer: {}
+    deploy: *limits-small
   envoy-01:
     <<: *envoy
     command: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "egress", "--service-node", "envoy-01"]
@@ -126,6 +175,7 @@ services:
     volumes: ["redis-data:/data"]
     restart: unless-stopped
     networks: [default, devcontainer]
+    deploy: *limits-small
 
   # The control plane and the work queue both live here. 4.x specifically:
   # this repo speaks AMQP 1.0 natively (see docs/rmq-control-plane.md), which
@@ -152,9 +202,15 @@ services:
     # keep them across a container being recreated only if the broker's data
     # directory outlives the container. Both halves are needed, and only one of
     # them is a queue argument.
-    volumes: ["rabbitmq-data:/var/lib/rabbitmq"]
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      # conf.d rather than replacing rabbitmq.conf: the image writes its own
+      # there from the RABBITMQ_* environment, and this only adds to it. See
+      # the file for why the broker cannot be left to work its own limit out.
+      - $HOST_WORKSPACE_FOLDER/infra/rabbitmq.conf:/etc/rabbitmq/conf.d/10-egress.conf:ro
     restart: unless-stopped
     networks: [default, devcontainer]
+    deploy: *limits-broker
 
   # Two real instances against the shared Redis lease, not one — this is
   # what makes HA a demonstrated property of the stack instead of a design
@@ -206,6 +262,7 @@ services:
       rabbitmq: {condition: service_healthy}
     ports: ["8088:8088"]
     networks: [default, devcontainer]
+    deploy: *limits-node
 
   aggregator-2:
     <<: *aggregator
@@ -243,6 +300,7 @@ services:
     depends_on: &rmq-depends
       rabbitmq: {condition: service_healthy}
     networks: [default, devcontainer]
+    deploy: *limits-node
 
   # One service, scaled. There is no index and no fleet size to keep in step
   # any more — a daemon applies the published fraction to its own position in
@@ -264,6 +322,7 @@ services:
       <<: *daemon-env
     deploy:
       replicas: 5
+      <<: *limits-daemon
     depends_on:
       <<: *rmq-depends
       envoy-00: {condition: service_started}
@@ -284,6 +343,7 @@ services:
     restart: unless-stopped
     depends_on: [envoy-00, envoy-01, envoy-02]
     networks: [default, devcontainer]
+    deploy: *limits-driver
 
   # Runs demo/driver.ts against this stack, end to end: `docker compose
   # --profile demo run --rm demo` (or `-- shipping-rates` for a different API).
@@ -314,6 +374,7 @@ services:
       traffic: {condition: service_started}
     profiles: [demo]
     networks: [default, devcontainer]
+    deploy: *limits-node
 
   # Scrapes the aggregator's /metrics (same registry the console reads from)
   # plus each Envoy's native /stats/prometheus. See monitoring/prometheus.yml.
@@ -331,6 +392,7 @@ services:
     restart: unless-stopped
     ports: ["9090:9090"]
     networks: [default, devcontainer]
+    deploy: *limits-store
 
   # Where alerts.yml's rules actually go. Prometheus evaluated them and routed
   # them nowhere until now, which is the same failure shape the rules are about:
@@ -343,6 +405,7 @@ services:
     depends_on: [alert-sink]
     ports: ["9093:9093"]
     networks: [default, devcontainer]
+    deploy: *limits-tiny
 
   # Stands in for Slack or PagerDuty: it logs what it is sent, so routing is
   # something you can watch rather than infer. Not the product, so it stays a
@@ -354,6 +417,7 @@ services:
     command: node alert-sink.mjs
     restart: unless-stopped
     networks: [default, devcontainer]
+    deploy: *limits-tiny
 
   grafana:
     image: grafana/grafana:11.3.1@sha256:fa801ab6e1ae035135309580891e09f7eb94d1abdbd2106bdc288030b028158c
@@ -372,6 +436,7 @@ services:
     depends_on: [prometheus]
     ports: ["3000:3000"]
     networks: [default, devcontainer]
+    deploy: *limits-node
 
   # Where every span goes, and where most of them stop. See
   # infra/otel-collector.yaml for the policies — errors and slow traces kept in
@@ -386,6 +451,7 @@ services:
     restart: unless-stopped
     depends_on: [jaeger]
     networks: [default, devcontainer]
+    deploy: *limits-small
 
   # The trace view. all-in-one keeps traces in memory, which is right for a
   # demo and wrong for anything else — losing them on restart costs nothing
@@ -398,6 +464,7 @@ services:
     restart: unless-stopped
     ports: ["16686:16686"]
     networks: [default, devcontainer]
+    deploy: *limits-store
 
 # Named, not bind-mounted: this is service state, not repo content, and it must
 # survive a container being recreated. Everything stateful in the stack has one
