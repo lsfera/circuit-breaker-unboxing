@@ -48,6 +48,10 @@ description: >-
   The control plane decides once, off that path, and publishes the verdict. The fleet reacts by
   changing how much work it sends back into the data plane — which is what closes the circle.</p>
 
+<!-- `&lt;br/&gt;`, not `<br/>`: this block is parsed as HTML before mermaid
+     sees it, so a real tag becomes an element and `textContent` drops it,
+     joining the words either side. In the markdown documents kramdown escapes
+     them for the same reason. -->
 <pre class="mermaid">
 flowchart LR
   classDef enforce fill:#fbe2dd,stroke:#c9432f,stroke-width:1.5px,color:#3a1c17;
@@ -60,15 +64,15 @@ flowchart LR
 
   subgraph FLEET["Reacting — five competing consumers, per API"]
     direction TB
-    Dae["daemon 0 .. 4<br/>pull only as many as the verdict allows"]:::react
-    Redrive["redrive<br/>elected to one"]:::react
+    Dae["daemons 0 .. 4&lt;br/&gt;pull only as many as the verdict allows"]:::react
+    Redrive["redrive&lt;br/&gt;elected to one"]:::react
   end
 
   subgraph BROKER["RabbitMQ"]
     direction TB
-    Work["work queue<br/>quorum · x-delivery-limit 3"]:::react
+    Work["work queue&lt;br/&gt;quorum · x-delivery-limit 3"]:::react
     Dead["dead letters"]:::react
-    Ctrl["circuit.control<br/>topic exchange"]:::control
+    Ctrl["circuit.control&lt;br/&gt;topic exchange"]:::control
   end
 
   subgraph DATA["Data plane — enforces, on the request path"]
@@ -78,16 +82,16 @@ flowchart LR
     E2["envoy-02"]:::enforce
   end
 
-  Third[("third-party API<br/>3 to 6 endpoints, ejected individually")]:::ext
+  Third[("third-party API&lt;br/&gt;3 to 6 endpoints, ejected individually")]:::ext
 
   subgraph CONTROL["Control plane — decides once, off the request path"]
     direction TB
-    Agg["aggregator · leader<br/>quorum of replica votes<br/>one breaker per API"]:::control
+    Agg["aggregator · leader&lt;br/&gt;quorum of replica votes&lt;br/&gt;one breaker per API"]:::control
     Standby["aggregator · standby"]:::control
   end
 
-  Redis[("Redis<br/>lease · fencing · checkpoints · outbox")]:::store
-  Subs["subscribers<br/>status page · billing · on call"]:::control
+  Redis[("Redis&lt;br/&gt;lease · fencing · checkpoints · outbox")]:::store
+  Subs["subscribers&lt;br/&gt;status page · billing · on call"]:::control
 
   Prod -- "publish work" --> Work
   Work -- "prefetch is the ceiling" --> Dae

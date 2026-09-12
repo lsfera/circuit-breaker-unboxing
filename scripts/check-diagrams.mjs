@@ -61,15 +61,26 @@ const PATTERNS = [
 /** Every diagram in one file, whichever way it is written. */
 const diagramsIn = function* (path) {
   const source = readFileSync(path, "utf8");
+  const inHtml = path.endsWith(".html");
   let index = 0;
   for (const pattern of PATTERNS) {
     for (const block of source.matchAll(pattern)) {
       // The line the block opens on, so a failure names somewhere to look.
       const line = source.slice(0, block.index).split("\n").length;
-      yield { file: relative(ROOT, path), line, index: index++, text: block[1] };
+      // A block inside a hand-written page is parsed as HTML before mermaid
+      // sees it: entities are decoded, and anything that looks like a tag
+      // becomes an element that `textContent` drops. Both are mimicked here,
+      // so what is parsed is what mermaid will actually receive.
+      const raw = inHtml ? [...block[1].matchAll(/<[a-zA-Z/!][^>]*>/g)].map((m) => m[0]) : [];
+      const text = inHtml ? decode(block[1]) : block[1];
+      yield { file: relative(ROOT, path), line, index: index++, text, raw };
     }
   }
 };
+
+const decode = (s) =>
+  s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"')
+   .replace(/&#39;/g, "'").replace(/&amp;/g, "&");
 
 const dom = new JSDOM("<!doctype html><body></body>", { pretendToBeVisual: true });
 global.window = dom.window;
@@ -105,6 +116,19 @@ const all = [...diagrams(join(ROOT, "docs")), ...diagramsIn(join(ROOT, "README.m
 const failures = [];
 
 for (const diagram of all) {
+  // Raw markup never reaches mermaid — the DOM has already removed it, joining
+  // whatever was either side. `<br/>` written literally in a hand-written page
+  // silently becomes no line break at all, and the diagram still parses.
+  if (diagram.raw.length > 0) {
+    failures.push({
+      ...diagram,
+      why: [
+        `raw HTML in a mermaid block: ${[...new Set(diagram.raw)].join(" ")}`,
+        "the DOM removes it before mermaid sees it — write it escaped (&lt;br/&gt;)",
+      ],
+    });
+    continue;
+  }
   try {
     await mermaid.parse(diagram.text);
   } catch (error) {
