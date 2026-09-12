@@ -138,6 +138,7 @@ endpoint is live on the same port in both modes (`--source=sim` or
 | `egress_webhook_outbox_depth` | Events waiting in the durable outbox for a subscriber that is not taking them, by API — zero in every healthy minute, so a non-zero reading is the whole signal |
 | `egress_webhook_outbox_replayed_total` / `_dropped_total` | Events delivered from the outbox after an earlier failure, and events discarded because the per-API bound was hit |
 | `egress_subscriber_events_received_total` / `_gaps_total` / `_duplicates_total` | The delivery contract, read from outside the process — same numbers the console's right-hand panel shows, as counters |
+| `egress_fleet_replica_lost_total` | Replica reports dropped before they could reach a quorum, by `reason` — `no-node-id`, `went-quiet`, `unreachable`, `incomplete-stats`. The denominator in `Breaker.step` shrinking is what this counts; see [ADR 009](decisions/009-what-the-quorum-is-a-quorum-of.md) and the [FleetShrunk](runbooks/FleetShrunk.md) runbook |
 
 And from the daemon fleet — the same in-process `effect` registry, served on
 `METRICS_PORT` by every daemon and by the producer:
@@ -256,6 +257,8 @@ production — `openMs` in particular is 4s so recovery is watchable.
 | `openMs` / `maxOpenMs` | 4s / 16s | probe backoff, doubles on each failed probe |
 | `probeSuccesses` | 3 | consecutive healthy observations needed to close |
 | `snapshotMs` | 15000 | periodic full-state republish per API |
+| `replicaTimeoutMs` | 5000 | after this, a replica stops counting toward the quorum |
+| `tickMs` | 250 | how often the control loop polls, steps, and publishes |
 
 `dwellMs` and `minStateMs` are not cosmetic. Without them a marginal upstream
 generates an event storm, and every subscriber ends up debouncing it themselves

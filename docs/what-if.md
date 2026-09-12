@@ -43,8 +43,8 @@ What neither says is what the breaker *does* instead.
 
 ### Measured
 
-The real `Breaker`, five simulated minutes, same 45% failure rate, changing only the
-endpoint count:
+The real `Breaker`, five simulated minutes at the aggregator's own `tickMs` of 250,
+same 45% failure rate, changing only the endpoint count:
 
 | | transitions published | time in each state |
 |---|---|---|
