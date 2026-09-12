@@ -13,7 +13,7 @@ one guarantee the whole system exists to provide.
 
 ```bash
 curl -s aggregator:8088/api/subscriber | head -c 400   # gaps list names the jump
-docker compose logs rmq-daemon-0 --tail 20 | grep -E "gaps=|dup="
+docker compose logs rmq-daemon --tail 40 | grep -E "gaps=|dup="
 ```
 
 The gap list says exactly which API jumped and from where to where, which is

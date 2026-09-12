@@ -18,12 +18,19 @@ export const circuitState = Metric.gauge("egress_daemon_circuit_state", {
     "Diverging from egress_circuit_state means the daemon has stopped hearing the control plane.",
 });
 
-export const targetActive = Metric.gauge("egress_daemon_target_active", {
-  description: "How many daemons this one believes should be pulling work right now.",
+export const targetFraction = Metric.gauge("egress_daemon_target_fraction", {
+  description:
+    "What proportion of the fleet should be pulling work right now, 0 to 1. " +
+    "Summed against egress_daemon_self_active across the fleet, the gap between " +
+    "intended and actual is the cost of selecting by hash rather than by index — " +
+    "see ADR 013. A persistent gap is a fleet too small for the fraction to land.",
 });
 
-export const fleetSize = Metric.gauge("egress_daemon_fleet_size", {
-  description: "Fleet size this daemon was configured with.",
+export const floorHeld = Metric.gauge("egress_daemon_floor_held", {
+  description:
+    "1 on the single daemon the broker has elected to run regardless of the " +
+    "fraction. Should sum to exactly 1 across the fleet whenever the target is " +
+    "non-zero; 0 means a DEGRADED fleet could stop entirely.",
 });
 
 export const selfActive = Metric.gauge("egress_daemon_self_active", {

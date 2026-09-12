@@ -397,17 +397,17 @@ repo does not run.
 
 ```bash
 # watch the fleet react — target=<k>/5 is the agreed active count
-docker compose logs -f rmq-daemon-0 rmq-daemon-3
+docker compose logs -f rmq-daemon
 
 # take the upstream down; the queue depth is the story
 curl -X POST localhost:8080/__fail -d '{"rate":1.0}'
 open http://localhost:15672        # guest / guest
 
 # kill whichever daemon the broker elected as prober, mid-incident
-docker kill workspace-rmq-daemon-1-1
+docker kill workspace-rmq-daemon-1
 
 # every daemon serves the same /metrics route the aggregator does
-docker compose exec prometheus wget -qO- http://rmq-daemon-0:9464/metrics
+docker compose exec prometheus wget -qO- http://rmq-daemon:9464/metrics
 ```
 
 ## What's actually verified, and how
@@ -990,7 +990,7 @@ sequence looks like from the outside.
 ## Verified end to end
 
 `docker compose up` runs the whole thing: `rabbitmq`, `rmq-producer` at
-200 msg/s onto `payments-provider.work`, and `rmq-daemon-0`..`4` as five
+200 msg/s onto `payments-provider.work`, and `rmq-daemon` scaled to five as
 separate containers. Failure is injected the same way the rest of the repo
 does it, on the upstream rather than anywhere in this stack:
 

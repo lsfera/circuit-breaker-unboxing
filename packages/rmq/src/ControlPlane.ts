@@ -110,6 +110,31 @@ export const deadLetterQueueOptions = () => ({
  */
 export const CONTROL_QUEUE_EXPIRES_MS = 600_000;
 
+/**
+ * The floor queue. One per API, bound to `circuit.control` alongside the
+ * per-daemon control queues, and single-active-consumer — so every published
+ * event also lands in exactly one daemon's lap, and that daemon is the one
+ * running while the fraction alone would have selected nobody.
+ *
+ * Bound rather than published to: the election needs no traffic of its own,
+ * and a snapshot every `snapshotMs` is already a heartbeat.
+ */
+export const floorQueueFor = (apiId: string) => `${apiId}.floor`;
+
+export const floorQueueOptions = () => ({
+  args: {
+    "x-single-active-consumer": true,
+    // Transient and self-deleting for the same reasons as a control queue:
+    // it is a live subscription, and one left behind by a departed fleet
+    // should not keep filling.
+    "x-expires": CONTROL_QUEUE_EXPIRES_MS,
+    // The lease is short, so an event nobody took is worthless within seconds.
+    "x-message-ttl": 30_000,
+    "x-max-length": 16,
+  },
+  durable: false,
+});
+
 export const controlQueueOptions = (apiId: string) => ({
   args: { ...deadLetterArgs(apiId), "x-expires": CONTROL_QUEUE_EXPIRES_MS },
   durable: false,

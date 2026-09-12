@@ -6,15 +6,14 @@ import { RAMP_DWELL_MS } from "../src/DaemonPolicy.ts";
 
 /** The daemon's decisions, with no broker, no connections and no runtime. */
 
-const FLEET = 5;
 const T0 = 1_700_000_000_000;
-const start = DaemonState.initialState(FLEET, T0);
+const start = DaemonState.initialState(T0);
 
 const reduce = (
   state: DaemonState.DaemonState,
   command: DaemonState.Command,
   redriveOnClose = true,
-) => DaemonState.reduce(state, command, FLEET, redriveOnClose);
+) => DaemonState.reduce(state, command, redriveOnClose);
 
 test("entering HALF_OPEN asks for a probe trigger to be published", () => {
   const { next, actions } = reduce(start, {
@@ -24,7 +23,8 @@ test("entering HALF_OPEN asks for a probe trigger to be published", () => {
     at: T0,
   });
   assert.equal(next.circuit, State.HALF_OPEN);
-  assert.equal(next.policy.targetActive, 1, "HALF_OPEN is always exactly one");
+  assert.equal(next.policy.fraction, 0, "HALF_OPEN asks for nobody; the prober is elected");
+  assert.equal(next.policy.floor, false);
   assert.deepEqual(actions, [{ _tag: "PublishProbeTrigger", sequence: 7 }]);
 });
 
@@ -108,7 +108,7 @@ test("the ramp advances only while CLOSED, and only when the dwell has elapsed",
   const open = reduce(start, { _tag: "CircuitChanged", state: State.OPEN, sequence: 1, at: T0 })
     .next;
   assert.equal(
-    reduce(open, { _tag: "RampTick", at: T0 + 60_000 }).next.policy.targetActive,
+    reduce(open, { _tag: "RampTick", at: T0 + 60_000 }).next.policy.fraction,
     0,
     "OPEN is a level, not a ramp",
   );
@@ -119,47 +119,61 @@ test("the ramp advances only while CLOSED, and only when the dwell has elapsed",
     sequence: 2,
     at: T0 + 1000,
   }).next;
-  assert.equal(closed.policy.targetActive, 1, "first rung on recovery");
+  assert.equal(closed.policy.fraction, 0, "first rung on recovery is the elected daemon alone");
+  assert.equal(closed.policy.floor, true);
 
   const tooSoon = reduce(closed, { _tag: "RampTick", at: T0 + 1500 });
-  assert.equal(tooSoon.next.policy.targetActive, 1, "a rung is earned by being held");
+  assert.equal(tooSoon.next.policy.fraction, 0, "a rung is earned by being held");
 
   const earned = reduce(closed, { _tag: "RampTick", at: T0 + 1000 + RAMP_DWELL_MS });
-  assert.equal(earned.next.policy.targetActive, 4);
+  assert.equal(earned.next.policy.fraction, 0.25);
 });
 
 // ---------------------------------------------------------------------------
 // Which connections should exist, and what to do about the ones that do.
 // ---------------------------------------------------------------------------
 
-test("HALF_OPEN never lets a daemon work off its own index, whatever that index is", () => {
+test("HALF_OPEN never lets a daemon take work, wherever it sits in the space", () => {
   const half = reduce(start, {
     _tag: "CircuitChanged",
     state: State.HALF_OPEN,
     sequence: 3,
     at: T0,
   }).next;
-  // targetActive is 1, so index 0 would self-activate and race the daemon the
-  // broker actually elected — two calls in the one state whose contract is
-  // "exactly one".
-  assert.equal(DaemonState.desired(half, 0, FLEET).work, false);
-  assert.equal(DaemonState.desired(half, 0, FLEET).probe, true, "but a probe may exist");
+  // A daemon low enough in the hash space, or holding the floor, would
+  // otherwise self-activate and race the one the broker elected — two calls in
+  // the one state whose contract is "exactly one".
+  for (const self of [
+    { position: 0, isFloor: false },
+    { position: 0, isFloor: true },
+    { position: 0.99, isFloor: true },
+  ]) {
+    assert.equal(DaemonState.desired(half, self).work, false);
+  }
+  assert.equal(
+    DaemonState.desired(half, { position: 0, isFloor: false }).probe,
+    true,
+    "but a probe may exist",
+  );
 });
 
-test("work follows the fleet's agreed prefix of indices", () => {
-  const closed = { ...start, policy: { targetActive: 3, rungSince: T0 } };
+test("work follows the fraction, and the floor runs whoever the broker elected", () => {
+  const closed = { ...start, policy: { fraction: 0.5, floor: true, rungSince: T0 } };
+  const works = (position: number, isFloor = false) =>
+    DaemonState.desired(closed, { position, isFloor }).work;
   assert.deepEqual(
-    [0, 1, 2, 3, 4].map((i) => DaemonState.desired(closed, i, FLEET).work),
-    [true, true, true, false, false],
+    [works(0.1), works(0.49), works(0.5), works(0.9)],
+    [true, true, false, false],
+    "the fraction is a threshold on the daemon's own position",
   );
+  assert.equal(works(0.9, true), true, "except for the one holding the floor");
 });
 
 test("a probe belongs to HALF_OPEN and a redrive to CLOSED, and to nothing else", () => {
   const inState = (state: State) =>
     DaemonState.desired(
       reduce(start, { _tag: "CircuitChanged", state, sequence: 1, at: T0 }).next,
-      0,
-      FLEET,
+      { position: 0, isFloor: false },
     );
   assert.deepEqual(
     { probe: inState(State.OPEN).probe, redrive: inState(State.OPEN).redrive },

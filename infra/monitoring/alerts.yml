@@ -87,21 +87,45 @@ groups:
   - name: egress-daemon-fleet
     interval: 15s
     rules:
-      # The deaf-daemon signature: every daemon derives the same target from
-      # the same events, so these two track each other. When they stop
-      # tracking, a daemon has stopped hearing the control plane while its
-      # container, CPU and sockets all still look normal.
+      # The deaf-daemon signature. Every daemon derives the same target from the
+      # same events, so every daemon should be reporting the *same* fraction —
+      # and a daemon that has stopped hearing circuit.control keeps reporting
+      # the last one it heard while its container, CPU and sockets all look
+      # normal.
+      #
+      # This compares the daemons against each other rather than the count of
+      # active ones against the target, which is what it used to do. Selecting
+      # by hash means the count only approximately matches the fraction (ADR
+      # 013), so an equality on counts would now fire constantly — while a
+      # disagreement about the fraction itself is exactly the fault, with no
+      # tolerance needed.
       - alert: FleetDisagreesWithTarget
-        expr: sum(egress_daemon_self_active) != max(egress_daemon_target_active)
+        expr: max(egress_daemon_target_fraction) != min(egress_daemon_target_fraction)
         for: 2m
         labels: { severity: warning }
         annotations:
           runbook_url: "docs/runbooks/FleetDisagreesWithTarget.md"
-          summary: "Daemons pulling work does not match the agreed target"
+          summary: "Daemons disagree about how much of the fleet should be working"
           description: >-
-            Expected {{ $value }} active. A daemon that has gone deaf to
-            circuit.control keeps working (or keeps idling) while the rest of
-            the fleet moves on.
+            Every daemon computes the target from the same published events, so
+            a spread means one has gone deaf to circuit.control while still
+            running.
+
+      # The floor is the one daemon the broker elects to keep working when the
+      # fraction alone would select nobody. Without it a small fleet can stop
+      # entirely on DEGRADED, which looks exactly like OPEN — see ADR 013. It
+      # should be held by exactly one daemon whenever any work is wanted.
+      - alert: FloorUnheld
+        expr: max(egress_daemon_target_fraction) > 0 and sum(egress_daemon_floor_held) != 1
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          runbook_url: "docs/runbooks/FleetDisagreesWithTarget.md"
+          summary: "The fleet's floor is held by {{ $value }} daemons, not one"
+          description: >-
+            Zero means a DEGRADED fleet could stop entirely and report nothing.
+            More than one means the single-active-consumer election on
+            <apiId>.floor is not doing what it is there for.
 
       # A quorum is a fraction, and this is the denominator moving. Every
       # verdict this system publishes is `votes.DOWN / live.length` over the

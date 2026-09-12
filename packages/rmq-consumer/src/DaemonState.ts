@@ -1,5 +1,5 @@
 import { State } from "@egress/domain/Model.ts";
-import { activeIndices, initial as initialPolicy, step } from "./DaemonPolicy.ts";
+import { initial as initialPolicy, runsWork, step } from "./DaemonPolicy.ts";
 import type { DaemonPolicyState } from "./DaemonPolicy.ts";
 
 /**
@@ -28,11 +28,11 @@ export type DaemonState = {
   readonly redrivenSequence: number;
 };
 
-export const initialState = (fleetSize: number, now: number): DaemonState => ({
+export const initialState = (now: number): DaemonState => ({
   // CLOSED until told otherwise: a daemon that starts mid-incident learns the
   // real state from the aggregator's next snapshot.
   circuit: State.CLOSED,
-  policy: initialPolicy(fleetSize, now),
+  policy: initialPolicy(now),
   probedSequence: -1,
   redrivenSequence: -1,
 });
@@ -67,7 +67,6 @@ type Transition = {
 export const reduce = (
   state: DaemonState,
   command: Command,
-  fleetSize: number,
   redriveOnClose: boolean,
 ): Transition => {
   switch (command._tag) {
@@ -75,7 +74,7 @@ export const reduce = (
       const next: DaemonState = {
         ...state,
         circuit: command.state,
-        policy: step(state.policy, command.state, fleetSize, command.at),
+        policy: step(state.policy, command.state, command.at),
       };
       const actions: Action[] = [];
       if (command.state === State.HALF_OPEN) {
@@ -94,7 +93,7 @@ export const reduce = (
       // Only while CLOSED: every other state is a level, not a ramp.
       if (state.circuit !== State.CLOSED) return { next: state, actions: [] };
       return {
-        next: { ...state, policy: step(state.policy, state.circuit, fleetSize, command.at) },
+        next: { ...state, policy: step(state.policy, state.circuit, command.at) },
         actions: [],
       };
     }
@@ -124,16 +123,13 @@ type Connections = {
 
 export const desired = (
   state: DaemonState,
-  index: number,
-  fleetSize: number,
+  self: { readonly position: number; readonly isFloor: boolean },
 ): Connections => ({
-  // HALF_OPEN is the one state where a daemon must not act on its own index.
-  // targetActive is 1, so index 0 would otherwise self-activate and race
-  // whichever daemon SAC actually elected — two probes for a state whose entire
-  // contract is "exactly one call". The prober is chosen by the broker.
-  work:
-    state.circuit !== State.HALF_OPEN &&
-    activeIndices(state.policy.targetActive, fleetSize).has(index),
+  // HALF_OPEN is the one state where a daemon must not decide for itself. The
+  // one call it permits belongs to whichever daemon the broker elected, and a
+  // daemon low enough in the hash space would otherwise self-activate and race
+  // it — two calls for a state whose entire contract is "exactly one".
+  work: state.circuit !== State.HALF_OPEN && runsWork(state.policy, self),
   // A probe connection only ever belongs to HALF_OPEN, and a redrive only to
   // CLOSED. Leaving either state retires the connection: replaying a backlog
   // into an upstream that has just started failing again is the one thing this

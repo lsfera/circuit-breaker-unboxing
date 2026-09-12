@@ -1,6 +1,8 @@
 # 013 — The target as a fraction, not a count
 
-**Status**: explored, measured, not adopted — and the measurement is the reason.
+**Status**: adopted 2026-09-12. The section below was written against the
+decision *not* to adopt it; the amendment at the end says what changed and what
+implementing it turned up.
 **Date**: 2026-09-12.
 **Context**: an ergonomics pass on
 [scaling the fleet](../adopting.md#scaling-the-fleet), which named three ways
@@ -155,3 +157,62 @@ For the record, so this is a decision rather than a sketch:
    `deploy.replicas`, which is the outcome that motivated the whole exercise.
 
 Steps 1 to 3 are an afternoon. Step 5 is the one that makes it safe.
+
+
+---
+
+## Adopted, and what building it found
+
+Added 2026-09-12. The reasoning above stands — this is imprecise at five
+daemons, and the floor is what makes that survivable rather than dangerous —
+but the ergonomics were judged worth it, so it is what the fleet does now.
+
+Three things came out of building it that the exploration did not predict.
+
+**The hash has to actually mix.** FNV-1a was the first choice: cheap, no
+imports, nothing here is adversarial. It does not mix identifiers that differ
+in one character, which is exactly what fleet instance ids are. `daemon-0`
+through `daemon-5` came out as
+
+    0.9426  0.9465  0.9504  0.9543  0.9582  0.9621
+
+a straight line covering 2% of the space, with 60 of 200 positions below 0.5
+instead of about 100. A fraction applied to that selects the wrong proportion
+*systematically* rather than noisily — the worse failure, and a silent one. It
+is SHA-256 now, which is what the simulation had measured all along, and 102 of
+200 fall below 0.5. `position` runs once per process, so nothing is paid for it.
+
+**The floor needs a lease, not a flag.** Single-active-consumer promotes
+silently: a daemon that dies holding the floor is replaced by the broker, but
+the replacement has no way to learn it has been promoted except by receiving
+something. The floor queue is *bound to `circuit.control`* rather than published
+to, so every event the aggregator already publishes elects the floor as a side
+effect, and a sixty-second lease means a dead holder's claim expires rather than
+outliving it.
+
+**The monitoring had to change with it.** `FleetDisagreesWithTarget` compared
+`sum(self_active)` to `max(target_active)` for equality, which a fraction makes
+permanently false. It compares the daemons *to each other* now —
+`max(target_fraction) != min(target_fraction)` — which is a better detector of
+the fault it was written for: a daemon that has gone deaf reports the last
+fraction it heard, and nothing else disagrees. A second alert, `FloorUnheld`,
+watches the thing that now prevents a silent stop.
+
+## What it looks like
+
+Five daemons became one service scaled to five, and `--scale rmq-daemon=12`
+resizes it. Verified end to end on twelve replicas:
+
+```
+== The daemon fleet reacts ==
+  target=0% (~0 of 12) pulling=0 work=13 dead-lettered=331
+== Fleet: ramp back, drain, and the same contract on AMQP ==
+  target=100% (~12 of 12) pulling=12 work=0 dead-lettered=0 (deepest backlog seen: 1765)
+  ... checked by 12 consumers the publisher does not control
+```
+
+Scaling five to twelve left all five original containers with their original
+start times, and Prometheus discovered the seven new ones through DNS rather
+than a config edit. The intended count is printed next to the actual one on
+that line on purpose: the gap between them is the cost of this decision, and it
+should be visible rather than assumed.

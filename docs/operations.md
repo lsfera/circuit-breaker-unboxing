@@ -146,7 +146,7 @@ And from the daemon fleet — the same in-process `effect` registry, served on
 | Metric | What it shows |
 |---|---|
 | `egress_daemon_circuit_state` | The state each daemon *received*, against `egress_circuit_state`, the state the aggregator *published*. They should be indistinguishable |
-| `egress_daemon_target_active` / `_self_active` / `_fleet_size` | The agreed active count, and whether this particular daemon is one of them |
+| `egress_daemon_target_fraction` / `_self_active` / `_floor_held` | What proportion of the fleet should be working, whether this daemon is one of them, and whether it is the one the broker elected to work regardless. The fraction should be identical on every daemon and the floor should sum to 1 — see [ADR 013](decisions/013-the-target-as-a-fraction.md) |
 | `egress_daemon_calls_total` | Third-party calls through the egress listener, by outcome |
 | `egress_daemon_in_flight` | Third-party calls open right now, per daemon. Bounded by the work consumer's prefetch (`MAX_IN_FLIGHT`), so it is also how close this daemon is to its ceiling — anything beyond it stays in the queue rather than in the process |
 | `egress_daemon_dead_lettered_total` | Work rejected onto `<apiId>.work.dead` because its call failed |

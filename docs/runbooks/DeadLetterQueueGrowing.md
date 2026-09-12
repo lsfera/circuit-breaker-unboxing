@@ -13,7 +13,7 @@ nobody drains is a slower way of losing the same messages.
 
 ```bash
 docker compose exec rabbitmq rabbitmqctl list_queues name messages | grep work
-docker compose logs rmq-daemon-0 rmq-daemon-1 | grep -i redriv | tail -5
+docker compose logs rmq-daemon | grep -i redriv | tail -5
 curl -s aggregator:8088/api/state | head -c 200        # is the circuit closed?
 ```
 

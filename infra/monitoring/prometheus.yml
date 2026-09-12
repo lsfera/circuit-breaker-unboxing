@@ -71,13 +71,21 @@ scrape_configs:
   # aggregator does, from the same in-process `effect` registry, so
   # `egress_daemon_*` and `egress_circuit_*` land on one dashboard and can be
   # read against each other. Prometheus's own `instance` label is what tells
-  # the five daemons apart; nothing in the app has to know its own hostname.
+  # the daemons apart.
+  #
+  # Discovered rather than listed: the fleet is one compose service scaled to N,
+  # so there are no container names to enumerate and `--scale rmq-daemon=12`
+  # must not need an edit here. Docker's DNS returns an A record per replica,
+  # and Prometheus scrapes each one it finds.
   - job_name: rmq-fleet
+    dns_sd_configs:
+      - names: ["rmq-daemon"]
+        type: A
+        port: 9464
+    # 10s, matching the scrape interval: a replica that has just been scaled
+    # away should stop being scraped about as fast as it stopped existing.
+    # Prometheus re-resolves on this schedule.
+
+  - job_name: rmq-producer
     static_configs:
-      - targets:
-          - "rmq-daemon-0:9464"
-          - "rmq-daemon-1:9464"
-          - "rmq-daemon-2:9464"
-          - "rmq-daemon-3:9464"
-          - "rmq-daemon-4:9464"
-          - "rmq-producer:9464"
+      - targets: ["rmq-producer:9464"]

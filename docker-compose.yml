@@ -12,11 +12,11 @@ networks:
     name: devcontainer
     external: true
 
-# Shared by every rmq-daemon-* below. Anchored separately from the service
-# anchor because YAML's `<<:` replaces a key wholesale rather than merging
-# into it — a daemon that redeclared `environment:` to set its own
-# DAEMON_INDEX would otherwise drop every other variable. Merging at the map
-# level instead keeps the differing value to one line per daemon.
+# Shared by every daemon replica. It stayed an anchor after the fleet collapsed
+# into one scaled service because the producer and the daemons still share most
+# of it, and because YAML's `<<:` replaces a key wholesale rather than merging
+# into it — anything that redeclared `environment:` would otherwise drop every
+# other variable.
 # Tracing is opt-in, and this is the opt. Unset on the host, this interpolates
 # to the empty string, which @egress/tracing treats as "no endpoint" and
 # installs no tracer at all — so the default stack traces nothing and pays
@@ -36,7 +36,6 @@ x-daemon-env: &daemon-env
   <<: *tracing-env
   RMQ: rabbitmq:5672
   API_ID: payments-provider
-  FLEET_SIZE: "5"
   # One address, no replica names, no admin ports — a daemon is a client of
   # the egress listener and knows nothing about Envoy's topology, exactly
   # like infra/traffic-generator.mjs.
@@ -245,44 +244,29 @@ services:
       rabbitmq: {condition: service_healthy}
     networks: [default, devcontainer]
 
-  rmq-daemon-0: &rmq-daemon
+  # One service, scaled. There is no index and no fleet size to keep in step
+  # any more — a daemon applies the published fraction to its own position in
+  # the hash space — so `--scale rmq-daemon=N` is the whole of resizing the
+  # fleet, with no restart of the daemons already running. See ADR 013.
+  #
+  #   docker compose up -d --scale rmq-daemon=12
+  #
+  # INSTANCE_ID is the container hostname: unique per replica without compose
+  # having to name them, stable across a restart of that container, and what
+  # names the control queue. A replaced container takes a new identity and a new
+  # position, and the queue it leaves behind expires on its own.
+  rmq-daemon:
     <<: *rmq-node
     command: >
-      node --experimental-strip-types packages/rmq-consumer/src/main.ts
+      sh -c 'exec node --experimental-strip-types packages/rmq-consumer/src/main.ts
+      --instance-id "$$(hostname)"'
     environment:
       <<: *daemon-env
-      DAEMON_INDEX: "0"
-      # Names the daemon's own control queue. Fixed rather than random so a
-      # restarted daemon reuses its queue instead of orphaning the old one —
-      # which is exactly what happens now that these containers restart.
-      INSTANCE_ID: daemon-0
+    deploy:
+      replicas: 5
     depends_on:
       <<: *rmq-depends
       envoy-00: {condition: service_started}
-  rmq-daemon-1:
-    <<: *rmq-daemon
-    environment:
-      <<: *daemon-env
-      DAEMON_INDEX: "1"
-      INSTANCE_ID: daemon-1
-  rmq-daemon-2:
-    <<: *rmq-daemon
-    environment:
-      <<: *daemon-env
-      DAEMON_INDEX: "2"
-      INSTANCE_ID: daemon-2
-  rmq-daemon-3:
-    <<: *rmq-daemon
-    environment:
-      <<: *daemon-env
-      DAEMON_INDEX: "3"
-      INSTANCE_ID: daemon-3
-  rmq-daemon-4:
-    <<: *rmq-daemon
-    environment:
-      <<: *daemon-env
-      DAEMON_INDEX: "4"
-      INSTANCE_ID: daemon-4
 
   # Without this, /__fail changes nothing: outlier detection only reacts to
   # requests it actually sees. Part of the default `docker compose up`, not

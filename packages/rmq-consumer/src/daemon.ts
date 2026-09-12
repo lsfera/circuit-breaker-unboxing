@@ -19,6 +19,8 @@ import {
   controlQueueOptions,
   deadLetterQueueFor,
   deadLetterQueueOptions,
+  floorQueueFor,
+  floorQueueOptions,
   decodeElectionTrigger,
   encodeElectionTrigger,
   probeTriggerQueueFor,
@@ -32,6 +34,7 @@ import { decodeCircuitEvent, State, STATE_CODE } from "@egress/domain/Model.ts";
 import { initialContract, observe } from "./Contract.ts";
 import { makeRedrive } from "./Redrive.ts";
 import { desired, initialState, plan, reduce } from "./DaemonState.ts";
+import { position } from "./DaemonPolicy.ts";
 import * as Tally from "./Tally.ts";
 import * as Telemetry from "./Telemetry.ts";
 import type { Consumer, Settlement } from "@egress/rmq/Client.ts";
@@ -68,9 +71,12 @@ import type { Action, Command, DaemonState } from "./DaemonState.ts";
 
 type DaemonConfig = {
   readonly apiId: string;
-  /** 0-based position in the fleet. Fixed per container — see docker-compose.yml. */
-  readonly index: number;
-  readonly fleetSize: number;
+  /**
+   * Names this daemon's control queue and fixes its position in the hash space,
+   * which is the whole of its identity now — there is no index and no fleet
+   * size. Two daemons sharing an id share a position and a queue, so it should
+   * be per-replica: a pod name, a container id, or the random default.
+   */
   readonly instanceId: string;
   /** The single egress address, exactly as a real client would be given it. */
   readonly egressAddr: string;
@@ -92,7 +98,7 @@ const HEARTBEAT_INTERVAL = Duration.seconds(15);
 export const runDaemon = (cfg: DaemonConfig) =>
   Effect.gen(function* () {
     const control = yield* Rmq;
-    const label = `${cfg.apiId}/daemon-${cfg.index}`;
+    const label = `${cfg.apiId}/${cfg.instanceId}`;
 
     const workQueue = workQueueFor(cfg.apiId);
     const deadQueue = deadLetterQueueFor(cfg.apiId);
@@ -114,12 +120,28 @@ export const runDaemon = (cfg: DaemonConfig) =>
     yield* control.bind(routingKeyFor(cfg.apiId), exchange, controlQ);
 
     /**
+     * The floor. One single-active-consumer queue per API, bound to the same
+     * exchange, so every published event also lands in exactly one daemon's lap
+     * — and that daemon runs whether or not its own position falls under the
+     * fraction. Without it a small fleet can select nobody: measured at 3.2% for
+     * five daemons at half, and a DEGRADED fleet that stops is indistinguishable
+     * from an OPEN one. See ADR 013.
+     *
+     * A lease rather than a flag, because SAC promotes silently: a daemon that
+     * dies holding the floor is replaced by the broker, and the replacement
+     * learns it holds the floor from the next event. The lease is what stops
+     * the dead one's claim outliving it.
+     */
+    const floorQ = yield* control.declareQueue(floorQueueFor(cfg.apiId), floorQueueOptions());
+    yield* control.bind(routingKeyFor(cfg.apiId), exchange, floorQ);
+
+    /**
      * Everything this daemon decides, in one value — see DaemonState.ts. One
      * `Ref.modify` over one value keeps each transition atomic against the
      * concurrent AMQP callbacks that drive it.
      */
     const now = yield* Clock.currentTimeMillis;
-    const state = yield* Ref.make<DaemonState>(initialState(cfg.fleetSize, now));
+    const state = yield* Ref.make<DaemonState>(initialState(now));
 
     /** The churning channels — the "actual" side `plan` compares the desired shape against. */
     const workConsumer = yield* Ref.make(O.none<Consumer>());
@@ -137,6 +159,23 @@ export const runDaemon = (cfg: DaemonConfig) =>
 
     /** The delivery contract, observed from this side of the broker — see Contract.ts. */
     let contract: ContractState = initialContract;
+
+    /**
+     * This daemon's fixed position in the hash space, and its claim on the
+     * floor. `Date.now()` for the same reason Redrive.ts uses it: the claim is
+     * refreshed from an AMQP callback, which has no fiber to read a Clock in,
+     * and it is read from the metric flush and the log line, which are sync.
+     *
+     * The lease has to outlast the gap between published events. The aggregator
+     * republishes a snapshot every `snapshotMs` — 15s by default — so a minute
+     * is four of them, and a floor that lapses only does so because the control
+     * plane has gone quiet for far longer than the fleet's own heartbeat.
+     */
+    const FLOOR_LEASE_MS = 60_000;
+    const selfPosition = position(cfg.instanceId);
+    let floorUntil = 0;
+    const floorHeld = () => Date.now() < floorUntil;
+    const self = () => ({ position: selfPosition, isFloor: floorHeld() });
 
     /**
      * One call to the third party through the egress listener. Plain async: it is
@@ -198,7 +237,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
               attributes: {
                 "egress.api_id": cfg.apiId,
                 "egress.path": cfg.apiPath,
-                "egress.daemon_index": cfg.index,
+                "egress.daemon": cfg.instanceId,
               },
             }),
             Effect.withParentSpan(span),
@@ -265,7 +304,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
           probe: O.isSome(yield* Ref.get(probeConsumer)),
           redrive: O.isSome(yield* Ref.get(redriveConsumer)),
         };
-        const actions = plan(desired(yield* Ref.get(state), cfg.index, cfg.fleetSize), have);
+        const actions = plan(desired(yield* Ref.get(state), self()), have);
         if (actions.startWork) yield* startWork;
         if (actions.stopWork) yield* retire(workConsumer);
         if (actions.stopProbe) yield* retire(probeConsumer);
@@ -324,7 +363,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
     /** One command in, one atomic transition out. `Ref.modify` because callers run concurrently. */
     const dispatch = (command: Command) =>
       Ref.modify(state, (prior) => {
-        const { next, actions } = reduce(prior, command, cfg.fleetSize, cfg.redriveOnClose);
+        const { next, actions } = reduce(prior, command, cfg.redriveOnClose);
         return [{ prior, next, actions }, next] as const;
       });
 
@@ -345,7 +384,8 @@ export const runDaemon = (cfg: DaemonConfig) =>
       const { circuit, policy } = yield* Ref.get(state);
       const active = O.isSome(yield* Ref.get(workConsumer));
       return (
-        `${circuit} target=${policy.targetActive}/${cfg.fleetSize} self=${active ? "ACTIVE" : "idle"} ` +
+        `${circuit} target=${Math.round(policy.fraction * 100)}%${policy.floor ? "+floor" : ""} ` +
+        `self=${active ? "ACTIVE" : "idle"}${floorHeld() ? " (floor)" : ""} ` +
         `calls ok=${counts.ok} failed=${counts.failed} inFlight=${inFlight} ` +
         `control=${[...counts.byType.values()].reduce((a, b) => a + b, 0)} ` +
         `gaps=${contract.gaps} dup=${contract.duplicates}`
@@ -394,6 +434,11 @@ export const runDaemon = (cfg: DaemonConfig) =>
       }),
     );
 
+    // Nothing is read from the body: the delivery *is* the election result.
+    yield* control.consume(floorQueueFor(cfg.apiId), () => {
+      floorUntil = Date.now() + FLOOR_LEASE_MS;
+    });
+
     /**
      * Both elections read their trigger the same way, through `ElectionTrigger`.
      * A duplicate for a transition already acted on produces no actions — that is
@@ -435,7 +480,7 @@ export const runDaemon = (cfg: DaemonConfig) =>
     // state from the aggregator's next snapshot.
     yield* reconcile;
     yield* Effect.log(
-      `${label}: up — fleet=${cfg.fleetSize} maxInFlight=${cfg.maxInFlight} ` +
+      `${label}: up — position=${selfPosition.toFixed(3)} maxInFlight=${cfg.maxInFlight} ` +
         `egress=${cfg.egressAddr}${cfg.apiPath} work=${workQueue} control=${controlQueue}`,
     );
 
@@ -477,8 +522,8 @@ export const runDaemon = (cfg: DaemonConfig) =>
       yield* Effect.all(
         [
           Metric.update(Metric.withAttributes(Telemetry.circuitState, attrs), STATE_CODE[circuit]),
-          Metric.update(Metric.withAttributes(Telemetry.targetActive, attrs), policy.targetActive),
-          Metric.update(Metric.withAttributes(Telemetry.fleetSize, attrs), cfg.fleetSize),
+          Metric.update(Metric.withAttributes(Telemetry.targetFraction, attrs), policy.fraction),
+          Metric.update(Metric.withAttributes(Telemetry.floorHeld, attrs), floorHeld() ? 1 : 0),
           Metric.update(Metric.withAttributes(Telemetry.selfActive, attrs), active ? 1 : 0),
           Metric.update(Metric.withAttributes(Telemetry.inFlight, attrs), inFlight),
         ],
@@ -529,11 +574,13 @@ export const runDaemon = (cfg: DaemonConfig) =>
     const advanceRamp = Effect.gen(function* () {
       const at = yield* Clock.currentTimeMillis;
       const { prior, next } = yield* dispatch({ _tag: "RampTick", at });
-      if (next.policy.targetActive === prior.policy.targetActive) return;
+      if (next.policy.fraction === prior.policy.fraction && next.policy.floor === prior.policy.floor) {
+        return;
+      }
       yield* reconcile;
       yield* Effect.log(
-        `${label}: ramp ${prior.policy.targetActive} -> ${next.policy.targetActive} ` +
-          `${yield* describe}`,
+        `${label}: ramp ${Math.round(prior.policy.fraction * 100)}% -> ` +
+          `${Math.round(next.policy.fraction * 100)}% ${yield* describe}`,
       );
     });
 

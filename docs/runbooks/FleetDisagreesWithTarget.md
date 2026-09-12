@@ -1,6 +1,9 @@
 # FleetDisagreesWithTarget
 
-`sum(egress_daemon_self_active) != max(egress_daemon_target_active)` for 2m.
+`max(egress_daemon_target_fraction) != min(egress_daemon_target_fraction)` for 2m —
+daemons disagreeing with each other about how much of the fleet should be
+working. Paired with `FloorUnheld`, which fires when the one daemon elected to
+work regardless of the fraction is missing or duplicated.
 
 ## What it means
 
@@ -15,7 +18,7 @@ sockets and file descriptors all looked completely normal.
 ## Check first
 
 ```bash
-docker compose logs rmq-daemon-0 --tail 5 | grep heartbeat
+docker compose logs rmq-daemon --tail 40 | grep heartbeat
 curl -s prometheus:9090/api/v1/query?query=egress_daemon_self_active | head -c 400
 ```
 

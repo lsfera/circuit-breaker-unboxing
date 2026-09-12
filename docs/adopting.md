@@ -10,81 +10,62 @@ Both answers are more honest than they are flattering.
 
 ### What it costs today
 
-A daemon is active when its index falls under the fleet's target:
+Nothing. One command:
 
-```ts
-activeIndices(targetActive, fleetSize).has(index)   // index < min(target, fleetSize)
+```
+docker compose up -d --scale rmq-daemon=12
 ```
 
-That single line is the ergonomics of this design. It buys something real —
-**which** daemons are active is deterministic and stable, so a target moving
-from 3 to 2 idles the same daemon every time rather than reshuffling the fleet
-— and it costs two pieces of static configuration that every replica has to
-agree on.
+No index to assign, no fleet size to keep in step, and no restart of the
+daemons already running — verified by watching: scaling five to twelve left all
+five original containers with their original start times, and Prometheus found
+the seven new ones on its own through DNS discovery rather than a config edit.
 
-Adding a sixth daemon means:
+That is recent, and it is worth knowing what it replaced, because the
+replacement has a cost of its own.
 
-1. giving it `DAEMON_INDEX=5` — unique, contiguous, and 0-based;
-2. raising `FLEET_SIZE` to 6 on **all six**;
-3. restarting the five that were already running, because `fleetSize` is read
-   once at startup.
+### How it works
 
-Step 3 is the part that makes this unsuitable for an autoscaler, and it should
-be said plainly rather than buried: **this fleet does not scale without a
-rolling restart.**
+The aggregator publishes a state; each daemon turns that into a **fraction** of
+the fleet that should be pulling, and applies it to its own position in a hash
+space derived from its instance id:
 
-### What goes wrong if you skip a step
+```ts
+runsWork(policy, self)   // self.position < policy.fraction || (policy.floor && self.isFloor)
+```
 
-| Mistake | What happens |
+Nothing is coordinated and nothing is configured. A daemon needs to know only
+its own identity, which Docker already gives it as a hostname.
+
+Two things fall out that are not obvious:
+
+- **`DEGRADED` is approximate.** Hash selection is independent per daemon, so
+  "half the fleet" lands near half rather than on it — ±60% at five daemons,
+  ±16% at a hundred. `docker compose` prints the gap rather than hiding it:
+  `target=50% (~6 of 12) pulling=5`.
+- **"Exactly one" cannot be a fraction**, so it is not one. The `HALF_OPEN`
+  prober and the first rung of the recovery ramp are both elected by the broker
+  on a single-active-consumer queue, and so is the **floor** — the one daemon
+  that runs whenever any work is wanted, which is what stops an approximate
+  half from ever being none.
+
+[ADR 013](decisions/013-the-target-as-a-fraction.md) has the measurements and
+the argument.
+
+### What to watch
+
+| Metric | What it means |
 |---|---|
-| Two daemons share an index | They activate and idle together. The fleet is one smaller than it looks, and nothing says so. |
-| `index >= fleetSize` | That daemon is never active. It starts, connects, consumes nothing, and reports healthy. |
-| `FLEET_SIZE` raised on the new daemon only | The old ones cap their ramp at the old size, and the `DEGRADED` target — `ceil(fleetSize / 2)` — is computed differently across the fleet. |
-| A daemon is removed | Its control queue is left bound to `circuit.control` with nobody reading it. |
+| `egress_daemon_target_fraction` | Should be identical on every daemon. A spread is a daemon that has gone deaf to `circuit.control` — the `FleetDisagreesWithTarget` alert. |
+| `egress_daemon_floor_held` | Should sum to exactly 1 whenever the target is non-zero — the `FloorUnheld` alert. Zero means a `DEGRADED` fleet could stop entirely. |
+| `sum(egress_daemon_self_active)` against `fraction × count` | The cost of approximation, in daemons. A persistent gap means a fleet too small for the fraction to land. |
 
-The second and fourth of those used to be silent. Both are now caught:
+### What it costs to run small
 
-- A daemon whose index is outside its fleet **refuses to start**, with the
-  reason and the fix in the message. It is a configuration error, and
-  [ADR 008](decisions/008-configuration-is-a-boundary.md) is the argument for
-  failing at the boundary rather than running a process that cannot work.
-- A control queue is declared with `x-expires`, so the broker deletes one that
-  has gone ten minutes without a consumer. Before that, a departed daemon's
-  queue kept filling: **three messages in forty seconds**, measured by stopping
-  `rmq-daemon-4` and watching, and growing for as long as the broker lived.
-
-The first and third remain yours to get right. They are a deployment concern —
-a StatefulSet gives ordinal indices for exactly this reason — and this repo
-does them with five hand-written compose services.
-
-### What would have to change for it to scale properly
-
-Worth writing down, because it is the obvious next piece of work and the shape
-of it is not obvious.
-
-The index exists so that a *count* can be turned into a *set* without the
-daemons talking to each other. Any replacement has to preserve that, and the
-options are:
-
-- **Ordinal identity from the platform.** A StatefulSet's pod ordinal is the
-  index, and `fleetSize` comes from the replica count. Cheapest, and it moves
-  the problem to somewhere that already solves it — but it still restarts the
-  fleet when the count changes.
-- **Let the broker assign the slots.** The prober and the redrive are already
-  elected by RabbitMQ through `x-single-active-consumer`; `targetActive` slots
-  could be elected the same way, with one SAC queue per slot. No index, no
-  fleet size, no restart — and considerably more machinery than a comparison.
-- **Publish the target as a fraction.** The aggregator says "run at 50%"
-  rather than "run 3 of 5", and each daemon decides for itself by hashing its
-  own instance id. Removes both the index and `fleetSize`, and growing the
-  fleet changes no existing daemon's state at all. Explored and measured in
-  [ADR 013](decisions/013-the-target-as-a-fraction.md): the ergonomics claim
-  holds completely, and the accuracy is worst at exactly this fleet size —
-  ±60% at five daemons, and 3.2% of five-daemon fleets would run none at all on
-  `DEGRADED` unless a floor of one is elected by the broker.
-
-None of these is implemented. The first is what a production deployment would
-most likely do.
+Below about ten daemons the approximation is loose enough to notice, and the
+floor is doing real work rather than being a safety net. If the fleet is fixed
+at three or five and never changes, the index this replaced was more accurate;
+ADR 013 says exactly when each is the better trade.
 
 ## Adopting it
 

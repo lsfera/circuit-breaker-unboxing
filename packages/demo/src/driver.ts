@@ -207,9 +207,11 @@ const run = (settings: Settings) => {
   };
 
   const fleetSnapshot: Effect.Effect<Fleet, Error> = Effect.all({
-    target: promQuery(`max(egress_daemon_target_active{apiId="${API}"})`),
+    target: promQuery(`max(egress_daemon_target_fraction{apiId="${API}"})`),
     active: promQuery(`sum(egress_daemon_self_active{apiId="${API}"})`),
-    size: promQuery(`max(egress_daemon_fleet_size{apiId="${API}"})`),
+    // Counted rather than configured: the fleet is one scaled service and no
+    // daemon knows how many there are, so how many are reporting *is* the size.
+    size: promQuery(`count(egress_daemon_self_active{apiId="${API}"})`),
     work: promQuery(`rabbitmq_detailed_queue_messages{queue="${API}.work"}`),
     dead: promQuery(`rabbitmq_detailed_queue_messages{queue="${API}.work.dead"}`),
     broken: promQuery(
@@ -239,7 +241,12 @@ const run = (settings: Settings) => {
   );
 
   const describeFleet = (f: Fleet) =>
-    `target=${f.target}/${f.size} pulling=${f.active} work=${f.work} dead-lettered=${f.dead}`;
+    // Intended and actual, because the fraction only approximately lands — a
+    // gap between the two is the cost of selecting by hash rather than index,
+    // and it is on the line rather than hidden. See ADR 013.
+    `target=${f.target === null ? "?" : Math.round(f.target * 100)}%` +
+    `${f.target !== null && f.size !== null ? ` (~${Math.round(f.target * f.size)} of ${f.size})` : ""}` +
+    ` pulling=${f.active} work=${f.work} dead-lettered=${f.dead}`;
 
   /**
    * Polls `probe` every `everyMs` until it yields something, or dies saying

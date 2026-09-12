@@ -676,7 +676,7 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "max(egress_daemon_target_active)",
+     "expr": "max(egress_daemon_target_fraction) * count(egress_daemon_self_active)",
      "refId": "A",
      "legendFormat": "agreed target"
     },
@@ -694,7 +694,7 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "max(egress_daemon_fleet_size)",
+     "expr": "count(egress_daemon_self_active)",
      "refId": "C",
      "legendFormat": "fleet size"
     }

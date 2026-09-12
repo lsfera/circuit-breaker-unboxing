@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import * as DaemonPolicy from "../src/DaemonPolicy.ts";
 import { State } from "@egress/domain/Model.ts";
 
-const FLEET = 5;
 const T0 = 1_700_000_000_000;
 const DWELL = DaemonPolicy.RAMP_DWELL_MS;
 
@@ -14,120 +13,172 @@ const DWELL = DaemonPolicy.RAMP_DWELL_MS;
  */
 const at = (offsetMs: number) => T0 + offsetMs;
 
+/** The state a daemon is in while running normally. */
+const ramping = (fraction: number) => ({ fraction, floor: true, rungSince: at(0) });
+/** The state a daemon is in while stopped — no fraction, and no floor either. */
+const stopped = { fraction: 0, floor: false, rungSince: at(0) };
+
 test("CLOSED at full strength stays at full strength", () => {
-  const state = DaemonPolicy.step(
-    DaemonPolicy.initial(FLEET, at(0)),
-    State.CLOSED,
-    FLEET,
-    at(0),
-  );
-  assert.equal(state.targetActive, FLEET);
+  const state = DaemonPolicy.step(DaemonPolicy.initial(at(0)), State.CLOSED, at(0));
+  assert.equal(state.fraction, 1);
+  assert.equal(state.floor, true);
 });
 
-test("DEGRADED halves the active fleet, rounding up, minimum 1", () => {
-  const d = (fleet: number) =>
-    DaemonPolicy.step(DaemonPolicy.initial(fleet, at(0)), State.DEGRADED, fleet, at(0))
-      .targetActive;
-  assert.equal(d(5), 3);
-  assert.equal(d(1), 1);
-  assert.equal(d(4), 2);
+test("DEGRADED halves the fleet, and keeps the floor so it can never be none of it", () => {
+  const state = DaemonPolicy.step(DaemonPolicy.initial(at(0)), State.DEGRADED, at(0));
+  assert.equal(state.fraction, 0.5);
+  assert.equal(state.floor, true, "a DEGRADED fleet that stops is indistinguishable from OPEN");
 });
 
-test("OPEN stops every daemon", () => {
-  const state = DaemonPolicy.step(
-    DaemonPolicy.initial(FLEET, at(0)),
-    State.OPEN,
-    FLEET,
-    at(0),
-  );
-  assert.equal(state.targetActive, 0);
+test("OPEN stops every daemon, floor included", () => {
+  const state = DaemonPolicy.step(DaemonPolicy.initial(at(0)), State.OPEN, at(0));
+  assert.equal(state.fraction, 0);
+  assert.equal(state.floor, false, "OPEN means nobody, not one");
 });
 
-test("HALF_OPEN is always exactly one, regardless of fleet size", () => {
-  const half = (targetActive: number) =>
-    DaemonPolicy.step({ targetActive, rungSince: at(0) }, State.HALF_OPEN, FLEET, at(0))
-      .targetActive;
-  assert.equal(half(0), 1);
-  assert.equal(half(5), 1);
+test("HALF_OPEN asks for nobody: the one call it permits is the prober's", () => {
+  const half = (prior: DaemonPolicy.DaemonPolicyState) =>
+    DaemonPolicy.step(prior, State.HALF_OPEN, at(0));
+  assert.deepEqual(half(stopped), { fraction: 0, floor: false, rungSince: at(0) });
+  assert.deepEqual(half(ramping(1)), { fraction: 0, floor: false, rungSince: at(0) });
 });
 
 test("recovery ramps one rung at a time, never snapping to full", () => {
-  let s = DaemonPolicy.step({ targetActive: 0, rungSince: at(0) }, State.CLOSED, 20, at(0));
-  assert.equal(s.targetActive, 1, "first rung, immediately: a closed circuit should do work now");
-  s = DaemonPolicy.step(s, State.CLOSED, 20, at(DWELL));
-  assert.equal(s.targetActive, 4, "second rung");
-  s = DaemonPolicy.step(s, State.CLOSED, 20, at(DWELL * 2));
-  assert.equal(s.targetActive, 16, "third rung");
-  s = DaemonPolicy.step(s, State.CLOSED, 20, at(DWELL * 3));
-  assert.equal(s.targetActive, 20, "capped at fleet size, not the next rung (would be unbounded)");
-  s = DaemonPolicy.step(s, State.CLOSED, 20, at(DWELL * 4));
-  assert.equal(s.targetActive, 20, "stays at full strength once there");
+  let s = DaemonPolicy.step(stopped, State.CLOSED, at(0));
+  assert.deepEqual(
+    [s.fraction, s.floor],
+    [0, true],
+    "first rung, immediately: one daemon, the one the broker elected",
+  );
+  s = DaemonPolicy.step(s, State.CLOSED, at(DWELL));
+  assert.equal(s.fraction, 0.25, "second rung");
+  s = DaemonPolicy.step(s, State.CLOSED, at(DWELL * 2));
+  assert.equal(s.fraction, 0.5, "third rung");
+  s = DaemonPolicy.step(s, State.CLOSED, at(DWELL * 3));
+  assert.equal(s.fraction, 1, "all of it");
+  s = DaemonPolicy.step(s, State.CLOSED, at(DWELL * 4));
+  assert.equal(s.fraction, 1, "stays at full strength once there");
 });
 
 /** A rung is earned by being held, not by a control message arriving. */
 test("a rung is held until it has been held long enough, however many events arrive", () => {
-  let s = DaemonPolicy.step({ targetActive: 0, rungSince: at(0) }, State.CLOSED, 20, at(0));
-  assert.equal(s.targetActive, 1);
+  let s = DaemonPolicy.step(stopped, State.CLOSED, at(0));
+  assert.equal(s.fraction, 0);
 
-  // Ten events in the first second of the rung: the old policy would have
-  // ramped to full strength on these alone.
-  for (let i = 0; i < 10; i++) {
-    s = DaemonPolicy.step(s, State.CLOSED, 20, at(100 * i));
-  }
-  assert.equal(s.targetActive, 1, "still the first rung, because no time has passed");
+  for (let i = 0; i < 10; i++) s = DaemonPolicy.step(s, State.CLOSED, at(100 * i));
+  assert.equal(s.fraction, 0, "still the first rung, because no time has passed");
 
-  s = DaemonPolicy.step(s, State.CLOSED, 20, at(DWELL - 1));
-  assert.equal(s.targetActive, 1, "and still, one millisecond short");
+  s = DaemonPolicy.step(s, State.CLOSED, at(DWELL - 1));
+  assert.equal(s.fraction, 0, "and still, one millisecond short");
 
-  s = DaemonPolicy.step(s, State.CLOSED, 20, at(DWELL));
-  assert.equal(s.targetActive, 4, "the rung is earned exactly when it has been held long enough");
+  s = DaemonPolicy.step(s, State.CLOSED, at(DWELL));
+  assert.equal(s.fraction, 0.25, "the rung is earned exactly when it has been held long enough");
 });
 
 /**
- * What lets five daemons converge with no coordination: same inputs, same answer.
+ * What lets a fleet converge with no coordination: same inputs, same answer.
  * Also why the ramp is gated on a clock and not on successful calls, which are
  * per daemon and would have the busy ones ramping while the idle ones held.
  */
 test("the same inputs give the same target, which is what lets the fleet converge", () => {
-  const busy = { targetActive: 1, rungSince: at(0) };
-  const idle = { targetActive: 1, rungSince: at(0) };
   assert.deepEqual(
-    DaemonPolicy.step(busy, State.CLOSED, FLEET, at(DWELL)),
-    DaemonPolicy.step(idle, State.CLOSED, FLEET, at(DWELL)),
+    DaemonPolicy.step(ramping(0.25), State.CLOSED, at(DWELL)),
+    DaemonPolicy.step(ramping(0.25), State.CLOSED, at(DWELL)),
   );
 });
 
-test("ramp is capped by fleet size even mid-rung", () => {
-  // A fleet smaller than the next rung should jump straight to fleet size,
-  // not overshoot past how many daemons actually exist.
-  const s = DaemonPolicy.step({ targetActive: 1, rungSince: at(0) }, State.CLOSED, 3, at(DWELL));
-  assert.equal(s.targetActive, 3);
+test("recovering from DEGRADED continues the ramp rather than dropping back to one", () => {
+  const degraded = DaemonPolicy.step(DaemonPolicy.initial(at(0)), State.DEGRADED, at(0));
+  const closed = DaemonPolicy.step(degraded, State.CLOSED, at(DWELL));
+  assert.equal(closed.fraction, 1, "half a fleet that recovers goes up, not back to a single daemon");
 });
 
-test("a relapse from CLOSED back through OPEN restarts the ramp from zero", () => {
-  let s = DaemonPolicy.step({ targetActive: 0, rungSince: at(0) }, State.CLOSED, 20, at(0));
-  assert.equal(s.targetActive, 1);
-  s = DaemonPolicy.step(s, State.CLOSED, 20, at(DWELL));
-  assert.equal(s.targetActive, 4);
+test("a relapse from CLOSED back through OPEN restarts the ramp from one daemon", () => {
+  let s = DaemonPolicy.step(stopped, State.CLOSED, at(0));
+  s = DaemonPolicy.step(s, State.CLOSED, at(DWELL));
+  assert.equal(s.fraction, 0.25);
   // Upstream degrades again before the ramp finished.
-  s = DaemonPolicy.step(s, State.OPEN, 20, at(DWELL + 100));
-  assert.equal(s.targetActive, 0);
-  s = DaemonPolicy.step(s, State.CLOSED, 20, at(DWELL + 200));
-  assert.equal(s.targetActive, 1, "ramp restarts from the bottom rung, not from where it left off");
-  s = DaemonPolicy.step(s, State.CLOSED, 20, at(DWELL + 300));
+  s = DaemonPolicy.step(s, State.OPEN, at(DWELL + 100));
+  assert.deepEqual([s.fraction, s.floor], [0, false]);
+  s = DaemonPolicy.step(s, State.CLOSED, at(DWELL + 200));
+  assert.deepEqual(
+    [s.fraction, s.floor],
+    [0, true],
+    "ramp restarts at one daemon, not from where it left off",
+  );
+  s = DaemonPolicy.step(s, State.CLOSED, at(DWELL + 300));
   assert.equal(
-    s.targetActive,
-    1,
-    "and the restarted ramp waits its dwell out like any other — a flapping circuit does not fast-track",
+    s.fraction,
+    0,
+    "and the restarted ramp waits its dwell out — a flapping circuit does not fast-track",
   );
 });
 
-test("activeIndices picks a stable, deterministic prefix of daemon indices", () => {
-  assert.deepEqual(DaemonPolicy.activeIndices(3, 5), new Set([0, 1, 2]));
-  assert.deepEqual(DaemonPolicy.activeIndices(0, 5), new Set());
-  assert.deepEqual(DaemonPolicy.activeIndices(5, 5), new Set([0, 1, 2, 3, 4]));
+// ---------------------------------------------------------------------------
+// Selecting a share of the fleet without knowing how big it is — ADR 013.
+// ---------------------------------------------------------------------------
+
+test("a position is stable for an identity and spread across the space", () => {
+  assert.equal(DaemonPolicy.position("daemon-0"), DaemonPolicy.position("daemon-0"));
+  const ps = Array.from({ length: 200 }, (_, i) => DaemonPolicy.position(`daemon-${i}`));
+  assert.ok(
+    ps.every((p) => p >= 0 && p < 1),
+    "every position is in [0, 1), which is what makes a fraction a threshold",
+  );
+  const below = ps.filter((p) => p < 0.5).length;
+  assert.ok(below > 70 && below < 130, `half the space should hold about half of 200, got ${below}`);
 });
 
-test("activeIndices never exceeds the actual fleet size", () => {
-  assert.deepEqual(DaemonPolicy.activeIndices(999, 3), new Set([0, 1, 2]));
+test("a falling fraction idles a subset of who was running, rather than reshuffling", () => {
+  const fleet = Array.from({ length: 40 }, (_, i) => `daemon-${i}`);
+  const running = (fraction: number) =>
+    new Set(
+      fleet.filter((id) =>
+        DaemonPolicy.runsWork(ramping(fraction), {
+          position: DaemonPolicy.position(id),
+          isFloor: false,
+        }),
+      ),
+    );
+  const all = running(1);
+  const half = running(0.5);
+  const quarter = running(0.25);
+  assert.ok(quarter.size < half.size && half.size < all.size, "fewer each time");
+  for (const id of quarter) assert.ok(half.has(id), `${id} kept working as the fraction fell`);
+  for (const id of half) assert.ok(all.has(id), `${id} was already working at full strength`);
+});
+
+test("the floor runs the elected daemon even when the fraction selects nobody", () => {
+  const elected = { position: 0.99, isFloor: true };
+  const other = { position: 0.99, isFloor: false };
+  assert.equal(DaemonPolicy.runsWork(ramping(0), elected), true);
+  assert.equal(DaemonPolicy.runsWork(ramping(0), other), false);
+});
+
+test("the floor does not override OPEN", () => {
+  const elected = { position: 0.01, isFloor: true };
+  assert.equal(
+    DaemonPolicy.runsWork({ fraction: 0, floor: false, rungSince: at(0) }, elected),
+    false,
+    "OPEN clears the floor, so the elected daemon stops with everyone else",
+  );
+});
+
+test("a fleet of any size runs at least one daemon whenever the target is non-zero", () => {
+  // The property the floor exists for. Without it, 3.2% of five-daemon fleets
+  // select nobody at 0.5 — measured in scripts/sim-fractional-target.mjs.
+  for (const size of [1, 3, 5, 10]) {
+    for (const seed of [0, 1, 2, 3, 4, 5, 6, 7]) {
+      const fleet = Array.from({ length: size }, (_, i) => `fleet${seed}-daemon-${i}`);
+      // The broker elects exactly one; which one is not this module's business.
+      const electedId = fleet[seed % fleet.length]!;
+      const running = fleet.filter((id) =>
+        DaemonPolicy.runsWork(ramping(0.5), {
+          position: DaemonPolicy.position(id),
+          isFloor: id === electedId,
+        }),
+      );
+      assert.ok(running.length >= 1, `fleet of ${size}, seed ${seed}, ran nobody`);
+    }
+  }
 });
