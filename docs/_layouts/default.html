@@ -115,7 +115,7 @@
     // 1. Links that leave docs/ — source files, the README, the Dockerfile —
     //    have no page on this site. Resolve each one against its own document's
     //    directory and send it to the repository instead of a 404.
-    if (REPO) {
+    {
       document.querySelectorAll(".content a[href]").forEach(function (a) {
         var href = a.getAttribute("href");
         // Jekyll has already resolved every link that names a page on this
@@ -124,6 +124,12 @@
         if (!href || /^([a-z]+:|#|\/)/i.test(href)) return;
         var url = new URL(href, "https://x/" + DOC_DIR);
         var resolved = url.pathname.slice(1);
+        // README.md is a page here — it is copied into the build — so a link
+        // to it stays on the site rather than leaving for the repository.
+        if (resolved === "README.md") {
+          a.href = SITE + "readme.html" + url.hash;
+          return;
+        }
         if (resolved.indexOf("docs/") === 0) {
           // A documentation page. Jekyll resolved these for every document
           // except the README, whose links are relative to the repository and
@@ -133,6 +139,10 @@
           a.href = SITE + page + url.hash;
           return;
         }
+        // Everything else exists only in the repository. Without a repository
+        // to point at — a local container, say — the link is left as it is
+        // rather than pointed somewhere wrong.
+        if (!REPO) return;
         // The fragment comes too. security.md cites line numbers — `#L288`,
         // `#L147-L151` — and those are the reason the link exists; dropping
         // them lands the reader at the top of a 400-line file.

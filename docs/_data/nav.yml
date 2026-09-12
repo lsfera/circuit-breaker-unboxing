@@ -19,3 +19,8 @@
     - { url: /what-if.html,         title: What if,                note: environments this was not measured against }
     - { url: /security.html,        title: Security,               note: what is missing, and what production needs }
     - { url: /effect-notes.html,    title: Effect notes,           note: what it bought, what an RC pin costs }
+
+- section: Reference
+  items:
+    - { url: /decisions/,      title: Decision records,       note: twelve, each resting on a measurement }
+    - { url: /runbooks/,       title: Runbooks,               note: one per alert }

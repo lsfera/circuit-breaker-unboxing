@@ -53,22 +53,42 @@ for (const path of pages) {
   // there is one failure, not thirty-four.
   const body = html.split("<main", 2)[1] ?? html;
 
+  // Where this page's own relative links are written from. Everything is
+  // relative to docs/ except readme.html, which is the repository's README.
+  const docDir = page === "readme.html" ? "" : "docs/" + (dirname(page) === "." ? "" : dirname(page) + "/");
+
   for (const [, href] of body.matchAll(/href="([^"]+)"/g)) {
     if (/^([a-z]+:|\/\/)/i.test(href)) continue;
 
     const [target, anchor] = href.split("#");
-    const page_ = target
-      ? normalize(join(target.startsWith("/") ? "." : dirname(page), target.replace(/^\//, "")))
-      : page;
+    let page_;
 
-    // The layout sends these to the repository at page load.
-    if (!idsByPage.has(page_) && /\.(ts|mjs|ya?ml|json|md)$|\/$|^\.\./.test(target)) {
-      offsite++;
-      continue;
+    if (!target) {
+      page_ = page;
+    } else if (href.startsWith("/")) {
+      // Jekyll resolved it; it names a page here directly. `normalize("")`
+      // is ".", so the site root has to be spelt out.
+      const stripped = target.replace(/^\//, "");
+      page_ = stripped === "" ? "" : normalize(stripped);
+    } else {
+      // Still relative, so the layout resolves it against the repository at
+      // load. The same rule is applied here rather than skipped — leaving
+      // these unchecked is what let two link bugs ship.
+      const resolved = normalize(join(docDir, target));
+      if (resolved === "README.md") page_ = "readme.html";
+      else if (resolved.startsWith("docs/")) {
+        page_ = resolved.slice(5).replace(/\.md$/, ".html").replace(/(^|\/)README\.html$/, "$1");
+      } else {
+        // Genuinely only in the repository.
+        offsite++;
+        continue;
+      }
     }
 
+    if (page_ === "" || page_.endsWith("/")) page_ += "index.html";
+
     checked++;
-    if (!idsByPage.has(page_)) broken.push([page, href, "no such page"]);
+    if (!idsByPage.has(page_)) broken.push([page, href, `no such page (${page_})`]);
     else if (anchor && !idsByPage.get(page_).has(anchor)) broken.push([page, href, "no such anchor"]);
   }
 }
