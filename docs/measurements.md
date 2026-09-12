@@ -98,9 +98,19 @@ to plan with.
 **The console breaks first, and by a distance.** `/api/stream` re-sends the
 whole state frame every 400ms, so at 1000 APIs each connected browser costs
 about **2.75 MB/s** — an order of magnitude more than everything else here put
-together. Nothing in the control path notices, which is exactly why it would
-be found late. A production console at this size sends diffs, or a page of
-APIs, not the fleet.
+together, and the same whether anything changed or not.
+
+**And the control path does notice.** Each connection builds and serializes
+its own frame on the event loop that runs the breaker, so a hundred open
+consoles took 16–22% of the control loop's cadence (3.69 → 2.88 ticks/s) and
+about 0.6% of a core each — against a one-core container ceiling. The console
+degrades the thing it observes, during the incident it is opened for.
+[ADR 015](decisions/015-the-console-at-a-thousand-apis.md) measures five ways
+out and proposes an order for them: a separate stream for the event tape, one
+frame per tick shared by every connection, a view of the APIs that need
+attention rather than the fleet, patches with resume, and gzip last. Measured
+on a recorded stream, that is 7.8 KB/s per browser in a storm, from 2.80 MB/s;
+what it does for the control loop is a projection until it is built.
 
 A soak, of the short kind that is honest to call a soak: 27 minutes on the
 compose stack, deliberately not a quiet window — it contained two chaos runs, a
