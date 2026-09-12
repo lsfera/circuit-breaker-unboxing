@@ -64,8 +64,13 @@ COPY docs/ .
 # `repo_root` tells the layout that this page's links are written relative to
 # the repository, not to docs/.
 COPY README.md /tmp/README.md
+# No `title:` here on purpose. `jekyll-titles-from-headings` takes the title
+# from the page's own first heading and, with `strip_title`, removes it from the
+# body — but only when it derived the title itself. Setting one explicitly left
+# the README's `# Per-API egress circuit breaker events` in place under the
+# layout's rendering of the same string, so the page opened with its name twice.
 RUN { \
-      printf -- '---\ntitle: Per-API egress circuit breaker events\nrepo_root: true\n---\n\n'; \
+      printf -- '---\nrepo_root: true\n---\n\n'; \
       cat /tmp/README.md; \
     } > readme.md
 
