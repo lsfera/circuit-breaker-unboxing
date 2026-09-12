@@ -19,8 +19,8 @@
     "subscribe": "node --experimental-strip-types packages/subscriber/src/subscriber.ts",
     "demo": "node --experimental-strip-types packages/demo/src/driver.ts",
     "demo:envoy": "AGGREGATOR=http://127.0.0.1:8088,http://127.0.0.1:8089 FAILURE_MODE=envoy FLAKY_UPSTREAM=http://127.0.0.1 PROMETHEUS=http://127.0.0.1:9090 node --experimental-strip-types packages/demo/src/driver.ts",
-    "site": "docker build -t egress-site docs && docker run --rm -p ${SITE_PORT:-4000}:80 egress-site",
-    "site:build": "docker build -t egress-site docs"
+    "site": "docker build -f docs/Dockerfile -t egress-site . && docker run --rm -p ${SITE_PORT:-4000}:80 egress-site",
+    "site:build": "docker build -f docs/Dockerfile -t egress-site ."
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

@@ -1,7 +1,11 @@
 # The documentation site, as an image you can read on a train.
 #
-#   docker build -t egress-site docs
+#   docker build -f docs/Dockerfile -t egress-site .
 #   docker run --rm -p 4000:80 egress-site     # then http://localhost:4000
+#
+# The build context is the repository root, not docs/, because README.md is
+# part of the site: it is the repository's own front page and four documents
+# link into its sections.
 #
 # 4000 because it is Jekyll's own default and nothing in docker-compose.yml
 # wants it. 8080 is not free here: flaky-upstream binds 8080-8085 and
@@ -32,7 +36,7 @@ WORKDIR /site
 
 # Gems first: the documents change constantly, the dependencies almost never,
 # and this keeps a rebuild to the seconds Jekyll itself takes.
-COPY Gemfile Gemfile.lock ./
+COPY docs/Gemfile docs/Gemfile.lock ./
 RUN bundle config set --local without "" \
  && bundle install --jobs 4 --retry 3
 
@@ -53,7 +57,17 @@ RUN mkdir -p assets/vendor \
       -o assets/vendor/mermaid.min.js \
  && test -s assets/vendor/mermaid.min.js
 
-COPY . .
+COPY docs/ .
+
+# Front matter prepended here rather than committed into README.md, because a
+# `---` block at the top of that file is the first thing GitHub would render.
+# `repo_root` tells the layout that this page's links are written relative to
+# the repository, not to docs/.
+COPY README.md /tmp/README.md
+RUN { \
+      printf -- '---\ntitle: Per-API egress circuit breaker events\nrepo_root: true\n---\n\n'; \
+      cat /tmp/README.md; \
+    } > readme.md
 
 RUN bundle exec jekyll build --destination /out --baseurl "${BASEURL}" \
  # A Jekyll build exits 0 having rendered nothing at all, so the things whose
@@ -76,7 +90,7 @@ LABEL org.opencontainers.image.description="The docs/ tree, built and served off
 # as part of the site.
 RUN rm -rf /usr/share/nginx/html/*
 COPY --from=build /out /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY docs/nginx.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 80
 HEALTHCHECK --interval=30s --timeout=3s --start-period=3s \

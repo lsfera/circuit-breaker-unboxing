@@ -522,8 +522,11 @@ docker-compose.yml           wires infra/ and the packages/ entrypoints together
 
 ### Reading this as a site
 
-Everything under `docs/` is also published as a GitHub Pages site, built by
-`.github/workflows/pages.yml`. Enable it once, in **Settings → Pages → Source:
+Everything under `docs/` is also published as a GitHub Pages site — this file
+included, which is why the build context is the repository root rather than
+`docs/`. Four documents link into this README's sections, and a link that leaves
+the site for its own front page is a strange thing to make a reader follow.
+Built by `.github/workflows/pages.yml`. Enable it once, in **Settings → Pages → Source:
 GitHub Actions**; nothing else needs configuring, because a project site is
 served from `<owner>.github.io/<repo>/` and the layout derives the repository
 links from that.
@@ -567,6 +570,9 @@ Without Docker, Jekyll directly still works:
 ```
 cd docs && bundle install && bundle exec jekyll serve
 ```
+
+That path builds `docs/` alone, so this README is not part of it — only the
+image and CI include it.
 
 Cross-package imports go through `@egress/domain`'s `package.json#exports`
 (`@egress/domain/Model.ts`, `@egress/domain/Breaker.ts`) rather than relative

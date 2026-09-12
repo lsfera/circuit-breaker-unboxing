@@ -67,7 +67,7 @@ jobs:
           base=""
           if [ "$REPO" != "$OWNER.github.io" ]; then base="/$REPO"; fi
           echo "building with baseurl '$base'"
-          docker build --build-arg BASEURL="$base" -t egress-site:ci docs
+          docker build -f docs/Dockerfile --build-arg BASEURL="$base" -t egress-site:ci .
 
       - name: Take the site out of the image
         # What gets published is what the image serves, extracted from it —

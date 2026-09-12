@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% if page.url == '/' %}{{ site.title }}{% else %}{{ page.title }} · {{ site.title }}{% endif %}</title>
+<title>{% if page.url == '/' or page.title == site.title %}{{ site.title }}{% else %}{{ page.title }} · {{ site.title }}{% endif %}</title>
 <meta name="description" content="{{ page.description | default: site.description | strip_newlines }}">
 <meta property="og:title" content="{% if page.url == '/' %}{{ site.title }}{% else %}{{ page.title }}{% endif %}">
 <meta property="og:description" content="{{ page.description | default: site.description | strip_newlines }}">
@@ -105,7 +105,12 @@
       a.hidden = false;
     });
 
-    var DOC_DIR = "docs/" + {{ page.path | jsonify }}.replace(/[^/]*$/, "");
+    // Where this page's own links are written relative to. Every document is
+    // relative to docs/ — except README.md, which is copied in from the
+    // repository root and written relative to that.
+    var DOC_DIR = {% if page.repo_root %}""{% else %}"docs/"{% endif %} +
+      {{ page.path | jsonify }}.replace(/[^/]*$/, "");
+    var SITE = {{ '/' | relative_url | jsonify }};
 
     // 1. Links that leave docs/ — source files, the README, the Dockerfile —
     //    have no page on this site. Resolve each one against its own document's
@@ -113,10 +118,21 @@
     if (REPO) {
       document.querySelectorAll(".content a[href]").forEach(function (a) {
         var href = a.getAttribute("href");
-        if (!href || /^([a-z]+:|#|\/\/)/i.test(href)) return;
+        // Jekyll has already resolved every link that names a page on this
+        // site, and made it root-relative. What is still relative is what left
+        // docs/ — those are the only ones with nowhere here to point at.
+        if (!href || /^([a-z]+:|#|\/)/i.test(href)) return;
         var url = new URL(href, "https://x/" + DOC_DIR);
         var resolved = url.pathname.slice(1);
-        if (resolved.indexOf("docs/") === 0) return;
+        if (resolved.indexOf("docs/") === 0) {
+          // A documentation page. Jekyll resolved these for every document
+          // except the README, whose links are relative to the repository and
+          // so were left alone — they are mapped to their pages here.
+          var page = resolved.slice(5).replace(/\.md$/, ".html")
+            .replace(/(^|\/)README\.html$/, "$1");
+          a.href = SITE + page + url.hash;
+          return;
+        }
         // The fragment comes too. security.md cites line numbers — `#L288`,
         // `#L147-L151` — and those are the reason the link exists; dropping
         // them lands the reader at the top of a 400-line file.
