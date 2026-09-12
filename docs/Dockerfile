@@ -41,7 +41,12 @@ RUN bundle config set --local without "" \
 # point is reading offline cannot fetch a renderer at page load. The layout
 # falls back to the CDN if this file is absent, so a bare `jekyll serve` with no
 # vendor step still draws them while online.
-ARG MERMAID_VERSION=11.17.2
+# 12.0.0. The bundle still ends with
+# `globalThis["mermaid"] = ...`, so a plain <script src> defines the global the
+# layout looks for, and `startOnLoad`, `securityLevel` and the `dark`/`neutral`
+# themes all survive the major. It is 5.6MB against 11.x's 3.6MB, which is the
+# price of this image being readable without a network.
+ARG MERMAID_VERSION=12.0.0
 RUN mkdir -p assets/vendor \
  && curl -fsSL --retry 3 \
       "https://cdn.jsdelivr.net/npm/mermaid@${MERMAID_VERSION}/dist/mermaid.min.js" \
