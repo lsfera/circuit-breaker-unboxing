@@ -22,8 +22,13 @@
   --sans: "IBM Plex Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 
+  /* Prose keeps a fixed measure because reading does. Everything around it is
+     fluid: the shell takes the window up to a generous cap, so code blocks,
+     tables and diagrams grow with the screen instead of scrolling inside a
+     column sized for paragraphs. */
   --measure: 40rem;
   --sidebar: 15.5rem;
+  --shell: 100rem;
   color-scheme: light;
 }
 
@@ -81,7 +86,7 @@ body {
 }
 
 .masthead-inner {
-  max-width: 68rem;
+  max-width: var(--shell);
   margin: 0 auto;
   padding-inline: 20px;
   padding-block: 0.85rem;
@@ -127,7 +132,7 @@ body {
 /* ---------- shell ---------- */
 
 .shell {
-  max-width: 68rem;
+  max-width: var(--shell);
   margin: 0 auto;
   padding-inline: 20px;
   padding-block: 2.5rem 5rem;
@@ -195,7 +200,20 @@ body {
 
 /* ---------- content ---------- */
 
-.content { min-width: 0; max-width: var(--measure); }
+/* The measure is for running text. Code, tables and diagrams are not running
+   text and are routinely wider — the repository tree in the README is 103
+   columns — so the container is fluid and prose caps itself inside it. Capping
+   the container put a horizontal scrollbar on a 101-line block at every width. */
+.content { min-width: 0; max-width: 100%; }
+.content > p,
+.content > ul,
+.content > ol,
+.content > blockquote,
+.content > h1,
+.content > h2,
+.content > h3,
+.content > h4,
+.content > .page-foot { max-width: var(--measure); }
 
 .content h1 {
   font-family: var(--serif);

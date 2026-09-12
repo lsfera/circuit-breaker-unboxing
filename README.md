@@ -469,7 +469,7 @@ packages/
     test/integration/        12 tests against a real broker, opt-in (`pnpm run test:rmq`)
 
   rmq-consumer/              @egress/rmq-consumer — the competing-consumer daemon fleet
-    src/DaemonPolicy.ts      pure: (prior, circuit state, fleet size, now) -> target active count
+    src/DaemonPolicy.ts      pure: (prior, circuit state, now) -> what fraction should be working
     src/DaemonState.ts       pure: the daemon's whole decision — one state, one reducer,
                              plus which connections should exist and what to do about it
     src/Contract.ts          pure: the per-API sequence guarantee, checked on the AMQP side
