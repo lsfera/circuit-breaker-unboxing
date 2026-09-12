@@ -298,28 +298,39 @@ const run = (settings: Settings) => {
   };
 
   /** Picks whichever candidate currently holds the publishing lease. */
-  const resolveLeader = Effect.gen(function* () {
-    if (CANDIDATES.length === 1) return;
-    for (const candidate of CANDIDATES) {
-      const leading = yield* Effect.tryPromise({
-        try: () =>
-          fetch(`${candidate}/api/state`).then(
-            (r) => r.json() as Promise<{ leader?: { isLeader: boolean; instanceId: string } }>,
-          ),
-        catch: (cause) => new Error(String(cause)),
-      }).pipe(
-        Effect.map((body) => body.leader?.isLeader === true),
-        Effect.catchCause(() => Effect.succeed(false)),
-      );
-      if (leading) {
-        ORIGIN = candidate;
-        return;
-      }
-    }
-    console.log(
-      `  (none of ${CANDIDATES.join(", ")} reports itself leader — using ${ORIGIN} and hoping)`,
+  const claimsLeadership = (candidate: string) =>
+    Effect.tryPromise({
+      try: () =>
+        fetch(`${candidate}/api/state`).then(
+          (r) => r.json() as Promise<{ leader?: { isLeader: boolean; instanceId: string } }>,
+        ),
+      catch: (cause) => new Error(String(cause)),
+    }).pipe(
+      Effect.map((body) => body.leader?.isLeader === true),
+      // An instance that cannot be reached is not the leader as far as this
+      // script is concerned; the next candidate gets asked.
+      Effect.catchCause(() => Effect.succeed(false)),
     );
-  });
+
+  const resolveLeader = Effect.when(
+    Effect.findFirst(CANDIDATES, claimsLeadership).pipe(
+      Effect.flatMap(
+        O.match({
+          onSome: (candidate) =>
+            Effect.sync(() => {
+              ORIGIN = candidate;
+            }),
+          onNone: () =>
+            Effect.sync(() =>
+              console.log(
+                `  (none of ${CANDIDATES.join(", ")} reports itself leader — using ${ORIGIN} and hoping)`,
+              ),
+            ),
+        }),
+      ),
+    ),
+    Effect.succeed(CANDIDATES.length > 1),
+  ).pipe(Effect.asVoid);
 
   const header = (msg: string) => Effect.sync(() => console.log(`\n\x1b[1m== ${msg} ==\x1b[0m`));
 

@@ -168,19 +168,25 @@ export const makeRedrive = (opts: RedriveOptions) => {
      * deadline is the timeout around it rather than a sixth branch, so no
      * `reason` can be reached without saying which one it was.
      */
-    const finished = Effect.gen(function* () {
-      if (!(yield* opts.isClosed)) return O.some("circuit reopened");
-      if (moved >= opts.maxPerPass) return O.some("cap reached");
-      if (cycled) return O.some("came full circle");
-      // Idle is measured on *replays* rather than on deliveries, so a pass
-      // that is only being handed things it will not replay still ends. On
-      // `Date.now()` at both ends deliberately: what is being measured is how
-      // long the broker has gone without handing over work.
-      if (Date.now() - lastReplayAt > PASS_IDLE_MS) {
-        return O.some(parked > 0 ? "nothing left to replay" : "drained");
-      }
-      return O.none<string>();
-    });
+    const when = (ended: boolean, reason: () => string): O.Option<string> =>
+      ended ? O.some(reason()) : O.none();
+
+    const finished = Effect.map(opts.isClosed, (closed) =>
+      // The order is the priority, and `firstSomeOf` is what makes it data
+      // rather than the order four `if`s happen to be written in.
+      O.firstSomeOf([
+        when(!closed, () => "circuit reopened"),
+        when(moved >= opts.maxPerPass, () => "cap reached"),
+        when(cycled, () => "came full circle"),
+        // Idle is measured on *replays* rather than on deliveries, so a pass
+        // that is only being handed things it will not replay still ends. On
+        // `Date.now()` at both ends deliberately: what is being measured is how
+        // long the broker has gone without handing over work.
+        when(Date.now() - lastReplayAt > PASS_IDLE_MS, () =>
+          parked > 0 ? "nothing left to replay" : "drained",
+        ),
+      ]),
+    );
 
     const reason = yield* finished.pipe(
       Effect.repeat({ schedule: Schedule.spaced(PASS_POLL), until: O.isSome }),
@@ -198,12 +204,12 @@ export const makeRedrive = (opts: RedriveOptions) => {
     );
     yield* conn.closeConsumer(consumer);
 
-    if (parked > 0) {
-      yield* Effect.logWarning(
-        `${opts.label}: left ${parked} non-work message(s) on ${opts.deadQueue} — ` +
-        `dead-lettered from somewhere other than ${opts.workQueue}, so not replayed as work`,
-      );
-    }
+    yield* parked > 0
+      ? Effect.logWarning(
+          `${opts.label}: left ${parked} non-work message(s) on ${opts.deadQueue} — ` +
+          `dead-lettered from somewhere other than ${opts.workQueue}, so not replayed as work`,
+        )
+      : Effect.void;
     return { moved, parked, reason };
   });
   /**
@@ -215,27 +221,55 @@ export const makeRedrive = (opts: RedriveOptions) => {
    * needing one outage per cap to recover.
    */
   const REDRIVE_MAX_PASSES = 20;
-  const redriveOnce = Effect.gen(function* () {
-    if (!opts.enabled) return;
-    if (O.isSome(yield* opts.gate.withPermit(Ref.get(opts.consumer)))) return;
-
+  const passes = Effect.gen(function* () {
     yield* Effect.log(`${opts.label}: redriving ${opts.deadQueue} (max ${opts.maxPerPass} per pass)`);
-    let total = 0;
-    for (let pass = 1; pass <= REDRIVE_MAX_PASSES; pass++) {
-      const { moved, reason } = yield* redrivePass;
-      total += moved;
-      // A pass that replayed nothing means whatever is left is not work,
-      // so more passes would only cycle it.
-      if (reason !== "cap reached" || moved === 0) {
-        yield* Effect.log(`${opts.label}: redrive finished — ${total} replayed (${reason})`);
-        return;
-      }
-    }
-    yield* Effect.log(
-      `${opts.label}: redrive stopped after ${REDRIVE_MAX_PASSES} passes — ${total} replayed; ` +
-      `whatever is left will be picked up by the next recovery`,
+
+    /**
+     * The loop is `repeat` with an `until`, and the state it threads is a Ref
+     * rather than a mutable local: `finished` carries the reason the run ended,
+     * and its absence after the cap is what tells the two log lines apart.
+     */
+    const state = yield* Ref.make({
+      pass: 0,
+      total: 0,
+      finished: O.none<string>(),
+    });
+
+    yield* Effect.repeat(
+      redrivePass.pipe(
+        Effect.flatMap(({ moved, reason }) =>
+          Ref.updateAndGet(state, (prior) => ({
+            pass: prior.pass + 1,
+            total: prior.total + moved,
+            // A pass that replayed nothing means whatever is left is not work,
+            // so more passes would only cycle it.
+            finished:
+              reason !== "cap reached" || moved === 0 ? O.some(reason) : O.none<string>(),
+          })),
+        ),
+      ),
+      { until: (s) => O.isSome(s.finished) || s.pass >= REDRIVE_MAX_PASSES },
     );
+
+    const { total, finished } = yield* Ref.get(state);
+    yield* O.match(finished, {
+      onSome: (reason) =>
+        Effect.log(`${opts.label}: redrive finished — ${total} replayed (${reason})`),
+      onNone: () =>
+        Effect.log(
+          `${opts.label}: redrive stopped after ${REDRIVE_MAX_PASSES} passes — ${total} replayed; ` +
+          `whatever is left will be picked up by the next recovery`,
+        ),
+    });
   });
+
+  /** Disabled, or a pass already holds the channel: either way there is nothing to start. */
+  const redriveOnce = Effect.when(
+    passes,
+    opts.enabled
+      ? opts.gate.withPermit(Ref.get(opts.consumer)).pipe(Effect.map(O.isNone))
+      : Effect.succeed(false),
+  ).pipe(Effect.asVoid);
 
   return redriveOnce;
 };
