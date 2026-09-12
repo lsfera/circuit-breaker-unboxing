@@ -303,8 +303,77 @@ body {
 
 .content img, .content svg { max-width: 100%; }
 
-.mermaid-wrap { overflow-x: auto; margin: 0 0 1.4rem; }
+.mermaid-wrap { overflow-x: auto; margin: 0 0 1.4rem; position: relative; }
 .mermaid { background: none; }
+
+/* Sits over the diagram's top-right corner rather than above it, so it costs
+   no vertical space in a column that is already tight. */
+.diagram-zoom {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.35rem;
+  z-index: 1;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  color: var(--ink-soft);
+  background: var(--raised);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0.25rem 0.5rem;
+  cursor: pointer;
+  opacity: 0.55;
+}
+.diagram-zoom:hover { opacity: 1; color: var(--accent); border-color: var(--accent); }
+.diagram-zoom:focus-visible { opacity: 1; }
+/* Touch has no hover to reveal it with. */
+@media (hover: none) { .diagram-zoom { opacity: 1; } }
+
+/* Native fullscreen paints its own black behind the element, so the ground has
+   to be set explicitly or a light-theme diagram lands on black. */
+.mermaid-wrap:fullscreen,
+.mermaid-wrap.is-overlaid {
+  background: var(--ground);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2.5rem 1.5rem;
+  overflow: auto;
+  margin: 0;
+}
+.mermaid-wrap.is-overlaid {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+}
+body.has-overlaid-diagram { overflow: hidden; }
+
+/* The diagram inherits `.content pre`'s frame, which is right in a column and
+   wrong filling a screen. */
+.mermaid-wrap:fullscreen .mermaid,
+.mermaid-wrap.is-overlaid .mermaid {
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: none;
+}
+
+/* Mermaid writes its own max-width onto the SVG, sized for the column. */
+.mermaid-wrap:fullscreen .mermaid svg,
+.mermaid-wrap.is-overlaid .mermaid svg {
+  max-width: 100% !important;
+  width: 100%;
+  height: auto;
+  max-height: 90vh;
+}
+
+.mermaid-wrap:fullscreen .diagram-zoom,
+.mermaid-wrap.is-overlaid .diagram-zoom {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  opacity: 1;
+}
 
 /* A link that leaves the site for the repository. */
 .content a.offsite::after {

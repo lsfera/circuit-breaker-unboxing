@@ -131,12 +131,82 @@
       var pre = node.tagName === "CODE" ? node.parentNode : node;
       var wrap = document.createElement("div");
       wrap.className = "mermaid-wrap";
+
+      // Several of these diagrams are wider than the column they sit in and
+      // carry labels at the size of body text, so reading one means filling the
+      // screen with it. The button is a sibling of the diagram rather than a
+      // child: mermaid replaces the contents of the element it renders into.
+      var zoom = document.createElement("button");
+      zoom.type = "button";
+      zoom.className = "diagram-zoom";
+      zoom.textContent = "Full screen";
+      wrap.appendChild(zoom);
+
       var box = document.createElement("pre");
       box.className = "mermaid";
       box.textContent = node.textContent;
       wrap.appendChild(box);
       pre.replaceWith(wrap);
     });
+
+    // Native fullscreen where it is allowed, a fixed overlay where it is not —
+    // an iframe without `allow="fullscreen"` refuses, and the diagram still
+    // has to be readable there.
+    var overlaid = null;
+
+    function fullscreenElement() {
+      return document.fullscreenElement || document.webkitFullscreenElement || null;
+    }
+
+    function labelButtons() {
+      var active = fullscreenElement() || overlaid;
+      document.querySelectorAll(".diagram-zoom").forEach(function (button) {
+        var isOpen = active !== null && button.parentNode === active;
+        button.textContent = isOpen ? "Exit full screen" : "Full screen";
+        button.setAttribute("aria-expanded", isOpen ? "true" : "false");
+      });
+    }
+
+    function closeOverlay() {
+      if (!overlaid) return;
+      overlaid.classList.remove("is-overlaid");
+      document.body.classList.remove("has-overlaid-diagram");
+      overlaid = null;
+      labelButtons();
+    }
+
+    function openOverlay(wrap) {
+      overlaid = wrap;
+      wrap.classList.add("is-overlaid");
+      document.body.classList.add("has-overlaid-diagram");
+      labelButtons();
+    }
+
+    document.addEventListener("click", function (event) {
+      var button = event.target.closest && event.target.closest(".diagram-zoom");
+      if (!button) return;
+      var wrap = button.parentNode;
+
+      if (overlaid === wrap) return closeOverlay();
+      if (fullscreenElement() === wrap) {
+        return (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      }
+
+      var request = wrap.requestFullscreen || wrap.webkitRequestFullscreen;
+      if (!request) return openOverlay(wrap);
+      // A rejected promise is the browser refusing, not an error to report:
+      // fall back to the overlay and the reader gets the same thing.
+      var attempt = request.call(wrap);
+      if (attempt && attempt.catch) attempt.catch(function () { openOverlay(wrap); });
+    });
+
+    // Escape leaves the overlay the way it leaves real fullscreen.
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && overlaid) closeOverlay();
+    });
+
+    document.addEventListener("fullscreenchange", labelButtons);
+    document.addEventListener("webkitfullscreenchange", labelButtons);
     function drawDiagrams() {
       mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "neutral", securityLevel: "strict" });
     }
