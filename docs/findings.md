@@ -907,3 +907,40 @@ correct-looking pieces of code, which no grep finds.
   stub outbox that fails on demand: three consecutive failing passes emit one
   warning, recovery emits one "readable again", and `drainOutbox` still returns
   0 without failing, so the tick loop is untouched.
+
+- **The demo's recovery claim was a trailing comment.** `awaitTransition(apiId,
+  after, timeout)` waited for *any* `state_changed` past `after` and returned
+  the newest one it could see. The six calls that make up the script's
+  choreography each assume a specific target state, and that assumption lived
+  only in a comment — `// CLOSED, after probeSuccesses healthy checks`.
+
+  A poll happens every 300ms, and HALF_OPEN → OPEN (PROBE_FAILED) completes well
+  inside that. When one poll catches both, that call consumes both and returns
+  the second, every later step shifts by one, and the run ends a transition
+  early. Caught in a live run: five transitions narrated across a stretch whose
+  choreography accounts for four, and the script finished on
+  `OPEN -> HALF_OPEN`.
+
+  That last call is the only check in the demo that the circuit recovered.
+  Nothing else asserts state — the delivery-contract check that follows is about
+  gaps and duplicates, which hold whether or not the circuit ever closed. So the
+  script printed "gapless and non-repeating through the full incident" and
+  exited 0 **with the circuit open**. `CLOSED` appeared exactly once in
+  `driver.ts`, in that comment.
+
+  The expected state is now a parameter, so each step asserts what its header
+  claims. Selection is `next.slice(0, next.findIndex((e) => e.data.state ===
+  expected) + 1)` — `findIndex` returning -1 makes that `slice(0, 0)`, so "not
+  there yet" and "nothing new" are the same empty answer and the poll simply
+  continues. Transitions past the expected one are left for the next step, which
+  filters on `sequence > after` and narrates them itself, so nothing is lost or
+  printed twice.
+
+  Demonstrated against the exact double-poll that caused it:
+
+      old            -> narrates 73,74, returns 74 (OPEN)      <- drifts
+      new(HALF_OPEN) -> narrates 73,    returns 73 (HALF_OPEN)
+      new(CLOSED)    -> not yet — keeps polling                <- no false pass
+
+  Two live runs after: six transitions each, two per section, both ending
+  `HALF_OPEN -> CLOSED PROBE_SUCCEEDED`.

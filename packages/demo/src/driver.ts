@@ -2,7 +2,7 @@ import { Config, Duration, Effect, Option as O, Schedule, Schema } from "effect"
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { NodeRuntime, NodeServices } from "@effect/platform-node";
 import { VERSION } from "@egress/config/Settings.ts";
-import { CircuitEvent, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
+import { CircuitEvent, SEQUENCED_EVENT, State } from "@egress/domain/Model.ts";
 
 /** Derived from the published schema rather than restated — see getEvents. */
 type CircuitEventData = CircuitEvent["data"];
@@ -343,11 +343,26 @@ const run = (settings: Settings) => {
 
   /**
    * Polls /api/events (newest first) until a state_changed for `apiId` with
-   * sequence > `after` appears, narrates it, and returns its sequence. A probe
-   * cycle can pass through more than one transition before landing on the one
-   * the caller cares about, so this reports every one it sees on the way.
+   * sequence > `after` that reaches `expected` appears, narrates every
+   * transition up to and including it, and returns its sequence.
+   *
+   * `expected` is a parameter and not a trailing comment because it is the
+   * assertion. This used to return the newest transition it could see, so a
+   * poll that caught two — HALF_OPEN and the OPEN right behind it land well
+   * inside one 300ms window — consumed both, every later step shifted by one,
+   * and the run finished a transition early. The last call in the script is
+   * the only check that the circuit recovered, and in that state it returned
+   * on a transition to HALF_OPEN and reported success with the circuit open.
+   *
+   * Transitions past the expected one are left un-narrated on purpose: the
+   * next step filters on `sequence > after` and reports them itself.
    */
-  const awaitTransition = (apiId: string, after: number, baseTimeoutMs: number) =>
+  const awaitTransition = (
+    apiId: string,
+    after: number,
+    baseTimeoutMs: number,
+    expected: State,
+  ) =>
     awaitOn(
       getEvents.pipe(
         Effect.flatMap(({ events }) => {
@@ -359,18 +374,21 @@ const run = (settings: Settings) => {
                 e.data.sequence > after,
             )
             .sort((a, b) => a.data.sequence - b.data.sequence);
-          const latest = next[next.length - 1];
-          return latest === undefined
+          // `findIndex` returning -1 makes this `slice(0, 0)`, so "not there
+          // yet" and "nothing new" are the same empty answer.
+          const upto = next.slice(0, next.findIndex((e) => e.data.state === expected) + 1);
+          const landed = upto[upto.length - 1];
+          return landed === undefined
             ? Effect.succeed(O.none<number>())
             : Effect.as(
-                Effect.forEach(next, (e) => narrate(e.data)),
-                O.some(latest.data.sequence),
+                Effect.forEach(upto, (e) => narrate(e.data)),
+                O.some(landed.data.sequence),
               );
         }),
       ),
       300,
       baseTimeoutMs * TIMEOUT_SCALE,
-      () => `waiting for ${apiId} to publish past seq=${after}`,
+      () => `waiting for ${apiId} to reach ${expected} past seq=${after}`,
     );
 
   const program = Effect.gen(function* () {
@@ -424,11 +442,11 @@ const run = (settings: Settings) => {
 
     yield* header(`Drag ${API} to 45%`);
     yield* setFailureRate(API, 0.45);
-    const s1 = yield* awaitTransition(API, start, 15_000);
+    const s1 = yield* awaitTransition(API, start, 15_000, State.DEGRADED);
 
     yield* header(`Drag ${API} to 100%`);
     yield* setFailureRate(API, 1.0);
-    const s2 = yield* awaitTransition(API, s1, 15_000);
+    const s2 = yield* awaitTransition(API, s1, 15_000, State.OPEN);
 
     if (fleetPresent) {
       yield* header("The daemon fleet reacts — no coordination, same events");
@@ -442,13 +460,13 @@ const run = (settings: Settings) => {
     }
 
     yield* header("Watch it probe — upstream is still dead, so this reopens with doubled backoff");
-    const s3 = yield* awaitTransition(API, s2, 15_000); // HALF_OPEN
-    const s4 = yield* awaitTransition(API, s3, 20_000); // OPEN again, PROBE_FAILED
+    const s3 = yield* awaitTransition(API, s2, 15_000, State.HALF_OPEN);
+    const s4 = yield* awaitTransition(API, s3, 20_000, State.OPEN); // PROBE_FAILED
 
     yield* header("Hit Restore");
     yield* setFailureRate(API, 0);
-    const s5 = yield* awaitTransition(API, s4, 30_000); // HALF_OPEN, after the doubled backoff
-    yield* awaitTransition(API, s5, 15_000); // CLOSED, after probeSuccesses healthy checks
+    const s5 = yield* awaitTransition(API, s4, 30_000, State.HALF_OPEN); // after the doubled backoff
+    yield* awaitTransition(API, s5, 15_000, State.CLOSED); // after probeSuccesses healthy checks
 
     yield* header("Delivery contract, read from outside the process");
     const sub = yield* getSubscriber;
