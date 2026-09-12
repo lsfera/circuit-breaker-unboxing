@@ -972,11 +972,11 @@ management image, on 15692 — per-queue depth lives behind
 `/metrics/detailed`, since the plain endpoint aggregates every queue into
 one number).
 
-The panel that matters is `max(egress_daemon_target_active)` against
+The panel that matters is `egress_daemon_target_fraction` against
 `sum(egress_daemon_self_active)`. Every daemon derives the same target from
-the same events, so those two lines track each other — and when they stop
-tracking, some daemon has stopped hearing the control plane while still
-looking perfectly healthy. That is exactly the failure described above,
+the same events, so every daemon should report the *same* fraction — and when
+one stops matching the others, it has stopped hearing the control plane while
+still looking perfectly healthy. That is exactly the failure described above,
 which took a session to find by hand and is now a glance.
 
 Two of these metrics are the delivery contract rather than fleet mechanics.
@@ -988,6 +988,13 @@ non-zero duplicate count is what a leader resuming from a stale in-memory
 sequence looks like from the outside.
 
 ## Verified end to end
+
+> A record of a run, not a description of the present. It was taken while the
+> fleet selected its active daemons by index — `activeIndices`, cited below, no
+> longer exists, and the target is a fraction now rather than a count. What
+> replaced it and why is
+> [ADR 013](decisions/013-the-target-as-a-fraction.md); what the run proved
+> about the broker is unchanged.
 
 `docker compose up` runs the whole thing: `rabbitmq`, `rmq-producer` at
 200 msg/s onto `payments-provider.work`, and `rmq-daemon` scaled to five as

@@ -34,7 +34,7 @@ it is one more pair of things that have to agree.
   wins by default on any API the new leader has not gotten to yet, which is
   the exact split-brain window fencing tokens exist to close. The fix is
   checking against the one shared lease-token counter, not a per-key value —
-  see [High availability](high-availability.md).
+  see [High availability](../docs/high-availability.md).
 - **A healthy-looking process can be a deaf one.** A daemon in the RabbitMQ
   fleet stopped reacting to circuit events entirely — container up, CPU at
   0.01%, sockets and file descriptors identical to a healthy peer, and 64
@@ -46,7 +46,7 @@ it is one more pair of things that have to agree.
   of the event stream — because until then every log line it produced was
   emitted while handling an event, so "gone deaf" and "nothing happened"
   looked identical. See
-  [docs/rmq-control-plane.md](rmq-control-plane.md).
+  [docs/rmq-control-plane.md](../docs/rmq-control-plane.md).
 - **Backpressure is about *when you ack*, not how much you buffer.** The
   first daemon accepted each message on arrival and fired its third-party
   call afterwards, so draining a 50k backlog meant tens of thousands of
@@ -64,7 +64,7 @@ it is one more pair of things that have to agree.
   devcontainer had already set. The fix was not a workaround, it was
   removing the override — three real Envoy replicas, two real aggregator
   instances, and a real Redis now run end to end (see
-  [Running against real Envoy](operations.md#running-against-real-envoy)). The lesson
+  [Running against real Envoy](../docs/operations.md#running-against-real-envoy)). The lesson
   travels further than this one variable: re-verify an environment
   assumption before designing around it, especially one written down as
   fact by an earlier pass over the same repo.
@@ -95,13 +95,13 @@ it is one more pair of things that have to agree.
   the *broker* count attempts and dead-letter at the limit, through this same
   client (measured: four deliveries, then `reason "delivery_limit"`). The
   lever was in the queue the whole time. See
-  [docs/decisions/001-amqp-client.md](decisions/001-amqp-client.md).
+  [docs/decisions/001-amqp-client.md](../docs/decisions/001-amqp-client.md).
   **Amended again 2026-09-06**: the repo moved to `amqplib` (AMQP 0-9-1), where
   `x-delivery-count` is simply readable — the same test now reads
   `[0, 1, 2, 3, 0, 1, 2, 3]`, the budget and the redrive's reset. Enforcement
   stays the broker's, because an in-process counter still dies when a message
   moves to another daemon; what is gone is the blind spot. See
-  [decisions/004](decisions/004-downgrade-to-amqp-0-9-1.md).
+  [decisions/004](../docs/decisions/004-downgrade-to-amqp-0-9-1.md).
 - **The check that proves the contract had no test, and a blind spot for the
   one bug most likely to break it.** `/api/subscriber` is what this README
   points at to claim the stream is gapless and non-repeating. It counted a
@@ -273,7 +273,7 @@ it is one more pair of things that have to agree.
   once, not per failed poll, because at `tickMs` of 250ms the honest version of
   this is four identical lines a second. The arithmetic is deliberately
   unchanged, and
-  [decisions/009](decisions/009-what-the-quorum-is-a-quorum-of.md) says why:
+  [decisions/009](../docs/decisions/009-what-the-quorum-is-a-quorum-of.md) says why:
   enlarging the denominator would suppress a legitimate `OPEN` when replicas
   genuinely die, which hides the failure the system exists to catch. Verified by
   stopping a real Envoy replica: one warning, the counter at 1, the gauge 3 → 2
@@ -378,7 +378,7 @@ it is one more pair of things that have to agree.
 - **Durable execution answers a question this system does not ask.**
   `effect/unstable/workflow` was evaluated the way every other `unstable` module
   here was, and declined — recorded in
-  [decisions/012](decisions/012-durable-workflows.md) rather than left as a
+  [decisions/012](../docs/decisions/012-durable-workflows.md) rather than left as a
   shrug. The short version: a daemon's unit of work is *one* activity, so there
   is no partial progress to resume and nothing to compensate; durability for
   that work already belongs to the broker by a decision that was measured; and
@@ -416,7 +416,7 @@ it is one more pair of things that have to agree.
   not to.** `@egress/tracing` hand-parsed both of its variables —
   `Number(process.env[...] ?? "1")` plus a range check that silently coerced
   anything invalid back to 1 — while
-  [decisions/008](decisions/008-configuration-is-a-boundary.md) had just
+  [decisions/008](../docs/decisions/008-configuration-is-a-boundary.md) had just
   established that a value a process cannot use must stop it. Both are `Config`
   now, so `OTEL_TRACES_SAMPLER_ARG=banana` says
   `Expected a string representing a finite number at ["OTEL_TRACES_SAMPLER_ARG"]`
@@ -492,7 +492,7 @@ it is one more pair of things that have to agree.
 - **The module that documents the hazard had five instances of it.**
   `daemon.ts` explains, above its context capture, that a bare `Effect.run*`
   builds a fresh runtime with *default* services — which is why
-  [003](decisions/003-tracing.md) records a span that reached the no-op tracer
+  [003](../docs/decisions/003-tracing.md) records a span that reached the no-op tracer
   and never left the process. That fix was applied to the one `runPromise` path
   and to nothing else: five `Effect.runFork` calls in AMQP callbacks below it
   kept the naive form, three of them starting real broker work rather than a
@@ -522,7 +522,7 @@ it is one more pair of things that have to agree.
 - **`undefined` as a sentinel travelling down a Stream.** The same subscriber
   mapped an undecodable frame to `undefined` and then checked for it in
   `runForEach` — precisely what
-  [006](decisions/006-representing-absence.md) rules out, in a repo that has an
+  [006](../docs/decisions/006-representing-absence.md) rules out, in a repo that has an
   ADR about it. `Stream.filterMapEffect` drops what it cannot use; the consumer
   no longer has a case to remember.
 - **A sweep that was not a sweep.** The previous pass reported replacing
@@ -601,7 +601,7 @@ it is one more pair of things that have to agree.
   seconds later.
 - **The AMQP client owned the process's fate, and its escape hatch was
   fiction.** `@egress/rmq` called `process.exit(1)` when recovery gave up —
-  the same thing [008](decisions/008-configuration-is-a-boundary.md) had
+  the same thing [008](../docs/decisions/008-configuration-is-a-boundary.md) had
   already removed from `@egress/config`, on the grounds that fail-fast is right
   and owning the process's fate from inside a library is not. It offered
   `onLost` to override it, documented as what "tests that deliberately take a

@@ -176,7 +176,7 @@ replica strip visualizes, in a second tool, at the same time.
 it — six rules, each one there because something went wrong in a way that
 looked fine from outside. `ControlLoopStalled` is the one that matters most;
 see the note on transient dependency outages under
-[What the build surfaced](findings.md). No Alertmanager is wired,
+[What the build surfaced](../history/findings.md). No Alertmanager is wired,
 so they surface in Prometheus's own `/alerts`; routing them to a human is a
 deployment concern.
 
@@ -195,7 +195,7 @@ up within a point or two. It used to also scrape `host.docker.internal:8088`
 so the same stack could watch a `pnpm start` sim fleet on the host; that target
 is gone, because the compose aggregator publishes 8088 to the host and the
 result was Prometheus scraping one process under two instance labels — see
-[What the build surfaced](findings.md) for what that did to the
+[What the build surfaced](../history/findings.md) for what that did to the
 `SplitBrain` alert.
 
 ### Alerting, and what to do when one fires

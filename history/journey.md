@@ -68,7 +68,7 @@ flowchart LR
 This picture, and one constraint — **the flaky service is outside your
 control** — is the whole of what was given. Every option that constraint
 leaves open, and where each one stops, is reviewed in
-[the approaches](approaches.md); this document is the path actually taken
+[the approaches](../docs/approaches.md); this document is the path actually taken
 through them.
 
 Nothing here is wrong. This is a correct picture of a work fleet, and it is
@@ -194,9 +194,15 @@ two inputs. That is what makes the fleet arbitrarily resizable and what makes
 [`DaemonPolicy`](../packages/rmq-consumer/src/DaemonPolicy.ts) a pure function
 of `(prior, circuitState, fleetSize, now)`.
 
+> The index and the fleet size are how this worked at the time. Both were later
+> replaced by a published fraction each daemon applies to its own position —
+> [ADR 013](../docs/decisions/013-the-target-as-a-fraction.md) — which is what
+> made the fleet resizable without restarting it. The paragraph above is left as
+> it was written.
+
 **The fork this left open, and how it closed.** Must the aggregator's `OPEN`
 be *enforced* fleet-wide, or is it observational? Answered in
-[decisions/002](decisions/002-enforcement-authority.md): observational. The
+[decisions/002](../docs/decisions/002-enforcement-authority.md): observational. The
 aggregator publishes and never pushes config, because enforcement is already
 local and immediate in Envoy, and making the aggregator authoritative would
 put it in-band for every request — a control plane whose failure takes the
@@ -370,7 +376,7 @@ has been down for a day is not a subscriber whose backlog you should still be
 holding.
 
 **What it cost.** Redis now holds event *bodies*, which is a data-at-rest
-question it did not have before — noted in [security.md](security.md) §7.
+question it did not have before — noted in [security.md](../docs/security.md) §7.
 
 ---
 
@@ -382,9 +388,9 @@ measurements.
 
 | Discovered | What it was |
 | --- | --- |
-| **The client creates links unsafely, silently** | Concurrent link creation in the pinned AMQP client corrupts state with no error. Fixed in the client wrapper, not at the call sites — see [decisions/001](decisions/001-amqp-client.md). |
+| **The client creates links unsafely, silently** | Concurrent link creation in the pinned AMQP client corrupts state with no error. Fixed in the client wrapper, not at the call sites — see [decisions/001](../docs/decisions/001-amqp-client.md). |
 | **Closing a consumer with deliveries in flight kills the connection** | Which is what "stop consuming" does on every `OPEN`. The daemon's connection lifetimes are built around this. |
-| **`transfer after detach`** | Thrown synchronously from inside a socket callback, unreachable from application code, because the AMQP 1.0 client kept its rhea container private. It needed a narrowly filtered `uncaughtException` guard until [the move to amqplib](decisions/004-downgrade-to-amqp-0-9-1.md) removed the throw and the guard together. |
+| **`transfer after detach`** | Thrown synchronously from inside a socket callback, unreachable from application code, because the AMQP 1.0 client kept its rhea container private. It needed a narrowly filtered `uncaughtException` guard until [the move to amqplib](../docs/decisions/004-downgrade-to-amqp-0-9-1.md) removed the throw and the guard together. |
 | **Queues were not durable, and nobody noticed** | A broker restart silently emptied the dead-letter queue, because the first daemon back redeclared it identically. `durable` and `x-queue-type` are one decision, not two. |
 | **The daemon fleet was invisible** | A daemon went deaf to the control plane while looking perfectly healthy. That was an *observability* bug before it was anything else; the fleet has its own `/metrics` now. |
 | **A control loop can die while the process serves 200s** | Found by a counter that stopped moving. `/livez` now fails on tick staleness — liveness is the loop, not the socket. |
@@ -573,7 +579,7 @@ Against that, the properties the first diagram cannot have:
 **What it is not.** The control plane is observational — a daemon that ignores
 the event still calls the third party. One broker is a quorum of one, so the
 durability is real and the node-loss tolerance is not. There is no
-authentication anywhere ([security.md](security.md)). And the console is the
+authentication anywhere ([security.md](../docs/security.md)). And the console is the
 first thing that breaks at scale, at ~2.75 MB/s per connected viewer with 1000
 APIs, while the control loop itself gives up 7% of its cadence over a 333×
 increase in APIs.

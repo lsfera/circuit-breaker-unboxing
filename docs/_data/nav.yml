@@ -2,7 +2,6 @@
   items:
     - { url: /,                title: Overview }
     - { url: /readme.html,     title: README,                 note: the repository's own front page }
-    - { url: /journey.html,         title: The journey,            note: every fork, the options, the choice }
     - { url: /architecture.html,    title: Architecture,           note: Envoy's signals and the event contract }
     - { url: /approaches.html,      title: The approaches,         note: every option the constraint leaves, and its limit }
     - { url: /breaker-library.html, title: A breaker library,      note: the first answer, and where it runs out }
@@ -17,12 +16,11 @@
 - section: Evidence
   items:
     - { url: /measurements.html,    title: Measured limits,        note: scale, chaos, the soak }
-    - { url: /findings.html,        title: What the build surfaced, note: the long form }
     - { url: /what-if.html,         title: What if,                note: environments this was not measured against }
     - { url: /security.html,        title: Security,               note: what is missing, and what production needs }
     - { url: /effect-notes.html,    title: Effect notes,           note: what it bought, what an RC pin costs }
 
 - section: Reference
   items:
-    - { url: /decisions/,      title: Decision records,       note: twelve, each resting on a measurement }
+    - { url: /decisions/,      title: Decision records,       note: thirteen, each resting on a measurement }
     - { url: /runbooks/,       title: Runbooks,               note: one per alert }

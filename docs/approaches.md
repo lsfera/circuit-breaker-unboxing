@@ -4,7 +4,7 @@ The design in this repository began as an interview question, and the question
 matters for reading everything else here — because it fixes both the picture
 you start from and the one thing you are not allowed to do about it.
 
-**Given** the system in [where it starts](journey.md#0-where-it-starts): a
+**Given** the system in [where it starts](../history/journey.md#0-where-it-starts): a
 producer, a broker, a fleet of competing consumers, and a third-party API they
 all call.
 
@@ -64,7 +64,7 @@ from one host behind a balancer.
 
 *Limitation:* a retry is another call. Under a real outage, retries multiply
 load at the exact moment the dependency can least take it, and the picture in
-[section 1 of the journey](journey.md#1-what-the-picture-hides) is that
+[section 1 of the journey](../history/journey.md#1-what-the-picture-hides) is that
 happening by default. Worse, an in-process attempt counter is lost the moment
 the message moves to another consumer — so "three attempts" quietly becomes
 three attempts *per consumer*. Here the broker counts instead

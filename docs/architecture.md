@@ -2,7 +2,7 @@
 
 Why the data plane is Envoy, what it emits, how those signals reach the
 aggregator, and what the aggregator publishes. The reasoning that produced
-this shape is in [journey.md](journey.md); this is the shape itself.
+this shape is in [journey.md](../history/journey.md); this is the shape itself.
 
 ## Why Envoy for the data plane
 

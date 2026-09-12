@@ -51,7 +51,7 @@ flowchart LR
 ```
 
 If you would rather read how this was arrived at than what it is,
-[docs/journey.md](docs/journey.md) tells it as the sequence of forks —
+[history/journey.md](history/journey.md) tells it as the sequence of forks —
 starting from a producer, a queue and a fleet of daemons calling one flaky
 third party, which is where it did start.
 
@@ -511,14 +511,16 @@ infra/
 
 Dockerfile                   one image for every process here; deps at build time, no compile step
 .dockerignore                keeps the host's node_modules (absolute symlinks) out of the build context
-docs/                        one document per job — see "Where to read next" below
-  journey.md                 how this design was arrived at: each fork, the options, the choice
+docs/                        the system as it is — one document per job, and what the
+                             site publishes; see "Where to read next" below
+history/                     how it got there: the journey and the long-form findings.
+                             Kept out of docs/ because a record stops being useful the
+                             moment it is edited to stay current
   architecture.md            Envoy, its signals, ingestion, and the published event contract
   high-availability.md       the lease, fencing, epochs, the outbox, the partition
   rmq-control-plane.md       the RabbitMQ scenario: design, live runs, what the broker taught
   operations.md              running the stack, every metric, the dashboards, the alerts
   measurements.md            scale, chaos and the soak, with the commands behind each number
-  findings.md                the long form of everything running it surfaced
   what-if.md                 environments this was not measured against, and what breaks
   approaches.md              every option the constraint leaves open, and where each stops
   breaker-library.md         the first answer, measured against this fleet's shape
@@ -718,13 +720,13 @@ to run it. Everything below it is a document with one job.
 
 | | |
 | --- | --- |
-| [docs/journey.md](docs/journey.md) | **How this design was arrived at.** Starts from a producer, a queue and a fleet of daemons calling one flaky third party, and walks the nine forks that turned it into what runs now — the options at each, and what was chosen. Read this one first. |
+| [history/journey.md](history/journey.md) | **How this design was arrived at.** Starts from a producer, a queue and a fleet of daemons calling one flaky third party, and walks the nine forks that turned it into what runs now — the options at each, and what was chosen. Read this one first. |
 | [docs/architecture.md](docs/architecture.md) | Why Envoy, what it emits, how those signals get here (push or poll, decided by measurement), and the published event contract. |
 | [docs/high-availability.md](docs/high-availability.md) | Two aggregators and one lease: fencing tokens, epochs, checkpoints, the durable outbox, and the one-sided partition. |
 | [docs/rmq-control-plane.md](docs/rmq-control-plane.md) | The RabbitMQ daemon fleet: design, the live runs, the two elections, and everything the broker taught this repo. |
 | [docs/operations.md](docs/operations.md) | Running the full stack, every metric it emits, the dashboards, and what to do when an alert fires. |
 | [docs/measurements.md](docs/measurements.md) | Scale to 1000 APIs, the chaos harness, and the soak — with the commands that produced each number. |
-| [docs/findings.md](docs/findings.md) | The long form of everything running it surfaced, including the four documented premises that turned out to be false. |
+| [history/findings.md](history/findings.md) | The long form of everything running it surfaced, including the four documented premises that turned out to be false. |
 | [docs/security.md](docs/security.md) | What is missing, with a file and line for each claim. An inventory, deliberately not a set of half-measures. |
 | [docs/effect-notes.md](docs/effect-notes.md) | What Effect bought here, and what an RC pin costs. |
 | [docs/decisions/](docs/decisions/) | Decision records: what was chosen, and the measurement it rests on. |

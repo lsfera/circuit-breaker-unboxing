@@ -112,7 +112,13 @@ if (have !== want) {
 // The README is not part of the site, but its diagrams are documentation and
 // GitHub renders them with a mermaid of its own; a version skew shows up here
 // first.
-const all = [...diagrams(join(ROOT, "docs")), ...diagramsIn(join(ROOT, "README.md"))];
+// `history/` is not published, but its diagrams are still diagrams — a record
+// nobody can render is not much of a record.
+const all = [
+  ...diagrams(join(ROOT, "docs")),
+  ...diagrams(join(ROOT, "history")),
+  ...diagramsIn(join(ROOT, "README.md")),
+];
 const failures = [];
 
 for (const diagram of all) {

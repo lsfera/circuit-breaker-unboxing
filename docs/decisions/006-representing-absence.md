@@ -163,7 +163,7 @@ a primitive lets you get away with until the day it doesn't.
 
 (`justAcquired` itself is gone: rehydration turned out to need only "no breaker
 for this API yet", and coupling it to the acquisition tick as well is what made
-the checkpoint unreadable under a push-based source. See `docs/findings.md`.
+the checkpoint unreadable under a push-based source. See `history/findings.md`.
 The equality lesson above is why this paragraph stays.)
 
 ## The corollary: an absence that occupies a position
@@ -179,7 +179,7 @@ rule this ADR states has a corollary worth writing down explicitly: **when the
 absence sits inside a sequence whose positions mean something, filtering it out
 is not a simplification, it is a silent renumbering.** `flatMap` over
 `O.toArray` is a filterMap, and a filterMap is exactly the wrong operation on a
-list whose indices are the contract. See `docs/findings.md`.
+list whose indices are the contract. See `history/findings.md`.
 
 ## Consequences
 

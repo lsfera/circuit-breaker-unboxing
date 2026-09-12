@@ -125,7 +125,7 @@ Not because it is wrong. Because at this repository's fleet size it trades an
 ergonomics problem that is *visible* — you must edit compose and restart — for
 an accuracy problem that is *invisible*: nothing reports that the fleet meant
 to run 2 and is running 4. Every finding in
-[findings.md](../findings.md) is some version of that trade going badly.
+[findings.md](../../history/findings.md) is some version of that trade going badly.
 
 The conditions under which this becomes the right answer are specific and worth
 writing down, because they are not hypothetical:

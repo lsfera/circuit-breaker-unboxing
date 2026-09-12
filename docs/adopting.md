@@ -140,7 +140,8 @@ The control plane is worth running when the verdict is a fact several parties
 act on, and [the approaches review](approaches.md) is the argument for when
 that is and is not true.
 
-The consumer fleet is a worked example. Its index-and-size configuration is the
-weakest ergonomics in this repository, it is documented above rather than
-defended, and a real deployment would replace it with ordinals from the
-platform.
+The consumer fleet is a worked example, and the one part of this repository
+whose ergonomics were rebuilt rather than defended: it scales with
+`--scale rmq-daemon=N` and nothing else, at the cost of a `DEGRADED` target
+that lands near its number rather than on it. What that trade is, and when it
+is the wrong one, is [ADR 013](decisions/013-the-target-as-a-fraction.md).

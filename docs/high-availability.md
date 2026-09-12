@@ -205,7 +205,7 @@ where a lease-based design actually goes wrong, and it had never been run.
 `extra_hosts: ["redis:127.0.0.1"]` on one instance produces it exactly: one
 process's coordinator is a black hole, everything else is untouched.
 
-What it found is in [What the build surfaced](findings.md): the
+What it found is in [What the build surfaced](../history/findings.md): the
 tick did not stand down, it hung. After the fix, the same partition gives 4
 ticks/s sustained on the partitioned instance, one coordination error per tick,
 `is_leader` reading 0, and the healthy instance holding the lease throughout —
