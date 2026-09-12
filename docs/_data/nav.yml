@@ -4,6 +4,7 @@
     - { url: /readme.html,     title: README,                 note: the repository's own front page }
     - { url: /journey.html,         title: The journey,            note: every fork, the options, the choice }
     - { url: /architecture.html,    title: Architecture,           note: Envoy's signals and the event contract }
+    - { url: /breaker-library.html, title: A breaker library,      note: the first answer, and where it runs out }
 
 - section: The system
   items:

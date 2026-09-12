@@ -101,6 +101,12 @@ There is also nothing to publish from: you would add an event path to every
 service, in every language you run. Fails constraint one, at the worst
 possible granularity.
 
+  Simulated at this fleet's shape and this repo's timings, five daemons against
+  an upstream failing 45% of the time agree with each other **17% of the time**,
+  and send **370 probes in five minutes** at one that is fully down. The long
+  version, with diagrams and the cases where a library is still the right
+  answer, is [docs/breaker-library.md](docs/breaker-library.md).
+
 **Publish straight from the proxy.** Envoy already emits discrete ejection
 records (`outlier_detection.event_log_path`); point them at a webhook and
 you are done in an afternoon. Except those records are *per replica*, so the
