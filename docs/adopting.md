@@ -75,10 +75,13 @@ options are:
   could be elected the same way, with one SAC queue per slot. No index, no
   fleet size, no restart — and considerably more machinery than a comparison.
 - **Publish the target as a fraction.** The aggregator says "run at 50%"
-  rather than "run 3 of 5", and each daemon decides for itself. Removes
-  `fleetSize` entirely, at the cost of the property the index was bought for:
-  which daemons idle would no longer be stable, and a fleet of 5 at 50% might
-  briefly be 2 or 3.
+  rather than "run 3 of 5", and each daemon decides for itself by hashing its
+  own instance id. Removes both the index and `fleetSize`, and growing the
+  fleet changes no existing daemon's state at all. Explored and measured in
+  [ADR 013](decisions/013-the-target-as-a-fraction.md): the ergonomics claim
+  holds completely, and the accuracy is worst at exactly this fleet size —
+  ±60% at five daemons, and 3.2% of five-daemon fleets would run none at all on
+  `DEGRADED` unless a floor of one is elected by the broker.
 
 None of these is implemented. The first is what a production deployment would
 most likely do.
