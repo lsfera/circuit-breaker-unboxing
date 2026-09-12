@@ -14,6 +14,7 @@
     "test:rmq": "pnpm --filter @egress/rmq test:rmq",
     "typecheck": "tsc --noEmit",
     "check:diagrams": "node scripts/check-diagrams.mjs",
+    "check:links": "node scripts/check-site-links.mjs",
     "check": "pnpm run typecheck && pnpm run test",
     "subscribe": "node --experimental-strip-types packages/subscriber/src/subscriber.ts",
     "demo": "node --experimental-strip-types packages/demo/src/driver.ts",

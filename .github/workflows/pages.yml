@@ -91,6 +91,12 @@ jobs:
           test -f _site/assets/site.css || { echo "::error::stylesheet missing"; exit 1; }
           test -s _site/assets/vendor/mermaid.min.js || { echo "::error::mermaid not vendored"; exit 1; }
 
+      - name: Check every internal link resolves
+        # Against the built site rather than the markdown, because heading ids
+        # are generated — kramdown's rule and GitHub's are not the same, so a
+        # `#section` link can be right in one place and dangling in the other.
+        run: node scripts/check-site-links.mjs _site
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

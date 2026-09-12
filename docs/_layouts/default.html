@@ -114,9 +114,13 @@
       document.querySelectorAll(".content a[href]").forEach(function (a) {
         var href = a.getAttribute("href");
         if (!href || /^([a-z]+:|#|\/\/)/i.test(href)) return;
-        var resolved = new URL(href, "https://x/" + DOC_DIR).pathname.slice(1);
+        var url = new URL(href, "https://x/" + DOC_DIR);
+        var resolved = url.pathname.slice(1);
         if (resolved.indexOf("docs/") === 0) return;
-        a.href = REPO + "/blob/HEAD/" + resolved;
+        // The fragment comes too. security.md cites line numbers — `#L288`,
+        // `#L147-L151` — and those are the reason the link exists; dropping
+        // them lands the reader at the top of a 400-line file.
+        a.href = REPO + "/blob/HEAD/" + resolved + url.hash;
         a.classList.add("offsite");
       });
     }
