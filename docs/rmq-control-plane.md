@@ -178,6 +178,123 @@ If the elected daemon dies mid-probe, RabbitMQ's own SAC promotion hands the
 role to a different registered consumer — no heartbeat, no hand-rolled
 election, confirmed below.
 
+## The redrive, end to end
+
+Dead-lettered work is replayed onto the work queue when the circuit closes, by
+one daemon the broker elects. Off by default — `REDRIVE_ON_CLOSE=false` — because
+whether stale work is still worth doing is a property of the workload, not of
+this machinery.
+
+```mermaid
+sequenceDiagram
+  participant Agg as aggregator
+  participant Ex as circuit.control
+  participant RQ as redrive-trigger (SAC)
+  participant D2 as daemon-2 (elected)
+  participant DLQ as work.dead
+  participant WQ as work queue
+
+  Agg->>Ex: state_changed · CLOSED
+  Ex-->>D2: CLOSED (and to every other daemon)
+  Note over D2: every daemon publishes a trigger, so one still arrives when some are down
+  D2->>RQ: publish trigger · sequence
+  Note over RQ: SAC delivers to the one active consumer
+  RQ-->>D2: trigger delivered
+  loop bounded passes
+    D2->>DLQ: open a consumer on its own channel
+    DLQ-->>D2: message
+    alt dead-lettered from the work queue
+      D2->>WQ: republish the body, stamped and traced
+      D2->>DLQ: accept
+    else anything else
+      D2->>DLQ: republish to the tail, stamped with its origin
+    end
+    D2->>DLQ: close the channel
+  end
+```
+
+The trigger fires only on the *transition* into `CLOSED` from something else —
+`reduce` checks `command.state === CLOSED && state.circuit !== CLOSED`. Snapshots
+repeat the current state every fifteen seconds, and a redrive per snapshot would
+replay the queue forever.
+
+### One pass
+
+A pass opens its own channel on the daemon's single connection, consumes
+`<apiId>.work.dead`, and decides per message:
+
+- **Dead-lettered from the work queue** — republish the body onto the work queue
+  and accept it off the dead-letter queue. Publish *then* accept, never the
+  reverse: a crash between the two redelivers something already replayed, which
+  is a duplicate, where accepting first would lose it outright. Duplicates are
+  recoverable; losses are not.
+- **Anything else** — republished to the *tail* of the dead-letter queue rather
+  than released. Releasing puts it straight back at the head, where it starves
+  everything behind it. One canonical dead-letter queue holds more than failed
+  work — a control event that would not decode lands here too — and replaying
+  that onto the work queue would be nonsense.
+
+Provenance is the discriminator, and it has three sources in priority order: the
+broker's own `x-first-death-queue` annotation while the message still has one,
+this repo's `x-egress-origin-queue` stamp once an earlier pass has moved it and
+the annotation is gone, and `"unknown"` for anything published straight onto the
+queue by something else. Unattributable messages are kept, never guessed at.
+
+### How a pass ends
+
+Five ways, evaluated in this order every 200ms:
+
+| Reason | Meaning |
+|---|---|
+| `circuit reopened` | `isClosed` went false — the upstream failed again mid-recovery |
+| `cap reached` | `maxPerPass` messages moved (`REDRIVE_MAX`, default 5000) |
+| `came full circle` | this pass met its own `x-egress-redrive-pass` stamp |
+| `nothing left to replay` / `drained` | 2s without a replay, with or without parked messages |
+| `deadline` | 60s hard ceiling on a single pass |
+
+Only `cap reached` with at least one message moved starts another pass, up to 20.
+Every other reason ends the run, because a pass that replayed nothing means
+whatever is left is not work and more passes would only cycle it.
+
+The pass stamp is what makes `came full circle` possible, and it is load-bearing:
+without it a pass re-parks the same handful of messages tail to tail as fast as
+the broker can deliver them — [measured at 17,703 republishes of two messages in
+2.5 seconds](#one-dead-letter-queue-for-everything-and-how-to-drain-it-anyway). A
+stamp from an *older* pass means only "something already decided this is not
+work" and must be moved on rather than ending the lap, or one parked message at
+the head makes every later redrive give up before replaying anything.
+
+### What a replay carries, and what it resets
+
+A replayed message keeps its `traceparent`, so it rejoins the trace that produced
+it under a `work.redrive` span; RabbitMQ preserves application headers across
+dead-lettering, and republishing the body alone threw that away. Only a message
+that carried a parent pays for a span.
+
+It also gets a **fresh delivery budget**. `x-delivery-limit` counts attempts per
+message, and a redrive publishes a new message — so the budget is three attempts
+per outage, not three ever. That is deliberate and
+[measured](#rejecting-a-message-preserves-it-only-if-the-queue-outlives-the-broker);
+what does not exist is a cap on how many redrives one message may receive across
+outages. The slot for it is the `x-egress-redrive-pass` stamp already on the wire.
+
+### Why one daemon, and how it is held
+
+Five daemons replaying the same backlog would make a recovery a fivefold burst at
+an upstream that has just come back. The election is the broker's, on a second
+`x-single-active-consumer` queue — the same mechanism as the `HALF_OPEN` prober,
+with no heartbeat and no hand-rolled leader. Duplicate triggers for a transition
+already acted on produce no actions: the reducer dedupes on sequence.
+
+The pass consumer lives in the daemon's `redriveConsumer` ref, shared with
+`reconcile` under one permit, so a state change retires the channel from the
+other side. Teardown clears the ref only if it still points at *this* pass's
+consumer — closing whatever the ref happens to hold would tear down a newer
+pass's live consumer.
+
+Replayed messages are counted on `egress_daemon_redriven_total`; the log line at
+the end of a run names the reason the pass stopped.
+
 ## The fleet as it runs
 
 `docker compose up` also brings up the scenario in
