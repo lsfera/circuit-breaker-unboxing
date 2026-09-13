@@ -446,6 +446,8 @@ packages/
     src/Http.ts              routes, SSE as a merged Stream, delivery-integrity tracking,
                              /metrics, and /livez + /readyz (liveness is the tick loop,
                              readiness is not leadership)
+    src/ConsoleFrames.ts     the console's frame, built once per tick for every browser and
+                             not at all for none; a slow reader skips rather than queues
     src/Telemetry.ts         every Metric the app emits, in one place
     src/main.ts              layer composition, NodeRuntime.runMain
     public/index.html        operator console (unchanged — plain HTML/CSS/JS)
@@ -455,6 +457,8 @@ packages/
                               re-promotion, a coordination outage, and a clean shutdown
                               handing the lease back
     test/Outbox.test.ts        3 tests, pure — ordering, partial commit, and which end the bound drops
+    test/ConsoleFrames.test.ts 5 tests under TestClock — one build for many readers, none for
+                              nobody, a slow reader skips, a closed tab stops the work
     test/integration/          8 tests: Redis-backed HA and the durable outbox, opt-in
                                (`pnpm run test:redis`) — needs Docker
 
@@ -630,7 +634,7 @@ general caveat — where it has been measured, the number is here.
   implied.** No authentication, no authorization, no TLS on any hop, and no
   secret handling — plus two inputs that shape decisions and accept anything
   that can reach them: the failure-injection route
-  ([Http.ts:288](packages/aggregator/src/Http.ts#L288)) and the gRPC metrics
+  ([Http.ts:324](packages/aggregator/src/Http.ts#L324)) and the gRPC metrics
   sink ([EnvoyPushSource.ts:164](packages/aggregator/src/EnvoyPushSource.ts#L164)),
   which will believe whichever node id a caller claims. [docs/security.md](docs/security.md)
   is the full inventory: ten sections, every claim with a file and line, and one
@@ -662,10 +666,11 @@ general caveat — where it has been measured, the number is here.
   that needs three of them. This repo runs one.
 - **The console does not scale the way the control loop does.** `/api/stream`
   re-sends the whole state frame every 400ms, which is about 2.75 MB/s per
-  connected browser at a thousand APIs while the tick loop itself barely
-  notices the size — see [Measured limits](docs/measurements.md). A production
-  console sends diffs or a page, and nothing in the control path would ever
-  tell you it needed to.
+  connected browser at a thousand APIs — see [Measured limits](docs/measurements.md).
+  The frame is built once and shared, so a hundred open consoles no longer cost
+  the control loop anything measurable; what each browser receives is still the
+  whole fleet, and [ADR 015](docs/decisions/015-the-console-at-a-thousand-apis.md)
+  is the plan for sending it a view instead.
 - **Nothing here has run for longer than half an hour.** The soak is 27
   minutes, deliberately disrupted, and it rules out a fast leak and nothing
   more — RSS moved about 5 MiB. There is no multi-hour run, no run at 1000

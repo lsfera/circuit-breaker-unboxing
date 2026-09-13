@@ -25,4 +25,4 @@ being right, are both the record.
 | 012 | [Durable workflows: evaluated, deliberately not adopted](012-durable-workflows.md) | what Temporal would have replaced, and what it would not |
 | 013 | [The target as a fraction, not a count](013-the-target-as-a-fraction.md) | 5,000 simulated fleets, then a real one: ±60% at five daemons, ±16% at a hundred |
 | 014 | [Every service declares what it may use](014-the-measurement-envelope.md) | the same demo run with and without limits: every garbage-collected process a third smaller |
-| 015 | [The console at a thousand APIs](015-the-console-at-a-thousand-apis.md) — *proposed* | a recorded stream replayed through five encodings, and a hundred consoles costing the control loop a fifth of its cadence |
+| 015 | [The console at a thousand APIs](015-the-console-at-a-thousand-apis.md) — *steps 1–2 built, 3–5 proposed* | a recorded stream replayed through five encodings; a hundred consoles took up to a fifth of the control loop's cadence, and after sharing the frame take none of it |

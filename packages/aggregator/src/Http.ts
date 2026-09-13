@@ -1,12 +1,12 @@
-import { Clock, Effect, Metric, Option as O, Ref, Schedule, Schema, Stream } from "effect";
+import { Clock, Effect, Metric, Option as O, Ref, Schema, Stream } from "effect";
 import { HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
-import { Sse } from "effect/unstable/encoding";
 import { CircuitEvent, classifySequence, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
 import { metricsResponse } from "@egress/tracing/Metrics.ts";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Aggregator } from "./Aggregator.ts";
+import * as ConsoleFrames from "./ConsoleFrames.ts";
 import { HaSettings } from "./Coordination.ts";
 import { EventBus, EventSink } from "./Events.ts";
 import { FleetSource } from "./FleetSource.ts";
@@ -79,12 +79,6 @@ export const record = (self: Integrity, event: CircuitEvent): Integrity => {
 };
 
 /**
- * One `Sse.Event`, encoded by `Sse.encode` below rather than by a template
- * string here. The bytes are identical — checked — and the point is that
- * @egress/subscriber decodes with the same module, so the wire format has one
- * definition instead of an encoder and a parser that happen to agree.
- */
-/**
  * `/api/failure`'s body. `rate` is a probability, and it is bounded here for
  * the reason every other bound in this repo exists: `setFailureRate(47)` is
  * `Math.random() < 47`, which is "always", and `-1` is "never" — two silent
@@ -93,13 +87,6 @@ export const record = (self: Integrity, event: CircuitEvent): Integrity => {
 const FailureRequest = Schema.Struct({
   apiId: Schema.NonEmptyString,
   rate: Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
-});
-
-const sse = (event: string, data: unknown): Sse.Event => ({
-  _tag: "Event",
-  event,
-  id: undefined,
-  data: JSON.stringify(data),
 });
 
 export const HttpLive = HttpRouter.use((router) =>
@@ -164,6 +151,8 @@ export const HttpLive = HttpRouter.use((router) =>
     yield* Effect.all(
       [
         Metric.update(Telemetry.coordinationErrors, 0),
+        Metric.update(Telemetry.consoleStreams, 0),
+        Metric.update(Telemetry.consoleFramesBuilt, 0),
         ...(["no-node-id", "went-quiet", "unreachable", "incomplete-stats"] as const).map(
           (reason) => Metric.update(Metric.withAttributes(Telemetry.replicasLost, { reason }), 0),
         ),
@@ -203,31 +192,44 @@ export const HttpLive = HttpRouter.use((router) =>
       ),
     );
 
-    // Two independent streams merged into one SSE body: periodic state frames
-    // for the console, and the event tape as it is published. Both end with the
-    // request scope, so a client that disconnects needs no tear-down of ours.
+    const consoleFrames = yield* ConsoleFrames.make(stateFrame, "400 millis");
+
+    const sseHeaders = {
+      contentType: "text/event-stream",
+      headers: { "cache-control": "no-cache", connection: "keep-alive" },
+    };
+
+    /** The event tape as it is published, one SSE event each. A fresh
+     *  subscription to the bus per run, so per connection. */
+    const tape = bus.subscribe.pipe(Stream.map((e) => ConsoleFrames.encodeEvent("cloudevent", e)));
+
+    // The console: shared state frames, built once per interval for every
+    // browser at once, merged with the tape. Both end with the request scope,
+    // so a client that disconnects needs no tear-down of ours.
     yield* router.add(
       "GET",
       "/api/stream",
-      Effect.sync(() => {
-        const states = Stream.fromEffectSchedule(
-          stateFrame,
-          Schedule.spaced("400 millis"),
-        ).pipe(Stream.map((frame) => sse("state", frame)));
-        const events = bus.subscribe.pipe(
-          Stream.map((e) => sse("cloudevent", e)),
-        );
-        return HttpServerResponse.stream(
-          Stream.merge(states, events).pipe(
-            Stream.pipeThroughChannel(Sse.encode()),
-            Stream.encodeText,
-          ),
-          {
-            contentType: "text/event-stream",
-            headers: { "cache-control": "no-cache", connection: "keep-alive" },
-          },
-        );
-      }),
+      Effect.sync(() =>
+        HttpServerResponse.stream(Stream.merge(consoleFrames.frames, Stream.encodeText(tape)), sseHeaders),
+      ),
+    );
+
+    // The tape alone, for anything that is not a person looking at a console.
+    // subscriber.ts used to read /api/stream and discard every state frame —
+    // 2.77 MB/s at a thousand APIs, thrown away by the one client whose job is
+    // reporting gaps, reading from a bus that drops the oldest events for a
+    // reader that falls behind. The keep-alive is what the state frames used to
+    // provide by accident: without it a quiet hour is an idle connection, and
+    // an idle connection is one a load balancer closes.
+    yield* router.add(
+      "GET",
+      "/api/events/stream",
+      Effect.sync(() =>
+        HttpServerResponse.stream(
+          Stream.encodeText(Stream.merge(tape, Stream.map(Stream.tick("15 seconds"), () => ConsoleFrames.KEEP_ALIVE))),
+          sseHeaders,
+        ),
+      ),
     );
 
     yield* router.add("GET", "/api/state", stateFrame.pipe(Effect.map((f) => HttpServerResponse.jsonUnsafe(f))));

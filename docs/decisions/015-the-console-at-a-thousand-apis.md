@@ -1,6 +1,8 @@
 # 015 — The console at a thousand APIs
 
-**Status**: proposed 2026-09-12. Nothing here is built.
+**Status**: proposed 2026-09-12; steps 1 and 2 built 2026-09-13, steps 3–5
+still proposed. The proposal below is as written; the amendment at the end
+says what building the first two measured, and corrects one thing it got wrong.
 **Date**: 2026-09-12.
 **Context**: [measured limits](../measurements.md#at-a-size-nobody-runs-it-at)
 found that the console breaks first at a thousand APIs — `/api/stream` re-sends
@@ -267,3 +269,80 @@ It is a host process with no limit, so this is at least partly V8 sizing itself
 from 47 GiB ([ADR 014](014-the-measurement-envelope.md)) and partly uptime — it
 grew across the runs — but it was not investigated, and whether the aggregator
 at a thousand APIs fits its own 512 MiB compose ceiling is unmeasured.
+
+
+---
+
+## Steps 1 and 2, built
+
+Added 2026-09-13. `GET /api/events/stream` carries the tape alone and
+`subscriber.ts` reads it; [`ConsoleFrames.ts`](../../packages/aggregator/src/ConsoleFrames.ts)
+builds the console's frame once per interval for every connection.
+
+Measured with part 2 of the script against the code before and after, each on a
+freshly started aggregator at 1000 APIs × 10 replicas with the fleet quiet — the
+same conditions on both sides, which the proposal's own table did not have:
+
+| open consoles | ticks/s before | after | aggregator cpu before | after | RSS before | after | frames built/s after |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | 3.69 | 3.69 | 8% | 10% | 396 MiB | 429 MiB | 0 |
+| 20 | 3.59 | 3.69 | 28% | 10% | 562 MiB | 449 MiB | 2.49 |
+| 50 | 3.49 | 3.69 | 49% | 13% | 709 MiB | 463 MiB | 2.49 |
+| 100 | 3.28 | 3.69 | 79% | 15% | 1166 MiB | 489 MiB | 2.49 |
+
+The control loop no longer notices a hundred consoles. The frame is built 2.49
+times a second whether one browser is open or a hundred, and not at all when
+none are. Against the proposal's targets: the cadence at a hundred consoles is
+within 3% of none — it is identical — and the cost per console is 0.05% of a
+core, which is the target line, not under it. What is left per connection is
+writing 1.1 MB it did not compute, 2.5 times a second, and that is steps 3 to 5.
+
+**The bytes on the wire did not change.** A browser still receives 2.77 MB/s at
+a thousand APIs. That was never what steps 1 and 2 were for.
+
+Four things came out of building it.
+
+**The proposal named the wrong primitive.** It said `SubscriptionRef`, latest
+value wins. `SubscriptionRef.changes` is backed by `PubSub.unbounded`, so a
+browser pulling 1.1 MB frames slower than they arrive would have had them
+queued in the aggregator without limit — the per-request schedule it replaced
+never had that failure, because it built the next frame only when the last one
+had been written. It is `PubSub.sliding` with a capacity of one: a newer frame
+replaces an unread one, and a reader that stops reading costs the frame in
+flight and the one in the slot. The test that says so fails against an
+unbounded PubSub; it was run that way to check.
+
+**The memory question the proposal left open was the measurement.** It recorded
+0.9–1.2 GiB for the aggregator against 462 MB in the scale table, and guessed at
+V8 and uptime. The table above answers it: the old code, fresh, read 396 MiB
+with nothing connected and 1166 MiB with a hundred streams — a 1.1 MB frame
+built per connection per tick, and the garbage from it. The proposal's own load
+test was what grew the process it was reading. Shared, a hundred consoles add
+60 MiB — less than one 1.1 MB frame in flight per socket, which is the most the
+bounded buffer lets each of them hold.
+
+**No replay, on purpose.** A replayed frame would be the last one built, and the
+last one built could be from whenever a console was last open — an hour-old
+incident shown as current. A new console waits at most 400ms for a frame that is
+not stale.
+
+**The tape needed a keep-alive the proposal did not mention.** The state frames
+had been keeping the subscriber's connection busy by accident. Taking them away
+turns a quiet hour into an idle connection, and an idle connection is one a load
+balancer closes; the tape sends an SSE comment every fifteen seconds, which the
+decoder `subscriber.ts` uses is tested to ignore.
+
+What was verified beyond the table: five tests in
+`ConsoleFrames.test.ts`, each run against an implementation broken in the way it
+names (unbounded buffer, building with nobody watching, no finalizer) and seen
+to fail; 100 unit, 16 broker and 9 Redis tests; the subscriber on the compose
+stack receiving an entire incident over the new route — sequence 180 to 186,
+`DEGRADED` through two probes to `CLOSED`, no gap; and the demo passing on the
+rebuilt aggregators.
+
+What was not: the aggregator's CPU on the compose stack at three APIs, where the
+effect is too small to matter and the comparison could not be taken cleanly —
+the host suspended during two instrumented runs, which read 2,169 and 1,047
+seconds of wall clock inside a five-minute timeout. The harness recorded both
+windows; neither is quoted.
+

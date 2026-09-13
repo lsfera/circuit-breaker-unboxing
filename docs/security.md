@@ -19,10 +19,11 @@ Everything the aggregator serves is open to anyone who can reach the port.
 
 | Route | Where | What it exposes |
 | --- | --- | --- |
-| `POST /api/failure` | [Http.ts:288](../packages/aggregator/src/Http.ts#L288) | **Failure injection.** Sets an API's simulated failure rate. |
-| `POST /subscriber/webhook` | [Http.ts:310](../packages/aggregator/src/Http.ts#L310) | Accepts events as the subscriber, feeding the delivery-integrity counters. |
-| `GET /api/state` | [Http.ts:181](../packages/aggregator/src/Http.ts#L181) | Full fleet state, per replica. |
-| `GET /api/stream` | [Http.ts:162](../packages/aggregator/src/Http.ts#L162) | The same, pushed continuously over SSE. |
+| `POST /api/failure` | [Http.ts:324](../packages/aggregator/src/Http.ts#L324) | **Failure injection.** Sets an API's simulated failure rate. |
+| `POST /subscriber/webhook` | [Http.ts:340](../packages/aggregator/src/Http.ts#L340) | Accepts events as the subscriber, feeding the delivery-integrity counters. |
+| `GET /api/state` | [Http.ts:235](../packages/aggregator/src/Http.ts#L235) | Full fleet state, per replica. |
+| `GET /api/stream` | [Http.ts:211](../packages/aggregator/src/Http.ts#L211) | The same, pushed continuously over SSE, with every published event. |
+| `GET /api/events/stream` | [Http.ts:226](../packages/aggregator/src/Http.ts#L226) | Every published event over SSE, and nothing else. |
 | `GET /metrics` | `/metrics` | Everything, including per-API topology. |
 
 The sharp one is the first. A route that makes a healthy API look broken is an

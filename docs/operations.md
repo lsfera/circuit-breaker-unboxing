@@ -139,6 +139,7 @@ endpoint is live on the same port in both modes (`--source=sim` or
 | `egress_webhook_outbox_replayed_total` / `_dropped_total` | Events delivered from the outbox after an earlier failure, and events discarded because the per-API bound was hit |
 | `egress_subscriber_events_received_total` / `_gaps_total` / `_duplicates_total` | The delivery contract, read from outside the process — same numbers the console's right-hand panel shows, as counters |
 | `egress_fleet_replica_lost_total` | Replica reports dropped before they could reach a quorum, by `reason` — `no-node-id`, `went-quiet`, `unreachable`, `incomplete-stats`. The denominator in `Breaker.step` shrinking is what this counts; see [ADR 009](decisions/009-what-the-quorum-is-a-quorum-of.md) and the [FleetShrunk](runbooks/FleetShrunk.md) runbook |
+| `egress_console_streams` / `egress_console_frames_built_total` | Browsers connected to `/api/stream`, and state frames built for them. The frame is built once per 400ms while anyone is watching, however many are, so the build rate is 2.5/s or zero — a build rate that rises with the stream count means frames are being built per connection again, which cost a hundred consoles a fifth of the control loop's cadence ([ADR 015](decisions/015-the-console-at-a-thousand-apis.md)) |
 
 And from the daemon fleet — the same in-process `effect` registry, served on
 `METRICS_PORT` by every daemon and by the producer:

@@ -31,7 +31,7 @@ const program = (ORIGIN: string) =>
   Effect.gen(function* () {
     const known = yield* Ref.make(new Map<string, Known>());
 
-    const res = yield* Effect.promise(() => fetch(`${ORIGIN}/api/stream`));
+    const res = yield* Effect.promise(() => fetch(`${ORIGIN}/api/events/stream`));
     if (!res.body) return yield* Effect.die(`cannot reach aggregator at ${ORIGIN}`);
     yield* Effect.log(`subscribed to ${ORIGIN}`);
 

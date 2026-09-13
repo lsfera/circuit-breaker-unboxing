@@ -100,17 +100,21 @@ whole state frame every 400ms, so at 1000 APIs each connected browser costs
 about **2.75 MB/s** — an order of magnitude more than everything else here put
 together, and the same whether anything changed or not.
 
-**And the control path does notice.** Each connection builds and serializes
+**And the control path noticed.** Each connection used to build and serialize
 its own frame on the event loop that runs the breaker, so a hundred open
-consoles took 16–22% of the control loop's cadence (3.69 → 2.88 ticks/s) and
-about 0.6% of a core each — against a one-core container ceiling. The console
-degrades the thing it observes, during the incident it is opened for.
+consoles took 11–22% of the control loop's cadence across three runs and about
+0.7% of a core each, and grew the process from 396 MiB to 1.1 GiB — the console
+degrading the thing it observes, during the incident it is opened for. The frame
+is now built once per interval for every connection: at a hundred consoles the
+cadence is unchanged at 3.69 ticks/s, the aggregator uses 15% of a core against
+10% with none, and RSS is 489 MiB. What each browser receives is unchanged —
+still 2.77 MB/s — and that is what the rest of the proposal is for.
 [ADR 015](decisions/015-the-console-at-a-thousand-apis.md) measures five ways
-out and proposes an order for them: a separate stream for the event tape, one
-frame per tick shared by every connection, a view of the APIs that need
-attention rather than the fleet, patches with resume, and gzip last. Measured
-on a recorded stream, that is 7.8 KB/s per browser in a storm, from 2.80 MB/s;
-what it does for the control loop is a projection until it is built.
+out and orders them. The first two — a separate stream for the event tape, and
+the shared frame — are built. The other three — a view of the APIs that need
+attention rather than the fleet, patches with resume, and gzip — are proposed,
+and measured on a recorded stream they take a browser from 2.80 MB/s to 7.8 KB/s
+in a storm.
 
 A soak, of the short kind that is honest to call a soak: 27 minutes on the
 compose stack, deliberately not a quiet window — it contained two chaos runs, a

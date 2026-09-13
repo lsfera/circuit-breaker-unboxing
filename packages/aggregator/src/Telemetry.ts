@@ -175,3 +175,21 @@ export const subscriberDuplicates = Metric.counter(
   "egress_subscriber_duplicates_total",
   { description: "Non-snapshot events delivered with a repeated sequence, by API." },
 );
+
+/**
+ * Consoles connected to `/api/stream` on this instance. What the frame below
+ * is being built for; zero means it is not being built at all.
+ */
+export const consoleStreams = Metric.gauge("egress_console_streams", {
+  description: "Browsers connected to /api/stream on this instance.",
+});
+
+/**
+ * State frames built for the console. Once per 400ms while anyone is watching,
+ * however many are — so its rate is 2.5/s or 0, and a rate that rises with
+ * `egress_console_streams` means frames are being built per connection again,
+ * which is the thing ConsoleFrames.ts exists to prevent.
+ */
+export const consoleFramesBuilt = Metric.counter("egress_console_frames_built_total", {
+  description: "State frames built for the console, once per interval while any console is connected.",
+});

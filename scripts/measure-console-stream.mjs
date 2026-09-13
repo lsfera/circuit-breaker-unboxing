@@ -31,6 +31,9 @@ const args = process.argv.slice(2);
 const BASE = args.find((a) => !a.startsWith("--")) ?? "http://127.0.0.1:8098";
 const PID = args.find((a) => a.startsWith("--pid="))?.slice(6) ?? null;
 const SECONDS = Number(args.find((a) => a.startsWith("--seconds="))?.slice(10) ?? 20);
+/** `--parts=2` to re-run only the control-loop measurement — the one a change
+ *  to how frames are served has to move. */
+const PARTS = new Set((args.find((a) => a.startsWith("--parts="))?.slice(8) ?? "1,2,3").split(","));
 const PAGE = 50;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const bytes = (s) => Buffer.byteLength(s);
@@ -324,11 +327,13 @@ const setRates = async (share, rate) => {
   }
 };
 
-console.log("part 1 — what each encoding would put on the wire, per connected browser");
-await phase("quiet: every API healthy", () => setRates(0, 0));
-await phase("incident: 5% of APIs at 50% failure", () => setRates(0.05, 0.5));
-await phase("storm: 25% of APIs at 50% failure", () => setRates(0.25, 0.5));
-await setRates(0, 0);
+if (PARTS.has("1")) {
+  console.log("part 1 — what each encoding would put on the wire, per connected browser");
+  await phase("quiet: every API healthy", () => setRates(0, 0));
+  await phase("incident: 5% of APIs at 50% failure", () => setRates(0.05, 0.5));
+  await phase("storm: 25% of APIs at 50% failure", () => setRates(0.25, 0.5));
+  await setRates(0, 0);
+}
 
 // ---------------------------------------------------------------------------
 // Part 2: what connected browsers cost the process that runs the breaker.
@@ -342,56 +347,64 @@ const cpuOf = (pid) => {
 };
 const rssOf = (pid) => Number(/VmRSS:\s+(\d+)/.exec(readFileSync(`/proc/${pid}/status`, "utf8"))[1]) / 1024;
 
-console.log("\npart 2 — concurrent streams against the control loop's own cadence");
-const clients = [];
-const open = async () => {
-  const c = new AbortController();
-  const res = await fetch(`${BASE}/api/stream`, { signal: c.signal });
-  const reader = res.body.getReader();
-  (async () => {
-    try {
-      for (;;) if ((await reader.read()).done) break;
-    } catch {}
-  })();
-  clients.push(c);
-};
-for (const k of [0, 1, 5, 20, 50, 100]) {
-  while (clients.length < k) await open();
-  await sleep(3000);
-  const m0 = await (await fetch(`${BASE}/metrics`)).text();
-  const c0 = PID ? cpuOf(PID) : 0;
-  const t0 = Date.now();
-  await sleep(10_000);
-  const m1 = await (await fetch(`${BASE}/metrics`)).text();
-  const secs = (Date.now() - t0) / 1000;
-  const ticks = (counter(m1, "egress_aggregator_ticks_total") - counter(m0, "egress_aggregator_ticks_total")) / secs;
-  const process_ = PID ? `  process cpu ${((cpuOf(PID) - c0) / secs / 10).toFixed(0).padStart(3)}%  rss ${rssOf(PID).toFixed(0)} MiB` : "";
-  console.log(`  ${String(k).padStart(3)} streams  ticks/s ${ticks.toFixed(2)}${process_}`);
+if (PARTS.has("2")) {
+  console.log("\npart 2 — concurrent streams against the control loop's own cadence");
+  const clients = [];
+  const open = async () => {
+    const c = new AbortController();
+    const res = await fetch(`${BASE}/api/stream`, { signal: c.signal });
+    const reader = res.body.getReader();
+    (async () => {
+      try {
+        for (;;) if ((await reader.read()).done) break;
+      } catch {}
+    })();
+    clients.push(c);
+  };
+  for (const k of [0, 1, 5, 20, 50, 100]) {
+    while (clients.length < k) await open();
+    await sleep(3000);
+    const m0 = await (await fetch(`${BASE}/metrics`)).text();
+    const c0 = PID ? cpuOf(PID) : 0;
+    const t0 = Date.now();
+    await sleep(10_000);
+    const m1 = await (await fetch(`${BASE}/metrics`)).text();
+    const secs = (Date.now() - t0) / 1000;
+    const rate = (name) => (counter(m1, name) - counter(m0, name)) / secs;
+    const ticks = rate("egress_aggregator_ticks_total");
+    // Absent before frames were shared, so NaN there rather than a misleading 0.
+    const built = rate("egress_console_frames_built_total");
+    const process_ = PID ? `  process cpu ${((cpuOf(PID) - c0) / secs / 10).toFixed(0).padStart(3)}%  rss ${rssOf(PID).toFixed(0)} MiB` : "";
+    const frames = Number.isFinite(built) ? `  frames built/s ${built.toFixed(2)}` : "";
+    console.log(`  ${String(k).padStart(3)} streams  ticks/s ${ticks.toFixed(2)}${frames}${process_}`);
+  }
+  clients.forEach((c) => c.abort());
 }
-clients.forEach((c) => c.abort());
 
 // ---------------------------------------------------------------------------
 // Part 3: what a compressor holds for as long as a browser stays connected.
 // ---------------------------------------------------------------------------
 
-console.log("\npart 3 — compressor memory per connection");
-const frame = Buffer.from(JSON.stringify(realistic(await (await fetch(`${BASE}/api/state`)).json())));
-/** `N` differs by compressor because gzip's state is small enough that forty of
- *  them vanish into RSS noise and read as zero, which is not the same as free. */
-const held = async (label, make, flushKind, N) => {
-  global.gc?.();
-  await sleep(300);
-  const before = process.memoryUsage().rss;
-  const zs = Array.from({ length: N }, () => {
-    const z = make();
-    z.resume();
-    return z;
-  });
-  for (let k = 0; k < 3; k++) await Promise.all(zs.map((z) => new Promise((r) => { z.write(frame); z.flush(flushKind, r); })));
-  global.gc?.();
-  await sleep(300);
-  console.log(`  ${label.padEnd(30)} ${((process.memoryUsage().rss - before) / N / 2 ** 20).toFixed(2)} MiB each, ${N} held open`);
-  zs.forEach((z) => z.end());
-};
-await held("gzip level 6, 32 KiB window", () => zlib.createGzip({ level: 6 }), zlib.constants.Z_SYNC_FLUSH, 1000);
-await held("brotli q5, 4 MiB window", () => zlib.createBrotliCompress(BROTLI_WIDE), zlib.constants.BROTLI_OPERATION_FLUSH, 40);
+if (PARTS.has("3")) {
+  console.log("\npart 3 — compressor memory per connection");
+  const frame = Buffer.from(JSON.stringify(realistic(await (await fetch(`${BASE}/api/state`)).json())));
+  /** `N` differs by compressor because gzip's state is small enough that forty of
+   *  them vanish into RSS noise and read as zero, which is not the same as free. */
+  const held = async (label, make, flushKind, N) => {
+    global.gc?.();
+    await sleep(300);
+    const before = process.memoryUsage().rss;
+    const zs = Array.from({ length: N }, () => {
+      const z = make();
+      z.resume();
+      return z;
+    });
+    for (let k = 0; k < 3; k++) await Promise.all(zs.map((z) => new Promise((r) => { z.write(frame); z.flush(flushKind, r); })));
+    global.gc?.();
+    await sleep(300);
+    console.log(`  ${label.padEnd(30)} ${((process.memoryUsage().rss - before) / N / 2 ** 20).toFixed(2)} MiB each, ${N} held open`);
+    zs.forEach((z) => z.end());
+  };
+  await held("gzip level 6, 32 KiB window", () => zlib.createGzip({ level: 6 }), zlib.constants.Z_SYNC_FLUSH, 1000);
+  await held("brotli q5, 4 MiB window", () => zlib.createBrotliCompress(BROTLI_WIDE), zlib.constants.BROTLI_OPERATION_FLUSH, 40);
+}
