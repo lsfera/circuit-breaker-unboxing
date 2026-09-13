@@ -26,13 +26,19 @@ As of 2026-09-13. Verify against `git log` and the ADRs before acting.
   - `infra/instrument.mjs`'s throttle budget is a percentage of runnable
     periods, so a nearly idle container fails on one throttle (alertmanager,
     1 of 57). It needs a minimum-periods floor.
-- **Dependencies not updated on 2026-09-13.** The npm packages are at latest
-  (Effect rc.115, jsdom 30). Container images pinned by digest in
-  docker-compose.yml, the GitHub Actions and the docs Gemfile were not touched.
-  Several would be major bumps, Prometheus 2 → 3 among them. `@types/node`
-  stays on 22.x on purpose, because Node 22 is the runtime floor.
-  `history/runs/baseline-demo-2026-09-12.json` was recorded on rc.113 and has
-  not been re-recorded.
+- **Dependencies, as of 2026-09-13.** Everything is at latest: npm packages,
+  container images including Prometheus 3.14, GitHub Actions, and the docs
+  Gemfile on Ruby 4.0. `@types/node` and the `node:22-alpine` image stay on 22
+  on purpose (runtime floor). `history/runs/baseline-demo-2026-09-12.json` was
+  recorded before all of this and has not been re-recorded.
+- **Left from the RabbitMQ 4.3 upgrade:** the `rabbitmq-data` volume still holds
+  node directories for five container ids (`rabbit@<id>*`) from before
+  `hostname: rabbitmq` was pinned. They are unreachable garbage, not deleted
+  without asking. Also: amqplib crashes the daemon (unhandled `error` on the
+  inner connection) when the broker closes the connection during topology
+  replay — recorded in ADR 005, not fixed.
+- **Grafana `le!="Infinity"` filter** can be removed once Prometheus 2-scraped
+  data is past retention (after 2026-09-28).
 - **Unexplained:** one `test:rmq` failure on the first of three runs
   (2026-09-13), not captured. The next two runs passed 16/16.
 - **Local disk:** about 120 MiB of unreferenced upstream Effect history sits in
