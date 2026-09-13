@@ -547,6 +547,12 @@ docker-compose.yml           wires infra/ and the packages/ entrypoints together
                              suites (`test:redis`, `test:rmq`) in a second job — they
                              are opt-in locally, which makes them the ones most likely
                              to rot unnoticed
+AGENTS.md, CLAUDE.md         instructions for coding agents: Effect 4, not the Effect 3
+                             most material teaches, and where to read it
+repos/effect/                Effect's own source and tests at the installed tag, vendored
+                             with git subtree as read-only reference; `pnpm run check`
+                             fails if it drifts from the dependency
+agent-patterns/              notes derived from that source for what this codebase uses
 ```
 
 ### Reading this as a site

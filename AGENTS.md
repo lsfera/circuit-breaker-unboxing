@@ -1,0 +1,72 @@
+# Agent instructions
+
+## Effect
+
+This repository uses **Effect 4** — `effect@4.0.0-rc.113`, pinned in
+`pnpm-workspace.yaml`'s catalog. Most Effect material in circulation, and
+most of what a model remembers, is Effect 3, which Effect 4 renamed and
+reshaped substantially. Before writing Effect code:
+
+1. Read [`repos/effect/LLMS.md`](repos/effect/LLMS.md) completely — Effect's
+   own guide for agents, for exactly this version.
+2. Read [`agent-patterns/effect-3-to-4.md`](agent-patterns/effect-3-to-4.md)
+   for the v3 idioms that have already come up here, and what they are now.
+3. For any API you are not certain of, read its source and its tests in
+   `repos/effect` rather than guessing. The tests show behaviour the
+   docstrings do not.
+
+## Vendored repositories
+
+This project vendors external repositories under @repos/.
+
+- Use vendored repositories as read-only reference material when working with
+  related libraries.
+- Prefer examples and patterns from the vendored source code over generated
+  guesses or web search results.
+- Do not edit files under @repos/ unless explicitly asked.
+- Do not import from @repos/ — application code keeps importing from normal
+  package dependencies.
+
+`repos/effect` is `Effect-TS/effect` at the tag `effect@4.0.0-rc.113`,
+vendored with `git subtree --squash`. It is **the installed version, not
+`main`**: on the day it was vendored, `main` was two release candidates ahead,
+and reference material for a newer version describes APIs this code cannot
+use.
+
+| Installed package | Source | Tests |
+| --- | --- | --- |
+| `effect` | `repos/effect/packages/effect/src` | `repos/effect/packages/effect/test` |
+| `@effect/platform-node` | `repos/effect/packages/platform/node/src` | `…/platform/node/test` |
+| `@effect/opentelemetry` | `repos/effect/packages/opentelemetry/src` | `…/opentelemetry/test` |
+| v3 → v4 renames | `repos/effect/migration/v3-to-v4.md`, `repos/effect/MIGRATION.md` | |
+| Worked examples | `repos/effect/ai-docs/src` | |
+
+**When sources disagree, the vendored code wins** — over a skill, a blog
+post, or memory. This is not hypothetical: `.claude/skills/domain-modeling`
+teaches four Schema and DateTime APIs that do not exist in this version (see
+`agent-patterns/effect-3-to-4.md`).
+
+**Searching.** `repos/` is tracked, so a search of the whole workspace
+returns Effect's 3,976 files alongside this project's. Scope searches for
+project code to `packages/`, `infra/`, `scripts/` or `docs/`, and search
+`repos/effect` deliberately.
+
+**Updating.** The vendored copy and the installed dependency move together.
+`pnpm run check` fails if any `effect` or `@effect/*` dependency differs from
+the vendored package of the same name. To move both:
+
+```bash
+# 1. bump the version in pnpm-workspace.yaml's catalog (and any direct pins),
+#    then `pnpm install`
+# 2. move the subtree to the matching tag
+git subtree pull --prefix=repos/effect https://github.com/Effect-TS/effect.git effect@<version> --squash
+# 3. regenerate the agent-patterns notes the release touched
+pnpm run check
+```
+
+## Agent patterns
+
+[`agent-patterns/`](agent-patterns/) holds notes derived from the vendored
+source for the parts of Effect this codebase leans on. Each cites the files
+and lines it came from, and line numbers are for the pinned tag. When the pin
+moves, regenerate a note from the new source rather than trusting it.

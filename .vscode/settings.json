@@ -13,5 +13,20 @@
 		"source.organizeImports.biome": "explicit",
 		"source.fixAll.biome": "explicit"
 	},
-	"todo-tree.ripgrep.ripgrep": "/usr/bin/rg"
+	"todo-tree.ripgrep.ripgrep": "/usr/bin/rg",
+	"typescript.preferences.autoImportFileExcludePatterns": [
+		"repos/**"
+	],
+	"javascript.preferences.autoImportFileExcludePatterns": [
+		"repos/**"
+	],
+	"files.watcherExclude": {
+		"repos/**": true
+	},
+	"search.exclude": {
+		"repos/**": true
+	},
+	"files.exclude": {
+		"repos/**": true
+	}
 }

@@ -14,6 +14,15 @@ node_modules
 .agents
 .vscode
 skills-lock.json
+AGENTS.md
+CLAUDE.md
+
+# Reference material for reading, never for running. repos/effect is 53 MB and
+# 3,976 files of Effect's own source and tests, which the image gets from
+# node_modules like any other dependency; sending it as build context would
+# only make every build slower.
+repos
+agent-patterns
 
 *.log
 .DS_Store
