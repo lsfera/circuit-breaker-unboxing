@@ -28,7 +28,7 @@ export class FleetSource extends Context.Service<
       rate: number,
     ) => Effect.Effect<boolean>;
   }
->()("FleetSource") {}
+>()("@egress/aggregator/FleetSource") {}
 
 // ---------------------------------------------------------------------------
 // Simulated fleet
@@ -364,19 +364,18 @@ export const EnvoyFleetLayer = (
       );
       const noteIncomplete = makeIncompleteReporter();
 
-      const departed = (replica: EnvoyReplica, cause: unknown) =>
-        Effect.gen(function* () {
-          if (answering.get(replica.replicaId) === false) return;
-          answering.set(replica.replicaId, false);
-          yield* Effect.logWarning(
-            `fleet: ${replica.replicaId} stopped answering (${String(cause)}) and no ` +
-              `longer counts toward any quorum`,
-          );
-          yield* Metric.update(
-            Metric.withAttributes(Telemetry.replicasLost, { reason: "unreachable" }),
-            1,
-          );
-        });
+      const departed = Effect.fnUntraced(function* (replica: EnvoyReplica, cause: unknown) {
+        if (answering.get(replica.replicaId) === false) return;
+        answering.set(replica.replicaId, false);
+        yield* Effect.logWarning(
+          `fleet: ${replica.replicaId} stopped answering (${String(cause)}) and no ` +
+            `longer counts toward any quorum`,
+        );
+        yield* Metric.update(
+          Metric.withAttributes(Telemetry.replicasLost, { reason: "unreachable" }),
+          1,
+        );
+      });
 
       const returned = (replica: EnvoyReplica) =>
         answering.get(replica.replicaId) === false
@@ -386,8 +385,8 @@ export const EnvoyFleetLayer = (
             )
           : Effect.void;
 
-      const pollOne = (replica: EnvoyReplica) =>
-        Effect.gen(function* () {
+      const pollOne = Effect.fnUntraced(
+        function* (replica: EnvoyReplica) {
           const now = yield* Clock.currentTimeMillis;
           const res = yield* Effect.tryPromise({
             try: (signal) =>
@@ -410,26 +409,24 @@ export const EnvoyFleetLayer = (
           const parsed = parseStats(replica.replicaId, body, now, (c) => known.has(c));
           yield* noteIncomplete(replica.replicaId, parsed.incomplete);
           return parsed.reports as ReplicaReport[];
-        }).pipe(
-          Effect.timeout("2 seconds"),
-          // One unreachable replica must not fail the whole poll — the quorum
-          // rule already tolerates a missing replica.
-          //
-          // `catchAll`, not `catchCause`: the expected failures here are a
-          // replica being unreachable and the poll timing out, and both mean
-          // "no report from this one". A *defect* means a bug — a parser that
-          // throws on a stat it did not expect, say — and disguising that as
-          // an unreachable replica would turn a crash into a fleet that
-          // quietly reports fewer members, which is far harder to notice.
-          // (`Effect.catch` is v4's failure-only catch; v3's `catchAll` is gone.)
-          //
-          // Tolerated, but no longer unremarked: the poll continues without
-          // this replica, and `departed` says so once so the shrinking
-          // denominator is visible rather than merely survivable.
-          Effect.catch((cause) =>
-            Effect.as(departed(replica, cause), [] as ReplicaReport[]),
-          ),
-        );
+        },
+        Effect.timeout("2 seconds"),
+        // One unreachable replica must not fail the whole poll — the quorum
+        // rule already tolerates a missing replica.
+        //
+        // `Effect.catch`, not `catchCause`: the expected failures here are a
+        // replica being unreachable and the poll timing out, and both mean
+        // "no report from this one". A *defect* means a bug — a parser that
+        // throws on a stat it did not expect, say — and disguising that as
+        // an unreachable replica would turn a crash into a fleet that
+        // quietly reports fewer members, which is far harder to notice.
+        //
+        // Tolerated, but no longer unremarked: the poll continues without
+        // this replica, and `departed` says so once so the shrinking
+        // denominator is visible rather than merely survivable.
+        (effect, replica) =>
+          Effect.catch(effect, (cause) => Effect.as(departed(replica, cause), [] as ReplicaReport[])),
+      );
 
       return {
         poll: Effect.forEach(replicas, pollOne, { concurrency: "unbounded" }).pipe(

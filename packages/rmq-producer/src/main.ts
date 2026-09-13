@@ -3,7 +3,7 @@ import { Command, Flag } from "effect/unstable/cli";
 import { HttpRouter } from "effect/unstable/http";
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
 import { createServer } from "node:http";
-import { launchWithRmq, RmqLive } from "@egress/rmq/Client.ts";
+import { launchWithRmq, Rmq } from "@egress/rmq/Client.ts";
 import { brokerFlag, metricsPortFlag, PositiveInt, VERSION } from "@egress/config/Settings.ts";
 import { MetricsRoute } from "@egress/tracing/Metrics.ts";
 import { TracingLive } from "@egress/tracing/Tracing.ts";
@@ -55,7 +55,7 @@ const producer = Command.make("rmq-producer", flags, (settings) => {
       // Every trace in this repo starts in this process. Without an OTLP
       // endpoint this installs no tracer at all — see @egress/tracing.
       Layer.provide(TracingLive("rmq-producer")),
-      Layer.provideMerge(RmqLive(settings.broker)),
+      Layer.provideMerge(Rmq.layer(settings.broker)),
     ),
   );
 });

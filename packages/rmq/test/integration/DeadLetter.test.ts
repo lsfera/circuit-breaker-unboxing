@@ -9,7 +9,7 @@ import {
   stopBroker,
   waitFor,
 } from "./harness.ts";
-import { Rmq, RmqLive } from "../../src/Client.ts";
+import { Rmq } from "../../src/Client.ts";
 import {
   deadLetterQueueFor,
   deadLetterQueueOptions,
@@ -41,7 +41,7 @@ after(stopBroker);
 
 const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(
-    Effect.scoped(Effect.provide(program, RmqLive({ host: broker.host, port: broker.port }))) as Effect.Effect<A>,
+    Effect.scoped(Effect.provide(program, Rmq.layer({ host: broker.host, port: broker.port }))) as Effect.Effect<A>,
   );
 
 /**

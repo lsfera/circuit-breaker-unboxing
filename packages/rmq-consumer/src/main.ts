@@ -4,7 +4,7 @@ import { HttpRouter } from "effect/unstable/http";
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { launchWithRmq, RmqLive } from "@egress/rmq/Client.ts";
+import { launchWithRmq, Rmq } from "@egress/rmq/Client.ts";
 import { brokerFlag, metricsPortFlag, PositiveInt, VERSION } from "@egress/config/Settings.ts";
 import { MetricsRoute } from "@egress/tracing/Metrics.ts";
 import { TracingLive } from "@egress/tracing/Tracing.ts";
@@ -97,7 +97,7 @@ const daemon = Command.make("rmq-daemon", flags, (settings) => {
       // All five daemons report as one service: which daemon is an attribute of
       // a span, not a different system.
       Layer.provide(TracingLive("rmq-daemon")),
-      Layer.provideMerge(RmqLive(settings.broker)),
+      Layer.provideMerge(Rmq.layer(settings.broker)),
     ),
   );
 });

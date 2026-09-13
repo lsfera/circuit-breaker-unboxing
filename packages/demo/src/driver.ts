@@ -1,4 +1,4 @@
-import { Config, Duration, Effect, Option as O, Schedule, Schema } from "effect";
+import { Config, Console, Duration, Effect, Option as O, Schedule, Schema } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { NodeRuntime, NodeServices } from "@effect/platform-node";
 import { VERSION } from "@egress/config/Settings.ts";
@@ -328,10 +328,8 @@ const run = (settings: Settings) => {
               ORIGIN = candidate;
             }),
           onNone: () =>
-            Effect.sync(() =>
-              console.log(
-                `  (none of ${CANDIDATES.join(", ")} reports itself leader — using ${ORIGIN} and hoping)`,
-              ),
+            Console.log(
+              `  (none of ${CANDIDATES.join(", ")} reports itself leader — using ${ORIGIN} and hoping)`,
             ),
         }),
       ),
@@ -339,13 +337,11 @@ const run = (settings: Settings) => {
     Effect.succeed(CANDIDATES.length > 1),
   ).pipe(Effect.asVoid);
 
-  const header = (msg: string) => Effect.sync(() => console.log(`\n\x1b[1m== ${msg} ==\x1b[0m`));
+  const header = (msg: string) => Console.log(`\n\x1b[1m== ${msg} ==\x1b[0m`);
 
   const narrate = (d: CircuitEventData) =>
-    Effect.sync(() =>
-      console.log(
-        `  seq=${String(d.sequence).padEnd(3)} ${(d.previousState ?? "").padEnd(10)} -> ${d.state.padEnd(10)} ${d.reason}`,
-      ),
+    Console.log(
+      `  seq=${String(d.sequence).padEnd(3)} ${(d.previousState ?? "").padEnd(10)} -> ${d.state.padEnd(10)} ${d.reason}`,
     );
 
   /**
@@ -433,7 +429,7 @@ const run = (settings: Settings) => {
         Effect.catchCause(() => Effect.succeed(false)),
       ));
     if (PROMETHEUS !== "" && !fleetPresent) {
-      console.log(`  (no daemon fleet metrics for ${API} at ${PROMETHEUS} — fleet step will be skipped)`);
+      yield* Console.log(`  (no daemon fleet metrics for ${API} at ${PROMETHEUS} — fleet step will be skipped)`);
     }
     // Interrupted with the program, so there is nothing to tear down by hand.
     if (fleetPresent) yield* Effect.forkChild(sampleFleet);
@@ -444,7 +440,7 @@ const run = (settings: Settings) => {
     const start =
       s0.events.find((e) => e.type === SEQUENCED_EVENT && e.data.apiId === API)
         ?.data.sequence ?? 0;
-    console.log(`  waiting a moment so the console reads as calm before the incident starts...`);
+    yield* Console.log(`  waiting a moment so the console reads as calm before the incident starts...`);
     yield* Effect.sleep(Duration.seconds(2));
 
     yield* header(`Drag ${API} to 45%`);
@@ -462,8 +458,8 @@ const run = (settings: Settings) => {
         "every daemon to stop pulling work",
         45_000,
       );
-      console.log(`  ${describeFleet(stopped)}`);
-      console.log(`  nothing is calling the dead upstream; the backlog is the point.`);
+      yield* Console.log(`  ${describeFleet(stopped)}`);
+      yield* Console.log(`  nothing is calling the dead upstream; the backlog is the point.`);
     }
 
     yield* header("Watch it probe — upstream is still dead, so this reopens with doubled backoff");
@@ -477,14 +473,14 @@ const run = (settings: Settings) => {
 
     yield* header("Delivery contract, read from outside the process");
     const sub = yield* getSubscriber;
-    console.log(
+    yield* Console.log(
       `  received=${sub.received} snapshots=${sub.snapshots} duplicates=${sub.duplicates} gaps=${sub.gaps.length}`,
     );
     if (sub.duplicates > 0 || sub.gaps.length > 0) {
-      console.log(`  gaps: ${sub.gaps.join(", ") || "(none)"}`);
+      yield* Console.log(`  gaps: ${sub.gaps.join(", ") || "(none)"}`);
       return yield* Effect.die("delivery contract broken — see gaps/duplicates above");
     }
-    console.log(`  gapless and non-repeating through the full incident.`);
+    yield* Console.log(`  gapless and non-repeating through the full incident.`);
 
     if (fleetPresent) {
       yield* header("Fleet: ramp back, drain, and the same contract on AMQP");
@@ -494,13 +490,13 @@ const run = (settings: Settings) => {
         `the fleet to ramp back to full strength and drain the ${peak}-message backlog`,
         120_000,
       );
-      console.log(`  ${describeFleet(back)} (deepest backlog seen: ${peak})`);
+      yield* Console.log(`  ${describeFleet(back)} (deepest backlog seen: ${peak})`);
       if ((back.broken ?? 0) > 0) {
         return yield* Effect.die(
           "the sequence contract broke on circuit.control — gaps or duplicates seen by the daemons",
         );
       }
-      console.log(
+      yield* Console.log(
         `  the same per-API sequence guarantee held on the AMQP transport too, ` +
           `checked by ${back.size} consumers the publisher does not control.`,
       );

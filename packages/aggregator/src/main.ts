@@ -9,13 +9,13 @@ import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
-import { Rmq, RmqLive } from "@egress/rmq/Client.ts";
+import { Rmq } from "@egress/rmq/Client.ts";
 import { PositiveInt, rmqFlag, VERSION } from "@egress/config/Settings.ts";
-import { Aggregator, AggregatorLayer } from "./Aggregator.ts";
+import { Aggregator } from "./Aggregator.ts";
 import { makeAmqpControlPlaneSink } from "./AmqpControlPlaneSink.ts";
 import { HaSettings, InMemoryCoordinationLayer, RedisCoordinationLayer } from "./Coordination.ts";
 import { InMemoryOutboxLayer, RedisOutboxLayer } from "./Outbox.ts";
-import { combineSinks, EventBusLayer, EventSink, makeWebhookSink, NoopSinkLayer } from "./Events.ts";
+import { combineSinks, EventBus, EventSink, makeWebhookSink, NoopSinkLayer } from "./Events.ts";
 import { EnvoyFleetLayer, SimFleetLayer } from "./FleetSource.ts";
 import { EnvoyPushFleetLayer } from "./EnvoyPushSource.ts";
 import { HttpLive } from "./Http.ts";
@@ -202,7 +202,7 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
           );
           return impls.length === 1 ? impls[0]! : combineSinks(impls);
         }),
-      ).pipe(Layer.provide(RmqLive(broker))),
+      ).pipe(Layer.provide(Rmq.layer(broker))),
   });
 
   /**
@@ -275,11 +275,11 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
    * them directly.
    */
   const AppLayer = HttpLive.pipe(
-    Layer.provideMerge(AggregatorLayer),
+    Layer.provideMerge(Aggregator.layer),
     // The sink layer sits *above* HaLayer rather than beside it: the webhook
     // sink needs the Outbox, which is part of the same durable state the lease
     // lives in.
-    Layer.provideMerge(Layer.mergeAll(FleetLayer, EventBusLayer, SinkLayer)),
+    Layer.provideMerge(Layer.mergeAll(FleetLayer, EventBus.layer, SinkLayer)),
     Layer.provideMerge(HaLayer),
     Layer.provide(Layer.succeed(Config, defaultConfig)),
   );

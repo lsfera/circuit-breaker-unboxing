@@ -61,39 +61,38 @@ export interface ConsoleFrames {
  * ago, showing an incident that has since ended. A newly connected console
  * waits at most one interval for a frame that is current instead.
  */
-export const make = <A>(
+export const make = Effect.fnUntraced(function* <A>(
   build: Effect.Effect<A>,
   every: Duration.Input,
-): Effect.Effect<ConsoleFrames, never, Scope.Scope> =>
-  Effect.gen(function* () {
-    const watching = yield* Ref.make(0);
-    const pubsub = yield* PubSub.sliding<Uint8Array>(1);
-    const text = new TextEncoder();
+): Effect.fn.Return<ConsoleFrames, never, Scope.Scope> {
+  const watching = yield* Ref.make(0);
+  const pubsub = yield* PubSub.sliding<Uint8Array>(1);
+  const text = new TextEncoder();
 
-    const publish = Effect.gen(function* () {
-      const frame = yield* build;
-      yield* PubSub.publish(pubsub, text.encode(encodeEvent("state", frame)));
-      yield* Metric.update(Telemetry.consoleFramesBuilt, 1);
-    });
+  const publish = Effect.gen(function* () {
+    const frame = yield* build;
+    yield* PubSub.publish(pubsub, text.encode(encodeEvent("state", frame)));
+    yield* Metric.update(Telemetry.consoleFramesBuilt, 1);
+  });
 
-    yield* Effect.forkScoped(
-      Effect.repeat(
-        Effect.when(publish, Effect.map(Ref.get(watching), (n) => n > 0)),
-        Schedule.spaced(every),
-      ),
+  yield* Effect.forkScoped(
+    Effect.repeat(
+      Effect.when(publish, Effect.map(Ref.get(watching), (n) => n > 0)),
+      Schedule.spaced(every),
+    ),
+  );
+
+  const track = (delta: number) =>
+    Effect.flatMap(Ref.updateAndGet(watching, (n) => n + delta), (n) =>
+      Metric.update(Telemetry.consoleStreams, n),
     );
 
-    const track = (delta: number) =>
-      Effect.flatMap(Ref.updateAndGet(watching, (n) => n + delta), (n) =>
-        Metric.update(Telemetry.consoleStreams, n),
-      );
-
-    return {
-      // `ensuring` runs when the stream is interrupted, which is how a browser
-      // closing its tab reaches this: the response stream ends with the
-      // request's scope, and the count has to come down with it or the frame
-      // would go on being built for a console nobody has open.
-      frames: Stream.fromPubSub(pubsub).pipe(Stream.onStart(track(1)), Stream.ensuring(track(-1))),
-      watching: Ref.get(watching),
-    };
-  });
+  return {
+    // `ensuring` runs when the stream is interrupted, which is how a browser
+    // closing its tab reaches this: the response stream ends with the
+    // request's scope, and the count has to come down with it or the frame
+    // would go on being built for a console nobody has open.
+    frames: Stream.fromPubSub(pubsub).pipe(Stream.onStart(track(1)), Stream.ensuring(track(-1))),
+    watching: Ref.get(watching),
+  };
+});

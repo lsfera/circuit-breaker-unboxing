@@ -10,7 +10,10 @@ reshaped substantially. Before writing Effect code:
 1. Read [`repos/effect/LLMS.md`](repos/effect/LLMS.md) completely — Effect's
    own guide for agents, for exactly this version.
 2. Read [`agent-patterns/effect-3-to-4.md`](agent-patterns/effect-3-to-4.md)
-   for the v3 idioms that have already come up here, and what they are now.
+   for the v3 idioms that have already come up here, and what they are now, and
+   [`agent-patterns/effect-guide-in-this-repo.md`](agent-patterns/effect-guide-in-this-repo.md)
+   for where this repository departs from the guide in step 1 — where the two
+   disagree, the repository's decision wins.
 3. For any API you are not certain of, read its source and its tests in
    `repos/effect` rather than guessing. The tests show behaviour the
    docstrings do not.

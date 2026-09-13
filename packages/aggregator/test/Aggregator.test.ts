@@ -2,9 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Duration, Effect, Layer, Ref, Option as O} from "effect";
 import { TestClock } from "effect/testing";
-import { Aggregator, AggregatorLayer } from "../src/Aggregator.ts";
+import { Aggregator } from "../src/Aggregator.ts";
 import { InMemoryCoordinationLayer } from "../src/Coordination.ts";
-import { EventBus, EventBusLayer, EventSink } from "../src/Events.ts";
+import { EventBus, EventSink } from "../src/Events.ts";
 import { FleetSource, SimFleetLayer, parseStats } from "../src/FleetSource.ts";
 import { emptyIntegrity, record } from "../src/Http.ts";
 import * as Breaker from "@egress/domain/Breaker.ts";
@@ -40,13 +40,13 @@ const RecordingSink = (into: Ref.Ref<ReadonlyArray<CircuitEvent>>) =>
   });
 
 const harness = (delivered: Ref.Ref<ReadonlyArray<CircuitEvent>>) =>
-  AggregatorLayer.pipe(
+  Aggregator.layer.pipe(
     // provideMerge, not provide: the tests drive FleetSource and read EventBus
     // directly, so those services stay in the output context.
     Layer.provideMerge(
       Layer.mergeAll(
         SimFleetLayer(SPECS, 5),
-        EventBusLayer,
+        EventBus.layer,
         RecordingSink(delivered),
         // Solo HA: this instance always wins its own lease, same as a single
         // real process would. Dedicated failover/fencing tests below build

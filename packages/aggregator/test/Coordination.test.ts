@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Clock, Duration, Effect, Fiber, Layer, Option as O, Ref } from "effect";
 import { TestClock } from "effect/testing";
-import { Aggregator, AggregatorLayer } from "../src/Aggregator.ts";
+import { Aggregator } from "../src/Aggregator.ts";
 import {
   CheckpointFenced,
   CheckpointStore,
@@ -13,7 +13,7 @@ import {
 } from "../src/Coordination.ts";
 import { isFenced, parseToken, sameToken } from "../src/Coordination.ts";
 import type { LeaseToken } from "../src/Coordination.ts";
-import { EventBusLayer, EventSink } from "../src/Events.ts";
+import { EventBus, EventSink } from "../src/Events.ts";
 import { FleetSource, SimFleetLayer } from "../src/FleetSource.ts";
 import { Config, defaultConfig } from "@egress/domain/Model.ts";
 import type { Checkpoint } from "../src/Coordination.ts";
@@ -142,11 +142,11 @@ const instanceLayer = (
   delivered: Ref.Ref<ReadonlyArray<CircuitEvent>>,
   leaseTtlMs = 1000,
 ) =>
-  AggregatorLayer.pipe(
+  Aggregator.layer.pipe(
     Layer.provideMerge(
       Layer.mergeAll(
         SimFleetLayer(SPECS, 5),
-        EventBusLayer,
+        EventBus.layer,
         RecordingSink(delivered),
         Layer.succeed(LeaderElection, coordination.leaderElection),
         Layer.succeed(CheckpointStore, coordination.checkpointStore),
@@ -255,11 +255,11 @@ test("a source that reports nothing on the acquisition tick still resumes from i
           yield* ticks(60);
         }).pipe(
           Effect.provide(
-            AggregatorLayer.pipe(
+            Aggregator.layer.pipe(
               Layer.provideMerge(
                 Layer.mergeAll(
                   silentUntil(5, SimFleetLayer(SPECS, 5)),
-                  EventBusLayer,
+                  EventBus.layer,
                   RecordingSink(delivered),
                   Layer.succeed(LeaderElection, coordination.leaderElection),
                   Layer.succeed(CheckpointStore, coordination.checkpointStore),

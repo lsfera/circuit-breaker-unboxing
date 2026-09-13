@@ -1,6 +1,7 @@
 import {
   Array as Arr,
   Context,
+  DateTime,
   Duration,
   Effect,
   Layer,
@@ -49,7 +50,7 @@ export const DELIVERY_RETRY = {
 /**
  * `now` is passed in rather than read here. Every other instant this system
  * publishes comes from the Effect clock — `observedSince` included, two lines
- * down — and a `new Date()` in this one field meant a tick carried two clocks:
+ * down — and a wall-clock read in this one field meant a tick carried two clocks:
  * simulated time in the payload and wall time in the envelope, which is also
  * why no test could assert what `time` should be.
  */
@@ -64,7 +65,7 @@ const build = (
   source: SOURCE,
   subject: `api://${snap.apiId}`,
   id: randomUUID(),
-  time: new Date(now).toISOString(),
+  time: DateTime.formatIso(DateTime.makeUnsafe(now)),
   datacontenttype: "application/json",
   data: {
     apiId: snap.apiId,
@@ -74,7 +75,7 @@ const build = (
     reason: snap.reason,
     healthyEndpoints: snap.healthyEndpoints,
     totalEndpoints: snap.totalEndpoints,
-    observedSince: new Date(snap.observedSince).toISOString(),
+    observedSince: DateTime.formatIso(DateTime.makeUnsafe(snap.observedSince)),
     reportingReplicas: snap.reportingReplicas,
   },
 });
@@ -102,24 +103,24 @@ export class EventBus extends Context.Service<
     readonly subscribe: Stream.Stream<CircuitEvent>;
     readonly recent: Effect.Effect<ReadonlyArray<CircuitEvent>>;
   }
->()("EventBus") {}
-
-export const EventBusLayer = Layer.effect(
-  EventBus,
-  Effect.gen(function* () {
-    const pubsub = yield* PubSub.sliding<CircuitEvent>(256);
-    const ring = yield* Ref.make<ReadonlyArray<CircuitEvent>>([]);
-    return {
-      publish: (event) =>
-        Ref.update(ring, (xs) => [...xs, event].slice(-200)).pipe(
-          Effect.andThen(PubSub.publish(pubsub, event)),
-          Effect.asVoid,
-        ),
-      subscribe: Stream.fromPubSub(pubsub),
-      recent: Ref.get(ring),
-    };
-  }),
-);
+>()("@egress/aggregator/Events/EventBus") {
+  static readonly layer = Layer.effect(
+    EventBus,
+    Effect.gen(function* () {
+      const pubsub = yield* PubSub.sliding<CircuitEvent>(256);
+      const ring = yield* Ref.make<ReadonlyArray<CircuitEvent>>([]);
+      return EventBus.of({
+        publish: (event) =>
+          Ref.update(ring, (xs) => [...xs, event].slice(-200)).pipe(
+            Effect.andThen(PubSub.publish(pubsub, event)),
+            Effect.asVoid,
+          ),
+        subscribe: Stream.fromPubSub(pubsub),
+        recent: Ref.get(ring),
+      });
+    }),
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Sinks
@@ -134,7 +135,7 @@ export class EventSink extends Context.Service<
     /** See SinkImpl: replay what an earlier attempt could not deliver, leader-only. */
     readonly drainOutbox: Effect.Effect<number>;
   }
->()("EventSink") {}
+>()("@egress/aggregator/Events/EventSink") {}
 
 /** The shape every sink builds — split out from the Layer wrapper so main.ts can compose several before mounting the one EventSink tag. */
 export type SinkImpl = {
@@ -162,247 +163,245 @@ export type SinkImpl = {
  * a loop with a counter, a sleep and a try/catch. Here the policy is a value —
  * exponential backoff, capped attempts — and it composes.
  */
-export const makeWebhookSink = (url: string): Effect.Effect<SinkImpl, never, Outbox> =>
-  Effect.gen(function* () {
-      const dead = yield* Ref.make<ReadonlyArray<DeliveryFailed>>([]);
-      const outbox = yield* Outbox;
+export const makeWebhookSink = Effect.fnUntraced(function* (url: string): Effect.fn.Return<SinkImpl, never, Outbox> {
+    const dead = yield* Ref.make<ReadonlyArray<DeliveryFailed>>([]);
+    const outbox = yield* Outbox;
 
-      const post = (event: CircuitEvent) =>
-        Effect.tryPromise({
-          try: async (signal) => {
-            const res = await fetch(url, {
-              method: "POST",
-              headers: {
-                "content-type": "application/cloudevents+json",
-                // Partition key. On Kafka this is the message key; ordering
-                // per API is the only ordering subscribers actually need.
-                "ce-partitionkey": event.data.apiId,
-                "idempotency-key": `${event.data.apiId}:${event.data.sequence}`,
-              },
-              body: JSON.stringify(event),
-              signal,
-            });
-            // Drained even though the status is all this cares about: an
-            // unconsumed body keeps its connection out of the pool.
-            await res.text().catch(() => {});
-            return res;
-          },
-          catch: (cause) =>
+    const post = (event: CircuitEvent) =>
+      Effect.tryPromise({
+        try: async (signal) => {
+          const res = await fetch(url, {
+            method: "POST",
+            headers: {
+              "content-type": "application/cloudevents+json",
+              // Partition key. On Kafka this is the message key; ordering
+              // per API is the only ordering subscribers actually need.
+              "ce-partitionkey": event.data.apiId,
+              "idempotency-key": `${event.data.apiId}:${event.data.sequence}`,
+            },
+            body: JSON.stringify(event),
+            signal,
+          });
+          // Drained even though the status is all this cares about: an
+          // unconsumed body keeps its connection out of the pool.
+          await res.text().catch(() => {});
+          return res;
+        },
+        catch: (cause) =>
+          new DeliveryFailed({
+            sink: "webhook",
+            apiId: event.data.apiId,
+            cause: String(cause),
+          }),
+      }).pipe(
+        Effect.filterOrFail(
+          (res) => res.ok,
+          (res) =>
             new DeliveryFailed({
               sink: "webhook",
               apiId: event.data.apiId,
-              cause: String(cause),
+              cause: `HTTP ${res.status}`,
             }),
-        }).pipe(
-          Effect.filterOrFail(
-            (res) => res.ok,
-            (res) =>
-              new DeliveryFailed({
-                sink: "webhook",
-                apiId: event.data.apiId,
-                cause: `HTTP ${res.status}`,
-              }),
-          ),
-          Effect.timeout(Duration.seconds(2)),
-        );
-
-      const deliver = (event: CircuitEvent) => {
-        const apiId = event.data.apiId;
-        const attempt = post(event).pipe(
-          Effect.retry(DELIVERY_RETRY),
-          Effect.tapError(() => Metric.update(Metric.withAttributes(Telemetry.webhookFailed, { apiId }), 1)),
-        );
-        return Effect.timed(attempt).pipe(
-          Effect.tap(([duration]) =>
-            Metric.update(
-              Metric.withAttributes(Telemetry.webhookDeliveryDuration, { apiId }),
-              duration,
-            ),
-          ),
-          Effect.tap(() =>
-            Metric.update(Metric.withAttributes(Telemetry.webhookDelivered, { apiId }), 1),
-          ),
-          Effect.asVoid,
-          // A failing subscriber must never stall the control loop, so the
-          // failure is recorded and swallowed rather than propagated.
-          //
-          // Two records, and they are not redundant. The in-memory list is a
-          // diagnostic: it answers "what did this instance fail to send", it
-          // is bounded, and it dies with the process. The outbox is the
-          // authoritative one: it survives the process, it is what gets
-          // replayed, and it is the reason the per-API guarantee now reaches
-          // the subscriber rather than stopping at the aggregator's edge.
-          Effect.catchCause((cause) =>
-            Effect.all(
-              [
-                Ref.update(dead, (xs) =>
-                  [
-                    ...xs,
-                    new DeliveryFailed({ sink: "webhook", apiId, cause: String(cause) }),
-                  ].slice(-DEAD_LETTER_BUFFER),
-                ),
-                Metric.update(Metric.withAttributes(Telemetry.webhookDeadLettered, { apiId }), 1),
-                outbox.append(event).pipe(
-                  Effect.flatMap((dropped) =>
-                    dropped > 0
-                      ? Effect.all([
-                          Metric.update(
-                            Metric.withAttributes(Telemetry.outboxDropped, { apiId }),
-                            dropped,
-                          ),
-                          Effect.logWarning(
-                            `outbox for ${apiId} is full — dropped ${dropped} of the oldest ` +
-                              `undelivered events; the subscriber will see a gap`,
-                          ),
-                        ], { discard: true })
-                      : Effect.void,
-                  ),
-                  // An unreachable outbox degrades to what this did before it
-                  // existed: the event is lost and counted. It must not turn a
-                  // failed delivery into a failed tick.
-                  Effect.catchCause(() =>
-                    Effect.logWarning(`could not persist an undelivered event for ${apiId}`),
-                  ),
-                ),
-              ],
-              { discard: true },
-            ),
-          ),
-          // Delivery is off the hot path by construction: the loop forks it and
-          // never awaits it.
-          Effect.forkChild,
-          Effect.asVoid,
-        );
-      };
-
-      /**
-       * One pass over the outbox, oldest first, per API.
-       *
-       * Stops that API at its first failure rather than skipping ahead: delivering
-       * 8 while 7 is stuck hands the subscriber a gap that never closes. Nothing
-       * is committed until delivered, so a crash mid-pass replays rather than
-       * loses. Bounded per pass, so a subscriber coming back is not met with
-       * everything at once.
-       */
-      const draining = yield* Ref.make(false);
-      /**
-       * `consumed` is what the commit trims, and counts entries this pass is
-       * done with — delivered or unreadable. `delivered` is what the subscriber
-       * actually took. They differ only when an entry no longer decodes, and
-       * conflating them is what leaves a delivered event in place to be sent
-       * twice. `stopped` is the old `break`: once an entry cannot be delivered,
-       * nothing behind it is posted or consumed.
-       */
-      type Pass = {
-        readonly consumed: number;
-        readonly delivered: number;
-        readonly unreadable: number;
-        readonly stopped: boolean;
-      };
-
-      const drainApi = (apiId: string) =>
-        Effect.gen(function* () {
-          const pending = yield* outbox.peek(apiId, OUTBOX_DRAIN_LIMIT);
-          const { consumed, delivered, unreadable } = yield* Effect.reduce(
-            pending,
-            (): Pass => ({ consumed: 0, delivered: 0, unreadable: 0, stopped: false }),
-            (acc, entry): Effect.Effect<Pass, CoordinationUnavailable> =>
-              acc.stopped
-                ? Effect.succeed(acc)
-                : O.match(entry, {
-                    onNone: () =>
-                      Effect.succeed({
-                        ...acc,
-                        consumed: acc.consumed + 1,
-                        unreadable: acc.unreadable + 1,
-                      }),
-                    onSome: (event) =>
-                      post(event).pipe(
-                        Effect.as({
-                          ...acc,
-                          consumed: acc.consumed + 1,
-                          delivered: acc.delivered + 1,
-                        }),
-                        Effect.catchCause(() => Effect.succeed({ ...acc, stopped: true })),
-                      ),
-                  }),
-          );
-
-          yield* unreadable > 0
-            ? Effect.logWarning(
-                `dropped ${unreadable} undeliverable outbox entr(ies) for ${apiId}: no longer decodable`,
-              )
-            : Effect.void;
-          yield* consumed > 0 ? outbox.commit(apiId, consumed) : Effect.void;
-          yield* delivered > 0
-            ? Metric.update(Metric.withAttributes(Telemetry.outboxReplayed, { apiId }), delivered)
-            : Effect.void;
-          yield* outbox
-            .depth(apiId)
-            .pipe(
-              Effect.flatMap((d) =>
-                Metric.update(Metric.withAttributes(Telemetry.outboxDepth, { apiId }), d),
-              ),
-            );
-          return delivered;
-        });
-
-      const drainPass = Effect.gen(function* () {
-        const apis = yield* outbox.apis;
-        const replayed = Arr.reduce(yield* Effect.forEach(apis, drainApi), 0, (a, b) => a + b);
-        yield* replayed > 0
-          ? Effect.logInfo(`replayed ${replayed} event(s) from the outbox`)
-          : Effect.void;
-        return replayed;
-      });
-
-      /**
-       * One pass at a time. The caller forks this, and a subscriber that hangs
-       * rather than refusing costs a full timeout per pass — without the
-       * guard, a tick every 250ms against a subscriber timing out at 2s would
-       * stack passes until they outnumber the events they are trying to
-       * deliver.
-       *
-       * The flag is released only by the pass that took it, which is why this
-       * is not a plain `ensuring` around the whole thing.
-       */
-      const drainable = yield* Ref.make(true);
-      const drainOutbox = Ref.getAndSet(draining, true).pipe(
-        Effect.flatMap((busy) =>
-          busy
-            ? Effect.succeed(0)
-            : drainPass.pipe(
-                Effect.ensuring(Ref.set(draining, false)),
-                Effect.tap(() =>
-                  Ref.getAndSet(drainable, true).pipe(
-                    Effect.flatMap((was) =>
-                      was ? Effect.void : Effect.logInfo("the outbox is readable again"),
-                    ),
-                  ),
-                ),
-              ),
         ),
-        // The outbox being unreachable is a reason to try again next tick, not
-        // a reason to end the loop that is trying — but not a reason to say
-        // nothing either. The append path warns per event it could not persist;
-        // this half had no voice at all, so an outbox holding undelivered
-        // events for a subscriber that has since recovered could fail to
-        // replay them on every tick, forever, in silence. Edge-triggered, the
-        // way coordination reachability is: once on the way down, once back.
-        Effect.catchCause((cause) =>
-          Ref.getAndSet(drainable, false).pipe(
-            Effect.flatMap((was) =>
-              was
-                ? Effect.logWarning("could not replay the outbox", cause)
-                : Effect.void,
-            ),
-            Effect.as(0),
-          ),
-        ),
+        Effect.timeout(Duration.seconds(2)),
       );
 
-      return { name: "webhook", deliver, deadLetters: Ref.get(dead), drainOutbox };
-  });
+    const deliver = (event: CircuitEvent) => {
+      const apiId = event.data.apiId;
+      const attempt = post(event).pipe(
+        Effect.retry(DELIVERY_RETRY),
+        Effect.tapError(() => Metric.update(Metric.withAttributes(Telemetry.webhookFailed, { apiId }), 1)),
+      );
+      return Effect.timed(attempt).pipe(
+        Effect.tap(([duration]) =>
+          Metric.update(
+            Metric.withAttributes(Telemetry.webhookDeliveryDuration, { apiId }),
+            duration,
+          ),
+        ),
+        Effect.tap(() =>
+          Metric.update(Metric.withAttributes(Telemetry.webhookDelivered, { apiId }), 1),
+        ),
+        Effect.asVoid,
+        // A failing subscriber must never stall the control loop, so the
+        // failure is recorded and swallowed rather than propagated.
+        //
+        // Two records, and they are not redundant. The in-memory list is a
+        // diagnostic: it answers "what did this instance fail to send", it
+        // is bounded, and it dies with the process. The outbox is the
+        // authoritative one: it survives the process, it is what gets
+        // replayed, and it is the reason the per-API guarantee now reaches
+        // the subscriber rather than stopping at the aggregator's edge.
+        Effect.catchCause((cause) =>
+          Effect.all(
+            [
+              Ref.update(dead, (xs) =>
+                [
+                  ...xs,
+                  new DeliveryFailed({ sink: "webhook", apiId, cause: String(cause) }),
+                ].slice(-DEAD_LETTER_BUFFER),
+              ),
+              Metric.update(Metric.withAttributes(Telemetry.webhookDeadLettered, { apiId }), 1),
+              outbox.append(event).pipe(
+                Effect.flatMap((dropped) =>
+                  dropped > 0
+                    ? Effect.all([
+                        Metric.update(
+                          Metric.withAttributes(Telemetry.outboxDropped, { apiId }),
+                          dropped,
+                        ),
+                        Effect.logWarning(
+                          `outbox for ${apiId} is full — dropped ${dropped} of the oldest ` +
+                            `undelivered events; the subscriber will see a gap`,
+                        ),
+                      ], { discard: true })
+                    : Effect.void,
+                ),
+                // An unreachable outbox degrades to what this did before it
+                // existed: the event is lost and counted. It must not turn a
+                // failed delivery into a failed tick.
+                Effect.catchCause(() =>
+                  Effect.logWarning(`could not persist an undelivered event for ${apiId}`),
+                ),
+              ),
+            ],
+            { discard: true },
+          ),
+        ),
+        // Delivery is off the hot path by construction: the loop forks it and
+        // never awaits it.
+        Effect.forkChild,
+        Effect.asVoid,
+      );
+    };
+
+    /**
+     * One pass over the outbox, oldest first, per API.
+     *
+     * Stops that API at its first failure rather than skipping ahead: delivering
+     * 8 while 7 is stuck hands the subscriber a gap that never closes. Nothing
+     * is committed until delivered, so a crash mid-pass replays rather than
+     * loses. Bounded per pass, so a subscriber coming back is not met with
+     * everything at once.
+     */
+    const draining = yield* Ref.make(false);
+    /**
+     * `consumed` is what the commit trims, and counts entries this pass is
+     * done with — delivered or unreadable. `delivered` is what the subscriber
+     * actually took. They differ only when an entry no longer decodes, and
+     * conflating them is what leaves a delivered event in place to be sent
+     * twice. `stopped` is the old `break`: once an entry cannot be delivered,
+     * nothing behind it is posted or consumed.
+     */
+    type Pass = {
+      readonly consumed: number;
+      readonly delivered: number;
+      readonly unreadable: number;
+      readonly stopped: boolean;
+    };
+
+    const drainApi = Effect.fnUntraced(function* (apiId: string) {
+      const pending = yield* outbox.peek(apiId, OUTBOX_DRAIN_LIMIT);
+      const { consumed, delivered, unreadable } = yield* Effect.reduce(
+        pending,
+        (): Pass => ({ consumed: 0, delivered: 0, unreadable: 0, stopped: false }),
+        (acc, entry): Effect.Effect<Pass, CoordinationUnavailable> =>
+          acc.stopped
+            ? Effect.succeed(acc)
+            : O.match(entry, {
+                onNone: () =>
+                  Effect.succeed({
+                    ...acc,
+                    consumed: acc.consumed + 1,
+                    unreadable: acc.unreadable + 1,
+                  }),
+                onSome: (event) =>
+                  post(event).pipe(
+                    Effect.as({
+                      ...acc,
+                      consumed: acc.consumed + 1,
+                      delivered: acc.delivered + 1,
+                    }),
+                    Effect.catchCause(() => Effect.succeed({ ...acc, stopped: true })),
+                  ),
+              }),
+      );
+
+      yield* unreadable > 0
+        ? Effect.logWarning(
+            `dropped ${unreadable} undeliverable outbox entr(ies) for ${apiId}: no longer decodable`,
+          )
+        : Effect.void;
+      yield* consumed > 0 ? outbox.commit(apiId, consumed) : Effect.void;
+      yield* delivered > 0
+        ? Metric.update(Metric.withAttributes(Telemetry.outboxReplayed, { apiId }), delivered)
+        : Effect.void;
+      yield* outbox
+        .depth(apiId)
+        .pipe(
+          Effect.flatMap((d) =>
+            Metric.update(Metric.withAttributes(Telemetry.outboxDepth, { apiId }), d),
+          ),
+        );
+      return delivered;
+    });
+
+    const drainPass = Effect.gen(function* () {
+      const apis = yield* outbox.apis;
+      const replayed = Arr.reduce(yield* Effect.forEach(apis, drainApi), 0, (a, b) => a + b);
+      yield* replayed > 0
+        ? Effect.logInfo(`replayed ${replayed} event(s) from the outbox`)
+        : Effect.void;
+      return replayed;
+    });
+
+    /**
+     * One pass at a time. The caller forks this, and a subscriber that hangs
+     * rather than refusing costs a full timeout per pass — without the
+     * guard, a tick every 250ms against a subscriber timing out at 2s would
+     * stack passes until they outnumber the events they are trying to
+     * deliver.
+     *
+     * The flag is released only by the pass that took it, which is why this
+     * is not a plain `ensuring` around the whole thing.
+     */
+    const drainable = yield* Ref.make(true);
+    const drainOutbox = Ref.getAndSet(draining, true).pipe(
+      Effect.flatMap((busy) =>
+        busy
+          ? Effect.succeed(0)
+          : drainPass.pipe(
+              Effect.ensuring(Ref.set(draining, false)),
+              Effect.tap(() =>
+                Ref.getAndSet(drainable, true).pipe(
+                  Effect.flatMap((was) =>
+                    was ? Effect.void : Effect.logInfo("the outbox is readable again"),
+                  ),
+                ),
+              ),
+            ),
+      ),
+      // The outbox being unreachable is a reason to try again next tick, not
+      // a reason to end the loop that is trying — but not a reason to say
+      // nothing either. The append path warns per event it could not persist;
+      // this half had no voice at all, so an outbox holding undelivered
+      // events for a subscriber that has since recovered could fail to
+      // replay them on every tick, forever, in silence. Edge-triggered, the
+      // way coordination reachability is: once on the way down, once back.
+      Effect.catchCause((cause) =>
+        Ref.getAndSet(drainable, false).pipe(
+          Effect.flatMap((was) =>
+            was
+              ? Effect.logWarning("could not replay the outbox", cause)
+              : Effect.void,
+          ),
+          Effect.as(0),
+        ),
+      ),
+    );
+
+    return { name: "webhook", deliver, deadLetters: Ref.get(dead), drainOutbox };
+});
 
 /**
  * Fans one event out to every given sink and forks each delivery

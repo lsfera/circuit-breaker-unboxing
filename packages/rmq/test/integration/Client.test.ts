@@ -9,7 +9,7 @@ import {
   stopBroker,
   waitFor,
 } from "./harness.ts";
-import { makeRmq, Rmq, RmqLive } from "../../src/Client.ts";
+import { makeRmq, Rmq } from "../../src/Client.ts";
 import type { Consumer } from "../../src/Client.ts";
 
 /**
@@ -33,7 +33,7 @@ after(stopBroker);
 
 const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(
-    Effect.scoped(Effect.provide(program, RmqLive({ host: broker.host, port: broker.port }))) as Effect.Effect<A>,
+    Effect.scoped(Effect.provide(program, Rmq.layer({ host: broker.host, port: broker.port }))) as Effect.Effect<A>,
   );
 
 test("concurrent publisher creation routes each message to its own binding", async (t) => {

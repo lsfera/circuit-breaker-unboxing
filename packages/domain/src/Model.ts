@@ -144,18 +144,16 @@ export type CircuitEvent = typeof CircuitEvent.Type;
  */
 export type DecodeFailure = "malformed-json" | "schema-mismatch";
 
+const parseJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
+
 /** Parse, then decode through one declaration, and say which step failed. */
 export const readerFor = <S extends Schema.ConstraintDecoder<unknown>>(schema: S) => {
   const decode = Schema.decodeUnknownOption(schema);
-  return (body: string): Result.Result<S["Type"], DecodeFailure> => {
-    let json: unknown;
-    try {
-      json = JSON.parse(body);
-    } catch {
-      return Result.fail("malformed-json");
-    }
-    return Result.fromOption(decode(json), (): DecodeFailure => "schema-mismatch");
-  };
+  return (body: string): Result.Result<S["Type"], DecodeFailure> =>
+    O.match(parseJson(body), {
+      onNone: () => Result.fail("malformed-json"),
+      onSome: (json) => Result.fromOption(decode(json), (): DecodeFailure => "schema-mismatch"),
+    });
 };
 
 /**
@@ -264,6 +262,6 @@ export const defaultConfig: AggregatorConfig = {
  * nothing is forced to declare a dependency on it, but any test can override it
  * for one call with Effect.provideService.
  */
-export const Config = Context.Reference<AggregatorConfig>("Config", {
+export const Config = Context.Reference<AggregatorConfig>("@egress/domain/Model/Config", {
   defaultValue: () => defaultConfig,
 });

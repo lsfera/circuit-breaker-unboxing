@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Ref, Option as O, Result, Schema } from "effect";
+import { Context, Effect, Layer, Ref, Option as O, Predicate, Result, Schema } from "effect";
 import { CoordinationUnavailable } from "./Coordination.ts";
 import type { RedisLike } from "./Coordination.ts";
 import { decodeCircuitEvent, readerFor } from "@egress/domain/Model.ts";
@@ -56,7 +56,7 @@ export class Outbox extends Context.Service<
     readonly apis: Effect.Effect<ReadonlyArray<string>, CoordinationUnavailable>;
     readonly depth: (apiId: string) => Effect.Effect<number, CoordinationUnavailable>;
   }
->()("Outbox") {}
+>()("@egress/aggregator/Outbox") {}
 
 // ---------------------------------------------------------------------------
 // In memory: what solo mode uses, and what the unit tests drive.
@@ -163,7 +163,7 @@ const evalGuarded = (
 const readStringList = readerFor(Schema.Array(Schema.String));
 
 const stringList = (result: string | number | null): ReadonlyArray<string> =>
-  typeof result === "string"
+  Predicate.isString(result)
     ? Result.getOrElse(readStringList(result), () => [])
     : [];
 

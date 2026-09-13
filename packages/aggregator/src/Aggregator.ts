@@ -56,7 +56,10 @@ export class Aggregator extends Context.Service<
     /** The loop's interval, so a health check can say what "stalled" means in its own terms. */
     readonly tickMs: number;
   }
->()("Aggregator") { }
+>()("@egress/aggregator/Aggregator") {
+  /** Suspended: `make` is defined below the service it implements. */
+  static readonly layer = Layer.effect(Aggregator, Effect.suspend(() => make));
+}
 
 /**
  * Rebuild a BreakerState from its last published checkpoint rather than
@@ -101,424 +104,421 @@ const seedFromCheckpoint = (
   ),
 });
 
-export const AggregatorLayer = Layer.effect(
-  Aggregator,
-  Effect.gen(function* () {
-    const cfg = yield* Config;
-    const ha = yield* HaSettings;
-    const fleet = yield* FleetSource;
-    const bus = yield* EventBus;
-    const sink = yield* EventSink;
-    const leader = yield* LeaderElection;
-    const checkpoints = yield* CheckpointStore;
+const make = Effect.gen(function* () {
+  const cfg = yield* Config;
+  const ha = yield* HaSettings;
+  const fleet = yield* FleetSource;
+  const bus = yield* EventBus;
+  const sink = yield* EventSink;
+  const leader = yield* LeaderElection;
+  const checkpoints = yield* CheckpointStore;
 
-    const registry = yield* Ref.make<Registry>({
-      breakers: new Map(),
-      lastSnapshotAt: new Map(),
-    });
-    const leadership = yield* Ref.make<{
-      readonly isLeader: boolean;
-      readonly token: O.Option<LeaseToken>;
-    }>({
-      isLeader: false,
-      token: O.none(),
-    });
+  const registry = yield* Ref.make<Registry>({
+    breakers: new Map(),
+    lastSnapshotAt: new Map(),
+  });
+  const leadership = yield* Ref.make<{
+    readonly isLeader: boolean;
+    readonly token: O.Option<LeaseToken>;
+  }>({
+    isLeader: false,
+    token: O.none(),
+  });
 
-    /**
-     * Stop leading, and drop every breaker held in memory.
-     *
-     * Dropping them is what keeps the sequence guarantee across a demotion:
-     * rehydrate-on-acquire only fires for APIs this instance has no breaker for,
-     * so a warm registry would let a re-promoted instance resume from its own
-     * stale sequence and republish numbers another leader already used. The
-     * per-replica history costs nothing to lose; it repopulates in a few polls.
-     */
-    const demote = Effect.all(
-      [
-        Ref.set(leadership, { isLeader: false, token: O.none() }),
-        Ref.set(registry, { breakers: new Map(), lastSnapshotAt: new Map() }),
-      ],
-      { discard: true },
-    );
+  /**
+   * Stop leading, and drop every breaker held in memory.
+   *
+   * Dropping them is what keeps the sequence guarantee across a demotion:
+   * rehydrate-on-acquire only fires for APIs this instance has no breaker for,
+   * so a warm registry would let a re-promoted instance resume from its own
+   * stale sequence and republish numbers another leader already used. The
+   * per-replica history costs nothing to lose; it repopulates in a few polls.
+   */
+  const demote = Effect.all(
+    [
+      Ref.set(leadership, { isLeader: false, token: O.none() }),
+      Ref.set(registry, { breakers: new Map(), lastSnapshotAt: new Map() }),
+    ],
+    { discard: true },
+  );
 
-    /** Flips only on change, so an outage is two log lines rather than four a second. */
-    const coordinationOk = yield* Ref.make(true);
+  /** Flips only on change, so an outage is two log lines rather than four a second. */
+  const coordinationOk = yield* Ref.make(true);
 
-    /**
-     * Stamped every pass, leader or not. `egress_aggregator_ticks_total`
-     * already proves the loop is alive to Prometheus; this is the same fact
-     * in a form a health check can read in one request, without a scrape
-     * interval's worth of delay.
-     */
-    const lastTick = yield* Ref.make(0);
+  /**
+   * Stamped every pass, leader or not. `egress_aggregator_ticks_total`
+   * already proves the loop is alive to Prometheus; this is the same fact
+   * in a form a health check can read in one request, without a scrape
+   * interval's worth of delay.
+   */
+  const lastTick = yield* Ref.make(0);
 
-    const attemptTick = Effect.gen(
-      function* () {
-        yield* Metric.update(Telemetry.ticks, 1);
-        yield* Clock.currentTimeMillis.pipe(
-          Effect.flatMap((now) => Ref.set(lastTick, now)),
-        );
-        const tokenOpt = yield* leader.tryAcquireOrRenew(ha.instanceId, ha.leaseTtlMs);
-        yield* Ref.getAndSet(coordinationOk, true).pipe(
-          Effect.flatMap((wasOk) =>
-            wasOk
-              ? Effect.void
-              : Effect.logInfo(`${ha.instanceId}: coordination is reachable again`),
+  const attemptTick = Effect.gen(
+    function* () {
+      yield* Metric.update(Telemetry.ticks, 1);
+      yield* Clock.currentTimeMillis.pipe(
+        Effect.flatMap((now) => Ref.set(lastTick, now)),
+      );
+      const tokenOpt = yield* leader.tryAcquireOrRenew(ha.instanceId, ha.leaseTtlMs);
+      yield* Ref.getAndSet(coordinationOk, true).pipe(
+        Effect.flatMap((wasOk) =>
+          wasOk
+            ? Effect.void
+            : Effect.logInfo(`${ha.instanceId}: coordination is reachable again`),
+        ),
+      );
+      yield* Metric.update(Telemetry.isLeader, O.isSome(tokenOpt) ? 1 : 0);
+
+      if (O.isNone(tokenOpt)) {
+        // Standby: do not poll, do not step, do not publish. The only
+        // thing a non-leader instance does is keep trying to acquire.
+        yield* demote;
+        return [];
+      }
+      const token = tokenOpt.value;
+      yield* Ref.set(leadership, { isLeader: true, token: O.some(token) });
+
+      const [pollDuration, reports] = yield* Effect.timed(fleet.poll);
+      yield* Metric.update(Telemetry.fleetPollDuration, pollDuration);
+      const now = yield* Clock.currentTimeMillis;
+
+      // Rehydrate any API this instance is leading and has no breaker for,
+      // so `sequence` continues after a failover instead of restarting at
+      // zero.
+      //
+      // The condition is "no breaker yet", and nothing more. It used to also
+      // require the *acquisition tick*, which quietly meant "only if reports
+      // for that API happened to arrive on the same tick the lease was
+      // taken". A polling source answers immediately, so this held in the
+      // simulator and in every test; the push source cannot, because no
+      // Envoy has streamed to a process that started milliseconds ago. In
+      // `--source=envoy-push` — what docker-compose runs — every leader
+      // change therefore cold-started every API at sequence 0, with the
+      // checkpoint sitting in Redis unread and nothing logged. The daemon
+      // fleet's own duplicate counter is what caught it.
+      //
+      // Dropping the guard costs nothing: `known.has(id)` is true from the
+      // moment an API is seeded, so this is one load per API per instance,
+      // not one per tick. An API first seen long after acquisition now
+      // resumes too, which is the same intent applied honestly.
+      const known = yield* Ref.get(registry).pipe(Effect.map((reg) => reg.breakers));
+      const toRehydrate = [...new Set(reports.map((r) => r.apiId))].filter(
+        (id) => !known.has(id),
+      );
+      const rehydrated = yield* Effect.forEach(toRehydrate, (apiId) =>
+        checkpoints.load(apiId).pipe(Effect.map((cp) => [apiId, cp] as const)),
+      );
+      const checkpointByApi = new Map(rehydrated);
+
+      const events = yield* Ref.modify(registry, (reg) => {
+        // Several replicas report the same API, so this is a left fold and
+        // not a map: each report folds into the breaker the last one left.
+        const ingested = Arr.reduce(reports, new Map(reg.breakers), (acc, report) =>
+          acc.set(
+            report.apiId,
+            Breaker.ingest(
+              acc.get(report.apiId) ??
+                seedFromCheckpoint(
+                  report.apiId,
+                  checkpointByApi.get(report.apiId) ?? O.none(),
+                  cfg,
+                  now,
+                ),
+              report,
+            ),
           ),
         );
-        yield* Metric.update(Telemetry.isLeader, O.isSome(tokenOpt) ? 1 : 0);
 
-        if (O.isNone(tokenOpt)) {
-          // Standby: do not poll, do not step, do not publish. The only
-          // thing a non-leader instance does is keep trying to acquire.
-          yield* demote;
-          return [];
-        }
-        const token = tokenOpt.value;
-        yield* Ref.set(leadership, { isLeader: true, token: O.some(token) });
-
-        const [pollDuration, reports] = yield* Effect.timed(fleet.poll);
-        yield* Metric.update(Telemetry.fleetPollDuration, pollDuration);
-        const now = yield* Clock.currentTimeMillis;
-
-        // Rehydrate any API this instance is leading and has no breaker for,
-        // so `sequence` continues after a failover instead of restarting at
-        // zero.
-        //
-        // The condition is "no breaker yet", and nothing more. It used to also
-        // require the *acquisition tick*, which quietly meant "only if reports
-        // for that API happened to arrive on the same tick the lease was
-        // taken". A polling source answers immediately, so this held in the
-        // simulator and in every test; the push source cannot, because no
-        // Envoy has streamed to a process that started milliseconds ago. In
-        // `--source=envoy-push` — what docker-compose runs — every leader
-        // change therefore cold-started every API at sequence 0, with the
-        // checkpoint sitting in Redis unread and nothing logged. The daemon
-        // fleet's own duplicate counter is what caught it.
-        //
-        // Dropping the guard costs nothing: `known.has(id)` is true from the
-        // moment an API is seeded, so this is one load per API per instance,
-        // not one per tick. An API first seen long after acquisition now
-        // resumes too, which is the same intent applied honestly.
-        const known = yield* Ref.get(registry).pipe(Effect.map((reg) => reg.breakers));
-        const toRehydrate = [...new Set(reports.map((r) => r.apiId))].filter(
-          (id) => !known.has(id),
-        );
-        const rehydrated = yield* Effect.forEach(toRehydrate, (apiId) =>
-          checkpoints.load(apiId).pipe(Effect.map((cp) => [apiId, cp] as const)),
-        );
-        const checkpointByApi = new Map(rehydrated);
-
-        const events = yield* Ref.modify(registry, (reg) => {
-          // Several replicas report the same API, so this is a left fold and
-          // not a map: each report folds into the breaker the last one left.
-          const ingested = Arr.reduce(reports, new Map(reg.breakers), (acc, report) =>
-            acc.set(
-              report.apiId,
-              Breaker.ingest(
-                acc.get(report.apiId) ??
-                  seedFromCheckpoint(
-                    report.apiId,
-                    checkpointByApi.get(report.apiId) ?? O.none(),
-                    cfg,
-                    now,
-                  ),
-                report,
+        const stepped = Arr.map([...ingested], ([apiId, before]) => {
+          const [after, change] = Breaker.step(before, now, cfg);
+          return {
+            apiId,
+            after,
+            // A transition wins over the heartbeat snapshot: both carry the
+            // same state, and only the transition carries where it came from.
+            event: O.orElse(
+              O.map(change, (transition) =>
+                stateChanged(Breaker.snapshot(after), transition.from, now),
               ),
+              () =>
+                now - (reg.lastSnapshotAt.get(apiId) ?? 0) >= cfg.snapshotMs
+                  ? O.some(snapshotEvent(Breaker.snapshot(after), now))
+                  : O.none(),
             ),
-          );
-
-          const stepped = Arr.map([...ingested], ([apiId, before]) => {
-            const [after, change] = Breaker.step(before, now, cfg);
-            return {
-              apiId,
-              after,
-              // A transition wins over the heartbeat snapshot: both carry the
-              // same state, and only the transition carries where it came from.
-              event: O.orElse(
-                O.map(change, (transition) =>
-                  stateChanged(Breaker.snapshot(after), transition.from, now),
-                ),
-                () =>
-                  now - (reg.lastSnapshotAt.get(apiId) ?? 0) >= cfg.snapshotMs
-                    ? O.some(snapshotEvent(Breaker.snapshot(after), now))
-                    : O.none(),
-              ),
-            };
-          });
-
-          return [
-            Arr.flatMap(stepped, ({ event }) => O.toArray(event)) as ReadonlyArray<CircuitEvent>,
-            {
-              breakers: new Map(Arr.map(stepped, ({ apiId, after }) => [apiId, after] as const)),
-              // Anything published restarts that API's snapshot clock, so a
-              // transition is not followed by a redundant heartbeat.
-              lastSnapshotAt: Arr.reduce(
-                stepped,
-                new Map(reg.lastSnapshotAt),
-                (acc, { apiId, event }) =>
-                  O.match(event, { onNone: () => acc, onSome: () => acc.set(apiId, now) }),
-              ),
-            },
-          ];
+          };
         });
 
-        // Checkpoint every transition under this tick's token before telling
-        // anyone else about it. A rejection means a newer instance has
-        // already taken the lease — stop publishing immediately rather than
-        // let a demoted instance keep talking; the remaining events in this
-        // tick are dropped, not queued, since the new leader will re-derive
-        // them itself from the next poll.
-        type Publishing = {
-          readonly publishable: ReadonlyArray<CircuitEvent>;
-          readonly fenced: boolean;
-        };
-        const { publishable } = yield* Effect.reduce(
-          events,
-          (): Publishing => ({ publishable: [], fenced: false }),
-          (acc, e): Effect.Effect<Publishing, CoordinationUnavailable> =>
-            // Once fenced, the remaining events are dropped rather than
-            // queued: the new leader re-derives them from its own next poll.
-            acc.fenced
-              ? Effect.succeed(acc)
-              : e.type !== SEQUENCED_EVENT
-                ? Effect.succeed({ ...acc, publishable: Arr.append(acc.publishable, e) })
-                : Effect.gen(function* () {
-                    const after = (yield* Ref.get(registry)).breakers.get(e.data.apiId);
-                    const checkpoint: Checkpoint = {
-                      state: e.data.state,
-                      // No cast: the published event's `reason` is the vocabulary
-                      // itself now, so what decodes off the wire is already a Reason.
-                      reason: e.data.reason,
-                      sequence: e.data.sequence,
-                      changedAt: now,
-                      openBackoffMs: after?.openBackoffMs ?? cfg.openMs,
-                    };
-                    const fenced = yield* checkpoints.save(e.data.apiId, token, checkpoint).pipe(
-                      Effect.as(false),
-                      Effect.catchTag("CheckpointFenced", (err) =>
-                        Effect.andThen(
-                          Effect.logWarning(
-                            `lost leadership publishing ${e.data.apiId}: ` +
-                            `token ${formatToken(err.attempted)} superseded by ` +
-                            O.match(err.current, {
-                              onNone: () => "an unreadable one",
-                              onSome: formatToken,
-                            }),
-                          ),
-                          Effect.succeed(true),
-                        ),
-                      ),
-                    );
-                    // Same demotion as losing the lease outright, registry drop
-                    // included — being fenced *is* how this instance finds out
-                    // someone else has already moved the sequence on.
-                    return yield* fenced
-                      ? Effect.as(
-                          Effect.all(
-                            [
-                              demote,
-                              Metric.update(Telemetry.isLeader, 0),
-                              Metric.update(
-                                Metric.withAttributes(Telemetry.fencingConflicts, {
-                                  apiId: e.data.apiId,
-                                }),
-                                1,
-                              ),
-                            ],
-                            { discard: true },
-                          ),
-                          { ...acc, fenced: true },
-                        )
-                      : Effect.succeed({ ...acc, publishable: Arr.append(acc.publishable, e) });
-                  }),
-        );
-
-        // Gauges reflect the fleet's current view every tick, whether or not
-        // anything published — a dashboard watching mid-dwell should not look
-        // frozen just because no event crossed the publish threshold yet.
-        yield* Ref.get(registry).pipe(
-          Effect.flatMap((reg) =>
-            Effect.forEach(
-              [...reg.breakers.values()].map(Breaker.snapshot),
-              (snap) =>
-                Effect.all(
-                  [
-                    Metric.update(
-                      Metric.withAttributes(Telemetry.circuitState, { apiId: snap.apiId }),
-                      Telemetry.STATE_CODE[snap.state],
-                    ),
-                    Metric.update(
-                      Metric.withAttributes(Telemetry.circuitHealthyEndpoints, {
-                        apiId: snap.apiId,
-                      }),
-                      snap.healthyEndpoints,
-                    ),
-                    Metric.update(
-                      Metric.withAttributes(Telemetry.circuitTotalEndpoints, {
-                        apiId: snap.apiId,
-                      }),
-                      snap.totalEndpoints,
-                    ),
-                    Metric.update(
-                      Metric.withAttributes(Telemetry.circuitReportingReplicas, {
-                        apiId: snap.apiId,
-                      }),
-                      snap.reportingReplicas,
-                    ),
-                    Metric.update(
-                      Metric.withAttributes(Telemetry.circuitEjectionsActive, {
-                        apiId: snap.apiId,
-                      }),
-                      snap.replicas.reduce((n, r) => n + r.ejectionsActive, 0),
-                    ),
-                    Metric.update(
-                      Metric.withAttributes(Telemetry.circuitSequence, { apiId: snap.apiId }),
-                      snap.sequence,
-                    ),
-                  ],
-                  { discard: true },
-                ),
-              { discard: true },
+        return [
+          Arr.flatMap(stepped, ({ event }) => O.toArray(event)) as ReadonlyArray<CircuitEvent>,
+          {
+            breakers: new Map(Arr.map(stepped, ({ apiId, after }) => [apiId, after] as const)),
+            // Anything published restarts that API's snapshot clock, so a
+            // transition is not followed by a redundant heartbeat.
+            lastSnapshotAt: Arr.reduce(
+              stepped,
+              new Map(reg.lastSnapshotAt),
+              (acc, { apiId, event }) =>
+                O.match(event, { onNone: () => acc, onSome: () => acc.set(apiId, now) }),
             ),
-          ),
-        );
+          },
+        ];
+      });
 
-        yield* Effect.forEach(
-          publishable,
-          (e) =>
-            Metric.update(
-              e.type === SEQUENCED_EVENT
-                ? Metric.withAttributes(Telemetry.circuitTransitions, {
-                    apiId: e.data.apiId,
-                    reason: e.data.reason,
+      // Checkpoint every transition under this tick's token before telling
+      // anyone else about it. A rejection means a newer instance has
+      // already taken the lease — stop publishing immediately rather than
+      // let a demoted instance keep talking; the remaining events in this
+      // tick are dropped, not queued, since the new leader will re-derive
+      // them itself from the next poll.
+      type Publishing = {
+        readonly publishable: ReadonlyArray<CircuitEvent>;
+        readonly fenced: boolean;
+      };
+      const { publishable } = yield* Effect.reduce(
+        events,
+        (): Publishing => ({ publishable: [], fenced: false }),
+        (acc, e): Effect.Effect<Publishing, CoordinationUnavailable> =>
+          // Once fenced, the remaining events are dropped rather than
+          // queued: the new leader re-derives them from its own next poll.
+          acc.fenced
+            ? Effect.succeed(acc)
+            : e.type !== SEQUENCED_EVENT
+              ? Effect.succeed({ ...acc, publishable: Arr.append(acc.publishable, e) })
+              : Effect.gen(function* () {
+                  const after = (yield* Ref.get(registry)).breakers.get(e.data.apiId);
+                  const checkpoint: Checkpoint = {
                     state: e.data.state,
-                  })
-                : Metric.withAttributes(Telemetry.circuitSnapshots, { apiId: e.data.apiId }),
-              1,
-            ),
-          { discard: true },
-        );
-
-        // Publish to the in-process bus first (the console), then hand to the
-        // sink, which forks delivery so a slow subscriber cannot stall the loop.
-        yield* Effect.forEach(publishable, (e) => bus.publish(e), {
-          discard: true,
-        });
-        yield* Effect.forEach(publishable, (e) => sink.deliver(e), {
-          discard: true,
-        });
-
-        // Then replay whatever an earlier attempt could not deliver.
-        //
-        // Here, and only here, because this branch runs only when the lease
-        // was acquired: two instances draining one shared outbox would deliver
-        // every entry twice, which is exactly the break the sequence contract
-        // exists to make visible. Forked for the same reason delivery is —
-        // a subscriber that hangs must cost the loop nothing — and the sink
-        // itself refuses to run two passes at once.
-        yield* Effect.forkChild(sink.drainOutbox);
-        return publishable;
-      },
-    );
-
-    /**
-     * A tick that cannot reach the coordinator is a *skipped* tick, not a dead
-     * loop: stand down, because an instance that cannot confirm it holds the lease
-     * must not act as leader, and try again next tick.
-     *
-     * The shape matters as much as the handling — as a defect rather than a typed
-     * failure, an outage would terminate `Effect.repeat` and end the loop for good
-     * in a process that stays up and keeps answering 200.
-     */
-    const tick: Effect.Effect<ReadonlyArray<CircuitEvent>> = attemptTick.pipe(
-      Effect.catchTag("CoordinationUnavailable", (err) =>
-        Effect.gen(function* () {
-          yield* demote;
-          yield* Metric.update(Telemetry.coordinationErrors, 1);
-          // Say "not the leader" rather than saying nothing. `isLeader` is
-          // only updated after an acquire attempt returns, so an instance that
-          // has never reached the coordinator publishes no series at all —
-          // and an alert written as `max(egress_aggregator_is_leader) == 0`
-          // cannot fire on a metric that is absent. Found by partitioning one
-          // instance from Redis and watching the gauge vanish instead of drop.
-          yield* Metric.update(Telemetry.isLeader, 0);
-          yield* Ref.getAndSet(coordinationOk, false).pipe(
-            Effect.flatMap((wasOk) =>
-              wasOk
-                ? Effect.logWarning(
-                    `${ha.instanceId}: coordination unavailable during ${err.operation}, ` +
-                    `standing down until it returns — ${err.cause}`,
-                  )
-                : Effect.void,
-            ),
-          );
-          return [] as ReadonlyArray<CircuitEvent>;
-        }),
-      ),
-    );
-
-    const snapshots = Ref.get(registry).pipe(
-      Effect.map((reg) =>
-        [...reg.breakers.values()]
-          .map(Breaker.snapshot)
-          .sort((a, b) => a.apiId.localeCompare(b.apiId)),
-      ),
-    );
-
-    const stateOf = (apiId: string) =>
-      Ref.get(registry).pipe(
-        Effect.map((reg) => O.fromUndefinedOr(reg.breakers.get(apiId)?.state)),
+                    // No cast: the published event's `reason` is the vocabulary
+                    // itself now, so what decodes off the wire is already a Reason.
+                    reason: e.data.reason,
+                    sequence: e.data.sequence,
+                    changedAt: now,
+                    openBackoffMs: after?.openBackoffMs ?? cfg.openMs,
+                  };
+                  const fenced = yield* checkpoints.save(e.data.apiId, token, checkpoint).pipe(
+                    Effect.as(false),
+                    Effect.catchTag("CheckpointFenced", (err) =>
+                      Effect.andThen(
+                        Effect.logWarning(
+                          `lost leadership publishing ${e.data.apiId}: ` +
+                          `token ${formatToken(err.attempted)} superseded by ` +
+                          O.match(err.current, {
+                            onNone: () => "an unreadable one",
+                            onSome: formatToken,
+                          }),
+                        ),
+                        Effect.succeed(true),
+                      ),
+                    ),
+                  );
+                  // Same demotion as losing the lease outright, registry drop
+                  // included — being fenced *is* how this instance finds out
+                  // someone else has already moved the sequence on.
+                  return yield* fenced
+                    ? Effect.as(
+                        Effect.all(
+                          [
+                            demote,
+                            Metric.update(Telemetry.isLeader, 0),
+                            Metric.update(
+                              Metric.withAttributes(Telemetry.fencingConflicts, {
+                                apiId: e.data.apiId,
+                              }),
+                              1,
+                            ),
+                          ],
+                          { discard: true },
+                        ),
+                        { ...acc, fenced: true },
+                      )
+                    : Effect.succeed({ ...acc, publishable: Arr.append(acc.publishable, e) });
+                }),
       );
 
-    const isLeader = Ref.get(leadership).pipe(Effect.map((l) => l.isLeader));
-
-    /**
-     * Hand the lease back on the way out, so a planned stop does not cost the
-     * standby `leaseTtlMs` of waiting with nobody publishing. `release` only
-     * removes the lease if this instance still holds it, so a demoted instance
-     * calling it cannot evict whoever took over.
-     *
-     * Best effort: if the coordinator is unreachable the lease expires the old
-     * way, and failing here would only make a clean shutdown noisy.
-     */
-    const releaseOnShutdown = Effect.when(
-      leader.release(ha.instanceId).pipe(
-        Effect.flatMap(() =>
-          Effect.logInfo(`${ha.instanceId}: lease released on shutdown`),
-        ),
-        Effect.catch((err) =>
-          Effect.logWarning(
-            `${ha.instanceId}: could not release the lease on shutdown ` +
-            `(${err.operation}) — it will expire instead`,
+      // Gauges reflect the fleet's current view every tick, whether or not
+      // anything published — a dashboard watching mid-dwell should not look
+      // frozen just because no event crossed the publish threshold yet.
+      yield* Ref.get(registry).pipe(
+        Effect.flatMap((reg) =>
+          Effect.forEach(
+            [...reg.breakers.values()].map(Breaker.snapshot),
+            (snap) =>
+              Effect.all(
+                [
+                  Metric.update(
+                    Metric.withAttributes(Telemetry.circuitState, { apiId: snap.apiId }),
+                    Telemetry.STATE_CODE[snap.state],
+                  ),
+                  Metric.update(
+                    Metric.withAttributes(Telemetry.circuitHealthyEndpoints, {
+                      apiId: snap.apiId,
+                    }),
+                    snap.healthyEndpoints,
+                  ),
+                  Metric.update(
+                    Metric.withAttributes(Telemetry.circuitTotalEndpoints, {
+                      apiId: snap.apiId,
+                    }),
+                    snap.totalEndpoints,
+                  ),
+                  Metric.update(
+                    Metric.withAttributes(Telemetry.circuitReportingReplicas, {
+                      apiId: snap.apiId,
+                    }),
+                    snap.reportingReplicas,
+                  ),
+                  Metric.update(
+                    Metric.withAttributes(Telemetry.circuitEjectionsActive, {
+                      apiId: snap.apiId,
+                    }),
+                    snap.replicas.reduce((n, r) => n + r.ejectionsActive, 0),
+                  ),
+                  Metric.update(
+                    Metric.withAttributes(Telemetry.circuitSequence, { apiId: snap.apiId }),
+                    snap.sequence,
+                  ),
+                ],
+                { discard: true },
+              ),
+            { discard: true },
           ),
         ),
-      ),
-      Ref.get(leadership).pipe(Effect.map((held) => held.isLeader)),
-    ).pipe(Effect.asVoid);
+      );
 
-    // The loop is a Schedule, not a setInterval. That is what lets TestClock
-    // drive thousands of simulated seconds instantly and deterministically,
-    // and what makes the loop interruptible as a value rather than via a
-    // clearInterval handle someone has to remember to call.
-    //
-    // `ensuring` rather than a finalizer on the layer: the lease belongs to
-    // this loop, so it should be given back exactly when the loop stops,
-    // whether that is an interrupt from SIGTERM or the scope closing.
-    const run = tick.pipe(
-      Effect.repeat(Schedule.spaced(Duration.millis(cfg.tickMs))),
-      Effect.asVoid,
-      Effect.ensuring(releaseOnShutdown),
+      yield* Effect.forEach(
+        publishable,
+        (e) =>
+          Metric.update(
+            e.type === SEQUENCED_EVENT
+              ? Metric.withAttributes(Telemetry.circuitTransitions, {
+                  apiId: e.data.apiId,
+                  reason: e.data.reason,
+                  state: e.data.state,
+                })
+              : Metric.withAttributes(Telemetry.circuitSnapshots, { apiId: e.data.apiId }),
+            1,
+          ),
+        { discard: true },
+      );
+
+      // Publish to the in-process bus first (the console), then hand to the
+      // sink, which forks delivery so a slow subscriber cannot stall the loop.
+      yield* Effect.forEach(publishable, (e) => bus.publish(e), {
+        discard: true,
+      });
+      yield* Effect.forEach(publishable, (e) => sink.deliver(e), {
+        discard: true,
+      });
+
+      // Then replay whatever an earlier attempt could not deliver.
+      //
+      // Here, and only here, because this branch runs only when the lease
+      // was acquired: two instances draining one shared outbox would deliver
+      // every entry twice, which is exactly the break the sequence contract
+      // exists to make visible. Forked for the same reason delivery is —
+      // a subscriber that hangs must cost the loop nothing — and the sink
+      // itself refuses to run two passes at once.
+      yield* Effect.forkChild(sink.drainOutbox);
+      return publishable;
+    },
+  );
+
+  /**
+   * A tick that cannot reach the coordinator is a *skipped* tick, not a dead
+   * loop: stand down, because an instance that cannot confirm it holds the lease
+   * must not act as leader, and try again next tick.
+   *
+   * The shape matters as much as the handling — as a defect rather than a typed
+   * failure, an outage would terminate `Effect.repeat` and end the loop for good
+   * in a process that stays up and keeps answering 200.
+   */
+  const tick: Effect.Effect<ReadonlyArray<CircuitEvent>> = attemptTick.pipe(
+    Effect.catchTag("CoordinationUnavailable", (err) =>
+      Effect.gen(function* () {
+        yield* demote;
+        yield* Metric.update(Telemetry.coordinationErrors, 1);
+        // Say "not the leader" rather than saying nothing. `isLeader` is
+        // only updated after an acquire attempt returns, so an instance that
+        // has never reached the coordinator publishes no series at all —
+        // and an alert written as `max(egress_aggregator_is_leader) == 0`
+        // cannot fire on a metric that is absent. Found by partitioning one
+        // instance from Redis and watching the gauge vanish instead of drop.
+        yield* Metric.update(Telemetry.isLeader, 0);
+        yield* Ref.getAndSet(coordinationOk, false).pipe(
+          Effect.flatMap((wasOk) =>
+            wasOk
+              ? Effect.logWarning(
+                  `${ha.instanceId}: coordination unavailable during ${err.operation}, ` +
+                  `standing down until it returns — ${err.cause}`,
+                )
+              : Effect.void,
+          ),
+        );
+        return [] as ReadonlyArray<CircuitEvent>;
+      }),
+    ),
+  );
+
+  const snapshots = Ref.get(registry).pipe(
+    Effect.map((reg) =>
+      [...reg.breakers.values()]
+        .map(Breaker.snapshot)
+        .sort((a, b) => a.apiId.localeCompare(b.apiId)),
+    ),
+  );
+
+  const stateOf = (apiId: string) =>
+    Ref.get(registry).pipe(
+      Effect.map((reg) => O.fromUndefinedOr(reg.breakers.get(apiId)?.state)),
     );
 
-    return {
-      tick,
-      snapshots,
-      stateOf,
-      isLeader,
-      run,
-      lastTickAt: Ref.get(lastTick),
-      tickMs: cfg.tickMs,
-    };
-  }),
-);
+  const isLeader = Ref.get(leadership).pipe(Effect.map((l) => l.isLeader));
+
+  /**
+   * Hand the lease back on the way out, so a planned stop does not cost the
+   * standby `leaseTtlMs` of waiting with nobody publishing. `release` only
+   * removes the lease if this instance still holds it, so a demoted instance
+   * calling it cannot evict whoever took over.
+   *
+   * Best effort: if the coordinator is unreachable the lease expires the old
+   * way, and failing here would only make a clean shutdown noisy.
+   */
+  const releaseOnShutdown = Effect.when(
+    leader.release(ha.instanceId).pipe(
+      Effect.flatMap(() =>
+        Effect.logInfo(`${ha.instanceId}: lease released on shutdown`),
+      ),
+      Effect.catch((err) =>
+        Effect.logWarning(
+          `${ha.instanceId}: could not release the lease on shutdown ` +
+          `(${err.operation}) — it will expire instead`,
+        ),
+      ),
+    ),
+    Ref.get(leadership).pipe(Effect.map((held) => held.isLeader)),
+  ).pipe(Effect.asVoid);
+
+  // The loop is a Schedule, not a setInterval. That is what lets TestClock
+  // drive thousands of simulated seconds instantly and deterministically,
+  // and what makes the loop interruptible as a value rather than via a
+  // clearInterval handle someone has to remember to call.
+  //
+  // `ensuring` rather than a finalizer on the layer: the lease belongs to
+  // this loop, so it should be given back exactly when the loop stops,
+  // whether that is an interrupt from SIGTERM or the scope closing.
+  const run = tick.pipe(
+    Effect.repeat(Schedule.spaced(Duration.millis(cfg.tickMs))),
+    Effect.asVoid,
+    Effect.ensuring(releaseOnShutdown),
+  );
+
+  return Aggregator.of({
+    tick,
+    snapshots,
+    stateOf,
+    isLeader,
+    run,
+    lastTickAt: Ref.get(lastTick),
+    tickMs: cfg.tickMs,
+  });
+});

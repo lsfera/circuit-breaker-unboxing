@@ -136,7 +136,7 @@ const defaultHaSettings: HaSettings = {
   leaseTtlMs: 5000,
 };
 
-export const HaSettings = Context.Reference<HaSettings>("HaSettings", {
+export const HaSettings = Context.Reference<HaSettings>("@egress/aggregator/Coordination/HaSettings", {
   defaultValue: () => defaultHaSettings,
 });
 
@@ -155,7 +155,7 @@ export class LeaderElection extends Context.Service<
     ) => Effect.Effect<O.Option<LeaseToken>, CoordinationUnavailable>;
     readonly release: (holderId: string) => Effect.Effect<void, CoordinationUnavailable>;
   }
->()("LeaderElection") {}
+>()("@egress/aggregator/Coordination/LeaderElection") {}
 
 export class CheckpointStore extends Context.Service<
   CheckpointStore,
@@ -182,7 +182,7 @@ export class CheckpointStore extends Context.Service<
       apiId: string,
     ) => Effect.Effect<O.Option<Checkpoint>, CoordinationUnavailable>;
   }
->()("CheckpointStore") {}
+>()("@egress/aggregator/Coordination/CheckpointStore") {}
 
 // ---------------------------------------------------------------------------
 // In-memory implementation. Not a stub, and not a leftover — it is load

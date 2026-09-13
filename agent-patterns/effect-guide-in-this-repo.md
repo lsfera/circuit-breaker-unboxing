@@ -1,0 +1,61 @@
+# Effect's guide, and where this repository departs from it
+
+[`repos/effect/LLMS.md`](../repos/effect/LLMS.md) is Effect's own guide for
+agents, and `AGENTS.md` says to read it first. It describes defaults for a
+typical Effect application. Where it disagrees with a decision recorded in this
+repository — an ADR, or a reason written next to the code — **the repository
+wins**. This note lists both halves so that nobody "fixes" the code back toward
+the guide.
+
+Checked against `effect@4.0.0-rc.115` on 2026-09-13.
+
+## Guidance this repository follows
+
+| The guide says | Here | Where |
+| --- | --- | --- |
+| A reusable function returning an Effect is `Effect.fn` / `Effect.fnUntraced`, not a function that wraps `Effect.gen` | `Effect.fnUntraced` — see below for why not the traced form | `makeRmq`, `makeWebhookSink`, `runDaemon`, `runProducer`, `ConsoleFrames.make`, `pollOne` |
+| A pipe on such a function goes in as extra arguments, not `.pipe` | Each pipeable receives the effect and then the function's arguments | `pollOne` in `FleetSource.ts`: `(effect, replica) => Effect.catch(effect, …)` |
+| A service with one implementation carries it as `static readonly layer`, and builds it with `Service.of` | `Aggregator.layer`, `EventBus.layer`, `Rmq.layer(opts)` | `Aggregator.ts`, `Events.ts`, `rmq/Client.ts` |
+| Service identifiers name the package and file | `"@egress/aggregator/Events/EventBus"`, `"@egress/domain/Model/Config"` | every `Context.Service` and `Context.Reference` |
+| Runtime type checks come from `Predicate`, not `typeof` | `Predicate.isString` | `rmq/Client.ts`, `Outbox.ts` |
+| Parse untrusted text with `Schema`, not by hand | `Schema.fromJsonString(Schema.Unknown)`, then the message schema | `readerFor` in `domain/Model.ts` |
+| Format instants with `DateTime` | `DateTime.formatIso(DateTime.makeUnsafe(ms))`, byte-identical to `toISOString()` | the published event in `Events.ts` |
+| Output from an Effect program goes through `Console` | `Console.log`, not `Effect.sync(() => console.log(…))` | `demo/driver.ts`, `subscriber.ts` |
+
+Two traps met while applying these:
+
+- **A static layer is evaluated when the class is.** `Aggregator`'s implementation
+  is defined below the class, so its layer is
+  `Layer.effect(Aggregator, Effect.suspend(() => make))`. Referencing `make`
+  directly throws at module load. `Rmq.layer` has no such problem, because it is
+  a function that runs only when called.
+- **`Schema.UnknownFromJsonString` is `@internal`** in this version
+  (`Schema.ts:9208`). Use the public `Schema.fromJsonString(Schema.Unknown)`.
+  Decoding in two steps is what keeps ADR 006's distinction between
+  `malformed-json` and `schema-mismatch`.
+
+## Where the repository wins
+
+| The guide says | This repository does | Because |
+| --- | --- | --- |
+| Define errors with `Schema.TaggedError` | `Data.TaggedError` — `RmqError`, `CoordinationUnavailable`, `CheckpointFenced`, `DeliveryFailed`, `StatsUnavailable` | [ADR 006](../docs/decisions/006-representing-absence.md) settles failures in the error channel as `Data.TaggedError`s recovered with `catchTag`. None of them crosses a process boundary, so a schema for their encoding would buy nothing. `RmqError` also overrides `message`, which `Data.TaggedError` prints. |
+| Tracing-relevant functions use `Effect.fn("name")`, which opens a span | `Effect.fnUntraced`; spans are opened explicitly with `Effect.withSpan` at chosen boundaries | [ADR 003](../docs/decisions/003-tracing.md) keeps tracing to `work.publish`, `work.call` and `work.redrive`, joined across the broker, with tail sampling behind them. A span for every service function would be volume the collector discards. |
+| Export telemetry with the lightweight `Otlp` modules in new projects | `@effect/opentelemetry/NodeSdk` | [ADR 003](../docs/decisions/003-tracing.md). The guide itself allows NodeSdk when integrating with an existing OpenTelemetry setup, and this stack has one: the collector and its sampling policies. |
+| Test with `@effect/vitest` and `it.effect` | `node:test` running Effect programs, with `TestClock` from `effect/testing` | The repository's test runner. `packages/aggregator/test/ConsoleFrames.test.ts` is a worked example. |
+| Use `Clock` / `DateTime` for the current time | `Date.now()` in six calls | Each runs in an AMQP or gRPC callback with no fiber to read a `Clock` from, and says so in a comment: `EnvoyPushSource.ts`, `Redrive.ts`, the floor lease in `daemon.ts`. Every instant computed inside the control loop comes from `Clock`, which is what lets `TestClock` drive it. |
+
+## Considered, not applied
+
+- **`static readonly layer` on services with several implementations.**
+  `FleetSource` has three (sim, Envoy polling, Envoy push), and `EventSink`,
+  `Outbox` and the two Coordination services have two each. `main.ts` chooses
+  between them from flags. The guide's static layer is a single default. The
+  push implementation also lives in a module that imports `FleetSource`, so
+  attaching it to the class would create an import cycle. These keep named
+  layers.
+- **`HttpApi` instead of `HttpRouter`.** The guide recommends it for
+  schema-first APIs with a generated typed client. This server's routes are two
+  SSE streams, Prometheus text, a static page and a demo-only failure switch.
+  Their consumers are a browser, `curl`, Prometheus and a webhook. Nothing would
+  use the typed client, and the streaming routes are the ones HttpApi models
+  least directly.
