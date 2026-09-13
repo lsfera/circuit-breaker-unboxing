@@ -8,5 +8,6 @@
   ],
   "disabledMcpjsonServers": [
     "exa"
-  ]
+  ],
+  "autoMemoryDirectory": "/workspace/.claude/memory"
 }

@@ -1,0 +1,6 @@
+- [How the user works on /workspace](rmq-control-plane-design.md) — one commit per request with a narrative body, measure before claiming, the full verification standard, reaching the stack.
+- [Effect style: composition, not if/loops](effect-functional-style.md) — Option/Result combinators and Effect constructs instead of if/for, but never convoluted; check APIs against repos/effect.
+- [Essential comments, not narrative](essential-comments-not-narrative.md) — comments carry invariants and gotchas; history goes in git log and docs/decisions.
+- [Open threads on /workspace](egress-breaker-open-threads.md) — ADR 015 steps 3–5, the v3-era skill, offers not taken up; check before starting new work.
+- [Devcontainer gotchas](devcontainer-environment-gotchas.md) — host suspends corrupt timing runs, git subtree path, pkill self-kill, 600s tool cap, RabbitMQ ignores cgroup memory.
+- [Egress breaker session record](egress-breaker-session-record.md) — article source material: the early build-out and the later measurements that overturned beliefs.
