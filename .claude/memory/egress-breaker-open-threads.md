@@ -13,14 +13,10 @@ As of 2026-09-13. Verify against `git log` and the ADRs before acting.
   with `Last-Event-ID` resume, and gzip last. Browsers still receive
   2.77 MB/s each. The ADR has measured targets; the browser rendering cost has
   never been measured (no browser in this devcontainer).
-- **`.claude/skills/domain-modeling` taught Effect 3 APIs** (`Schema.annotations`,
-  `Schema.Data`, `Schema.DateTimeUtcFromSelf`, `DateTime.unsafeNow`). After that
-  was reported, the file was deleted from the working tree on 2026-09-13, but
-  the deletion is not committed. `AGENTS.md` and
-  `agent-patterns/effect-3-to-4.md` still name it as the example of stale
-  material; update them once the deletion is committed.
-  `.claude/skills/effect-testing` assumes `@effect/vitest`, which the repo does
-  not use.
+- **`.claude/skills/effect-testing` assumes `@effect/vitest`**, which the repo
+  does not use (tests are `node:test` with `TestClock`). Reported, not edited.
+  The `domain-modeling` skill, which taught four Effect 3 APIs, was deleted by
+  the user on 2026-09-13.
 - **Offered, not taken up:**
   - `review/NN-*` branches for publishing the work incrementally, from the
     article request (recommended: annotated branches at pass boundaries, no

@@ -42,12 +42,13 @@ is the wrong fix. See `packages/subscriber/src/subscriber.ts` and
 
 ## Where this repository's own material disagrees
 
-`.claude/skills/domain-modeling/SKILL.md` teaches `Schema.annotations`,
+A `domain-modeling` skill in `.claude/skills/` taught `Schema.annotations`,
 `Schema.Data`, `Schema.DateTimeUtcFromSelf` and `DateTime.unsafeNow`. None of
 the four exists in the installed version — checked by name against
-`repos/effect/packages/effect/src/Schema.ts` and `DateTime.ts`. Its structure
-(tagged unions, constructors, guards, `Match.typeTags`) still applies; its API
-names do not. `.claude/skills/effect-testing` is written for `@effect/vitest`,
+`repos/effect/packages/effect/src/Schema.ts` and `DateTime.ts` — and the skill
+was deleted. Its structure (tagged unions, constructors, guards,
+`Match.typeTags`) is still sound, so if domain models need guidance again, write
+it against the table above. `.claude/skills/effect-testing` is written for `@effect/vitest`,
 which this repository does not use: tests here are `node:test` running Effect
 programs, with `TestClock` from `effect/testing`.
 

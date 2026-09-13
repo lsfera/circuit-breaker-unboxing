@@ -42,9 +42,9 @@ version describes APIs this code cannot use.
 | Worked examples | `repos/effect/ai-docs/src` | |
 
 **When sources disagree, the vendored code wins** — over a skill, a blog
-post, or memory. This is not hypothetical: `.claude/skills/domain-modeling`
-teaches four Schema and DateTime APIs that do not exist in this version (see
-`agent-patterns/effect-3-to-4.md`).
+post, or memory. This is not hypothetical: a project skill taught four Schema
+and DateTime APIs that do not exist in this version, and was deleted for it
+(see `agent-patterns/effect-3-to-4.md`).
 
 **Searching.** `repos/` is tracked, so a search of the whole workspace
 returns Effect's 3,976 files alongside this project's. Scope searches for
