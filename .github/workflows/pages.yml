@@ -40,15 +40,15 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # A diagram mermaid cannot parse does not fail anything: it renders as a
       # grey "Syntax error in text" box where the explanation should be, and the
       # rest of the page is fine. Three of these were doing that against the
       # version the site vendored. So the diagrams are parsed here, against the
       # pin in docs/Dockerfile rather than against whatever is newest.
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: pnpm
@@ -97,7 +97,7 @@ jobs:
         # `#section` link can be right in one place and dangling in the other.
         run: node scripts/check-site-links.mjs _site
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
@@ -110,4 +110,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

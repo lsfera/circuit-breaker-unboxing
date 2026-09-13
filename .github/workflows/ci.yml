@@ -21,12 +21,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Version comes from package.json#packageManager, same as `corepack
       # enable` uses in docker-compose.yml — one source of truth for which
       # pnpm builds this workspace.
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           # The floor from package.json#engines, not "latest": type stripping
           # is what makes this repo build-step-free, and it landed in 22.6.
@@ -44,9 +44,9 @@ jobs:
     needs: check
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: pnpm
@@ -72,8 +72,8 @@ jobs:
     needs: check
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
       - run: docker build -t egress-breaker:ci .
       # Compose references the same image and pins every other one by digest,
       # so a malformed file or a digest that no longer resolves fails here
