@@ -5,12 +5,12 @@
 # only by argv, which is what `command:` in docker-compose.yml is for — an
 # image per package would be five images that install the same workspace.
 #
-# Pinned by digest, not by tag. `node:22-alpine` moves, and an image that moves
+# Pinned by digest, not by tag. `node:24-alpine` moves, and an image that moves
 # is an image nobody can reproduce: the whole point of building an artifact is
-# that the thing you tested is the thing you ship. This digest is node v22.23.2.
-# To refresh: docker pull node:22-alpine && docker inspect --format \
-#   '{{index .RepoDigests 0}}' node:22-alpine
-ARG NODE_IMAGE=node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+# that the thing you tested is the thing you ship. This digest is node v24.21.0.
+# To refresh: docker pull node:24-alpine && docker inspect --format \
+#   '{{index .RepoDigests 0}}' node:24-alpine
+ARG NODE_IMAGE=node:24-alpine@sha256:50c8e8ca1d27439048670df5883f32d57cf81cff6233222c893fd0d9884cbd81
 
 # ---------------------------------------------------------------------------
 # deps — the workspace's production dependencies, and nothing else.

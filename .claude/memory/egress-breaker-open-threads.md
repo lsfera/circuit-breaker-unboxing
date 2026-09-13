@@ -33,8 +33,9 @@ As of 2026-09-13. Verify against `git log` and the ADRs before acting.
     1 of 57). It needs a minimum-periods floor.
 - **Dependencies, as of 2026-09-13.** Everything is at latest: npm packages,
   container images including Prometheus 3.14, GitHub Actions, and the docs
-  Gemfile on Ruby 4.0. `@types/node` and the `node:22-alpine` image stay on 22
-  on purpose (runtime floor). `history/runs/baseline-demo-2026-09-12.json` was
+  Gemfile on Ruby 4.0. Node is 24 everywhere (images, CI, `engines`,
+  `@types/node`) since 2026-09-13; `--experimental-strip-types` flags are now
+  redundant (stripping is default on 24) but still present. `history/runs/baseline-demo-2026-09-12.json` was
   recorded before all of this and has not been re-recorded.
 - **Left from the RabbitMQ 4.3 upgrade:** amqplib crashes the daemon (unhandled `error` on the
   inner connection) when the broker closes the connection during topology

@@ -28,9 +28,9 @@ jobs:
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
-          # The floor from package.json#engines, not "latest": type stripping
-          # is what makes this repo build-step-free, and it landed in 22.6.
-          node-version: '22'
+          # The floor from package.json#engines, not "latest": the LTS line the
+          # images run, so CI type-checks against the Node that ships.
+          node-version: '24'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # `tsc --noEmit` is load-bearing here rather than cosmetic — with no
@@ -48,7 +48,7 @@ jobs:
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # Leader election and fencing, executed by Redis's own Lua rather than
