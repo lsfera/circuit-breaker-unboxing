@@ -43,6 +43,12 @@ As of 2026-09-13. Verify against `git log` and the ADRs before acting.
   replay — recorded in ADR 005, not fixed.
 - **Grafana `le!="Infinity"` filter** can be removed once Prometheus 2-scraped
   data is past retention (after 2026-09-28).
+- **Node 26 verified, not adopted (2026-09-13).** On 26.8.2: install, typecheck
+  (incl. `@types/node` 26.5.1), 102 unit, test:redis 9/9, test:rmq 16/16,
+  image build, instrumented demo and both chaos scenarios all pass. The one
+  required change: `node:26` ships no corepack, so the Dockerfile must install
+  pnpm with `npm install --global "$(node -p 'require("./package.json").packageManager')"`.
+  Node 26 becomes LTS 2026-10-28; Node 24 enters maintenance 2026-10-20.
 - **Unexplained:** one `test:rmq` failure on the first of three runs
   (2026-09-13), not captured. The next two runs passed 16/16.
 - **Local disk:** about 120 MiB of unreferenced upstream Effect history sits in
