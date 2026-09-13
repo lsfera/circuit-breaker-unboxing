@@ -13,10 +13,11 @@ As of 2026-09-13. Verify against `git log` and the ADRs before acting.
   with `Last-Event-ID` resume, and gzip last. Browsers still receive
   2.77 MB/s each. The ADR has measured targets; the browser rendering cost has
   never been measured (no browser in this devcontainer).
-- **`.claude/skills/effect-testing` assumes `@effect/vitest`**, which the repo
-  does not use (tests are `node:test` with `TestClock`). Reported, not edited.
-  The `domain-modeling` skill, which taught four Effect 3 APIs, was deleted by
-  the user on 2026-09-13.
+- **Two project skills were deleted on 2026-09-13** at the user's request:
+  `domain-modeling`, which taught four Effect 3 APIs, and `effect-testing`,
+  which assumed `@effect/vitest` rather than this repo's `node:test` +
+  `TestClock`. Don't recreate them from memory; any replacement should be
+  written against `repos/effect`.
 - **Offered, not taken up:**
   - `review/NN-*` branches for publishing the work incrementally, from the
     article request (recommended: annotated branches at pass boundaries, no

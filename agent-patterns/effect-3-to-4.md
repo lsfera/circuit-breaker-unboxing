@@ -48,9 +48,11 @@ the four exists in the installed version — checked by name against
 `repos/effect/packages/effect/src/Schema.ts` and `DateTime.ts` — and the skill
 was deleted. Its structure (tagged unions, constructors, guards,
 `Match.typeTags`) is still sound, so if domain models need guidance again, write
-it against the table above. `.claude/skills/effect-testing` is written for `@effect/vitest`,
-which this repository does not use: tests here are `node:test` running Effect
-programs, with `TestClock` from `effect/testing`.
+it against the table above. An `effect-testing` skill was deleted for a similar
+reason: it was written for `@effect/vitest`, which this repository does not use.
+Tests here are `node:test` running Effect programs, with `TestClock` from
+`effect/testing`; `packages/aggregator/test/ConsoleFrames.test.ts` is a
+worked example.
 
 When a skill, a post or a remembered example disagrees with `repos/effect`,
 the vendored source is right.
