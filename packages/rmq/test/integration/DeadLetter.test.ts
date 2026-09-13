@@ -221,27 +221,22 @@ test("application properties survive a republish, so provenance can outlive the 
  * rabbitmq` — the queue was recreated by the next daemon to connect, empty,
  * so nothing even looked wrong.
  *
- * Both halves are asserted together because the contrast is the point. A
- * transient queue is the right choice for a live subscription a restarting
- * consumer rebuilds from the next snapshot; it is the wrong choice for work
- * you promised to keep, and the two differ by one flag.
+ * There used to be a transient queue beside it, emptied by the same restart, as
+ * the contrast. RabbitMQ 4.3 refuses to declare one that is not exclusive — it
+ * closes the connection — so every queue here is durable now.
  */
-test("a durable queue keeps its messages across a broker restart; a transient one does not", async (t) => {
+test("a durable queue keeps its messages across a broker restart", async (t) => {
   if (skipIfNoDocker(t)) return;
 
   const durable = "survive.durable";
-  const transient = "survive.transient";
 
   await run(
     Effect.gen(function* () {
       const rmq = yield* Rmq;
       yield* rmq.declareQueue(durable, { durable: true });
-      yield* rmq.declareQueue(transient, { durable: false });
       const a = yield* rmq.publisherToQueue(durable);
-      const b = yield* rmq.publisherToQueue(transient);
       for (let i = 0; i < 5; i++) {
         yield* rmq.send(a, `keep-${i}`);
-        yield* rmq.send(b, `lose-${i}`);
       }
       // Settle before the restart, so this measures durability rather than a
       // race between publishing and the broker going down.
@@ -251,27 +246,23 @@ test("a durable queue keeps its messages across a broker restart; a transient on
 
   await restartBroker();
 
-  const { kept, lost } = await run(
+  const kept = await run(
     Effect.gen(function* () {
       const rmq = yield* Rmq;
       // Redeclared with the same arguments, exactly as a reconnecting daemon
       // does — which is why an empty durable queue would look identical to a
       // healthy one from the outside.
       yield* rmq.declareQueue(durable, { durable: true });
-      yield* rmq.declareQueue(transient, { durable: false });
 
       const kept: string[] = [];
-      const lost: string[] = [];
       yield* rmq.consume(durable, (body) => void kept.push(body));
-      yield* rmq.consume(transient, (body) => void lost.push(body));
       yield* waitFor(() => kept.length >= 5);
-      return { kept, lost };
+      return kept;
     }),
   );
 
   assert.equal(kept.length, 5, `durable queue must keep its messages, kept ${kept.length}`);
   assert.deepEqual([...kept].sort(), ["keep-0", "keep-1", "keep-2", "keep-3", "keep-4"]);
-  assert.equal(lost.length, 0, "a transient queue is empty again, which is the whole contrast");
 });
 
 /**

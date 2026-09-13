@@ -104,9 +104,10 @@ const DEFAULT_PREFETCH = 100;
 
 export interface RmqService {
   /**
-   * Whether the queue and its contents survive a broker restart. A real decision:
-   * transient suits a live subscription a consumer can rebuild, and is badly wrong
-   * for a queue holding work you promised to keep.
+   * Durable unless told otherwise. RabbitMQ 4.3 refuses a transient queue that
+   * is not exclusive by closing the connection, and this client only declares
+   * non-exclusive queues, so `durable: false` is a broker error waiting to
+   * happen rather than a choice.
    */
   readonly declareQueue: (
     name: string,
@@ -192,11 +193,17 @@ const wrap = <A>(operation: string, promise: () => Promise<A>) =>
  * flight, which is exactly what `OPEN` does to @egress/rmq-consumer's daemons.
  * The settlement is genuinely moot at that point, because the broker requeues
  * every unacked delivery when the channel goes.
+ *
+ * `reject`, not `nack`. From RabbitMQ 4.3 a `nack` with requeue does not count
+ * toward a quorum queue's `x-delivery-limit` — measured, 8,954 redeliveries in
+ * four seconds and never dead-lettered, where 4.0 parked the message after
+ * four — so the retry budget the work queue holds would never run out. A
+ * requeuing `reject` still counts on both.
  */
 const settle = (channel: Channel, message: ConsumeMessage, outcome: Settlement) => {
   try {
-    if (outcome === "discard") channel.nack(message, false, false);
-    else if (outcome === "requeue") channel.nack(message, false, true);
+    if (outcome === "discard") channel.reject(message, false);
+    else if (outcome === "requeue") channel.reject(message, true);
     else channel.ack(message);
   } catch {
     // channel already gone; the broker has the delivery back
@@ -605,7 +612,7 @@ export const makeRmq = (
 
     return {
       declareQueue: (name, options = {}) => {
-        const durable = options.durable ?? false;
+        const durable = options.durable ?? true;
         const args = options.args ?? {};
         record(`q:${name}`, { kind: "queue", name, durable, args });
         return onFreshChannel("declareQueue", async (ch) => {

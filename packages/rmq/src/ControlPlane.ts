@@ -14,7 +14,7 @@ export const CONTROL_EXCHANGE = "circuit.control";
 /** One routing key per API: a fleet binds only its own and never sees other APIs' events. */
 export const routingKeyFor = (apiId: string): string => `circuit.${apiId}`;
 
-/** Every daemon process gets its own queue on the control exchange — not shared, not durable. */
+/** Every daemon process gets its own queue on the control exchange, never shared. */
 export const controlQueueFor = (apiId: string, instanceId: string): string =>
   `${apiId}.control.${instanceId}`;
 
@@ -74,10 +74,12 @@ export const WORK_DELIVERY_LIMIT = 3;
  * is a redeclare conflict (`409 inequivalent arg 'durable'`), so changing a flag
  * on a broker that already holds the queue means deleting it first.
  *
- * Control queues are live subscriptions a restarting daemon rebuilds from the
- * next snapshot, so they stay transient and die with it. Everything else is a
- * durable quorum queue; a quorum queue cannot be transient, so the two flags are
- * one decision.
+ * Every queue is durable. RabbitMQ 4.3 refuses a transient queue that is not
+ * exclusive, and refuses it by closing the whole connection (541), so one such
+ * declare takes the daemon down. The control and floor queues cannot be
+ * exclusive — the floor is shared by the fleet — so they are durable classic
+ * queues whose `x-expires` does the cleanup transience used to. Everything else
+ * is a quorum queue, which could never be transient anyway.
  */
 export const workQueueOptions = (apiId: string) => ({
   args: {
@@ -104,9 +106,8 @@ export const deadLetterQueueOptions = () => ({
  *
  * Ten minutes, because it has to outlast a reconnect. `@egress/rmq` recovers
  * for about five minutes before giving up (see ADR 005), and a queue deleted
- * mid-recovery would be redeclared empty on reconnect — harmless, since these
- * are transient and a restarting daemon rebuilds from the next snapshot, but
- * pointless churn.
+ * mid-recovery would be redeclared empty on reconnect — harmless, since a
+ * daemon rebuilds its view from the next snapshot, but pointless churn.
  */
 export const CONTROL_QUEUE_EXPIRES_MS = 600_000;
 
@@ -124,20 +125,19 @@ export const floorQueueFor = (apiId: string) => `${apiId}.floor`;
 export const floorQueueOptions = () => ({
   args: {
     "x-single-active-consumer": true,
-    // Transient and self-deleting for the same reasons as a control queue:
-    // it is a live subscription, and one left behind by a departed fleet
-    // should not keep filling.
+    // Self-deleting for the same reason as a control queue: one left behind
+    // by a departed fleet should not keep filling.
     "x-expires": CONTROL_QUEUE_EXPIRES_MS,
     // The lease is short, so an event nobody took is worthless within seconds.
     "x-message-ttl": 30_000,
     "x-max-length": 16,
   },
-  durable: false,
+  durable: true,
 });
 
 export const controlQueueOptions = (apiId: string) => ({
   args: { ...deadLetterArgs(apiId), "x-expires": CONTROL_QUEUE_EXPIRES_MS },
-  durable: false,
+  durable: true,
 });
 
 export const sacQueueOptions = (apiId: string) => ({

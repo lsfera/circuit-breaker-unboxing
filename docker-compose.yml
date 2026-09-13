@@ -128,7 +128,7 @@ services:
   # same image, config and command — and only override the admin port mapping,
   # so all three run identically and stay in sync by construction.
   envoy-00: &envoy
-    image: envoyproxy/envoy:v1.31-latest@sha256:caa5b411be1633b90023592a34a7e010c933d6e60206c758f631485e53006865
+    image: envoyproxy/envoy:v1.39-latest@sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4
     volumes: ["$HOST_WORKSPACE_FOLDER/infra/envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro"]
     # List (exec) form, so these are argv straight to the envoy binary — no
     # shell involved, so none of the sh -c/YAML-folding pitfalls below apply.
@@ -164,7 +164,7 @@ services:
   # aggregator instances below — no bind mount, so this one needed nothing
   # special to run even before HOST_WORKSPACE_FOLDER was set correctly.
   redis:
-    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+    image: redis:8-alpine@sha256:becdda6c7f4b3fb42e42fd7f120bbf5c54c4caaaf16f26da24e4563d2c1f0576
     # AOF, because this is the checkpoint store. Without persistence a restart
     # loses every checkpoint, and a newly promoted leader resumes from nothing
     # rather than from where the last one stopped — a sequence reset, which is
@@ -177,14 +177,19 @@ services:
     networks: [default, devcontainer]
     deploy: *limits-small
 
-  # The control plane and the work queue both live here. 4.x specifically:
-  # this repo speaks AMQP 1.0 natively (see docs/rmq-control-plane.md), which
-  # is RabbitMQ 4's own protocol rather than a plugin over 0-9-1. Management
+  # The control plane and the work queue both live here, over AMQP 0-9-1
+  # (docs/decisions/004-downgrade-to-amqp-0-9-1.md). 4.x for quorum queues'
+  # `x-delivery-limit`, which holds the redelivery budget in the queue. Management
   # UI on http://localhost:15672 (guest/guest) is how you watch
   # payments-provider.work's depth climb during an outage and drain on the
   # ramp back — the single most legible view of what this fleet does.
   rabbitmq:
-    image: rabbitmq:4.0-management-alpine@sha256:d808ad631ae0a8182bbba362ffbd5408c27e90dddfa1b0ca2f4bbdce126ce3bf
+    image: rabbitmq:4.3-management-alpine@sha256:b3b8b7f95f5382a19f9ea33540e604f30aad081d37ad9aba72255135765373a1
+    # The broker's data lives under its node name, rabbit@<hostname>, and a
+    # container's default hostname is its id. Without this, every recreation
+    # booted a new, empty node beside the last one's queues: the volume held
+    # four such node directories before it was pinned.
+    hostname: rabbitmq
     # 15692 is rabbitmq_prometheus, enabled by default in the management
     # image — the per-queue depth on the Grafana dashboard comes from there,
     # so the queue filling and draining is visible in the same place as the
@@ -198,10 +203,10 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
-    # Durable quorum queues keep their messages across a broker *restart*; they
-    # keep them across a container being recreated only if the broker's data
-    # directory outlives the container. Both halves are needed, and only one of
-    # them is a queue argument.
+    # Durable quorum queues keep their messages across a container being
+    # recreated only if the data directory outlives the container *and* the
+    # node name does not change — the volume here, `hostname` above. Neither is
+    # a queue argument.
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
       # conf.d rather than replacing rabbitmq.conf: the image writes its own
@@ -398,7 +403,7 @@ services:
   # them nowhere until now, which is the same failure shape the rules are about:
   # something that looks fine because it is running.
   alertmanager:
-    image: prom/alertmanager:v0.27.0@sha256:e13b6ed5cb929eeaee733479dce55e10eb3bc2e9c4586c705a4e8da41e5eacf5
+    image: prom/alertmanager:v0.34.0@sha256:690c7b525f4367aa91f73e2f91c632206d32e97c6384bdbf2fb7a861b420340d
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
     restart: unless-stopped
@@ -420,7 +425,7 @@ services:
     deploy: *limits-tiny
 
   grafana:
-    image: grafana/grafana:11.3.1@sha256:fa801ab6e1ae035135309580891e09f7eb94d1abdbd2106bdc288030b028158c
+    image: grafana/grafana:13.2.1@sha256:f772d434e8fab0049deb2b1b30abd43342bcfca1537614aa8d36080232cf4283
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       # Viewer, not Editor: the dashboard is provisioned from a file in this
@@ -444,7 +449,7 @@ services:
   # is complete and it is clear which it was.
   otel-collector:
     profiles: [tracing]
-    image: otel/opentelemetry-collector-contrib:0.115.1@sha256:d2da12c4336a79758826700be9e21ecf4a9f7d945b7f8a58ba55ee3fa45427c8
+    image: otel/opentelemetry-collector-contrib:0.160.0@sha256:799dc6cf12c96192af37b5bdba804da8c10b3bc563b43cb90c3f3c58d9572ad6
     command: ["--config=/etc/otel/config.yaml"]
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/otel-collector.yaml:/etc/otel/config.yaml:ro
@@ -453,14 +458,13 @@ services:
     networks: [default, devcontainer]
     deploy: *limits-small
 
-  # The trace view. all-in-one keeps traces in memory, which is right for a
-  # demo and wrong for anything else — losing them on restart costs nothing
-  # here and would cost a lot in production.
+  # The trace view. Jaeger v2, whose default configuration is all-in-one with
+  # in-memory storage and OTLP on 4317/4318 — right for a demo and wrong for
+  # anything else, since losing traces on restart costs nothing here and would
+  # cost a lot in production. v1, and its all-in-one image, is end of life.
   jaeger:
     profiles: [tracing]
-    image: jaegertracing/all-in-one:1.62.0@sha256:836e9b69c88afbedf7683ea7162e179de63b1f981662e83f5ebb68badadc710f
-    environment:
-      COLLECTOR_OTLP_ENABLED: "true"
+    image: jaegertracing/jaeger:2.20.0@sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8
     restart: unless-stopped
     ports: ["16686:16686"]
     networks: [default, devcontainer]

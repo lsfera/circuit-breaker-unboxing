@@ -18,7 +18,7 @@ let available = false;
 
 export const startRedis = async (): Promise<void> => {
   try {
-    container = await new GenericContainer("redis:7-alpine")
+    container = await new GenericContainer("redis:8-alpine")
       .withExposedPorts(6379)
       .withWaitStrategy(Wait.forLogMessage(/Ready to accept connections/))
       .start();

@@ -366,18 +366,33 @@ daemon-2: redriving payments-provider.work.dead (max 5000 per pass)
 daemon-2: redrive finished — 2070 replayed (drained)
 ```
 
-Everything but the per-daemon control queue is a **durable quorum queue**, and
-neither half of that was true to begin with: a broker restart used to empty
-the dead-letter queue silently, because the first daemon back redeclares it
-with the same name and arguments. `durable` decides what survives the broker
-process; `x-queue-type` decides what survives losing the node the queue lives
-on, and a quorum queue cannot be transient, so the two are one decision. The
-control queue stays a classic transient queue on purpose — it is one daemon's
-live subscription, and a daemon that comes back relearns the circuit state
-from the aggregator's next snapshot, so keeping those events buys nothing
-while a queue outliving its daemon costs something. The election queues are
-always empty, which makes quorum free for them and means an election survives
-a node loss rather than vanishing with it.
+Everything but the per-daemon control queue and the floor queue is a
+**durable quorum queue**, and neither half of that was true to begin with: a
+broker restart used to empty the dead-letter queue silently, because the first
+daemon back redeclares it with the same name and arguments. `durable` decides
+what survives the broker process; `x-queue-type` decides what survives losing
+the node the queue lives on, and a quorum queue cannot be transient, so the
+two are one decision. The election queues are always empty, which makes quorum
+free for them and means an election survives a node loss rather than vanishing
+with it.
+
+The control and floor queues are **durable classic queues with `x-expires`**.
+They are live subscriptions — a daemon that comes back relearns the circuit
+state from the aggregator's next snapshot — and they used to be transient for
+that reason. RabbitMQ 4.3 refuses a transient queue that is not exclusive, and
+refuses it by closing the whole connection, so on the upgraded broker every
+daemon crash-looped on connect. Neither can be exclusive: the floor queue is
+shared by the fleet. Durable is the only option left, and it costs nothing
+here. `x-expires` removes a queue ten minutes after its last consumer leaves,
+which is the cleanup transience used to provide.
+
+**Requeues are `basic.reject`, not `basic.nack`.** The work queue's retry
+budget depends on every requeue counting toward `x-delivery-limit`. On 4.0 both
+calls counted. On 4.3.5 a requeuing `nack` does not: a message nacked back
+onto a quorum queue with a limit of 3 was redelivered 8,954 times in four
+seconds and never dead-lettered. A requeuing `reject` still parks it after
+four deliveries. The client settles with `reject`, and the broker suite's
+delivery-limit test is what caught the difference.
 
 The broker now has a volume too, so the data directory outlives the container
 and not just the process. What this stack still cannot demonstrate is the

@@ -60,7 +60,7 @@ processors:
     send_batch_size: 1024
 
 exporters:
-  otlp/jaeger:
+  otlp_grpc/jaeger:
     endpoint: jaeger:4317
     tls: { insecure: true }
 
@@ -71,7 +71,7 @@ service:
       # tail_sampling before batch: batching first would hand the sampler
       # groups of unrelated spans and it needs whole traces.
       processors: [tail_sampling, batch]
-      exporters: [otlp/jaeger]
+      exporters: [otlp_grpc/jaeger]
   telemetry:
     logs:
       level: warn

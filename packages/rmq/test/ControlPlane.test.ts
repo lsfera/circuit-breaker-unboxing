@@ -2,9 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Result } from "effect";
 import {
+  controlQueueOptions,
+  deadLetterQueueOptions,
   decodeElectionTrigger,
   encodeCircuitEvent,
   encodeElectionTrigger,
+  floorQueueOptions,
+  sacQueueOptions,
+  workQueueOptions,
 } from "../src/ControlPlane.ts";
 import { decodeCircuitEvent } from "@egress/domain/Model.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
@@ -113,4 +118,28 @@ test("an event whose sequence cannot be ordered is not a valid event", () => {
     );
   }
   assert.equal(readEvent(encodeCircuitEvent(event({ sequence: 0 }))), 0);
+});
+
+/**
+ * RabbitMQ 4.3 closes the connection (541) on any transient queue that is not
+ * exclusive, and the daemons declare every queue on connect — so one
+ * `durable: false` here is a fleet that crash-loops on the upgraded broker.
+ */
+test("every queue the fleet declares is durable", () => {
+  const declared = {
+    work: workQueueOptions("api"),
+    deadLetter: deadLetterQueueOptions(),
+    election: sacQueueOptions("api"),
+    control: controlQueueOptions("api"),
+    floor: floorQueueOptions(),
+  };
+  assert.deepEqual(
+    Object.entries(declared).filter(([, options]) => options.durable !== true).map(([name]) => name),
+    [],
+  );
+});
+
+test("the queues nobody reads after a daemon leaves still delete themselves", () => {
+  assert.ok(Number(controlQueueOptions("api").args["x-expires"]) > 0);
+  assert.ok(Number(floorQueueOptions().args["x-expires"]) > 0);
 });

@@ -259,3 +259,21 @@ packages/*/src` returns five hits and every one is a comment describing what
 used to be there. The two fatal paths — a lost control plane and a failed
 startup — both complete that one deferred, so the program ends the way every
 other failure does.
+
+### Control queues are durable now
+
+Added 2026-09-13. The topology bullet above says each control queue is
+`durable: false`. RabbitMQ 4.3 refuses a transient queue that is not exclusive
+by closing the connection, so the control and floor queues are durable classic
+queues with `x-expires` — see `packages/rmq/src/ControlPlane.ts`. Topology
+replay is still required: a queue that expired during a long outage, or a
+broker whose data was lost, has to be declared again before a consumer can
+attach to it.
+
+That upgrade also found a gap in this recovery. If `setup` fails because the
+broker closes the connection partway through the replay, amqplib emits `error`
+on the inner connection it is rebuilding. Nothing listens there, so the process
+exits instead of scheduling another attempt. The restart policy brings it back,
+but a server-initiated close during the rebuild window is a restart, not a
+reconnect.
+

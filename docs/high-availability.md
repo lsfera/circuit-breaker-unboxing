@@ -105,7 +105,7 @@ integration:
    remembers, and it is kept alive across the whole demotion precisely so a
    fresh build cannot hide the bug.
 2. `test/integration/RedisCoordination.test.ts` (`pnpm run test:redis`,
-   opt-in — needs Docker) spins up a real `redis:7-alpine` container via
+   opt-in — needs Docker) spins up a real `redis:8-alpine` container via
    Testcontainers and proves the same properties, including the exact
    fencing bug above, by Redis's own Lua execution rather than by re-reading
    the script.

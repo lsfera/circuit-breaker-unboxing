@@ -18,7 +18,7 @@ export const broker = { host: "", port: 0, available: false };
 
 export const startBroker = async (): Promise<void> => {
   try {
-    container = await new GenericContainer("rabbitmq:4.0-management-alpine")
+    container = await new GenericContainer("rabbitmq:4.3-management-alpine")
       .withExposedPorts(5672)
       .withWaitStrategy(Wait.forLogMessage(/Server startup complete/))
       .start();
