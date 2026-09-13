@@ -5,12 +5,12 @@
 # only by argv, which is what `command:` in docker-compose.yml is for — an
 # image per package would be five images that install the same workspace.
 #
-# Pinned by digest, not by tag. `node:24-alpine` moves, and an image that moves
+# Pinned by digest, not by tag. `node:26-alpine` moves, and an image that moves
 # is an image nobody can reproduce: the whole point of building an artifact is
-# that the thing you tested is the thing you ship. This digest is node v24.21.0.
-# To refresh: docker pull node:24-alpine && docker inspect --format \
-#   '{{index .RepoDigests 0}}' node:24-alpine
-ARG NODE_IMAGE=node:24-alpine@sha256:50c8e8ca1d27439048670df5883f32d57cf81cff6233222c893fd0d9884cbd81
+# that the thing you tested is the thing you ship. This digest is node v26.8.2.
+# To refresh: docker pull node:26-alpine && docker inspect --format \
+#   '{{index .RepoDigests 0}}' node:26-alpine
+ARG NODE_IMAGE=node:26-alpine@sha256:ef24c5053d50fdc3e4e56eb4e7ddb7861874ab0fdc797046ba897581deb8e868
 
 # ---------------------------------------------------------------------------
 # deps — the workspace's production dependencies, and nothing else.
@@ -21,10 +21,10 @@ ARG NODE_IMAGE=node:24-alpine@sha256:50c8e8ca1d27439048670df5883f32d57cf81cff623
 # ---------------------------------------------------------------------------
 FROM ${NODE_IMAGE} AS deps
 WORKDIR /app
-# Same pnpm the workspace pins in package.json#packageManager, resolved by
-# corepack rather than named twice.
-RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# Same pnpm the workspace pins in package.json#packageManager, read from it
+# rather than named twice. npm, not corepack: Node 25 stopped shipping corepack.
+RUN npm install --global "$(node -p 'require("./package.json").packageManager')" >/dev/null
 # One line per workspace, and it has to be kept in step by hand: a package
 # missing here installs none of its dependencies, and the failure surfaces as
 # ERR_MODULE_NOT_FOUND at runtime rather than as a build error. Adding

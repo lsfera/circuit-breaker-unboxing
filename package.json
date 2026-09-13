@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=26"
   },
   "packageManager": "pnpm@11.23.0",
   "scripts": {
@@ -26,7 +26,7 @@
     "site:build": "docker build -f docs/Dockerfile -t egress-site ."
   },
   "devDependencies": {
-    "@types/node": "^24.13.4",
+    "@types/node": "^26.5.1",
     "jsdom": "^30.0.1",
     "mermaid": "12.0.0",
     "typescript": "^7.0.2"

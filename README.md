@@ -280,7 +280,7 @@ Then open <http://localhost:8088>. For the full thing — three real Envoy
 replicas, two aggregators, a real broker and the daemon fleet — see
 [Running against real Envoy](docs/operations.md#running-against-real-envoy).
 
-Built on **Effect 4 (4.0.0-rc.115)**. Requires Node 24+ and TypeScript 7.
+Built on **Effect 4 (4.0.0-rc.115)**. Requires Node 26+ and TypeScript 7.
 TypeScript runs natively via Node's type stripping, so there is still no build
 step — but `tsc --noEmit` is now load-bearing, because Effect's guarantees are
 type-level.
@@ -615,7 +615,7 @@ Cross-package imports go through `@egress/domain`'s `package.json#exports`
 `pnpm install` resolves to a symlink — so a change to the state machine is a
 change in one package, felt through a real dependency edge, not a shared
 folder. There is still no build step: every package runs straight off its
-`src/*.ts` through Node 24's built-in type stripping, and `tsc --noEmit` at the root
+`src/*.ts` through Node's built-in type stripping, and `tsc --noEmit` at the root
 typechecks every package in one pass (`packages/*/src` and
 `packages/*/test` in `tsconfig.json`'s `include`). The root scripts
 (`pnpm start`, `pnpm run demo`, `pnpm run subscribe`) call `node` on each

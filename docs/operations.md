@@ -42,7 +42,7 @@ There is still no compile step, and that is deliberate — every process runs
 TypeScript directly through node's type stripping, which is why `tsc --noEmit`
 is load-bearing in CI rather than cosmetic. The cost of that choice is that
 the runtime version matters, so the base image is pinned **by digest** rather
-than by the moving `node:24-alpine` tag (currently v24.21.0), as are Envoy,
+than by the moving `node:26-alpine` tag (currently v26.8.2), as are Envoy,
 RabbitMQ, Redis, Prometheus and Grafana. An image that moves is an image
 nobody can reproduce.
 
