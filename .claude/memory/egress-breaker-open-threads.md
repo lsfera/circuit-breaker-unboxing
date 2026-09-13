@@ -13,11 +13,16 @@ As of 2026-09-13. Verify against `git log` and the ADRs before acting.
   with `Last-Event-ID` resume, and gzip last. Browsers still receive
   2.77 MB/s each. The ADR has measured targets; the browser rendering cost has
   never been measured (no browser in this devcontainer).
-- **Two project skills were deleted on 2026-09-13** at the user's request:
-  `domain-modeling`, which taught four Effect 3 APIs, and `effect-testing`,
-  which assumed `@effect/vitest` rather than this repo's `node:test` +
-  `TestClock`. Don't recreate them from memory; any replacement should be
-  written against `repos/effect`.
+- **Three Effect skills were deleted on 2026-09-13** at the user's request,
+  because they clashed with `agent-patterns/`, which wins:
+  - `domain-modeling` taught four Effect 3 APIs.
+  - `effect-testing` assumed `@effect/vitest` rather than this repo's
+    `node:test` + `TestClock`.
+  - `effect-ts` (lockfile-managed) installs a floating `effect@rc` and points at
+    `node_modules/effect`, which doesn't exist at the root under pnpm.
+
+  Don't reinstall or recreate them. Any replacement must agree with
+  `agent-patterns/` and `repos/effect`.
 - **Offered, not taken up:**
   - `review/NN-*` branches for publishing the work incrementally, from the
     article request (recommended: annotated branches at pass boundaries, no

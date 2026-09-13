@@ -54,5 +54,12 @@ Tests here are `node:test` running Effect programs, with `TestClock` from
 `effect/testing`; `packages/aggregator/test/ConsoleFrames.test.ts` is a
 worked example.
 
+The `effect-ts` setup skill (Effect-TS/skills) went the same way. It installs
+`effect@rc` as a floating range, where this repository pins an exact version in
+the catalog that `pnpm run check` holds to the vendored source. It also sends
+agents to `node_modules/effect/AGENTS.md` and `node_modules/effect/src`, which
+under pnpm do not exist at the root at all. Read `repos/effect/LLMS.md` and
+`repos/effect` instead.
+
 When a skill, a post or a remembered example disagrees with `repos/effect`,
 the vendored source is right.
