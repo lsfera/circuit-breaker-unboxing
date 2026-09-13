@@ -2,7 +2,7 @@
 
 ## Effect
 
-This repository uses **Effect 4** — `effect@4.0.0-rc.113`, pinned in
+This repository uses **Effect 4** — `effect@4.0.0-rc.115`, pinned in
 `pnpm-workspace.yaml`'s catalog. Most Effect material in circulation, and
 most of what a model remembers, is Effect 3, which Effect 4 renamed and
 reshaped substantially. Before writing Effect code:
@@ -27,11 +27,11 @@ This project vendors external repositories under @repos/.
 - Do not import from @repos/ — application code keeps importing from normal
   package dependencies.
 
-`repos/effect` is `Effect-TS/effect` at the tag `effect@4.0.0-rc.113`,
+`repos/effect` is `Effect-TS/effect` at the tag `effect@4.0.0-rc.115`,
 vendored with `git subtree --squash`. It is **the installed version, not
-`main`**: on the day it was vendored, `main` was two release candidates ahead,
-and reference material for a newer version describes APIs this code cannot
-use.
+`main`**: `main` runs ahead of the releases (it was two release candidates
+ahead when this was first vendored), and reference material for a newer
+version describes APIs this code cannot use.
 
 | Installed package | Source | Tests |
 | --- | --- | --- |

@@ -1,6 +1,6 @@
 # Effect 3 idioms, and what they are in Effect 4
 
-This repository runs `effect@4.0.0-rc.113`. Most Effect material in
+This repository runs `effect@4.0.0-rc.115`. Most Effect material in
 circulation — blog posts, model memory, and some of this repository's own
 agent skills — is Effect 3, and Effect 4 renamed or removed a good deal of it.
 The code usually fails to compile, which is the good outcome. The bad one is
@@ -15,19 +15,19 @@ subset that has come up here.
 
 | Effect 3 | Effect 4 | Source |
 | --- | --- | --- |
-| `Either`, `Effect.either` | `Result`, `Effect.result` | v3-to-v4.md:22, :9845 |
-| `Option.fromNullable` | `Option.fromNullishOr` — or `fromUndefinedOr` / `fromNullOr` when only one of them is possible, which is what this codebase uses | v3-to-v4.md:12728; `Option.ts:773,807,841` |
-| `Effect.catchAll` | `Effect.catch` | v3-to-v4.md:9797 |
-| `Effect.fork` | `Effect.forkChild` | v3-to-v4.md:9881 |
-| `Effect.forkDaemon` | `Effect.forkDetach` | v3-to-v4.md:9885 |
-| `Effect.zipRight` | `Effect.andThen` | v3-to-v4.md:10129 |
-| `Context.Tag` | `Context.Service` | v3-to-v4.md:9437 |
+| `Either`, `Effect.either` | `Result`, `Effect.result` | v3-to-v4.md:22, :9861 |
+| `Option.fromNullable` | `Option.fromNullishOr` — or `fromUndefinedOr` / `fromNullOr` when only one of them is possible, which is what this codebase uses | v3-to-v4.md:12744; `Option.ts:773,807,841` |
+| `Effect.catchAll` | `Effect.catch` | v3-to-v4.md:9813 |
+| `Effect.fork` | `Effect.forkChild` | v3-to-v4.md:9897 |
+| `Effect.forkDaemon` | `Effect.forkDetach` | v3-to-v4.md:9901 |
+| `Effect.zipRight` | `Effect.andThen` | v3-to-v4.md:10145 |
+| `Context.Tag` | `Context.Service` | v3-to-v4.md:9453 |
 | `FiberRef` | `Context.Reference` / `References` | v3-to-v4.md:277 |
-| `Schema.annotations` | `Schema.annotate` | v3-to-v4.md:14638 |
-| `Schema.decodeUnknown` | `Schema.decodeUnknownEffect` | v3-to-v4.md:14678 |
-| `Schema.DateTimeUtcFromSelf` | `Schema.DateTimeUtc` | v3-to-v4.md:14130 |
-| `Schema.Data` | nothing — delete the wrapper; decoded objects already have structural equality | v3-to-v4.md:14110 |
-| `DateTime.unsafeNow` | `DateTime.nowUnsafe` — `unsafe` moved to the end of every name | v3-to-v4.md:9553 |
+| `Schema.annotations` | `Schema.annotate` | v3-to-v4.md:14654 |
+| `Schema.decodeUnknown` | `Schema.decodeUnknownEffect` | v3-to-v4.md:14694 |
+| `Schema.DateTimeUtcFromSelf` | `Schema.DateTimeUtc` | v3-to-v4.md:14146 |
+| `Schema.Data` | nothing — delete the wrapper; decoded objects already have structural equality | v3-to-v4.md:14126 |
+| `DateTime.unsafeNow` | `DateTime.nowUnsafe` — `unsafe` moved to the end of every name | v3-to-v4.md:9569 |
 
 ## Changed contracts, not just names
 

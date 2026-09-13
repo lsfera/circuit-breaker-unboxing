@@ -2,17 +2,11 @@ packages:
   - "packages/*"
 
 catalog:
-  effect: 4.0.0-rc.113
-  "@effect/platform-node": 4.0.0-rc.113
+  effect: 4.0.0-rc.115
+  "@effect/platform-node": 4.0.0-rc.115
 
 allowBuilds:
   cpu-features: true
   msgpackr-extract: true
   protobufjs: true
   ssh2: true
-
-minimumReleaseAgeExclude:
-  - '@effect/opentelemetry@4.0.0-rc.113'
-  - '@effect/platform-node-shared@4.0.0-rc.113'
-  - '@effect/platform-node@4.0.0-rc.113'
-  - effect@4.0.0-rc.113

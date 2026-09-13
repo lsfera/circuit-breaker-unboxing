@@ -280,7 +280,7 @@ Then open <http://localhost:8088>. For the full thing — three real Envoy
 replicas, two aggregators, a real broker and the daemon fleet — see
 [Running against real Envoy](docs/operations.md#running-against-real-envoy).
 
-Built on **Effect 4 (4.0.0-rc.113)**. Requires Node 22.6+ and TypeScript 7.
+Built on **Effect 4 (4.0.0-rc.115)**. Requires Node 22.6+ and TypeScript 7.
 TypeScript runs natively via Node's type stripping, so there is still no build
 step — but `tsc --noEmit` is now load-bearing, because Effect's guarantees are
 type-level.

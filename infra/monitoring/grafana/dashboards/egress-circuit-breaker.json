@@ -244,7 +244,7 @@
    "id": 6,
    "type": "timeseries",
    "title": "Webhook delivery latency (p95)",
-   "description": "le!=\"Infinity\" works around an effect@4.0.0-rc.112 bug: PrometheusMetrics.format() emits both a mislabeled le=\"Infinity\" bucket (boundary.toString() on the histogram's own terminal Infinity boundary) and the spec-required le=\"+Inf\" bucket for the same cumulative count. The duplicate infinite bucket breaks histogram_quantile's interpolation, which returns the raw top boundary (4294967296, i.e. \"49.7 days\") instead of a real latency. Drop this filter once upstream fixes the formatter.",
+   "description": "le!=\"Infinity\" works around an effect PrometheusMetrics bug, present from rc.112 through rc.115: PrometheusMetrics.format() emits both a mislabeled le=\"Infinity\" bucket (boundary.toString() on the histogram's own terminal Infinity boundary) and the spec-required le=\"+Inf\" bucket for the same cumulative count. The duplicate infinite bucket breaks histogram_quantile's interpolation, which returns the raw top boundary (4294967296, i.e. \"49.7 days\") instead of a real latency. Drop this filter once upstream fixes the formatter.",
    "gridPos": {
     "x": 0,
     "y": 24,
@@ -277,7 +277,7 @@
    "id": 7,
    "type": "timeseries",
    "title": "Fleet poll duration (p95)",
-   "description": "Time to poll and parse every replica's /stats once per tick. Rises here, not in delivery latency, points at ingestion. le!=\"Infinity\" works around an effect@4.0.0-rc.112 formatter bug \u2014 see the note on the delivery latency panel.",
+   "description": "Time to poll and parse every replica's /stats once per tick. Rises here, not in delivery latency, points at ingestion. le!=\"Infinity\" works around an effect formatter bug (rc.112 through rc.115) \u2014 see the note on the delivery latency panel.",
    "gridPos": {
     "x": 12,
     "y": 24,

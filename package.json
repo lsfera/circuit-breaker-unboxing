@@ -26,8 +26,8 @@
     "site:build": "docker build -f docs/Dockerfile -t egress-site ."
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "jsdom": "^25.0.1",
+    "@types/node": "^22.20.2",
+    "jsdom": "^30.0.1",
     "mermaid": "12.0.0",
     "typescript": "^7.0.2"
   }
