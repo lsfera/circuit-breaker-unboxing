@@ -22,7 +22,7 @@
 # default here is empty.
 
 # ---------------------------------------------------------------------------
-FROM ruby:3.3-slim AS build
+FROM ruby:4.0-slim AS build
 
 ARG BASEURL=""
 
@@ -85,7 +85,7 @@ RUN bundle exec jekyll build --destination /out --baseurl "${BASEURL}" \
  && test -f /out/assets/vendor/mermaid.min.js
 
 # ---------------------------------------------------------------------------
-FROM nginx:1.27-alpine AS serve
+FROM nginx:1.31-alpine AS serve
 
 LABEL org.opencontainers.image.title="Egress circuit breaker — documentation"
 LABEL org.opencontainers.image.description="The docs/ tree, built and served offline."
