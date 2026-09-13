@@ -244,7 +244,7 @@
    "id": 6,
    "type": "timeseries",
    "title": "Webhook delivery latency (p95)",
-   "description": "le!=\"Infinity\" works around an effect PrometheusMetrics bug, present from rc.112 through rc.115: PrometheusMetrics.format() emits both a mislabeled le=\"Infinity\" bucket (boundary.toString() on the histogram's own terminal Infinity boundary) and the spec-required le=\"+Inf\" bucket for the same cumulative count. The duplicate infinite bucket breaks histogram_quantile's interpolation, which returns the raw top boundary (4294967296, i.e. \"49.7 days\") instead of a real latency. Drop this filter once upstream fixes the formatter.",
+   "description": "effect's PrometheusMetrics.format() (rc.112 through rc.115 at least) emits a mislabeled le=\"Infinity\" bucket beside the real le=\"+Inf\" one, and histogram_quantile over both returns the top boundary, 4294967296 (\"49.7 days\"). Prometheus 3 normalizes le at ingestion, so anything it scraped is correct unfiltered; the filter is for the series Prometheus 2 scraped, which stay in this TSDB until retention expires them (15 days after 2026-09-13). Drop it after that.",
    "gridPos": {
     "x": 0,
     "y": 24,
@@ -277,7 +277,7 @@
    "id": 7,
    "type": "timeseries",
    "title": "Fleet poll duration (p95)",
-   "description": "Time to poll and parse every replica's /stats once per tick. Rises here, not in delivery latency, points at ingestion. le!=\"Infinity\" works around an effect formatter bug (rc.112 through rc.115) \u2014 see the note on the delivery latency panel.",
+   "description": "Time to poll and parse every replica's /stats once per tick. Rises here, not in delivery latency, points at ingestion. The le filter is for data scraped before the Prometheus 3 upgrade \u2014 see the note on the delivery latency panel.",
    "gridPos": {
     "x": 12,
     "y": 24,
