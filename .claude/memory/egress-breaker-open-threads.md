@@ -33,9 +33,9 @@ As of 2026-09-13. Verify against `git log` and the ADRs before acting.
     1 of 57). It needs a minimum-periods floor.
 - **Dependencies, as of 2026-09-13.** Everything is at latest: npm packages,
   container images including Prometheus 3.14, GitHub Actions, and the docs
-  Gemfile on Ruby 4.0. Node is 24 everywhere (images, CI, `engines`,
-  `@types/node`) since 2026-09-13, and the `--experimental-strip-types` flag
-  is gone: Node 24 strips types by default. ADR 008's quoted transcript and
+  Gemfile on Ruby 4.0. Node is 26 everywhere (images, CI, `engines` >=26,
+  `@types/node` 26) since 2026-09-13, and the `--experimental-strip-types` flag
+  is gone. Node 26 is Current until LTS on 2026-10-28. ADR 008's quoted transcript and
   `history/` still show it, as records. `history/runs/baseline-demo-2026-09-12.json` was
   recorded before all of this and has not been re-recorded.
 - **Left from the RabbitMQ 4.3 upgrade:** amqplib crashes the daemon (unhandled `error` on the
@@ -43,12 +43,6 @@ As of 2026-09-13. Verify against `git log` and the ADRs before acting.
   replay — recorded in ADR 005, not fixed.
 - **Grafana `le!="Infinity"` filter** can be removed once Prometheus 2-scraped
   data is past retention (after 2026-09-28).
-- **Node 26 verified, not adopted (2026-09-13).** On 26.8.2: install, typecheck
-  (incl. `@types/node` 26.5.1), 102 unit, test:redis 9/9, test:rmq 16/16,
-  image build, instrumented demo and both chaos scenarios all pass. The one
-  required change: `node:26` ships no corepack, so the Dockerfile must install
-  pnpm with `npm install --global "$(node -p 'require("./package.json").packageManager')"`.
-  Node 26 becomes LTS 2026-10-28; Node 24 enters maintenance 2026-10-20.
 - **Unexplained:** one `test:rmq` failure on the first of three runs
   (2026-09-13), not captured. The next two runs passed 16/16.
 - **Local disk:** about 120 MiB of unreferenced upstream Effect history sits in

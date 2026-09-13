@@ -12,6 +12,11 @@ Facts about this environment, each learned by losing time to it (2026-09-12/13):
   `timeout` (which uses a monotonic clock). Any timing or CPU window can be
   corrupted this way. Check a record's `seconds` against the expected duration
   before quoting it, and discard the run if they disagree.
+- **Node 25+ ships no corepack.** The Dockerfile installs pnpm with
+  `npm install --global "$(node -p 'require("./package.json").packageManager')"`.
+- **An attached `docker run` can drop a short-lived container's output.** A test
+  run can exit 0 having printed nothing. Run it detached, `docker wait`, then
+  `docker logs`.
 - **`git subtree` is not on PATH.** The PATH git is 2.55 in `/usr/local`, without
   contrib. The system copy works: `/usr/lib/git-core/git-subtree pull
   --prefix=repos/effect https://github.com/Effect-TS/effect.git effect@<ver> --squash`.

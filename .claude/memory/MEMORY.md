@@ -4,3 +4,4 @@
 - [Open threads on /workspace](egress-breaker-open-threads.md) — ADR 015 steps 3–5, the v3-era skill, offers not taken up; check before starting new work.
 - [Devcontainer gotchas](devcontainer-environment-gotchas.md) — host suspends corrupt timing runs, git subtree path, pkill self-kill, 600s tool cap, RabbitMQ ignores cgroup memory.
 - [Egress breaker session record](egress-breaker-session-record.md) — article source material: the early build-out and the later measurements that overturned beliefs.
+- [Devcontainer rebuild](devcontainer-rebuild.md) — what survives rebuilding the devcontainer (workspace, volumes, Docker Desktop) and what is lost (~/.claude transcripts, login, user settings, a global skill).
