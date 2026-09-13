@@ -13,7 +13,7 @@ import { runDaemon } from "./daemon.ts";
 /**
  * One daemon, one process:
  *
- *   node --experimental-strip-types src/main.ts
+ *   node src/main.ts
  *
  * Settings come from the environment because these are containers rather than
  * commands someone types; `DAEMON_INDEX` is the one value that differs between

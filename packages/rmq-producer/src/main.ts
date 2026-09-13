@@ -12,7 +12,7 @@ import { runProducer } from "./producer.ts";
 /**
  * The producer, its own component rather than a role inside the daemon process:
  *
- *   node --experimental-strip-types src/main.ts
+ *   node src/main.ts
  *
  * It shares nothing with the fleet — no control queue, no policy, no elections —
  * and never reads the circuit state, which is the point of the scenario.

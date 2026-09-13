@@ -75,4 +75,4 @@ USER node
 # Overridden per service in docker-compose.yml. The default is the aggregator
 # because a container started with no arguments should do the thing this repo
 # is named after.
-CMD ["node", "--experimental-strip-types", "packages/aggregator/src/main.ts"]
+CMD ["node", "packages/aggregator/src/main.ts"]

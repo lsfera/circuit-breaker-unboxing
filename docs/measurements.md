@@ -73,7 +73,7 @@ anything. `--apis=N` replaces the named APIs with N synthetic ones
 samples a running instance:
 
 ```bash
-node --experimental-strip-types packages/aggregator/src/main.ts \
+node packages/aggregator/src/main.ts \
   --source=sim --apis=1000 --replicas=10 --port=8098 --no-webhook &
 node infra/scale-probe.mjs http://127.0.0.1:8098 15
 ```

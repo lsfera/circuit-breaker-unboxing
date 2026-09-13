@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Standalone consumer of the aggregator's SSE stream; decodes with @egress/domain's Schema and checks the delivery contract from outside the process.",
   "scripts": {
-    "start": "node --experimental-strip-types src/subscriber.ts"
+    "start": "node src/subscriber.ts"
   },
   "dependencies": {
     "@egress/config": "workspace:*",

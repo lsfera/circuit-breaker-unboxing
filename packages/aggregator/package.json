@@ -4,9 +4,9 @@
   "type": "module",
   "description": "Fleet-wide tick loop over @egress/domain's pure state machine, event bus/sink, HTTP routes, SSE, and /metrics.",
   "scripts": {
-    "start": "node --experimental-strip-types src/main.ts",
-    "test": "node --experimental-strip-types --test 'test/*.test.ts'",
-    "test:redis": "node --experimental-strip-types --test 'test/integration/*.test.ts'"
+    "start": "node src/main.ts",
+    "test": "node --test 'test/*.test.ts'",
+    "test:redis": "node --test 'test/integration/*.test.ts'"
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",

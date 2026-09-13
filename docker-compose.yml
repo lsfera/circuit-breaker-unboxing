@@ -254,7 +254,7 @@ services:
     # every event on circuit.control. Only the leader publishes, so the two
     # instances never double-deliver.
     command: >
-      node --experimental-strip-types packages/aggregator/src/main.ts --source=envoy-push --push-port=9900 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-1
+      node packages/aggregator/src/main.ts --source=envoy-push --push-port=9900 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-1
     # Restarting matters more here than it looks: a killed leader whose
     # container never comes back leaves the survivor with nowhere to fail
     # over to next time, so the second failover in a demo has no candidate.
@@ -272,7 +272,7 @@ services:
   aggregator-2:
     <<: *aggregator
     command: >
-      node --experimental-strip-types packages/aggregator/src/main.ts --source=envoy-push --push-port=9900 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-2
+      node packages/aggregator/src/main.ts --source=envoy-push --push-port=9900 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-2
     ports: ["8089:8088"]
 
   # The scenario from docs/rmq-control-plane.md, running for real: a producer
@@ -288,7 +288,7 @@ services:
     image: *app-image
     build: *app-build
     command: >
-      node --experimental-strip-types packages/rmq-producer/src/main.ts
+      node packages/rmq-producer/src/main.ts
     environment:
       <<: *tracing-env
       RMQ: rabbitmq:5672
@@ -321,7 +321,7 @@ services:
   rmq-daemon:
     <<: *rmq-node
     command: >
-      sh -c 'exec node --experimental-strip-types packages/rmq-consumer/src/main.ts
+      sh -c 'exec node packages/rmq-consumer/src/main.ts
       --instance-id "$$(hostname)"'
     environment:
       <<: *daemon-env
@@ -361,7 +361,7 @@ services:
     # get added, keep them on this same line — see the aggregator command
     # above for why a more-indented continuation line breaks silently.
     command: >
-      node --experimental-strip-types packages/demo/src/driver.ts
+      node packages/demo/src/driver.ts
     environment:
       # Both instances, because only the leader publishes and which one that
       # is depends on who won the lease — the driver resolves it at startup.

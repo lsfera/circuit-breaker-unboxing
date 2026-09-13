@@ -9,8 +9,8 @@
     "./Trace.ts": "./src/Trace.ts"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test 'test/*.test.ts'",
-    "test:rmq": "node --experimental-strip-types --test 'test/integration/*.test.ts'"
+    "test": "node --test 'test/*.test.ts'",
+    "test:rmq": "node --test 'test/integration/*.test.ts'"
   },
   "dependencies": {
     "@egress/domain": "workspace:*",

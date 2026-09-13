@@ -288,7 +288,7 @@ const SCENARIOS = {
   },
   /** The full incident, driven by the thing that already asserts it. */
   demo: () =>
-    run("node", ["--experimental-strip-types", "packages/demo/src/driver.ts"], {
+    run("node", ["packages/demo/src/driver.ts"], {
       AGGREGATOR: "http://aggregator:8088,http://aggregator-2:8088",
       FAILURE_MODE: "envoy",
       FLAKY_UPSTREAM: "http://flaky-upstream",

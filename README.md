@@ -615,7 +615,7 @@ Cross-package imports go through `@egress/domain`'s `package.json#exports`
 `pnpm install` resolves to a symlink — so a change to the state machine is a
 change in one package, felt through a real dependency edge, not a shared
 folder. There is still no build step: every package runs straight off its
-`src/*.ts` via `--experimental-strip-types`, and `tsc --noEmit` at the root
+`src/*.ts` through Node 24's built-in type stripping, and `tsc --noEmit` at the root
 typechecks every package in one pass (`packages/*/src` and
 `packages/*/test` in `tsconfig.json`'s `include`). The root scripts
 (`pnpm start`, `pnpm run demo`, `pnpm run subscribe`) call `node` on each

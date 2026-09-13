@@ -4,7 +4,7 @@
  * estimated from one frame. The numbers in
  * docs/decisions/015-the-console-at-a-thousand-apis.md come from this.
  *
- *   node --experimental-strip-types packages/aggregator/src/main.ts \
+ *   node packages/aggregator/src/main.ts \
  *     --source=sim --apis=1000 --replicas=10 --port=8098 --no-webhook &
  *   node scripts/measure-console-stream.mjs http://127.0.0.1:8098 --pid=<aggregator pid>
  *
