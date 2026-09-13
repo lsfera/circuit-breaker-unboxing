@@ -328,7 +328,7 @@ export const HttpLive = HttpRouter.use((router) =>
         const specs = yield* fleet.specs;
         return HttpServerResponse.jsonUnsafe({ ok, specs }, { status: ok ? 200 : 404 });
       }).pipe(
-        Effect.catchCause(() =>
+        Effect.catch(() =>
           Effect.succeed(
             HttpServerResponse.jsonUnsafe({ error: "bad request" }, { status: 400 }),
           ),
@@ -388,7 +388,7 @@ export const HttpLive = HttpRouter.use((router) =>
 
         return yield* served ? accept : Effect.succeed(rejectUnknown);
       }).pipe(
-        Effect.catchCause(() =>
+        Effect.catch(() =>
           Effect.succeed(HttpServerResponse.jsonUnsafe({ accepted: false }, { status: 400 })),
         ),
       ),

@@ -260,8 +260,8 @@ export const makeWebhookSink = Effect.fnUntraced(function* (url: string): Effect
                 // An unreachable outbox degrades to what this did before it
                 // existed: the event is lost and counted. It must not turn a
                 // failed delivery into a failed tick.
-                Effect.catchCause(() =>
-                  Effect.logWarning(`could not persist an undelivered event for ${apiId}`),
+                Effect.catchCause((cause) =>
+                  Effect.logWarning(`could not persist an undelivered event for ${apiId}`, cause),
                 ),
               ),
             ],

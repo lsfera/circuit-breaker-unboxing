@@ -235,7 +235,7 @@ const run = (settings: Settings) => {
         peakWork = Math.max(peakWork, f.work ?? 0);
       }),
       // A scrape blip is not a demo failure; the next sample covers it.
-      Effect.catchCause(() => Effect.void),
+      Effect.catch(() => Effect.void),
     ),
     Schedule.spaced(Duration.seconds(1)),
   );
@@ -294,7 +294,7 @@ const run = (settings: Settings) => {
           last = f;
           return predicate(f) ? O.some(f) : O.none();
         }),
-        Effect.catchCause(() => Effect.succeed(O.none<Fleet>())),
+        Effect.catch(() => Effect.succeed(O.none<Fleet>())),
       ),
       500,
       timeoutMs,
@@ -316,7 +316,7 @@ const run = (settings: Settings) => {
       Effect.map((body) => body.leader?.isLeader === true),
       // An instance that cannot be reached is not the leader as far as this
       // script is concerned; the next candidate gets asked.
-      Effect.catchCause(() => Effect.succeed(false)),
+      Effect.catch(() => Effect.succeed(false)),
     );
 
   const resolveLeader = Effect.when(
@@ -407,7 +407,7 @@ const run = (settings: Settings) => {
     // on step one with a fetch stack trace — the aggregator not being up yet is
     // the overwhelmingly likely reason this doesn't connect.
     yield* getEvents.pipe(
-      Effect.catchCause(() =>
+      Effect.catch(() =>
         Effect.die(
           `cannot reach the aggregator at ${ORIGIN} — start it first, in another terminal: pnpm start.\n` +
             `  If the stack IS up and you are running this from a devcontainer, published ports on\n` +
@@ -426,7 +426,7 @@ const run = (settings: Settings) => {
       PROMETHEUS !== "" &&
       (yield* fleetSnapshot.pipe(
         Effect.map((f) => f.target !== null),
-        Effect.catchCause(() => Effect.succeed(false)),
+        Effect.catch(() => Effect.succeed(false)),
       ));
     if (PROMETHEUS !== "" && !fleetPresent) {
       yield* Console.log(`  (no daemon fleet metrics for ${API} at ${PROMETHEUS} — fleet step will be skipped)`);

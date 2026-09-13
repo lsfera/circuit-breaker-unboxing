@@ -135,8 +135,7 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
    * is what this is.
    */
   const fatal = Deferred.makeUnsafe<never, Fatal>();
-  const stop = (reason: string) =>
-    Effect.sync(() => Deferred.doneUnsafe(fatal, Effect.fail(new Fatal({ reason }))));
+  const stop = (reason: string) => Effect.asVoid(Deferred.fail(fatal, new Fatal({ reason })));
 
   const APIS: ReadonlyArray<ApiSpec> =
     settings.apis > 0 ? syntheticApis(settings.apis) : NAMED_APIS;
@@ -185,8 +184,10 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
       Layer.effect(
         EventSink,
         Effect.gen(function* () {
-          const impls = webhookEnabled ? [yield* makeWebhookSink(webhookUrl)] : [];
-          impls.push(yield* makeAmqpControlPlaneSink);
+          const impls = [
+            ...(webhookEnabled ? [yield* makeWebhookSink(webhookUrl)] : []),
+            yield* makeAmqpControlPlaneSink,
+          ];
           // A control plane this instance can no longer publish to is the same
           // silent failure a dead control loop is: it keeps serving 200s and
           // the daemon fleet simply stops hearing about state changes. The

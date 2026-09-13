@@ -30,9 +30,9 @@ const TRACEPARENT_RE = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
  * which is the common case, and why absence is a value here rather than a
  * failure or an invented id.
  */
-export const traceparent: Effect.Effect<O.Option<string>> = Effect.currentSpan.pipe(
-  Effect.map((span) => O.some(`00-${span.traceId}-${span.spanId}-01`)),
-  Effect.catchCause(() => Effect.succeed(O.none<string>())),
+export const traceparent: Effect.Effect<O.Option<string>> = Effect.map(
+  Effect.option(Effect.currentSpan),
+  O.map((span) => `00-${span.traceId}-${span.spanId}-01`),
 );
 
 /**

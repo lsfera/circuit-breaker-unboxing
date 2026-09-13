@@ -21,6 +21,9 @@ Checked against `effect@4.0.0-rc.115` on 2026-09-13.
 | Parse untrusted text with `Schema`, not by hand | `Schema.fromJsonString(Schema.Unknown)`, then the message schema | `readerFor` in `domain/Model.ts` |
 | Format instants with `DateTime` | `DateTime.formatIso(DateTime.makeUnsafe(ms))`, byte-identical to `toISOString()` | the published event in `Events.ts` |
 | Output from an Effect program goes through `Console` | `Console.log`, not `Effect.sync(() => console.log(…))` | `demo/driver.ts`, `subscriber.ts` |
+| Catch failures with `Effect.catch`; a defect is a bug | `Effect.catch` where only an expected failure should be absorbed — a request body that does not decode is a 400, but a defect in the handler is a 500, not a 400 blaming the caller | `/api/failure` and `/subscriber/webhook` in `Http.ts`, the demo driver's requests, `pollOne` |
+| Absence of an optional value is `Effect.option`, not a catch-all | `Effect.option(Effect.currentSpan)` | `traceparent` in `rmq/Trace.ts` |
+| Completing a `Deferred` is an effect | `Deferred.fail(fatal, new Fatal(…))`, not `Effect.sync(() => Deferred.doneUnsafe(…))` | `aggregator/main.ts` |
 
 Two traps met while applying these:
 
@@ -42,6 +45,8 @@ Two traps met while applying these:
 | Tracing-relevant functions use `Effect.fn("name")`, which opens a span | `Effect.fnUntraced`; spans are opened explicitly with `Effect.withSpan` at chosen boundaries | [ADR 003](../docs/decisions/003-tracing.md) keeps tracing to `work.publish`, `work.call` and `work.redrive`, joined across the broker, with tail sampling behind them. A span for every service function would be volume the collector discards. |
 | Export telemetry with the lightweight `Otlp` modules in new projects | `@effect/opentelemetry/NodeSdk` | [ADR 003](../docs/decisions/003-tracing.md). The guide itself allows NodeSdk when integrating with an existing OpenTelemetry setup, and this stack has one: the collector and its sampling policies. |
 | Test with `@effect/vitest` and `it.effect` | `node:test` running Effect programs, with `TestClock` from `effect/testing` | The repository's test runner. `packages/aggregator/test/ConsoleFrames.test.ts` is a worked example. |
+| `Effect.catch` rather than `Effect.catchCause` | `catchCause` in six places that deliberately absorb defects too | Each one guards the control loop or the delivery path from something outside it, and a comment says so: a sink must never stall a tick (`Events.ts`, `AmqpControlPlaneSink.ts`), an unreachable outbox must not fail a tick, a drain pass stops at its first failure of any kind, and a daemon's control handler logs and carries on (`daemon.ts`). Where a defect is caught, the cause is logged rather than dropped. |
+| Prefer combinators and folds to loops | Four loops in `FleetSource.ts`'s simulator, and sequential `await` loops in `rmq/Client.ts` | The simulator mutates per-host ejection state across N simulated requests, and commit `df95b85` left it on purpose: a fold would move the mutation into a closure rather than remove it. The client's loops are inside amqplib's Promise callbacks, where order is the point. |
 | Use `Clock` / `DateTime` for the current time | `Date.now()` in six calls | Each runs in an AMQP or gRPC callback with no fiber to read a `Clock` from, and says so in a comment: `EnvoyPushSource.ts`, `Redrive.ts`, the floor lease in `daemon.ts`. Every instant computed inside the control loop comes from `Clock`, which is what lets `TestClock` drive it. |
 
 ## Considered, not applied
