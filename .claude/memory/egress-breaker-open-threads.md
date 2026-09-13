@@ -31,10 +31,7 @@ As of 2026-09-13. Verify against `git log` and the ADRs before acting.
   Gemfile on Ruby 4.0. `@types/node` and the `node:22-alpine` image stay on 22
   on purpose (runtime floor). `history/runs/baseline-demo-2026-09-12.json` was
   recorded before all of this and has not been re-recorded.
-- **Left from the RabbitMQ 4.3 upgrade:** the `rabbitmq-data` volume still holds
-  node directories for five container ids (`rabbit@<id>*`) from before
-  `hostname: rabbitmq` was pinned. They are unreachable garbage, not deleted
-  without asking. Also: amqplib crashes the daemon (unhandled `error` on the
+- **Left from the RabbitMQ 4.3 upgrade:** amqplib crashes the daemon (unhandled `error` on the
   inner connection) when the broker closes the connection during topology
   replay — recorded in ADR 005, not fixed.
 - **Grafana `le!="Infinity"` filter** can be removed once Prometheus 2-scraped
