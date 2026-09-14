@@ -1,8 +1,11 @@
 ---
 name: egress-breaker-open-threads
-description: Work on /workspace that was proposed, offered or deferred but not done, as of 2026-09-13 — check before starting anything new.
-metadata:
+description: "Work on /workspace that was proposed, offered or deferred but not done, as of 2026-09-13 — check before starting anything new."
+metadata: 
+  node_type: memory
   type: project
+  originSessionId: d23c6dbd-5c0e-471a-a8fc-5ed6afc8c7c7
+  modified: 2026-09-14T10:41:14.891Z
 ---
 
 As of 2026-09-13. Verify against `git log` and the ADRs before acting.
@@ -41,6 +44,20 @@ As of 2026-09-13. Verify against `git log` and the ADRs before acting.
 - **Left from the RabbitMQ 4.3 upgrade:** amqplib crashes the daemon (unhandled `error` on the
   inner connection) when the broker closes the connection during topology
   replay — recorded in ADR 005, not fixed.
+- **Found 2026-09-14, fixed 2026-09-14 (same day, later session):** a related
+  but distinct gap in the same family — `packages/rmq-consumer/src/main.ts`
+  ran `runDaemon` as a forked, unobserved fiber
+  (`Layer.effectDiscard(Effect.forkScoped(Effect.orDie(...)))`), so a startup
+  failure there (e.g. the same queue-arg mismatch that used to make a daemon
+  merely hang for ~5 minutes, now fixed) was a defect that never ended
+  `Layer.launch` — the daemon hung *forever*, looking healthy. Fixed by
+  extending `launchWithRmq` and applying the same pattern to
+  `rmq-producer/src/main.ts`, which had the identical shape. Live-verified
+  against the running stack (daemon binary run standalone against a
+  hand-mismatched queue, exits FATAL in ~0.4s) — see
+  [[chaos-reliability-work-2026-09-13]] for the one bug this fix went through
+  first (dropped `orDie` meant `catchDefect` couldn't have caught the real
+  failure) and how it was caught before landing.
 - **Grafana `le!="Infinity"` filter** can be removed once Prometheus 2-scraped
   data is past retention (after 2026-09-28).
 - **Unexplained:** one `test:rmq` failure on the first of three runs
@@ -48,4 +65,7 @@ As of 2026-09-13. Verify against `git log` and the ADRs before acting.
 - **Local disk:** about 120 MiB of unreferenced upstream Effect history sits in
   `.git` from `git subtree add`. `git gc` prunes it eventually; never pushed.
 
-Related: [[rmq-control-plane-design]], [[egress-breaker-session-record]].
+- **The 2026-09-13 load/chaos/reliability work is uncommitted and partly
+  half-finished** — see [[chaos-reliability-work-2026-09-13]] before anything else.
+
+Related: [[rmq-control-plane-design]], [[egress-breaker-session-record]], [[chaos-reliability-work-2026-09-13]].

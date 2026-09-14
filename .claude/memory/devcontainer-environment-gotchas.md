@@ -1,8 +1,11 @@
 ---
 name: devcontainer-environment-gotchas
-description: Traps in the /workspace devcontainer that have silently cost time — host suspends corrupting timing runs, git subtree missing, pkill killing its own shell, RabbitMQ and cgroups.
-metadata:
+description: "Traps in the /workspace devcontainer that have silently cost time — host suspends corrupting timing runs, git subtree missing, pkill killing its own shell, RabbitMQ and cgroups."
+metadata: 
+  node_type: memory
   type: reference
+  originSessionId: d23c6dbd-5c0e-471a-a8fc-5ed6afc8c7c7
+  modified: 2026-09-13T23:28:17.256Z
 ---
 
 Facts about this environment, each learned by losing time to it (2026-09-12/13):
@@ -47,5 +50,21 @@ Facts about this environment, each learned by losing time to it (2026-09-12/13):
   no longer counts toward `x-delivery-limit` (a `basic.reject` does).
 - **Prometheus 3 normalizes `le`** (`1048576` → `1.048576e+06`, `Infinity` →
   `+Inf`), so queries spanning v2 and v3 data briefly see duplicate buckets.
+
+- **Quorum queues (RabbitMQ 4) default to `x-delivery-limit` 20, and a queue with no
+  dead-letter target silently DROPS at the limit** (`dead_letter_strategy="disabled"`
+  counter). A consumer channel closing with the message unacked counts as a return.
+  Terminal queues need `x-delivery-limit: -1`. Measured with temp queues, 2026-09-13.
+- **Changing a queue's arguments** needs the queue deleted (`DELETE` without
+  `if-empty` — quorum queues reject that with 400); daemons meanwhile hang at
+  declare silently rather than crash.
+- **`consumer_capacity` reads 0 for every quorum queue** — useless as a stall signal.
+- **Host suspend shows as clock skew:** `Date.now() - performance.timeOrigin -
+  performance.now()` grows only across a sleep; chaos-load.mjs voids such runs.
+  After a wake RabbitMQ may close consumer channels ("ack timed out, -1 ms").
+- **No `bc` in the devcontainer.** Docker bind mounts need host paths — pass Envoy
+  configs to `--mode validate` via `--config-yaml "$(cat …)"`, not a /tmp mount.
+- **netshoot (`nicolaka/netshoot:v0.14`) with `--net container:X --cap-add NET_ADMIN`**
+  works for tc netem / iptables; every container has two IPs (default + devcontainer).
 
 Related: [[rmq-control-plane-design]].
