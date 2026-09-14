@@ -48,18 +48,15 @@ the four exists in the installed version — checked by name against
 `repos/effect/packages/effect/src/Schema.ts` and `DateTime.ts` — and the skill
 was deleted. Its structure (tagged unions, constructors, guards,
 `Match.typeTags`) is still sound, so if domain models need guidance again, write
-it against the table above. An `effect-testing` skill was deleted for a similar
-reason: it was written for `@effect/vitest`, which this repository does not use.
-Tests here are `node:test` running Effect programs, with `TestClock` from
-`effect/testing`; `packages/aggregator/test/ConsoleFrames.test.ts` is a
-worked example.
+it against the table above.
 
-The `effect-ts` setup skill (Effect-TS/skills) went the same way. It installs
-`effect@rc` as a floating range, where this repository pins an exact version in
-the catalog that `pnpm run check` holds to the vendored source. It also sends
-agents to `node_modules/effect/AGENTS.md` and `node_modules/effect/src`, which
-under pnpm do not exist at the root at all. Read `repos/effect/LLMS.md` and
-`repos/effect` instead.
+Two more skills were deleted alongside it, for reasons that aren't v3-vs-v4
+idioms, so they aren't repeated here: `effect-testing` assumed `@effect/vitest`
+— see this repository's actual choice in
+[`effect-guide-in-this-repo.md`](effect-guide-in-this-repo.md)'s testing row —
+and `effect-ts` (Effect-TS/skills) pinned a floating `effect@rc` and pointed at
+`node_modules/effect`, which doesn't exist at the root under pnpm (`git log`,
+commit `1a213315fe`).
 
 When a skill, a post or a remembered example disagrees with `repos/effect`,
 the vendored source is right.
