@@ -277,3 +277,56 @@ exits instead of scheduling another attempt. The restart policy brings it back,
 but a server-initiated close during the rebuild window is a restart, not a
 reconnect.
 
+### A silent, deterministic reconnect, and a fiber `launchWithRmq` still couldn't see
+
+Added 2026-09-14, chasing the same symptom three ways: a daemon that looked
+healthy and consumed nothing after a queue-arg mismatch, in each case with no
+signal that anything was wrong.
+
+**The socket had no timeout.** `amqp.connect()` reused its options on every
+reconnect, and none of them bounded the underlying `net.connect`. A one-sided
+network partition — outbound packets to the broker silently dropped, not
+refused or reset — falls back to Linux's own `tcp_syn_retries`: measured at
+~135s per attempt against a real one. "Roughly five minutes" above assumes 60
+attempts that each fail fast; three at 135s each already blows past it, and
+the full budget would have taken over two hours before `reconnect-failed` said
+anything — indistinguishable from hung to anyone watching less than that.
+Fixed with a 5s `timeout` on the connection options (`packages/rmq/src/Client.ts`),
+the same order of magnitude as `maxDelay`, so a partition now fails each
+attempt fast enough that the five-minute budget is the real bound again.
+
+**Nothing listened for a failed attempt, only the last one.** `connect-failed`
+fires on every failed reconnect, not just the one that exhausts the budget —
+measured against a real broker, a queue redeclared with different arguments
+retried in total silence for 21 attempts and 84 seconds before
+`reconnect-failed` said anything at all. `Client.ts` now logs every attempt,
+and reads the numeric AMQP reply code amqplib stamps on a deterministic
+rejection (406 `PRECONDITION_FAILED` and the like) to tell "the broker is
+actively saying no" from "the broker is not there right now": the former
+abandons the retry budget immediately, on attempt 1, rather than retrying a
+setup that is exactly as doomed on attempt 60 — see the churn on
+`x-delivery-limit` in [016](016-the-retry-budget-travels-with-the-message.md)
+for one way a redeclare drifts.
+
+**A third instance of the gap "Fatal, but not by `process.exit`" already
+describes.** That section's finding — a defect in a fiber forked into the
+layer's scope does not end `Layer.launch` — was fixed there for `Rmq.lost`
+and, a day later, for the aggregator's control-plane sink. It had not been
+applied to the daemon's and producer's own long-running loop
+(`runDaemon` / `runProducer`), each forked with
+`Effect.forkScoped(Effect.orDie(...))` in its `main.ts` and never observed
+again. This failure mode was worse than a slow reconnect: a startup failure in
+that fiber — the same queue-arg mismatch, this time hit by `runDaemon`'s own
+`declareQueue` on first connect, never a reconnect at all — is a defect
+nothing was waiting on, so the process hung forever instead of exiting for the
+restart policy to find.
+
+Fixed by extending `launchWithRmq` to take a second effect to race against
+`Rmq.lost` (`Effect.raceFirst`), and having each `main.ts` catch its loop's
+defect and fail a local `Fatal` deferred into that race — the same
+`Fatal`-deferred shape the aggregator already uses, reached here because
+`launchWithRmq` has an `Rmq` to race against and the aggregator's sink does
+not. Verified against a real broker: a work queue declared by hand with a
+mismatched argument, then a daemon started against it directly, now logs
+`FATAL: daemon died` and exits in well under a second, instead of hanging.
+

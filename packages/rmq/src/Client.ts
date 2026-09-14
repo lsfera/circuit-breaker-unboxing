@@ -560,6 +560,23 @@ export const makeRmq = Effect.fnUntraced(function* (
           password: opts.password ?? "guest",
         },
         {
+          // Bounds every socket connect — initial and every reconnect alike,
+          // since amqplib reuses these options on each attempt — to a fixed
+          // wall-clock time rather than the OS's own SYN-retry timeout.
+          // Without this, a one-sided network partition (outbound packets to
+          // the broker silently dropped rather than refused or reset) leaves
+          // `net.connect` retrying at the kernel level: measured against a
+          // real one, three consecutive reconnect attempts each took ~135s to
+          // fail — Linux's default `tcp_syn_retries` — before amqplib's own
+          // `setTimeout` backoff even got a turn. A `maxRetries: 60` budget
+          // meant to take "about five minutes" (see `recovery` below and
+          // docs/decisions/005-connection-recovery.md) would have taken over
+          // two hours instead, indistinguishable from hung to anything
+          // watching less than that. 5s comfortably covers a real connect on
+          // this network and is the same order of magnitude as `maxDelay`
+          // below, so a partition now fails each attempt fast enough that the
+          // documented five-minute budget is the actual bound again.
+          timeout: 5000,
           recovery: {
             initialDelay: 200,
             maxDelay: 5000,
@@ -585,6 +602,22 @@ export const makeRmq = Effect.fnUntraced(function* (
       }),
   );
 
+  /**
+   * A numeric `.code` on an amqplib error is an AMQP reply code — the broker
+   * accepted the connection, parsed a frame, and rejected it for a protocol
+   * reason (channel.js's `ChannelClose` handler stamps `error.code` from the
+   * close frame's `replyCode`, e.g. 406 for `PRECONDITION_FAILED`). A
+   * network-level failure — broker unreachable, connection refused or reset —
+   * never has one: those surface as Node's own string error codes
+   * (`ECONNREFUSED` and the like) or no `.code` at all, because the broker
+   * never got far enough to reject anything. That split is what tells "the
+   * broker is actively saying no" from "the broker is not there right now".
+   */
+  const amqpReplyCode = (error: Error): number | undefined => {
+    const code = (error as { readonly code?: unknown }).code;
+    return typeof code === "number" ? code : undefined;
+  };
+
   connection.on("error", (error) => {
     warn(`connection error: ${error.message}`);
   });
@@ -592,8 +625,48 @@ export const makeRmq = Effect.fnUntraced(function* (
     connected = false;
     warn(`disconnected (${error?.message ?? "no reason given"}) — recovering`);
   });
-  connection.on("reconnect-scheduled", ({ attempt, delay }) => {
-    warn(`reconnect attempt ${attempt} in ${delay}ms`);
+  /**
+   * Fires on every failed reconnect attempt, not just the last —
+   * recovery.js's `_connect()` emits it from its `catch` before scheduling
+   * the next try. Nothing listened here before: a deterministic failure (the
+   * broker closing `setup`'s topology replay with the same
+   * `PRECONDITION_FAILED` on every attempt, e.g. a queue redeclared with
+   * different arguments — see docs/decisions/016's churn on `x-delivery-limit`)
+   * retried silently for up to five minutes before `reconnect-failed` said
+   * anything at all, which is indistinguishable from hung to anyone watching
+   * for less than five minutes. Measured against a real broker: 21 attempts
+   * and 84 seconds of exactly this silence before this handler existed.
+   *
+   * An AMQP reply code here (see `amqpReplyCode`) can only mean the broker
+   * itself rejected a frame during `setup` — retrying the identical topology
+   * against it cannot succeed without a human fixing the mismatch, so this
+   * abandons the retry budget immediately (failing `lost`, same as
+   * `reconnect-failed` below) rather than burning the full five minutes on a
+   * setup that is doomed on attempt 1 as surely as on attempt 60. A
+   * transient failure — broker unreachable, connection refused — has no such
+   * code and keeps its full budget; `RecoveringCore` schedules its next
+   * attempt right after this handler returns, unless `lost` failing has
+   * already torn the connection down.
+   */
+  connection.on("connect-failed", (error) => {
+    const code = amqpReplyCode(error);
+    warn(
+      `connect attempt failed${code !== undefined ? ` (AMQP ${code})` : ""}: ${error.message}`,
+    );
+    if (code !== undefined) {
+      Deferred.doneUnsafe(
+        lost,
+        Effect.fail(
+          new RmqError({
+            operation: "connection",
+            cause: `broker rejected setup deterministically, abandoning retry budget: ${error.message}`,
+          }),
+        ),
+      );
+    }
+  });
+  connection.on("reconnect-scheduled", ({ attempt, delay, error }) => {
+    warn(`reconnect attempt ${attempt} in ${delay}ms (${error.message})`);
   });
   connection.on("connect", () => {
     warn(
@@ -793,10 +866,21 @@ export const makeRmq = Effect.fnUntraced(function* (
  * running. So the guarantee has to be on the fiber that launches, and putting
  * it here rather than in each `main.ts` is the difference between a rule and
  * three places that have to remember it.
+ *
+ * `alsoFatal` is the same gap for the caller's own long-running fiber (the
+ * daemon loop, the producer loop): forked into the layer with `forkScoped`,
+ * its defects are just as invisible to `Layer.launch` as a lost connection
+ * would be without this function. A caller with such a fiber catches its
+ * defect, fails a `Deferred` from that handler, and passes `Deferred.await`
+ * of it here — mirroring `@egress/aggregator`'s `Fatal`-deferred pattern,
+ * which has no `Rmq` to race against and so cannot use this function.
  */
-export const launchWithRmq = <ROut, E, RIn>(
+export const launchWithRmq = <ROut, E, RIn, E2 = never>(
   layer: Layer.Layer<ROut | Rmq, E, RIn>,
-): Effect.Effect<never, E | RmqError, RIn> =>
+  alsoFatal: Effect.Effect<never, E2, never> = Effect.never,
+): Effect.Effect<never, E | RmqError | E2, RIn> =>
   Effect.scoped(
-    Effect.flatMap(Layer.build(layer), (context) => Context.get(context, Rmq).lost),
+    Effect.flatMap(Layer.build(layer), (context) =>
+      Effect.raceFirst(Context.get(context, Rmq).lost, alsoFatal),
+    ),
   );

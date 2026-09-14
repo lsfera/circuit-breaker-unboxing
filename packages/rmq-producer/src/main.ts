@@ -1,4 +1,4 @@
-import { Config, Effect, Layer } from "effect";
+import { Config, Data, Deferred, Effect, Layer } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { HttpRouter } from "effect/unstable/http";
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
@@ -39,14 +39,39 @@ const flags = {
   metricsPort: metricsPortFlag,
 };
 
+/** Why this process stopped, when it stops itself rather than losing the broker. */
+class Fatal extends Data.TaggedError("Fatal")<{ readonly reason: string }> {
+  override get message(): string {
+    return this.reason;
+  }
+}
+
 /**
  * Scoped fiber for the lifetime of the server, the same shape the aggregator's
  * tick loop and the daemon use. Failing setup — a broker that never comes up, a
  * queue redeclared with different arguments — is a defect rather than something
  * to recover from, hence `orDie` and the restart policy on the container.
+ *
+ * See the daemon's main for why its `catchDefect` fails `fatal` instead of
+ * leaving the fork bare: an unobserved defect in a `forkScoped` fiber cannot
+ * end `Layer.launch`, and `launchWithRmq` races `fatal` against the broker
+ * connection to close that gap here too.
  */
 const producer = Command.make("rmq-producer", flags, (settings) => {
-  const Producer = Layer.effectDiscard(Effect.forkScoped(Effect.orDie(runProducer(settings))));
+  const fatal = Deferred.makeUnsafe<never, Fatal>();
+  const stop = (reason: string) => Effect.asVoid(Deferred.fail(fatal, new Fatal({ reason })));
+
+  const Producer = Layer.effectDiscard(
+    Effect.forkScoped(
+      Effect.orDie(runProducer(settings)).pipe(
+        Effect.catchDefect((defect) =>
+          Effect.logFatal("producer died, restarting the process", defect).pipe(
+            Effect.andThen(stop("producer died")),
+          ),
+        ),
+      ),
+    ),
+  );
 
   // See the daemon's main for why this is not `Layer.launch`.
   return launchWithRmq(
@@ -57,6 +82,7 @@ const producer = Command.make("rmq-producer", flags, (settings) => {
       Layer.provide(TracingLive("rmq-producer")),
       Layer.provideMerge(Rmq.layer(settings.broker)),
     ),
+    Deferred.await(fatal),
   );
 });
 

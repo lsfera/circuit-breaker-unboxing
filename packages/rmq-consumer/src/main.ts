@@ -1,4 +1,4 @@
-import { Config, Effect, Layer } from "effect";
+import { Config, Data, Deferred, Effect, Layer } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { HttpRouter } from "effect/unstable/http";
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
@@ -74,6 +74,13 @@ const flags = {
   metricsPort: metricsPortFlag,
 };
 
+/** Why this process stopped, when it stops itself rather than losing the broker. */
+class Fatal extends Data.TaggedError("Fatal")<{ readonly reason: string }> {
+  override get message(): string {
+    return this.reason;
+  }
+}
+
 /**
  * The graph is built *from* the settings, so it is built inside the command's
  * handler. Nothing below an unbuilt layer is built, so a value this process
@@ -84,9 +91,29 @@ const flags = {
  * failing setup — a broker that never comes up, a queue redeclared with
  * different arguments — is a defect rather than something to recover from,
  * hence `orDie` and the restart policy on these containers.
+ *
+ * That defect still has to reach something that ends the process: forked into
+ * the layer's scope with `forkScoped`, it is otherwise as invisible to
+ * `Layer.launch` as a lost connection would be without `launchWithRmq` — the
+ * same gap ADR 005 fixed for the connection, never applied to this fiber. So
+ * its `catchDefect` fails `fatal`, and `launchWithRmq` races that against the
+ * broker connection, mirroring `@egress/aggregator`'s `Fatal`-deferred pattern.
  */
 const daemon = Command.make("rmq-daemon", flags, (settings) => {
-  const Daemon = Layer.effectDiscard(Effect.forkScoped(Effect.orDie(runDaemon(settings))));
+  const fatal = Deferred.makeUnsafe<never, Fatal>();
+  const stop = (reason: string) => Effect.asVoid(Deferred.fail(fatal, new Fatal({ reason })));
+
+  const Daemon = Layer.effectDiscard(
+    Effect.forkScoped(
+      Effect.orDie(runDaemon(settings)).pipe(
+        Effect.catchDefect((defect) =>
+          Effect.logFatal("daemon died, restarting the process", defect).pipe(
+            Effect.andThen(stop("daemon died")),
+          ),
+        ),
+      ),
+    ),
+  );
 
   // `launchWithRmq`, not `Layer.launch`: a broker this process can no longer
   // reach ends it, and `provideMerge` is what keeps the one connection visible
@@ -99,6 +126,7 @@ const daemon = Command.make("rmq-daemon", flags, (settings) => {
       Layer.provide(TracingLive("rmq-daemon")),
       Layer.provideMerge(Rmq.layer(settings.broker)),
     ),
+    Deferred.await(fatal),
   );
 });
 
