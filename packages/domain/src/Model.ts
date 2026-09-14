@@ -238,6 +238,19 @@ export type AggregatorConfig = {
   readonly maxOpenMs: number;
   /** Consecutive healthy observations needed to close from HALF_OPEN. */
   readonly probeSuccesses: number;
+  /**
+   * Re-entering DEGRADED this soon after a DEGRADED->CLOSED close counts as
+   * a relapse of the same incident, not a new one (see `closeHoldMs` on
+   * `BreakerState`). Long enough to cover one flap cycle; a separate incident
+   * later starts from the base hold.
+   */
+  readonly relapseWindowMs: number;
+  /** The least a relapse must stay healthy before closing again: longer than a
+   * flapping link's healthy windows. See `closeHoldMs` on `BreakerState`. */
+  readonly relapseHoldMs: number;
+  /** Cap on the earned close hold, so a link that never stops flapping still
+   * gets probed for recovery rather than staying DEGRADED forever. */
+  readonly maxCloseHoldMs: number;
   /** Replicas silent longer than this stop counting toward quorum. */
   readonly replicaTimeoutMs: number;
   /** Periodic full-state republish per API, so late subscribers can sync. */
@@ -252,6 +265,9 @@ export const defaultConfig: AggregatorConfig = {
   openMs: 4000,
   maxOpenMs: 16000,
   probeSuccesses: 3,
+  relapseWindowMs: 15000,
+  relapseHoldMs: 8000,
+  maxCloseHoldMs: 30000,
   replicaTimeoutMs: 5000,
   snapshotMs: 15000,
   tickMs: 250,

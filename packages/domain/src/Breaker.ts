@@ -30,6 +30,20 @@ export type BreakerState = {
   readonly candidateSince: number;
   readonly probeStreak: number;
   readonly openBackoffMs: number;
+  /**
+   * How long the fleet must look healthy without a break before
+   * DEGRADED->CLOSED. `dwellMs` for a first incident, so it closes as fast as
+   * any other transition. A relapse (DEGRADED again within `relapseWindowMs`
+   * of the last close) raises it to at least `relapseHoldMs`, then doubles it,
+   * up to `maxCloseHoldMs`. It is measured from `candidateSince`, not from
+   * entering DEGRADED: a flapping link's healthy windows are shorter than the
+   * hold, so none of them can close the breaker. Carried through OPEN and
+   * HALF_OPEN, so a flap cannot reset it by passing through a probe.
+   */
+  readonly closeHoldMs: number;
+  /** `now` at the last DEGRADED->CLOSED, or -Infinity before the first one.
+   * The only clock a relapse is measured against. */
+  readonly lastDegradedCloseAt: number;
   readonly replicas: ReadonlyMap<string, ReplicaSlot>;
   readonly lastVotes: Record<Vote, number>;
   readonly lastHealthy: number;
@@ -60,6 +74,8 @@ export const initial = (
   candidateSince: now,
   probeStreak: 0,
   openBackoffMs: cfg.openMs,
+  closeHoldMs: cfg.dwellMs,
+  lastDegradedCloseAt: -Infinity,
   replicas: new Map(),
   lastVotes: { OK: 0, DEGRADED: 0, DOWN: 0 },
   lastHealthy: 0,
@@ -123,6 +139,9 @@ type Tick = {
   readonly dwelled: boolean;
   /** Has the current state been in place long enough to leave? */
   readonly settled: boolean;
+  /** Has the candidate been unchanged for the earned `closeHoldMs`? Only
+   * meaningful in DEGRADED, but computed once per tick like `settled`. */
+  readonly held: boolean;
   /** Every reporting replica sees zero hosts, not merely a quorum of them. */
   readonly allGone: boolean;
   /** The impairment came from replicas shedding on their own thresholds. */
@@ -210,6 +229,53 @@ const settleInto =
       : [self, O.none()];
 
 /**
+ * CLOSED -> DEGRADED, gated like any settled transition. A relapse raises
+ * `closeHoldMs` (see BreakerState); a first incident leaves it at base.
+ */
+const enterDegraded: Resolve = (self, now, tick) =>
+  tick.dwelled && tick.settled
+    ? transition(
+        {
+          ...self,
+          closeHoldMs:
+            now - self.lastDegradedCloseAt <= tick.cfg.relapseWindowMs
+              ? Math.min(Math.max(self.closeHoldMs * 2, tick.cfg.relapseHoldMs), tick.cfg.maxCloseHoldMs)
+              : self.closeHoldMs,
+        },
+        now,
+        State.DEGRADED,
+        REASON.DEGRADED(tick),
+      )
+    : [self, O.none()];
+
+/**
+ * DEGRADED -> CLOSED: settled, and healthy without a break for `closeHoldMs`.
+ * Stamps `lastDegradedCloseAt` so the next DEGRADED entry can tell a relapse.
+ */
+const settleFromDegraded: Resolve = (self, now, tick) =>
+  tick.dwelled && tick.settled && tick.held
+    ? transition(
+        { ...self, lastDegradedCloseAt: now },
+        now,
+        State.CLOSED,
+        REASON.CLOSED(tick),
+      )
+    : [self, O.none()];
+
+/**
+ * CLOSED holding steady for the whole relapse window is the fleet actually
+ * recovering, not a lull between flaps — so the earned hold resets to base.
+ * A relapse after this point is a new incident and starts the doubling over.
+ */
+const stayClosed: Resolve = (self, now, { cfg }) => [
+  {
+    ...self,
+    closeHoldMs: now - self.changedAt >= cfg.relapseWindowMs ? cfg.dwellMs : self.closeHoldMs,
+  },
+  O.none(),
+];
+
+/**
  * The whole graph, as a table rather than a chain of `if`s: every state this
  * machine can be in, against every verdict the fleet can return.
  *
@@ -224,8 +290,8 @@ const settleInto =
 const RESOLVE: Record<State, Record<Candidate, Resolve>> = {
   OPEN: { CLOSED: waitOutBackoff, DEGRADED: waitOutBackoff, OPEN: waitOutBackoff },
   HALF_OPEN: { CLOSED: probeSucceeded, DEGRADED: probeDegraded, OPEN: probeFailed },
-  CLOSED: { CLOSED: hold, DEGRADED: settleInto(State.DEGRADED), OPEN: settleInto(State.OPEN) },
-  DEGRADED: { CLOSED: settleInto(State.CLOSED), DEGRADED: hold, OPEN: settleInto(State.OPEN) },
+  CLOSED: { CLOSED: stayClosed, DEGRADED: enterDegraded, OPEN: settleInto(State.OPEN) },
+  DEGRADED: { CLOSED: settleFromDegraded, DEGRADED: hold, OPEN: settleInto(State.OPEN) },
 };
 
 /**
@@ -292,6 +358,7 @@ export const step = (
         cfg,
         dwelled: now - next.candidateSince >= cfg.dwellMs,
         settled: now - next.changedAt >= cfg.minStateMs,
+        held: now - next.candidateSince >= next.closeHoldMs,
         allGone: votes.DOWN === reporting,
         overflowDrove,
       });
