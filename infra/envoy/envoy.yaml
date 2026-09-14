@@ -159,6 +159,11 @@ static_resources:
                           min_concurrency: 4
                           buffer:
                             value: 25
+                      # 429, not the default 503: a request shed here never reached the
+                      # third party, and the daemons must be able to tell it apart from a
+                      # 5xx the upstream returned, or shedding spends messages' delivery budget.
+                      concurrency_limit_exceeded_status:
+                        code: TooManyRequests
                       enabled:
                         default_value: true
                         runtime_key: "adaptive_concurrency.enabled"
@@ -270,7 +275,10 @@ static_resources:
       # rate hosts go unhealthy independently rather than all at once - which
       # is what lets a replica report healthy < total and vote DEGRADED.
       health_checks: &health_checks
-        - timeout: 1s
+        # The daemons give a call 2s. A health check that gave up sooner ejected every
+        # host of an upstream answering in 1.5s — calls that would all have succeeded —
+        # and opened the circuit on it (chaos scenario flaky-slow-healthcheck).
+        - timeout: 2s
           interval: 2s
           unhealthy_threshold: 3
           healthy_threshold: 2

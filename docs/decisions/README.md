@@ -26,3 +26,4 @@ being right, are both the record.
 | 013 | [The target as a fraction, not a count](013-the-target-as-a-fraction.md) | 5,000 simulated fleets, then a real one: ±60% at five daemons, ±16% at a hundred |
 | 014 | [Every service declares what it may use](014-the-measurement-envelope.md) | the same demo run with and without limits: every garbage-collected process a third smaller |
 | 015 | [The console at a thousand APIs](015-the-console-at-a-thousand-apis.md) — *steps 1–2 built, 3–5 proposed* | a recorded stream replayed through five encodings; a hundred consoles took up to a fifth of the control loop's cadence, and after sharing the frame take none of it |
+| 016 | [The retry budget travels with the message](016-the-retry-budget-travels-with-the-message.md) | a kill-broker audit — 0 lost, 18 duplicate calls under a producer-assigned key — and the sweep's first pass against a 22,246-message backlog |

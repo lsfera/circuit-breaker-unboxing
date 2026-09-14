@@ -67,8 +67,14 @@ load at the exact moment the dependency can least take it, and the picture in
 [section 1 of the journey](../history/journey.md#1-what-the-picture-hides) is that
 happening by default. Worse, an in-process attempt counter is lost the moment
 the message moves to another consumer — so "three attempts" quietly becomes
-three attempts *per consumer*. Here the broker counts instead
-(`x-delivery-limit`), so the budget belongs to the message.
+three attempts *per consumer*. Here the daemon republishes on a failed call
+rather than requeuing, carrying an attempt count and a per-attempt
+idempotency key forward in headers, rather than relying only on the broker's
+`x-delivery-limit` — which stays on the queue as a backstop for a delivery
+that never gets that far, not as the primary counter. This is close to the
+retry-queue ladder further down, and paid for the same reason: see
+[ADR 016](decisions/016-the-retry-budget-travels-with-the-message.md) for the
+measurement that forced it and what it cost.
 
 **Backoff and jitter.** Spreads retries out in time so they do not arrive as a
 wall.
@@ -136,6 +142,65 @@ immediately.
 same blindness — the delay is a constant chosen in advance, not a response to
 what the dependency is doing now.
 
+**Arbitrary delays from a binary cascade.** RabbitMQ has no "deliver at" for a
+message, only a TTL and somewhere to dead-letter it when the TTL expires.
+[NServiceBus's RabbitMQ transport](https://docs.particular.net/transports/rabbitmq/delayed-delivery)
+builds any delay out of those two primitives. It declares 28 levels, each a
+topic exchange and a queue of the same name (`nsb.v2.delay-level-27` down to
+`nsb.v2.delay-level-00`). The queue at level *n* has `x-message-ttl` of 2ⁿ
+seconds and dead-letters into the exchange of level *n − 1*. A message's delay
+is written into its routing key as 28 binary digits followed by the destination,
+so ten seconds is `0.0.…0.1.0.1.0.destination`. At each level a `1` routes the
+message into that level's queue to wait out its TTL, and a `0` routes it
+straight past to the next exchange. It leaves level 0 through a final
+`nsb.v2.delay-delivery` exchange bound to each destination. Any whole number of
+seconds up to 2²⁸ − 1 (about 8.5 years) takes at most 28 hops. Each queue holds
+messages with one TTL only, so the one that expires next is always at the
+head, which is what makes TTL-based expiry dependable there.
+
+*Limitation:* it answers "when", never "whether". Every delay is decided by
+the publisher at publish time, so a thousand messages that failed together are
+released together, however the dependency is doing by then. The precision is
+a second, and a message's wait also includes each queue's expiry scan. Moving
+work between brokers gets harder: a delayed message is a message part-way
+through 28 queues, and Particular documents that a shovel cannot move them. And
+it rests on dead-lettering, which quorum queues do *at most once* unless the
+source queue is declared with `x-dead-letter-strategy: at-least-once` (which
+also requires `x-overflow: reject-publish`). This stack's own work queue is the
+default: the broker's
+`rabbitmq_global_messages_dead_lettered_delivery_limit_total` counter reads
+`dead_letter_strategy="at_most_once"`, so a dead-lettering the broker cannot
+complete drops the message instead of retrying it.
+
+**A cascade of retry queues for backoff.** The simpler variant of the same
+idea: a fixed ladder of queues, for example `work.retry.1s`, `work.retry.10s`,
+`work.retry.1m` and `work.retry.10m`, each with its own `x-message-ttl`,
+dead-lettering back into the work queue. A consumer whose call fails publishes
+the message to the next rung and acks the original, so the delay grows with
+each attempt without any consumer holding it. One queue per rung keeps every
+TTL at the head of its own queue. The alternative, per-message TTLs on a single
+queue, does not: RabbitMQ only expires a message when it reaches the head, so a
+ten-minute retry ahead of a one-second one holds the short one back for ten
+minutes.
+
+*Limitation:* everything the per-call backoff already had, plus three costs of
+its own. The schedule is still blind: it is fixed per rung and ignores the
+upstream's state, and all the messages that failed in the same second reach
+the same rung together, so they come back together. A TTL cannot jitter a
+single message without per-message TTLs, which brings back the head-of-line
+problem above. The retry budget stops belonging to the broker: republishing
+resets `x-delivery-count`, so the attempt count has to travel in a header the
+consumer maintains, which is what
+[`x-delivery-limit`](#per-call) was chosen to avoid. And the queues multiply: the
+number of rungs times the number of APIs, each with its own dead-lettering to
+reason about. Where it does fit here is narrower than backoff in general.
+Settling with `requeue` puts a message straight back on the queue, and
+[`packages/rmq/src/Client.ts`](../packages/rmq/src/Client.ts) already warns that
+repeated undelayed requeues become a hot loop. A single short rung would give
+failures that say nothing about the third party, such as a refused connection
+to the local proxy, a pause before the next attempt that does not spend the
+message's budget. Deciding *whether* to call stays with the breaker.
+
 ## Per fleet
 
 Everything above reduces or reschedules load. None of it produces **one answer
@@ -198,15 +263,17 @@ The column that matters is the third one.
 | Prefetch ceiling | how much is in flight | whether it should be | yes |
 | Dead-lettering | poison messages cycling | getting the work back | yes |
 | Redrive | recovering the backlog | knowing recovery happened | yes, elected to one consumer |
+| Binary delay cascade | any delay from TTL + dead-letter | whether to send at all; at-most-once dead-lettering by default | no |
+| Retry-queue ladder | growing backoff held by the broker | blind schedule, no per-message jitter, budget moves to a header | no |
 | Shared state in Redis | agreement | a round trip in the hot path | no |
 | Publish from the proxy | telling someone | per-replica flapping; saturation is not an event | no |
 | **Aggregate and publish** | **one verdict, off the hot path** | **it is three components** | **yes** |
 
-The first nine rows are not alternatives to the last. They are what the last
+The first eleven rows are not alternatives to the last. They are what the last
 one sits on top of, and a design that reaches for the control plane without
 them is answering a question nobody asked.
 
-What none of the first nine can do — individually or together — is make the
+What none of the first eleven can do — individually or together — is make the
 verdict a **fact the rest of the system can act on**, rather than an
 implementation detail of whichever process happened to make the last call.
 That is the question the constraint forces, and it is the only one the last

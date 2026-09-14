@@ -1,4 +1,3 @@
-import { Array as Arr, Result } from "effect";
 import type { ContractState } from "./Contract.ts";
 import type { EventType } from "@egress/domain/Model.ts";
 
@@ -16,18 +15,23 @@ import type { EventType } from "@egress/domain/Model.ts";
 type Counts = {
   ok: number;
   failed: number;
+  /** Rejected by Envoy's adaptive-concurrency filter (429) before reaching the third party — backpressure, not a call failure. */
+  shed: number;
   probed: number;
-  redriven: number;
   undecodable: number;
-  /** Control-plane events by CloudEvents type. */
+  /**
+   * Control-plane events by CloudEvents type — read directly by the heartbeat
+   * log line (its `control=` count), not published as a metric: RabbitMQ's own
+   * per-queue publish count already covers what a fleet-wide counter would.
+   */
   readonly byType: Map<EventType, number>;
 };
 
 export const zero = (): Counts => ({
   ok: 0,
   failed: 0,
+  shed: 0,
   probed: 0,
-  redriven: 0,
   undecodable: 0,
   byType: new Map(),
 });
@@ -37,72 +41,58 @@ export const observed = (counts: Counts, type: EventType): void => {
 };
 
 /**
- * One reading of everything, immutable afterwards — the by-type map included.
+ * One reading of everything published as a metric, immutable afterwards.
  * `gaps`/`duplicates` come from `ContractState` because `observe` derives them
- * rather than the daemon incrementing them.
+ * rather than the daemon incrementing them. `byType` stays on `Counts` only —
+ * nothing here feeds a per-type metric any more, see the comment on `Counts`.
  */
 type Snapshot = {
   readonly ok: number;
   readonly failed: number;
+  readonly shed: number;
   readonly probed: number;
-  readonly redriven: number;
   readonly undecodable: number;
   readonly gaps: number;
   readonly duplicates: number;
-  readonly byType: ReadonlyMap<EventType, number>;
 };
 
 export const nothing: Snapshot = {
   ok: 0,
   failed: 0,
+  shed: 0,
   probed: 0,
-  redriven: 0,
   undecodable: 0,
   gaps: 0,
   duplicates: 0,
-  byType: new Map(),
 };
 
 export const snapshot = (counts: Counts, contract: ContractState): Snapshot => ({
   ok: counts.ok,
   failed: counts.failed,
+  shed: counts.shed,
   probed: counts.probed,
-  redriven: counts.redriven,
   undecodable: counts.undecodable,
   gaps: contract.gaps,
   duplicates: contract.duplicates,
-  byType: new Map(counts.byType),
 });
 
 /** What the registry is owed since the last publication. Positive amounts only. */
 type Delta = {
   readonly ok: number;
   readonly failed: number;
+  readonly shed: number;
   readonly probed: number;
-  readonly redriven: number;
   readonly undecodable: number;
   readonly gaps: number;
   readonly duplicates: number;
-  readonly byType: ReadonlyArray<readonly [type: EventType, count: number]>;
 };
 
-export const since = (published: Snapshot, current: Snapshot): Delta => {
-  // Only types seen since the last publish carry a delta; the rest are absent
-  // rather than zero, so nothing republishes a counter that has not moved.
-  // `Result.fail` is this combinator's "skip" — see subscriber.ts for the same
-  // note. A type that has not moved since the last publish is absent, not zero.
-  const byType = Arr.filterMap(current.byType, ([type, count]) => {
-    const seen = count - (published.byType.get(type) ?? 0);
-    return seen > 0 ? Result.succeed([type, seen] as const) : Result.fail(type);
-  });
-  return {
-    ok: current.ok - published.ok,
-    failed: current.failed - published.failed,
-    probed: current.probed - published.probed,
-    redriven: current.redriven - published.redriven,
-    undecodable: current.undecodable - published.undecodable,
-    gaps: current.gaps - published.gaps,
-    duplicates: current.duplicates - published.duplicates,
-    byType,
-  };
-};
+export const since = (published: Snapshot, current: Snapshot): Delta => ({
+  ok: current.ok - published.ok,
+  failed: current.failed - published.failed,
+  shed: current.shed - published.shed,
+  probed: current.probed - published.probed,
+  undecodable: current.undecodable - published.undecodable,
+  gaps: current.gaps - published.gaps,
+  duplicates: current.duplicates - published.duplicates,
+});

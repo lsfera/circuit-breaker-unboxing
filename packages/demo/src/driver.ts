@@ -208,10 +208,17 @@ const run = (settings: Settings) => {
 
   const fleetSnapshot: Effect.Effect<Fleet, Error> = Effect.all({
     target: promQuery(`max(egress_daemon_target_fraction{apiId="${API}"})`),
-    active: promQuery(`sum(egress_daemon_self_active{apiId="${API}"})`),
+    // The broker's own count of consumers on the work queue, not a daemon-reported
+    // gauge — RabbitMQ already knows who is pulling. During HALF_OPEN this also
+    // counts the one elected prober, which briefly opens its own consumer on the
+    // same queue to take its single message; nothing here asserts through that
+    // window, so it doesn't change what the two checks below mean.
+    active: promQuery(`sum(rabbitmq_detailed_queue_consumers{queue="${API}.work"})`),
     // Counted rather than configured: the fleet is one scaled service and no
     // daemon knows how many there are, so how many are reporting *is* the size.
-    size: promQuery(`count(egress_daemon_self_active{apiId="${API}"})`),
+    // `target_fraction` still has one series per daemon, published whether or
+    // not it is currently pulling work.
+    size: promQuery(`count(egress_daemon_target_fraction{apiId="${API}"})`),
     work: promQuery(`rabbitmq_detailed_queue_messages{queue="${API}.work"}`),
     dead: promQuery(`rabbitmq_detailed_queue_messages{queue="${API}.work.dead"}`),
     broken: promQuery(

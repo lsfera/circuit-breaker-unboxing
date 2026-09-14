@@ -11,6 +11,41 @@ import type { CircuitEvent, DecodeFailure } from "@egress/domain/Model.ts";
 
 export const CONTROL_EXCHANGE = "circuit.control";
 
+/**
+ * The payments idempotency key: an AMQP header inbound, an HTTP header on the
+ * call it authorizes. Minted by the consumer on a message's first call
+ * attempt, not by the producer — a key only protects the third party if every
+ * retry of the same attempt sends the same one, and a broker requeue hands
+ * back the original message with no way to add a header to it. So a failed
+ * call is retried by republishing with the key carried forward — see
+ * `packages/rmq-consumer/src/Attempts.ts` — and this is the one name that
+ * republish, the redrive, and the call itself all import rather than repeat.
+ */
+export const IDEMPOTENCY_KEY_HEADER = "x-idempotency-key";
+
+/**
+ * How many times a message has been *called* — not delivered — since it was
+ * last a fresh message. Distinct from the broker's own `x-delivery-count`:
+ * that counts deliveries of the same message, and a failed call now retries
+ * by republishing a new message rather than requeuing the old one. Absent
+ * means zero. Reset (omitted) whenever `REDRIVE_COUNT_HEADER` advances — a
+ * redrive is a fresh outage, and deserves a fresh call budget.
+ */
+export const ATTEMPTS_HEADER = "x-egress-attempts";
+
+/**
+ * Where a message came from, stamped by anything that moves a message
+ * between queues without going through the broker's own dead-lettering —
+ * the daemon's own republish to `<api>.work.dead` once `ATTEMPTS_HEADER`
+ * exhausts `WORK_DELIVERY_LIMIT`, and Redrive.ts's parking of a non-work
+ * message. Read by Redrive.ts as the fallback for `delivery.deadLetter`,
+ * which is only populated when the *broker* did the dead-lettering — a
+ * message published straight onto the queue carries no `x-first-death-*` at
+ * all, and without this it would look unattributable and never get redriven.
+ */
+export const ORIGIN_QUEUE_HEADER = "x-egress-origin-queue";
+export const ORIGIN_REASON_HEADER = "x-egress-origin-reason";
+
 /** One routing key per API: a fleet binds only its own and never sees other APIs' events. */
 export const routingKeyFor = (apiId: string): string => `circuit.${apiId}`;
 
@@ -33,6 +68,15 @@ export const workQueueFor = (apiId: string): string => `${apiId}.work`;
 
 /** Where work that could not be completed ends up. */
 export const deadLetterQueueFor = (apiId: string): string => `${apiId}.work.dead`;
+
+/**
+ * Where a message goes once it has been redriven `MAX_REDRIVES` times without
+ * succeeding — a true poison message, told apart from a message that only
+ * failed because the outage it was caught in hadn't ended yet. The periodic
+ * sweep would otherwise replay it forever: dead-letter, redrive, three more
+ * calls, dead-letter again.
+ */
+export const parkedQueueFor = (apiId: string): string => `${apiId}.work.parked`;
 
 /**
  * One dead-letter destination for *every* queue this fleet declares, so anything
@@ -86,15 +130,51 @@ export const workQueueOptions = (apiId: string) => ({
     ...workQueueArgs(apiId),
     "x-queue-type": "quorum",
     "x-delivery-limit": WORK_DELIVERY_LIMIT,
+    // At-least-once: the default (at-most-once) drops a dead letter the target
+    // queue does not take. Not what lost the 1,570 — see deadLetterQueueOptions.
+    // Quorum queues require reject-publish for it.
+    "x-dead-letter-strategy": "at-least-once",
+    "x-overflow": "reject-publish",
   },
   durable: true,
 });
 
-/** No delivery limit: this queue is the end of the line. */
+/**
+ * The end of the line, so nothing may ever leave it except by being moved.
+ *
+ * `x-delivery-limit: -1`, because a quorum queue left alone has a limit of 20, and
+ * a queue with no dead-letter target at its limit *drops* the message
+ * (`dead_letter_strategy="disabled"`). Every redrive pass hands back what it did not
+ * move — its channel closing counts — so the old default quietly lost dead letters:
+ * 1,570 in one chaos run, and 0 of 50 survived 22 channel closes on this broker
+ * where -1 kept all 50 through 25.
+ */
 export const deadLetterQueueOptions = () => ({
-  args: { "x-queue-type": "quorum" },
+  args: { "x-queue-type": "quorum", "x-delivery-limit": -1 },
   durable: true,
 });
+
+/** Terminal like the dead-letter queue, and for the same reason never allowed to drop at a delivery limit. */
+export const parkedQueueOptions = () => ({
+  args: { "x-queue-type": "quorum", "x-delivery-limit": -1 },
+  durable: true,
+});
+
+/**
+ * Stamped on a redriven message so the next redrive can tell a message caught
+ * in its second outage from one that has failed every single time. Absent
+ * means zero — a message dead-lettered by the broker directly, never yet
+ * redriven.
+ */
+export const REDRIVE_COUNT_HEADER = "x-egress-redrive-count";
+
+/**
+ * Redrives before a message is treated as poison rather than unlucky. Each
+ * redrive grants a fresh `WORK_DELIVERY_LIMIT`-attempt budget, so this bounds
+ * outages survived, not attempts: five outages' worth of retrying the same
+ * message is enough evidence that the upstream will never accept it.
+ */
+export const MAX_REDRIVES = 5;
 
 /**
  * How long a control queue may sit with no consumer before the broker deletes

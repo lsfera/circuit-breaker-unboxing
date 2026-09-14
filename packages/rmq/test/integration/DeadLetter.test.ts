@@ -13,6 +13,7 @@ import { Rmq } from "../../src/Client.ts";
 import {
   deadLetterQueueFor,
   deadLetterQueueOptions,
+  IDEMPOTENCY_KEY_HEADER,
   WORK_DELIVERY_LIMIT,
   workQueueFor,
   workQueueOptions,
@@ -351,6 +352,78 @@ test("a traceparent survives dead-lettering, and only a republish that carries i
   );
 });
 
+/**
+ * The idempotency key a payments call needs to be safe under at-least-once
+ * delivery, carried the same way the traceparent above is: the header
+ * survives being dead-lettered, and only a republish that explicitly carries
+ * it keeps it on the replay. This is the property `Redrive.ts`'s move back
+ * onto the work queue depends on — a message with no key must still redrive
+ * with none, not inherit one from elsewhere.
+ */
+test("an idempotency key survives dead-lettering, and only a redrive republish that carries it keeps it", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const apiId = `idem-${Date.now()}`;
+  const work = workQueueFor(apiId);
+  const dead = deadLetterQueueFor(apiId);
+  const key = "11111111-1111-1111-1111-111111111111";
+
+  const { onDead, replayed } = await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(dead, deadLetterQueueOptions());
+      yield* rmq.declareQueue(work, workQueueOptions(apiId));
+      const into = yield* rmq.publisherToQueue(work);
+
+      const onDead: Array<O.Option<string>> = [];
+      const replayed: Array<{ how: string; key: O.Option<string> }> = [];
+
+      // "keyed" carries x-idempotency-key the way the producer stamps it;
+      // "keyless" never had one — both must redrive true to what they arrived
+      // with, exactly as the traceparent test pins for the trace header.
+      const deadSeen = new Map<string, number>();
+      yield* rmq.consume(dead, (body, delivery) => {
+        const n = (deadSeen.get(body) ?? 0) + 1;
+        deadSeen.set(body, n);
+        if (n > 1) return "accept" as const;
+        onDead.push(delivery.idempotencyKey);
+        const props = O.match(delivery.idempotencyKey, {
+          onNone: () => undefined,
+          onSome: (v) => ({ [IDEMPOTENCY_KEY_HEADER]: v }),
+        });
+        return Effect.runPromise(rmq.send(into, body, props)).then(() => "accept" as const);
+      });
+
+      const workSeen = new Map<string, number>();
+      yield* rmq.consume(work, (body, delivery) => {
+        const n = (workSeen.get(body) ?? 0) + 1;
+        workSeen.set(body, n);
+        if (n === 2) replayed.push({ how: body, key: delivery.idempotencyKey });
+        return "discard" as const;
+      });
+
+      yield* rmq.send(into, "keyless");
+      yield* rmq.send(into, "keyed", { [IDEMPOTENCY_KEY_HEADER]: key });
+      yield* waitFor(() => replayed.length >= 2);
+      return { onDead, replayed };
+    }),
+  );
+
+  assert.deepEqual(
+    onDead.map(O.isSome),
+    [false, true],
+    "the idempotency key must still be readable once the message is dead-lettered, and absence must stay absence",
+  );
+  assert.deepEqual(
+    [...replayed].sort((a, b) => a.how.localeCompare(b.how)).map((r) => ({ how: r.how, key: O.getOrUndefined(r.key) })),
+    [
+      { how: "keyed", key },
+      { how: "keyless", key: undefined },
+    ],
+    "a redrive republish must carry the original key when there was one, and add none when there wasn't",
+  );
+});
+
 test("the work queue parks a message at the delivery limit, and a redrive republish grants a fresh budget", async (t) => {
   if (skipIfNoDocker(t)) return;
 
@@ -408,4 +481,45 @@ test("the work queue parks a message at the delivery limit, and a redrive republ
     [0, 1, 2, 3, 0, 1, 2, 3],
     "x-delivery-count climbs to the limit, then starts again from 0 for the republished message",
   );
+});
+
+/**
+ * A dead-letter queue must never lose a message to its own delivery limit.
+ *
+ * A quorum queue with no dead-letter target drops a message once its delivery
+ * limit (20 by default) is reached, and every redrive pass hands back what it did
+ * not move by closing its channel — which counts. Measured in a chaos run as 1,570
+ * messages gone. Twenty-five consumer channels that take the message and close
+ * without settling it is more returns than the old default allowed.
+ */
+test("the dead-letter queue keeps a message through more returns than a default delivery limit", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const apiId = "dl-unlimited";
+  const dead = deadLetterQueueFor(apiId);
+
+  const left = await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(dead, deadLetterQueueOptions());
+      yield* rmq.send(yield* rmq.publisherToQueue(dead), "kept");
+
+      for (let round = 0; round < 25; round++) {
+        let seen = false;
+        const consumer = yield* rmq.consume(dead, () => {
+          seen = true;
+          return new Promise<never>(() => {});
+        }, { prefetch: 1 });
+        yield* waitFor(() => seen);
+        yield* rmq.closeConsumer(consumer);
+      }
+
+      const received: string[] = [];
+      yield* rmq.consume(dead, (body) => void received.push(body));
+      yield* waitFor(() => received.length > 0);
+      return received;
+    }),
+  );
+
+  assert.deepEqual(left, ["kept"]);
 });

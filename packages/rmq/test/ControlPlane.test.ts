@@ -9,6 +9,7 @@ import {
   encodeElectionTrigger,
   floorQueueOptions,
   sacQueueOptions,
+  parkedQueueOptions,
   workQueueOptions,
 } from "../src/ControlPlane.ts";
 import { decodeCircuitEvent } from "@egress/domain/Model.ts";
@@ -125,6 +126,17 @@ test("an event whose sequence cannot be ordered is not a valid event", () => {
  * exclusive, and the daemons declare every queue on connect — so one
  * `durable: false` here is a fleet that crash-loops on the upgraded broker.
  */
+test("terminal queues never drop at a delivery limit", () => {
+  assert.equal(deadLetterQueueOptions().args["x-delivery-limit"], -1);
+  assert.equal(parkedQueueOptions().args["x-delivery-limit"], -1);
+});
+
+test("the work queue dead-letters at least once", () => {
+  const { args } = workQueueOptions("api");
+  assert.equal(args["x-dead-letter-strategy"], "at-least-once");
+  assert.equal(args["x-overflow"], "reject-publish");
+});
+
 test("every queue the fleet declares is durable", () => {
   const declared = {
     work: workQueueOptions("api"),

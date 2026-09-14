@@ -10,9 +10,10 @@ import {
   Schedule,
   Semaphore,
 } from "effect";
-import type { Tracer } from "effect";
+import { randomUUID } from "node:crypto";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
+  ATTEMPTS_HEADER,
   CONTROL_EXCHANGE,
   CONTROL_EXCHANGE_OPTIONS,
   controlQueueFor,
@@ -23,7 +24,13 @@ import {
   floorQueueOptions,
   decodeElectionTrigger,
   encodeElectionTrigger,
+  IDEMPOTENCY_KEY_HEADER,
+  ORIGIN_QUEUE_HEADER,
+  ORIGIN_REASON_HEADER,
+  parkedQueueFor,
+  parkedQueueOptions,
   probeTriggerQueueFor,
+  REDRIVE_COUNT_HEADER,
   redriveTriggerQueueFor,
   routingKeyFor,
   sacQueueOptions,
@@ -35,9 +42,10 @@ import { initialContract, observe } from "./Contract.ts";
 import { makeRedrive } from "./Redrive.ts";
 import { desired, initialState, plan, reduce } from "./DaemonState.ts";
 import { position } from "./DaemonPolicy.ts";
+import * as Attempts from "./Attempts.ts";
 import * as Tally from "./Tally.ts";
 import * as Telemetry from "./Telemetry.ts";
-import type { Consumer, Settlement } from "@egress/rmq/Client.ts";
+import type { Consumer, DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
 
 import type { ContractState } from "./Contract.ts";
 import type { Action, Command, DaemonState } from "./DaemonState.ts";
@@ -97,6 +105,12 @@ type DaemonConfig = {
 const FLUSH_INTERVAL = Duration.seconds(1);
 const RAMP_INTERVAL = Duration.seconds(1);
 const HEARTBEAT_INTERVAL = Duration.seconds(15);
+/**
+ * How often the floor sweeps `<api>.work.dead` for messages that arrived
+ * there without a circuit transition — a broker restart, an Envoy 503, a
+ * rolling redeploy. See DaemonState.ts's `SweepTick` and Redrive.ts.
+ */
+const SWEEP_INTERVAL = Duration.seconds(30);
 
 export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   const control = yield* Rmq;
@@ -104,6 +118,7 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
 
   const workQueue = workQueueFor(cfg.apiId);
   const deadQueue = deadLetterQueueFor(cfg.apiId);
+  const parkedQueue = parkedQueueFor(cfg.apiId);
   const probeQueue = probeTriggerQueueFor(cfg.apiId);
   const redriveQueue = redriveTriggerQueueFor(cfg.apiId);
   const controlQueue = controlQueueFor(cfg.apiId, cfg.instanceId);
@@ -115,6 +130,9 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   );
   // Before the queues that point at it, so an early rejection has somewhere to land.
   yield* control.declareQueue(deadQueue, deadLetterQueueOptions());
+  // Terminal like deadQueue — nothing dead-letters into it, Redrive.ts publishes
+  // here directly once a message has been redriven MAX_REDRIVES times.
+  yield* control.declareQueue(parkedQueue, parkedQueueOptions());
   yield* control.declareQueue(workQueue, workQueueOptions(cfg.apiId));
   yield* control.declareQueue(probeQueue, sacQueueOptions(cfg.apiId));
   yield* control.declareQueue(redriveQueue, sacQueueOptions(cfg.apiId));
@@ -149,6 +167,8 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   const workConsumer = yield* Ref.make(O.none<Consumer>());
   const probeConsumer = yield* Ref.make(O.none<Consumer>());
   const redriveConsumer = yield* Ref.make(O.none<Consumer>());
+  /** Atomic claim so an election-triggered pass and a sweep-triggered one can never both start — see Redrive.ts's comment on `running`. */
+  const redriveRunning = yield* Ref.make(false);
 
   /**
    * Calls open right now — a graph, not a decision. What *bounds* it is the
@@ -179,36 +199,20 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   const floorHeld = () => Date.now() < floorUntil;
   const self = () => ({ position: selfPosition, isFloor: floorHeld() });
 
+  /** Confirmed publishers the retry path needs, alive for the daemon's whole life — same pattern as `trigger`/`redriveTrigger` below. */
+  const workPublisher = yield* control.publisherToQueue(workQueue);
+  const deadPublisher = yield* control.publisherToQueue(deadQueue);
+
   /**
-   * One call to the third party through the egress listener. Plain async: it is
-   * awaited by the AMQP handler, and Effect would buy nothing here.
+   * Held before releasing a 429 back to the broker. Holding the delivery
+   * unacked *is* the backpressure — `prefetch` stops the broker pushing
+   * another until this one settles, see ADR 011 — so this is less a retry
+   * delay than a pause before the same slot goes to whoever is next in line.
+   * Jittered so a fleet that all got shed together doesn't all come back on
+   * the same tick. 100–400ms is a starting point, not a measured one.
    */
-  const rawCall = async (): Promise<Settlement> => {
-    inFlight++;
-    try {
-      const res = await fetch(`${cfg.egressAddr}${cfg.apiPath}`, {
-        signal: AbortSignal.timeout(2000),
-      });
-      // Drain the body even though nothing wants it: an unconsumed response holds
-      // its connection out of the pool, which at this rate leaks sockets.
-      await res.text().catch(() => {});
-      if (res.ok) {
-        counts.ok++;
-        return "accept";
-      }
-      counts.failed++;
-      return "requeue";
-    } catch {
-      // Connection refused or timeout is the expected shape of an outage, not an
-      // error to report: the aggregator judges the API's health from Envoy's view.
-      // `requeue`, not `discard` — the broker counts attempts and parks the message
-      // itself at `x-delivery-limit`. `failed` therefore counts attempts, not messages.
-      counts.failed++;
-      return "requeue";
-    } finally {
-      inFlight--;
-    }
-  };
+  const SHED_BACKOFF_MIN_MS = 100;
+  const SHED_BACKOFF_MAX_MS = 400;
 
   /**
    * Captured so work started from an AMQP callback can still reach them.
@@ -224,14 +228,126 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   const forkInContext = Effect.runForkWith(services);
 
   /**
+   * One call to the third party, and what happens to the delivery
+   * afterwards. Plain async — it is awaited by the AMQP handler, and Effect
+   * would buy nothing for the call itself — except for a republish, which
+   * runs through `runInContext` the same way Redrive.ts's replay does.
+   *
+   * The key: reused from the delivery when present — a broker redelivery, a
+   * republish below, or a redrive all set it — minted here only on a
+   * message's true first attempt. See ControlPlane.ts's
+   * IDEMPOTENCY_KEY_HEADER for why the producer never sets one.
+   *
+   * `Attempts.nextAttempt` is the decision; this is only the shell around it.
+   */
+  const call = async (body: string, delivery: DeliveryInfo): Promise<Settlement> => {
+    const key = O.getOrElse(delivery.idempotencyKey, () => randomUUID());
+    let outcome: Attempts.CallOutcome;
+    inFlight++;
+    try {
+      const res = await fetch(`${cfg.egressAddr}${cfg.apiPath}`, {
+        signal: AbortSignal.timeout(2000),
+        headers: { [IDEMPOTENCY_KEY_HEADER]: key },
+      });
+      // Drain the body even though nothing wants it: an unconsumed response holds
+      // its connection out of the pool, which at this rate leaks sockets.
+      await res.text().catch(() => {});
+      outcome = res.status === 429 ? "shed" : res.ok ? "ok" : "failed";
+    } catch {
+      // Connection refused or timeout is the expected shape of an outage, not an
+      // error to report: the aggregator judges the API's health from Envoy's view.
+      outcome = "failed";
+    } finally {
+      inFlight--;
+    }
+
+    // Headers are only materialized when the call failed: the success path runs thousands of times a second.
+    const decision = Attempts.nextAttempt(
+      outcome,
+      outcome === "failed" ? delivery.properties[ATTEMPTS_HEADER] : undefined,
+    );
+    switch (decision._tag) {
+      case "accept":
+        counts.ok++;
+        return "accept";
+
+      case "release": {
+        // Envoy's adaptive-concurrency filter shedding this request before it
+        // reached the third party — backpressure, not a failed call, and not
+        // this message's fault. `release` (a requeuing nack) hands it back
+        // without spending x-delivery-limit; `requeue` (a requeuing reject)
+        // would, and three of these during a burst would dead-letter healthy
+        // work for no reason a redrive could ever fix. See Client.ts.
+        counts.shed++;
+        const jitter =
+          SHED_BACKOFF_MIN_MS + Math.random() * (SHED_BACKOFF_MAX_MS - SHED_BACKOFF_MIN_MS);
+        await new Promise((resolve) => setTimeout(resolve, jitter));
+        return "release";
+      }
+
+      case "republish": {
+        // A failed call is retried by republishing a new message carrying
+        // the key forward, never by `requeue`: a broker requeue hands back
+        // the original message, with no way to add a header to it, and the
+        // key only protects the third party if every retry sends the same
+        // one. `failed` still counts once per attempt, same as before.
+        counts.failed++;
+        const toDead = decision.destination === "dead";
+        const target = toDead ? deadPublisher : workPublisher;
+        const destinationQueue = toDead ? deadQueue : workQueue;
+        const headers: Record<string, string> = {
+          [IDEMPOTENCY_KEY_HEADER]: key,
+          [ATTEMPTS_HEADER]: String(decision.attempts),
+          // Carried forward, or a redriven poison message would reset its count on every failure and never park.
+          ...O.match(O.fromNullishOr(delivery.properties[REDRIVE_COUNT_HEADER]), {
+            onNone: () => ({}),
+            onSome: (count) => ({ [REDRIVE_COUNT_HEADER]: count }),
+          }),
+          // Redrive.ts reads these as the fallback for `delivery.deadLetter`,
+          // which only the broker's own dead-lettering populates — a message
+          // published straight onto the queue has no x-first-death-* at all,
+          // and without this it would look unattributable and never redrive.
+          ...(toDead
+            ? { [ORIGIN_QUEUE_HEADER]: workQueue, [ORIGIN_REASON_HEADER]: "attempts-exhausted" }
+            : {}),
+        };
+        try {
+          const send = control.send(target, body, headers);
+          await runInContext(
+            O.map(delivery.parent, (span) =>
+              send.pipe(
+                Effect.withSpan("work.retry", {
+                  attributes: {
+                    "messaging.system": "rabbitmq",
+                    "messaging.operation.name": "retry",
+                    "messaging.destination.name": destinationQueue,
+                    "egress.attempts": decision.attempts,
+                  },
+                }),
+                Effect.withParentSpan(span),
+              ),
+            ).pipe(O.getOrElse(() => send)),
+          );
+        } catch {
+          // The destination is unreachable; leave the delivery where it is.
+          // The broker's own x-delivery-limit is the backstop once a retry
+          // can't even be republished.
+          return "requeue";
+        }
+        return "accept";
+      }
+    }
+  };
+
+  /**
    * The same call inside a span, only when the message carried a parent:
-   * the parent mapped to a traced call, or the raw one. Untraced is the
+   * the parent mapped to a traced call, or the plain one. Untraced is the
    * common case and stays a plain `fetch` with no Effect runtime around it.
    */
-  const callEgress = (parent: O.Option<Tracer.ExternalSpan>): Promise<Settlement> =>
-    O.map(parent, (span) =>
+  const callEgress = (body: string, delivery: DeliveryInfo): Promise<Settlement> =>
+    O.map(delivery.parent, (span) =>
       runInContext(
-        Effect.promise(rawCall).pipe(
+        Effect.promise(() => call(body, delivery)).pipe(
           Effect.tap((outcome) =>
             Effect.annotateCurrentSpan({ "egress.settlement": outcome }),
           ),
@@ -245,7 +361,7 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
           Effect.withParentSpan(span),
         ),
       ),
-    ).pipe(O.getOrElse(rawCall));
+    ).pipe(O.getOrElse(() => call(body, delivery)));
 
   /**
    * Unreadable messages preserved before the rest are let go. Control events fan
@@ -281,7 +397,7 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   const startWork = Effect.gen(function* () {
     const consumer = yield* control.consume(
       workQueue,
-      (_body, delivery) => callEgress(delivery.parent),
+      (body, delivery) => callEgress(body, delivery),
       // The whole concurrency limit, expressed once, where it can actually
       // stop the flow: the broker will not push a `maxInFlight + 1`th
       // delivery until this daemon settles one.
@@ -325,11 +441,14 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
       let taken = false;
       const consumer = yield* control.consume(
         workQueue,
-        (_body, delivery) => {
-          if (taken || self === null) return;
+        (body, delivery): Settlement | Promise<Settlement> => {
+          // Handed back uncounted, never accepted: returning nothing acks, and a
+          // delivery arriving before `self` is set or after the one message was
+          // taken would be acked without ever being called — measured as lost work.
+          if (taken || self === null) return "release";
           taken = true;
           forkInContext(control.cancelConsumer(self));
-          return callEgress(delivery.parent);
+          return callEgress(body, delivery);
         },
         // The state whose contract is "exactly one call" asks for exactly one message.
         { prefetch: 1 },
@@ -349,13 +468,12 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
     rmq: control,
     workQueue,
     deadQueue,
+    parkedQueue,
     maxPerPass: cfg.redriveMax,
     isClosed: Ref.get(state).pipe(Effect.map((s) => s.circuit === State.CLOSED)),
-    onReplayed: () => {
-      counts.redriven++;
-    },
     consumer: redriveConsumer,
     gate,
+    running: redriveRunning,
   });
 
   // Published by every daemon, so a trigger still arrives when some are down.
@@ -422,7 +540,16 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
         if (data.apiId !== cfg.apiId) return; // belt and braces; the binding already filters
         Tally.observed(counts, type);
 
+        const before = contract;
         contract = observe(contract, type, data.sequence);
+        // The counter says a gap happened; only this says which sequence went missing.
+        if (contract.gaps > before.gaps) {
+          forkInContext(
+            Effect.logWarning(
+              `${label}: sequence gap — expected ${O.getOrElse(O.map(before.lastSequence, (n) => n + 1), () => 0)}, got ${data.sequence} (${type}, ${data.state}, ${data.reason})`,
+            ),
+          );
+        }
 
         forkInContext(
           applyEvent(data.state, data.sequence, data.reason).pipe(
@@ -509,13 +636,10 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   const counters = [
     ["ok", Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "ok" })],
     ["failed", Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "failed" })],
-    // Fed by the same field as calls{failed}, because the gap between the two is
-    // informative: a rejection whose link has already gone is requeued rather
-    // than dead-lettered, so dead_lettered trailing calls{failed} slightly is
-    // work that was retried rather than work that was lost.
-    ["failed", Metric.withAttributes(Telemetry.deadLettered, attrs)],
+    // A 429 — Envoy's adaptive-concurrency filter shedding before the third party
+    // was reached, or the third party's own rate limit: backpressure, not a failure.
+    ["shed", Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "shed" })],
     ["probed", Metric.withAttributes(Telemetry.probes, attrs)],
-    ["redriven", Metric.withAttributes(Telemetry.redriven, attrs)],
     ["undecodable", Metric.withAttributes(Telemetry.undecodable, attrs)],
     ["gaps", Metric.withAttributes(Telemetry.controlGaps, attrs)],
     ["duplicates", Metric.withAttributes(Telemetry.controlDuplicates, attrs)],
@@ -523,7 +647,6 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
 
   const flush = Effect.gen(function* () {
     const { circuit, policy } = yield* Ref.get(state);
-    const active = O.isSome(yield* Ref.get(workConsumer));
 
     // Gauges are whatever it is now, so these are read live.
     yield* Effect.all(
@@ -531,8 +654,6 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
         Metric.update(Metric.withAttributes(Telemetry.circuitState, attrs), STATE_CODE[circuit]),
         Metric.update(Metric.withAttributes(Telemetry.targetFraction, attrs), policy.fraction),
         Metric.update(Metric.withAttributes(Telemetry.floorHeld, attrs), floorHeld() ? 1 : 0),
-        Metric.update(Metric.withAttributes(Telemetry.selfActive, attrs), active ? 1 : 0),
-        Metric.update(Metric.withAttributes(Telemetry.inFlight, attrs), inFlight),
       ],
       { discard: true },
     );
@@ -546,13 +667,6 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
       counters,
       ([field, metric]) =>
         delta[field] > 0 ? Metric.update(metric, delta[field]) : Effect.void,
-      { discard: true },
-    );
-
-    yield* Effect.forEach(
-      delta.byType,
-      ([type, seen]) =>
-        Metric.update(Metric.withAttributes(Telemetry.controlEvents, { ...attrs, type }), seen),
       { discard: true },
     );
   });
@@ -592,6 +706,21 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   });
 
   yield* Effect.forkScoped(Effect.repeat(advanceRamp, Schedule.spaced(RAMP_INTERVAL)));
+
+  /**
+   * The periodic sweep: a `SweepTick` command through the same dispatch/perform
+   * path every other command uses, on its own clock rather than a transition.
+   * `dispatch` already keeps this to the floor and to CLOSED — see
+   * DaemonState.ts — and `redriveOnce` (Redrive.ts) already makes a `Redrive`
+   * action a no-op when a pass, election-triggered or from an earlier sweep,
+   * is still running.
+   */
+  const sweep = Effect.gen(function* () {
+    const { actions } = yield* dispatch({ _tag: "SweepTick", isFloor: floorHeld() });
+    yield* performAll(actions);
+  });
+
+  yield* Effect.forkScoped(Effect.repeat(sweep, Schedule.spaced(SWEEP_INTERVAL)));
 
   // Independent of the control plane: without it, a daemon that has gone deaf
   // looks exactly like one whose circuit has not moved.

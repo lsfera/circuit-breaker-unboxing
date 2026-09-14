@@ -147,15 +147,50 @@ And from the daemon fleet — the same in-process `effect` registry, served on
 | Metric | What it shows |
 |---|---|
 | `egress_daemon_circuit_state` | The state each daemon *received*, against `egress_circuit_state`, the state the aggregator *published*. They should be indistinguishable |
-| `egress_daemon_target_fraction` / `_self_active` / `_floor_held` | What proportion of the fleet should be working, whether this daemon is one of them, and whether it is the one the broker elected to work regardless. The fraction should be identical on every daemon and the floor should sum to 1 — see [ADR 013](decisions/013-the-target-as-a-fraction.md) |
-| `egress_daemon_calls_total` | Third-party calls through the egress listener, by outcome |
-| `egress_daemon_in_flight` | Third-party calls open right now, per daemon. Bounded by the work consumer's prefetch (`MAX_IN_FLIGHT`), so it is also how close this daemon is to its ceiling — anything beyond it stays in the queue rather than in the process |
-| `egress_daemon_dead_lettered_total` | Work rejected onto `<apiId>.work.dead` because its call failed |
-| `egress_daemon_redriven_total` | Dead-lettered work replayed onto the work queue after recovery — the two together are the round trip |
+| `egress_daemon_target_fraction` / `_floor_held` | What proportion of the fleet should be working, and whether this daemon is the one the broker elected to work regardless. The fraction should be identical on every daemon and the floor should sum to 1 — see [ADR 013](decisions/013-the-target-as-a-fraction.md) |
+| `egress_daemon_calls_total` | Third-party calls through the egress listener, by outcome — `ok`, `failed`, or `shed` (a `429`: Envoy's adaptive-concurrency filter or the third party's own rate limit, held and released back to the broker uncounted rather than treated as a failure) |
 | `egress_daemon_undecodable_total` | Messages the fleet could not read — a control event failing the published schema, a malformed election trigger — rejected onto the canonical dead-letter queue rather than logged and dropped |
-| `egress_daemon_control_events_total` / `_gaps_total` / `_duplicates_total` | The same per-API sequence contract, checked on the AMQP transport by five processes the publisher does not control |
+| `egress_daemon_control_gaps_total` / `_duplicates_total` | The same per-API sequence contract, checked on the AMQP transport by five processes the publisher does not control |
 | `egress_daemon_probes_total` | `HALF_OPEN` probes this daemon was elected by the broker to run |
-| `egress_producer_published_total` | Arrival rate, against the fleet's completion rate — the difference is the queue |
+
+The three counters that used to live here —
+`egress_daemon_dead_lettered_total`, `egress_daemon_redriven_total`,
+`egress_producer_published_total` — are gone. The first counted failed call
+*attempts*, not dead-lettered messages, which was never what its name said;
+the other two duplicated numbers RabbitMQ already has, more accurately,
+per queue. Queue-flow now comes from RabbitMQ's own exporter instead:
+
+| Metric | What it shows |
+|---|---|
+| `rabbitmq_detailed_queue_exchange_messages_published_total{queue}` | Messages published onto a queue — the work queue's own arrival rate, and the dead-letter queue's when the daemon republishes a failed call's third attempt there directly |
+| `rabbitmq_detailed_queue_messages_acked_total{queue}` | Messages settled off a queue — on the dead-letter queue, this is what a redrive pass moves |
+| `rabbitmq_detailed_queue_messages_redelivered_total{queue}` | Broker-driven redeliveries — a consumer that never settled a delivery, not a republish, which the broker sees as a fresh publish |
+| `rabbitmq_global_messages_dead_lettered_delivery_limit_total` | Node-wide: messages the broker itself dead-lettered because `x-delivery-limit` was spent — the backstop path, not the daemon's own republish-to-dead-letter |
+
+The producer's own `/metrics` endpoint stays up — `METRICS_PORT` still answers
+— it simply has no metric of its own left to report; publish rate onto the
+work queue is one of the RabbitMQ metrics above now. The dashboard's **Dead
+letters now** panel reads dead-letter depth, parked depth, and messages
+dead-lettered in the last minute; **Work queue flow (RabbitMQ)** graphs
+published/acked/redelivered on the work queue alongside broker
+dead-lettering, publishes onto the dead-letter queue, redrive replays out of
+it, and parking — see [Watching it live](#watching-it-live) below.
+
+Three daemon metrics went the same way —
+`egress_daemon_in_flight`, `egress_daemon_self_active`, and
+`egress_daemon_control_events_total` are gone, each a daemon-side count of
+something the broker already reports per queue, more accurately, for the
+whole fleet at once:
+
+| From RabbitMQ | What it shows |
+|---|---|
+| `rabbitmq_detailed_queue_messages_unacked{queue="<api>.work"}` | Deliveries the fleet currently holds — what `egress_daemon_in_flight` summed across daemons used to approximate |
+| `rabbitmq_detailed_queue_consumers{queue="<api>.work"}` | Consumers currently pulling work — what `egress_daemon_self_active` used to report per daemon. In `HALF_OPEN` the one elected prober also shows up here, briefly |
+| `rabbitmq_detailed_queue_exchange_messages_published_total{queue="<api>.control.<daemonId>", exchange="circuit.control"}` | Control-plane events delivered to one daemon's own control queue — what `egress_daemon_control_events_total` used to count from inside the process |
+
+`egress_daemon_target_fraction` and `_floor_held` stay: the broker has no way
+to know which single daemon the fleet elected to hold the floor, or what
+fraction the aggregator asked for.
 
 ### Watching it live
 
@@ -182,10 +217,11 @@ so they surface in Prometheus's own `/alerts`; routing them to a human is a
 deployment concern.
 
 A **RabbitMQ daemon fleet** row sits underneath it, so the reaction is on the
-same screen as the cause: work-queue and dead-letter depth (from RabbitMQ's
-own `rabbitmq_prometheus`, enabled by default in the management image on
-15692), arrival rate against completion rate, each daemon's own view of the
-circuit state, and the AMQP-side delivery-contract tiles. The panel worth
+same screen as the cause: work-queue and dead-letter depth, publish rate onto
+work against call outcomes, dead-letter and parked-queue flow (all from
+RabbitMQ's own `rabbitmq_prometheus`, enabled by default in the management
+image on 15692), each daemon's own view of the circuit state, and the
+AMQP-side delivery-contract tiles. The panel worth
 knowing is **agreed target vs actually pulling** — every daemon derives the
 same target from the same events, so those two lines track each other, and
 when they stop tracking, a daemon has gone deaf while still looking healthy.

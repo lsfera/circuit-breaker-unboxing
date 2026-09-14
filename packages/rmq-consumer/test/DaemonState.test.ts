@@ -104,6 +104,56 @@ test("a redrive trigger dedupes the same way — one replay per recovery", () =>
   );
 });
 
+/**
+ * The periodic sweep: a message can dead-letter while the circuit never
+ * leaves CLOSED — a broker restart, an Envoy 503, a rolling redeploy — and
+ * nothing else would ever replay it. `SweepTick` has no sequence to dedupe
+ * on, so it is a `Redrive` exactly when the floor is CLOSED and asks, and a
+ * no-op every other time.
+ */
+test("a sweep asks for a redrive only from the floor, only while CLOSED", () => {
+  assert.deepEqual(
+    reduce(start, { _tag: "SweepTick", isFloor: true }).actions,
+    [{ _tag: "Redrive" }],
+    "CLOSED and the floor: redrive",
+  );
+  assert.deepEqual(
+    reduce(start, { _tag: "SweepTick", isFloor: false }).actions,
+    [],
+    "CLOSED but not the floor: nothing",
+  );
+});
+
+test("a sweep does nothing outside CLOSED, whoever holds the floor", () => {
+  for (const circuitState of [State.OPEN, State.DEGRADED, State.HALF_OPEN]) {
+    const notClosed = reduce(start, {
+      _tag: "CircuitChanged",
+      state: circuitState,
+      sequence: 1,
+      at: T0,
+    }).next;
+    assert.deepEqual(
+      reduce(notClosed, { _tag: "SweepTick", isFloor: true }).actions,
+      [],
+      `${circuitState} must not redrive even from the floor`,
+    );
+  }
+});
+
+test("REDRIVE_ON_CLOSE off means a sweep never redrives either", () => {
+  assert.deepEqual(
+    reduce(start, { _tag: "SweepTick", isFloor: true }, false).actions,
+    [],
+  );
+});
+
+test("a sweep never touches state — no sequence to dedupe on, and none is spent", () => {
+  const redriven = reduce(start, { _tag: "RedriveTriggered", sequence: 3 }).next;
+  const { next, actions } = reduce(redriven, { _tag: "SweepTick", isFloor: true });
+  assert.deepEqual(actions, [{ _tag: "Redrive" }], "a sweep still asks for a redrive");
+  assert.equal(next, redriven, "and the state, redrivenSequence included, is untouched");
+});
+
 test("the ramp advances only while CLOSED, and only when the dwell has elapsed", () => {
   const open = reduce(start, { _tag: "CircuitChanged", state: State.OPEN, sequence: 1, at: T0 })
     .next;

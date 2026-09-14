@@ -1,4 +1,4 @@
-import { Duration, Effect, Metric, Schedule } from "effect";
+import { Duration, Effect, Schedule } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
   deadLetterQueueFor,
@@ -6,7 +6,6 @@ import {
   workQueueFor,
   workQueueOptions,
 } from "@egress/rmq/ControlPlane.ts";
-import * as Telemetry from "./Telemetry.ts";
 
 /**
  * The load half of the scenario: a steady stream onto `<apiId>.work`.
@@ -49,9 +48,12 @@ export const runProducer = Effect.fnUntraced(function* (cfg: ProducerConfig) {
     // particular messages arrive: they are independent units of work, and
     // the ordering this repo does guarantee is per-API on circuit.control,
     // which the aggregator publishes one at a time.
-    const batch = Array.from({ length: perTick }, () =>
-      JSON.stringify({ apiId: cfg.apiId, n: sent++ }),
-    );
+    // No idempotency key here: it is not a producer concern. The consumer
+    // mints one on a message's first call attempt and every retry of that
+    // attempt — a broker requeue or the daemon's own republish — reuses it,
+    // which is the only way the key protects the third party. See
+    // packages/rmq-consumer/src/Attempts.ts.
+    const batch = Array.from({ length: perTick }, () => JSON.stringify({ apiId: cfg.apiId, n: sent++ }));
     yield* Effect.forEach(
       batch,
       (body) =>
@@ -71,13 +73,8 @@ export const runProducer = Effect.fnUntraced(function* (cfg: ProducerConfig) {
         ),
       { concurrency: "unbounded", discard: true },
     );
-    // Scraped alongside the daemons' call counters: arrival rate against
-    // completion rate is the queue's depth, expressed as two lines that
-    // separate during an outage and converge again on the ramp back.
-    yield* Metric.update(
-      Metric.withAttributes(Telemetry.published, { apiId: cfg.apiId }),
-      perTick,
-    );
+    // Publish rate onto the work queue is read from RabbitMQ's own metrics
+    // now, not republished here — see rabbitmq_detailed_queue_*.
     if (sent % (cfg.ratePerSecond * 10) < perTick) {
       yield* Effect.log(`${cfg.apiId}/producer: ${sent} messages published`);
     }

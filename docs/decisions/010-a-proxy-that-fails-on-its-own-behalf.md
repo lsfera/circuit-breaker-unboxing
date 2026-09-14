@@ -76,3 +76,34 @@ to look, and the answer is one `grep` on the proxy's own log rather than an
 inference from two counters agreeing. `EgressSheddingLocally` watches the
 counter directly, because a proxy generating its own failures is exactly this
 repo's alerting criterion: something that looks fine from outside.
+
+## Amendment — 2026-09-13
+
+The gap this ADR recorded — a shed request and a third-party failure are
+byte-for-byte the same to a daemon, because Envoy only says which in an
+access-log field the daemon never sees — is closed. The adaptive concurrency
+filter now sheds with `429` (`concurrency_limit_exceeded_status: TooManyRequests`
+in `infra/envoy/envoy.yaml`), not the platform default `503`, and a daemon
+tells the two apart by status code alone. A `429` is held for 100–400ms of
+jitter and released back to the broker uncounted (RabbitMQ 4.3's requeuing
+`nack`, which does not spend `x-delivery-limit` — see
+[ADR 016](016-the-retry-budget-travels-with-the-message.md)); anything else
+still counts as a failed attempt. Shedding no longer dead-letters healthy
+work, which was the consequence this ADR described but left standing.
+
+**The measurement that forced it.** Chaos harness `infra/chaos-load.mjs`, low
+profile (200 msg/s base, spikes to 3,000/s), fault `net-upstream-latency`
+(+300ms ±50ms Envoy → payments endpoints): between 14:06 and 14:08 UTC the
+three Envoys served **90,753** local `503 reached_concurrency_limit` on
+`/payments` while the upstream returned no errors — the same shape as the
+95 errors above, three orders of magnitude larger under sustained load.
+`adaptive_concurrency.gradient_controller.min_rtt_msecs` read **0** on all
+three replicas throughout. Under the pre-amendment `503` behaviour, **22,226**
+messages were dead-lettered with the circuit `CLOSED` the entire time — the
+disagreement this ADR named, now with a number on it.
+
+**What is still unchanged.** The filter stays, and its parameters stay — this
+ADR's original position holds. `min_rtt_msecs` reading 0 across all three
+replicas during the incident is noted, not explained: it was not
+investigated as part of this amendment, and remains, like the original
+trigger below, a candidate rather than a conclusion.

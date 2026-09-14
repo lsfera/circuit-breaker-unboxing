@@ -37,7 +37,7 @@ export const initialState = (now: number): DaemonState => ({
   redrivenSequence: -1,
 });
 
-/** Everything that can move a daemon: two from the control plane, two from the broker's elections, one from its own clock. */
+/** Everything that can move a daemon: two from the control plane, two from the broker's elections, two from its own clock. */
 export type Command =
   | {
       readonly _tag: "CircuitChanged";
@@ -47,7 +47,15 @@ export type Command =
     }
   | { readonly _tag: "RampTick"; readonly at: number }
   | { readonly _tag: "ProbeTriggered"; readonly sequence: number }
-  | { readonly _tag: "RedriveTriggered"; readonly sequence: number };
+  | { readonly _tag: "RedriveTriggered"; readonly sequence: number }
+  /**
+   * Fired on a timer, not a transition — the only command with no sequence to
+   * dedupe on. Messages dead-letter while the circuit stays CLOSED too: a
+   * broker restart advances `x-delivery-count` on outstanding deliveries, an
+   * Envoy 503 counts as a failure, a rolling redeploy churns consumers. None
+   * of that is a recovery, so nothing else would ever replay them.
+   */
+  | { readonly _tag: "SweepTick"; readonly isFloor: boolean };
 
 /**
  * What the shell must do about a transition. Returned rather than performed,
@@ -110,6 +118,20 @@ export const reduce = (
       return {
         next: { ...state, redrivenSequence: command.sequence },
         actions: [{ _tag: "Redrive" }],
+      };
+
+    // No sequence, so no dedupe and no state change — a sweep either finds the
+    // circuit CLOSED and itself the floor right now, or it doesn't, and the next
+    // one thirty seconds later decides fresh. `redriveOnce` is what makes a
+    // sweep that finds nothing to do, or one that overlaps a pass already
+    // running, harmless — see Redrive.ts.
+    case "SweepTick":
+      return {
+        next: state,
+        actions:
+          redriveOnClose && state.circuit === State.CLOSED && command.isFloor
+            ? [{ _tag: "Redrive" }]
+            : [],
       };
   }
 };

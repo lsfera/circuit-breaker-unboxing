@@ -15,7 +15,6 @@ test("a delta is what happened since the last publication", () => {
   const counts = Tally.zero();
   counts.ok = 12;
   counts.failed = 3;
-  Tally.observed(counts, "egress.circuit.snapshot");
 
   const first = Tally.snapshot(counts, contract({ gaps: 1 }));
   const delta = Tally.since(Tally.nothing, first);
@@ -23,19 +22,16 @@ test("a delta is what happened since the last publication", () => {
   assert.equal(delta.ok, 12);
   assert.equal(delta.failed, 3);
   assert.equal(delta.gaps, 1);
-  assert.deepEqual(delta.byType, [["egress.circuit.snapshot", 1]]);
 });
 
 test("publishing twice with nothing in between asks the registry for nothing", () => {
   const counts = Tally.zero();
   counts.ok = 5;
-  Tally.observed(counts, "egress.circuit.state_changed");
 
   const published = Tally.snapshot(counts, contract());
   const delta = Tally.since(published, Tally.snapshot(counts, contract()));
 
-  assert.equal(delta.ok, 0);
-  assert.deepEqual(delta.byType, [], "a counter is never asked to go up by zero");
+  assert.equal(delta.ok, 0, "a counter is never asked to go up by zero");
 });
 
 /**
@@ -45,37 +41,21 @@ test("publishing twice with nothing in between asks the registry for nothing", (
  */
 test("what is counted after a snapshot is taken survives to the next delta", () => {
   const counts = Tally.zero();
-  Tally.observed(counts, "egress.circuit.state_changed");
+  counts.ok = 1;
 
   // The flush takes its one reading and advances the mark from it...
   const published = Tally.snapshot(counts, contract());
-  assert.deepEqual(Tally.since(Tally.nothing, published).byType, [
-    ["egress.circuit.state_changed", 1],
-  ]);
+  assert.equal(Tally.since(Tally.nothing, published).ok, 1);
 
   // ...and an event arrives while it is still publishing.
-  Tally.observed(counts, "egress.circuit.state_changed");
-  counts.ok = 4;
+  counts.ok = 5;
 
   const next = Tally.since(published, Tally.snapshot(counts, contract()));
-  assert.deepEqual(
-    next.byType,
-    [["egress.circuit.state_changed", 1]],
+  assert.equal(
+    next.ok,
+    4,
     "the mid-flush arrival is owed to the registry, not lost to a mark that moved without it",
   );
-  assert.equal(next.ok, 4);
-});
-
-test("a type first seen after the mark is published in full", () => {
-  const counts = Tally.zero();
-  Tally.observed(counts, "egress.circuit.snapshot");
-  const published = Tally.snapshot(counts, contract());
-
-  Tally.observed(counts, "egress.circuit.state_changed");
-  Tally.observed(counts, "egress.circuit.state_changed");
-
-  const delta = Tally.since(published, Tally.snapshot(counts, contract()));
-  assert.deepEqual(delta.byType, [["egress.circuit.state_changed", 2]]);
 });
 
 /**
@@ -90,4 +70,20 @@ test("the delivery-contract counters come along in the same reading", () => {
 
   assert.equal(delta.gaps, 3);
   assert.equal(delta.duplicates, 0);
+});
+
+/**
+ * `byType` is no longer published as a metric — RabbitMQ's own per-queue
+ * publish count covers it — but it stays on `Counts` for the heartbeat log's
+ * `control=` total, so counting by type still needs to work.
+ */
+test("observed tallies control events by type for the heartbeat log", () => {
+  const counts = Tally.zero();
+  Tally.observed(counts, "egress.circuit.snapshot");
+  Tally.observed(counts, "egress.circuit.state_changed");
+  Tally.observed(counts, "egress.circuit.state_changed");
+
+  const total = [...counts.byType.values()].reduce((a, b) => a + b, 0);
+  assert.equal(total, 3);
+  assert.equal(counts.byType.get("egress.circuit.state_changed"), 2);
 });

@@ -4,9 +4,12 @@ import { Metric } from "effect";
  * Everything the daemon fleet exposes to Prometheus — the peer of
  * @egress/aggregator's Telemetry.ts, deliberately the same shape.
  *
- * `egress_daemon_target_active` next to `egress_daemon_self_active` is the pair
- * that makes a daemon which has gone deaf to the control plane obvious; on its
- * own, that failure looks exactly like a circuit that has not moved.
+ * `egress_daemon_target_fraction` against `rabbitmq_detailed_queue_consumers`
+ * (the broker's own count of consumers on `<api>.work`) is the pair that makes
+ * a daemon which has gone deaf to the control plane obvious; on its own, that
+ * failure looks exactly like a circuit that has not moved. The daemon used to
+ * publish its own view of that second half as `egress_daemon_self_active`, but
+ * the broker already knows who is consuming — see docs/operations.md.
  *
  * Published by a flush loop in daemon.ts rather than at each call site — see
  * Tally.ts.
@@ -21,7 +24,7 @@ export const circuitState = Metric.gauge("egress_daemon_circuit_state", {
 export const targetFraction = Metric.gauge("egress_daemon_target_fraction", {
   description:
     "What proportion of the fleet should be pulling work right now, 0 to 1. " +
-    "Summed against egress_daemon_self_active across the fleet, the gap between " +
+    "Against rabbitmq_detailed_queue_consumers on the work queue, the gap between " +
     "intended and actual is the cost of selecting by hash rather than by index — " +
     "see ADR 013. A persistent gap is a fleet too small for the fraction to land.",
 });
@@ -33,29 +36,8 @@ export const floorHeld = Metric.gauge("egress_daemon_floor_held", {
     "non-zero; 0 means a DEGRADED fleet could stop entirely.",
 });
 
-export const selfActive = Metric.gauge("egress_daemon_self_active", {
-  description: "1 if this daemon currently holds a work connection, 0 if it is idle.",
-});
-
-export const inFlight = Metric.gauge("egress_daemon_in_flight", {
-  description: "Third-party calls this daemon has open right now.",
-});
-
 export const calls = Metric.counter("egress_daemon_calls_total", {
   description: "Third-party calls made through the egress listener, by outcome.",
-});
-
-export const deadLettered = Metric.counter("egress_daemon_dead_lettered_total", {
-  description:
-    "Work messages rejected to the dead-letter queue because their call failed. " +
-    "Before this existed the same messages were accepted and silently lost.",
-});
-
-export const redriven = Metric.counter("egress_daemon_redriven_total", {
-  description:
-    "Dead-lettered work messages replayed onto the work queue after recovery. " +
-    "Without this the dead-letter queue only ever grows: it is where failed work " +
-    "is preserved, and preserving it is not the same as recovering it.",
 });
 
 export const undecodable = Metric.counter("egress_daemon_undecodable_total", {
@@ -80,10 +62,6 @@ export const probes = Metric.counter("egress_daemon_probes_total", {
  * — and, notably, exactly what a leader that resumed from a stale in-memory
  * sequence would look like from the outside.
  */
-export const controlEvents = Metric.counter("egress_daemon_control_events_total", {
-  description: "Control-plane events this daemon decoded, by event type.",
-});
-
 export const controlGaps = Metric.counter("egress_daemon_control_gaps_total", {
   description: "Sequence gaps observed in the state_changed stream on circuit.control.",
 });

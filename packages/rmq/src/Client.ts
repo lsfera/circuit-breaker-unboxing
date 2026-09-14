@@ -1,6 +1,7 @@
 import { Context, Data, Deferred, Effect, Layer, Option as O, Predicate, Scope, Tracer } from "effect";
 import * as amqp from "amqplib";
 import { parentFrom, TRACEPARENT, traceparent } from "./Trace.ts";
+import { IDEMPOTENCY_KEY_HEADER } from "./ControlPlane.ts";
 import type { ChannelModel, ConfirmChannel, ConsumeMessage, Channel } from "amqplib";
 
 /**
@@ -56,15 +57,22 @@ type QueueArgs = Record<string, unknown>;
  * What a handler asks the broker to do with its delivery.
  *
  * - `accept` — drop it from the queue; the default when a handler returns nothing.
- * - `requeue` — back on the queue, with no delay, so an unbounded requeue on a
- *   failing dependency is a hot loop. Bound it.
+ * - `requeue` — back on the queue, with no delay, counting toward a quorum
+ *   queue's `x-delivery-limit` (see the comment on `settle` below), so an
+ *   unbounded requeue on a failing dependency both hot-loops and eventually
+ *   dead-letters. Bound it, or use `release` if the message did not fail.
  * - `discard` — rejected without requeue: dead-lettered where a target is
  *   declared, dropped where none is.
+ * - `release` — back on the queue like `requeue`, but *not* counted: for a
+ *   delivery held only for backpressure, not because the work itself failed —
+ *   a local 503 from a concurrency limiter is the case this exists for. The
+ *   broker hands it to the next available consumer, or back to this one,
+ *   with no strike against it.
  */
-export type Settlement = "accept" | "requeue" | "discard";
+export type Settlement = "accept" | "requeue" | "discard" | "release";
 
 /** What the broker knows about this particular delivery. */
-type DeliveryInfo = {
+export type DeliveryInfo = {
   /**
    * The broker's own `x-delivery-count`, 0 on a first delivery. For looking at;
    * enforcement stays the queue's job via `x-delivery-limit`, because an
@@ -85,6 +93,13 @@ type DeliveryInfo = {
    * queue has to carry the provenance itself. This is where it puts it.
    */
   readonly properties: Readonly<Record<string, string>>;
+  /**
+   * The payments idempotency key, read directly off the one header rather than
+   * through `properties`. The work and probe consumers read this on every
+   * delivery — thousands a second — and materializing every header into
+   * strings for one value would be waste.
+   */
+  readonly idempotencyKey: O.Option<string>;
   /**
    * The publishing span, when there was one. `None` for most messages, since
    * tracing is sampled at the root. Handed to the caller rather than applied here.
@@ -197,16 +212,22 @@ const wrap = <A>(operation: string, promise: () => Promise<A>) =>
  * The settlement is genuinely moot at that point, because the broker requeues
  * every unacked delivery when the channel goes.
  *
- * `reject`, not `nack`. From RabbitMQ 4.3 a `nack` with requeue does not count
- * toward a quorum queue's `x-delivery-limit` — measured, 8,954 redeliveries in
- * four seconds and never dead-lettered, where 4.0 parked the message after
- * four — so the retry budget the work queue holds would never run out. A
- * requeuing `reject` still counts on both.
+ * `reject`, not `nack`, for `requeue` — and the reverse for `release`, and
+ * that split is deliberate rather than an inconsistency. From RabbitMQ 4.3 a
+ * `nack` with requeue does not count toward a quorum queue's
+ * `x-delivery-limit` — measured, 8,954 redeliveries in four seconds and never
+ * dead-lettered, where 4.0 parked the message after four — while a requeuing
+ * `reject` still counts on both. `requeue` needs the count to spend (a failed
+ * call is an attempt); `release` needs it not to (a 429 never reached the
+ * third party, so nothing about the message was tried). Same wire behaviour
+ * on RabbitMQ 4.0 either way — the two only diverge on 4.3, in exactly the
+ * direction each is meant to use.
  */
 const settle = (channel: Channel, message: ConsumeMessage, outcome: Settlement) => {
   try {
     if (outcome === "discard") channel.reject(message, false);
     else if (outcome === "requeue") channel.reject(message, true);
+    else if (outcome === "release") channel.nack(message, false, true);
     else channel.ack(message);
   } catch {
     // channel already gone; the broker has the delivery back
@@ -224,6 +245,7 @@ const describe = (delivery: ConsumeMessage): DeliveryInfo => {
   const headers = delivery.properties.headers ?? {};
   let deadLetter: DeliveryInfo["deadLetter"] | undefined;
   let properties: Readonly<Record<string, string>> | undefined;
+  let idempotencyKey: DeliveryInfo["idempotencyKey"] | undefined;
   let parent: DeliveryInfo["parent"] | undefined;
   return {
     deliveryCount: Number(headers["x-delivery-count"] ?? 0),
@@ -245,6 +267,13 @@ const describe = (delivery: ConsumeMessage): DeliveryInfo => {
         );
       }
       return properties;
+    },
+    get idempotencyKey() {
+      if (idempotencyKey === undefined) {
+        const header = headers[IDEMPOTENCY_KEY_HEADER];
+        idempotencyKey = Predicate.isString(header) ? O.some(header) : O.none();
+      }
+      return idempotencyKey;
     },
     get parent() {
       if (parent === undefined) {

@@ -58,7 +58,7 @@ the argument.
 |---|---|
 | `egress_daemon_target_fraction` | Should be identical on every daemon. A spread is a daemon that has gone deaf to `circuit.control` — the `FleetDisagreesWithTarget` alert. |
 | `egress_daemon_floor_held` | Should sum to exactly 1 whenever the target is non-zero — the `FloorUnheld` alert. Zero means a `DEGRADED` fleet could stop entirely. |
-| `sum(egress_daemon_self_active)` against `fraction × count` | The cost of approximation, in daemons. A persistent gap means a fleet too small for the fraction to land. |
+| `sum(rabbitmq_detailed_queue_consumers{queue="<api>.work"})` against `fraction × count(egress_daemon_target_fraction)` | The cost of approximation, in daemons. A persistent gap means a fleet too small for the fraction to land. |
 
 ### What it costs to run small
 

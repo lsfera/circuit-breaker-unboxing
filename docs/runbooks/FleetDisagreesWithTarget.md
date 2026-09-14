@@ -19,7 +19,7 @@ sockets and file descriptors all looked completely normal.
 
 ```bash
 docker compose logs rmq-daemon --tail 40 | grep heartbeat
-curl -s prometheus:9090/api/v1/query?query=egress_daemon_self_active | head -c 400
+curl -s 'prometheus:9090/api/v1/query?query=sum(rabbitmq_detailed_queue_consumers{queue="<api>.work"})' | head -c 400
 ```
 
 Each daemon logs a heartbeat every 15s *independent of the event stream*,

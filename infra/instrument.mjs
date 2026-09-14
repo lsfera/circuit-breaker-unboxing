@@ -325,7 +325,7 @@ const DOMAIN = {
   work_queue_depth: 'rabbitmq_detailed_queue_messages{queue="payments-provider.work"}',
   dead_letter_depth: 'rabbitmq_detailed_queue_messages{queue="payments-provider.work.dead"}',
   target_fraction: "max(egress_daemon_target_fraction)",
-  daemons_pulling: "sum(egress_daemon_self_active)",
+  daemons_pulling: 'sum(rabbitmq_detailed_queue_consumers{queue="payments-provider.work"})',
   floor_held: "sum(egress_daemon_floor_held)",
   egress_calls_per_second: "sum(rate(egress_daemon_calls_total[1m]))",
 };
