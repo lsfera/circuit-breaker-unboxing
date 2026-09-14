@@ -178,6 +178,26 @@ groups:
             Failed work is preserved but not replayed. Either the circuit has
             not closed since, or REDRIVE_ON_CLOSE is off.
 
+      # Consumers registered, work ready, nothing acked: the broker has stopped
+      # delivering to consumers that still look healthy. Observed after a host
+      # suspend: 52,621 messages ready against 5 consumers for at least eight minutes,
+      # every daemon logging a healthy heartbeat. RabbitMQ's consumer_capacity
+      # cannot catch it — it reads 0 for every quorum queue.
+      - alert: WorkQueueStalled
+        expr: >-
+          sum by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~".*[.]work"}) > 0
+          and sum by (queue) (rabbitmq_detailed_queue_consumers{queue=~".*[.]work"}) > 0
+          and sum by (queue) (rate(rabbitmq_detailed_queue_messages_acked_total{queue=~".*[.]work"}[1m])) == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          runbook_url: "docs/runbooks/WorkQueueStalled.md"
+          summary: "Work is ready and consumers are attached, but nothing is being acked"
+          description: >-
+            {{ $labels.queue }} has had ready messages, consumers and zero acks
+            for two minutes. The daemons can look healthy from inside while the
+            broker delivers them nothing.
+
   # ---------------------------------------------------------------------------
   # Service level objectives.
   #

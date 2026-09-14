@@ -62,7 +62,11 @@ scrape_configs:
   - job_name: rabbitmq-queues
     metrics_path: /metrics/detailed
     params:
-      family: [queue_coarse_metrics, queue_consumer_count]
+      # Depth, consumers and bytes, plus the flow through
+      # each queue: published (by exchange), acked, redelivered, basic.get. Flow is the broker's to report — an
+      # application counter dies with its process and never sees the redrive,
+      # a restart or the dead-lettering the broker does on its own.
+      family: [queue_coarse_metrics, queue_consumer_count, queue_metrics, queue_delivery_metrics, queue_exchange_metrics]
     static_configs:
       - targets: ["rabbitmq:15692"]
 

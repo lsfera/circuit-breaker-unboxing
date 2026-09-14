@@ -1,6 +1,6 @@
 # Runbooks
 
-Nine pages for the eleven rules in `infra/monitoring/alerts.yml`. Each rule
+Ten pages for the twelve rules in `infra/monitoring/alerts.yml`. Each rule
 exists because something in this repo went wrong in a way that looked fine from
 outside, so each runbook starts from what was actually observed rather than from
 the metric's name.
@@ -24,5 +24,6 @@ deployment; service names are the compose ones.
 | FleetShrunk | warning | [FleetShrunk.md](FleetShrunk.md) |
 | EgressSheddingLocally | warning | [EgressSheddingLocally.md](EgressSheddingLocally.md) |
 | DeadLetterQueueGrowing | warning | [DeadLetterQueueGrowing.md](DeadLetterQueueGrowing.md) |
+| WorkQueueStalled | critical | [WorkQueueStalled.md](WorkQueueStalled.md) |
 | DeliverySLOFastBurn | critical | [DeliverySLOBurn.md](DeliverySLOBurn.md) |
 | DeliverySLOSlowBurn | warning | [DeliverySLOBurn.md](DeliverySLOBurn.md) |

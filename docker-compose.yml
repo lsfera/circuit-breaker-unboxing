@@ -58,6 +58,10 @@ x-limits-daemon: &limits-daemon { resources: { limits: { cpus: "2.00", memory: 5
 x-limits-driver: &limits-driver { resources: { limits: { cpus: "1.00", memory: 256m } } }
 x-limits-store: &limits-store { resources: { limits: { cpus: "1.00", memory: 768m } } }
 x-limits-broker: &limits-broker { resources: { limits: { cpus: "2.00", memory: 2g } } }
+# Envoy and the producer are the first two ceilings infra/load-sweep.mjs reaches,
+# so a sweep can lift them without changing the envelope everything else is measured in.
+x-limits-envoy: &limits-envoy { resources: { limits: { cpus: "${ENVOY_CPUS:-0.50}", memory: 256m } } }
+x-limits-producer: &limits-producer { resources: { limits: { cpus: "${PRODUCER_CPUS:-1.00}", memory: 512m } } }
 
 # Shared by every daemon replica. It stayed an anchor after the fleet collapsed
 # into one scaled service because the producer and the daemons still share most
@@ -150,7 +154,7 @@ services:
       default:
         aliases: [envoy]
       devcontainer: {}
-    deploy: *limits-small
+    deploy: *limits-envoy
   envoy-01:
     <<: *envoy
     command: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "egress", "--service-node", "envoy-01"]
@@ -293,7 +297,8 @@ services:
       <<: *tracing-env
       RMQ: rabbitmq:5672
       API_ID: payments-provider
-      RATE_PER_SECOND: "200"
+      # Overridable so infra/load-sweep.mjs can step the arrival rate without a second producer.
+      RATE_PER_SECOND: ${RATE_PER_SECOND:-200}
       METRICS_PORT: "9464"
     # Restarting is what makes the crash-fast stance coherent. Less reaches it
     # than it used to: the AMQP client reconnects and rebuilds its own topology
@@ -305,7 +310,7 @@ services:
     depends_on: &rmq-depends
       rabbitmq: {condition: service_healthy}
     networks: [default, devcontainer]
-    deploy: *limits-node
+    deploy: *limits-producer
 
   # One service, scaled. There is no index and no fleet size to keep in step
   # any more — a daemon applies the published fraction to its own position in
