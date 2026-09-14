@@ -194,6 +194,37 @@ export interface RmqService {
    * is the one place that turns this into an exit.
    */
   readonly lost: Effect.Effect<never, RmqError>;
+  /**
+   * Cheap read of the `connected` flag tracked from amqplib's own events —
+   * see that variable's doc comment for exactly when it is honest. It is
+   * `true` for most of a one-sided partition: a channel's 'close' arrives
+   * before the connection's 'disconnect', and a firewall dropping packets
+   * outbound leaves nothing to trigger either until a heartbeat times out.
+   * A caller that needs to know whether publishing actually works — not just
+   * whether the socket looks open — has to track delivery outcomes itself,
+   * which is what AmqpControlPlaneSink's consecutive-failure count is for.
+   */
+  readonly isConnected: Effect.Effect<boolean>;
+  /**
+   * Destroy the underlying socket outright — not a graceful close, which
+   * would send a Close method and wait on a peer that may be a one-sided
+   * partition away from ever answering. Anything already written but
+   * unconfirmed (amqplib's own buffering, the kernel socket buffer) is
+   * discarded with the socket rather than delivered late, once whatever hid
+   * it heals, interleaved with a new leader's sequence.
+   *
+   * Every pending publish confirm fails as a side effect — the destroy
+   * cascades to each channel's own 'close', which the publish channel's
+   * listener already turns into a rejection — so a delivery stuck on this
+   * connection counts as failed rather than hanging. Recovery is the same
+   * path a real network partition already takes: `setup` reconnects and
+   * replays topology and consumers (see docs/decisions/005-connection-recovery.md).
+   *
+   * For a caller demoted from leadership, not for routine use — see
+   * AmqpControlPlaneSink's `resetConnection` and `Aggregator.ts`'s
+   * `demoteAndFence`.
+   */
+  readonly resetConnection: Effect.Effect<void>;
 }
 
 export class Rmq extends Context.Service<Rmq, RmqService>()("@egress/rmq/Client/Rmq") {
@@ -367,6 +398,20 @@ export const makeRmq = Effect.fnUntraced(function* (
   let opening: Promise<ConfirmChannel> | null = null;
 
   /**
+   * The current live model, captured from `setup` (which amqplib runs on
+   * every successful connect, initial and reconnect alike, before handing
+   * the connection to anyone) rather than from the `'connect'` event: that
+   * event fires synchronously inside amqplib's own connect chain, before the
+   * `amqp.connect()` promise this closure awaits below has even resolved, so
+   * subscribing to it afterwards would miss exactly the first connection.
+   *
+   * `ChannelModel.connection` is typed as `{ serverProperties }` only, but
+   * the runtime object is connection.js's full `Connection`, which owns the
+   * wrapped socket as `.stream` — see `resetConnection`.
+   */
+  let currentModel: ChannelModel | null = null;
+
+  /**
    * Publishes awaiting a confirm, so one 'close' listener per channel can fail
    * all of them. A listener per publish trips Node's leak warning at eleven
    * concurrent, which the producer's batching reaches immediately.
@@ -497,6 +542,7 @@ export const makeRmq = Effect.fnUntraced(function* (
    * serving connections yet and would deadlock waiting for this one.
    */
   const setup = async (model: ChannelModel) => {
+    currentModel = model;
     await applyTopology(() => model.createChannel());
     out = watchPublishChannel(await model.createConfirmChannel());
     for (const entry of live) await attach(() => model.createChannel(), entry);
@@ -719,13 +765,27 @@ export const makeRmq = Effect.fnUntraced(function* (
         return c.channel.close().then(() => {}, () => {});
       }),
     lost: Deferred.await(lost),
+    isConnected: Effect.sync(() => connected),
+    // `destroy(error)`, not `destroy()`: amqplib only wires `onSocketError`
+    // to the stream's 'error' and 'end' events, and a plain destroy with no
+    // argument emits neither — Node's Duplex emits bare 'close' for that, which
+    // nothing here listens for. Without the error this would be a silent
+    // no-op: the socket dies, but amqplib's Connection never notices, never
+    // closes its channels, and never tells RecoveringCore to reconnect.
+    resetConnection: Effect.sync(() => {
+      const raw = currentModel?.connection as
+        | { readonly stream?: { destroy: (err?: Error) => void } }
+        | undefined;
+      raw?.stream?.destroy(new Error("connection reset: fencing a demoted leader's buffered publishes"));
+    }),
   });
 });
 
 
 /**
- * Build `layer` and run until its scope ends or the broker connection is lost,
- * whichever comes first — `Layer.launch` for a graph that contains an `Rmq`.
+ * Build `layer` and run until its scope ends, the broker connection is lost,
+ * or `alsoFatal` completes — whichever comes first. `Layer.launch` for a
+ * graph that contains an `Rmq`.
  *
  * This exists so the fatal-on-lost-connection decision has exactly one call
  * site. `Layer.launch` alone blocks forever, and a fiber forked into the

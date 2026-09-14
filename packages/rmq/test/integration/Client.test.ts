@@ -152,6 +152,45 @@ test("a killed connection comes back with its consumers still registered", async
 });
 
 /**
+ * `resetConnection` destroys the socket from our side, which only helps a
+ * demoted leader if amqplib notices and recovers: a destroy it does not see
+ * would leave the process connected to nothing, forever.
+ */
+test("resetConnection drops the connection and the client recovers from it", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const queue = `reset.${Date.now()}`;
+  const seen: string[] = [];
+
+  await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(queue, { durable: true });
+      const pub = yield* rmq.publisherToQueue(queue);
+      yield* rmq.consume(queue, (body) => void seen.push(body));
+
+      yield* rmq.send(pub, "before");
+      yield* waitFor(() => seen.length >= 1);
+
+      yield* rmq.resetConnection;
+      // Reconnect starts at 200ms, so sample closely rather than after a sleep.
+      let dropped = false;
+      for (let i = 0; i < 100 && !dropped; i++) {
+        dropped = !(yield* rmq.isConnected);
+        yield* waitFor(() => false, 5);
+      }
+      assert.ok(dropped, "the reset must actually drop the connection");
+
+      yield* waitFor(() => false, 3000);
+      yield* rmq.send(pub, "after");
+      yield* waitFor(() => seen.length >= 2);
+    }),
+  );
+
+  assert.deepEqual(seen, ["before", "after"]);
+});
+
+/**
  * amqplib recovers connections, not channels. A channel that dies on its own —
  * a protocol error, a queue deleted, a settle on a tag the broker has already
  * seen — takes its consumer with it and leaves the connection healthy, so

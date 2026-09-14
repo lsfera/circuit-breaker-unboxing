@@ -83,6 +83,19 @@ export const isLeader = Metric.gauge("egress_aggregator_is_leader", {
 });
 
 /**
+ * 1 if this instance's control-plane sink can currently deliver, 0 otherwise.
+ * Updated every tick regardless of leadership, so a standby's reading is
+ * visible too — the question this answers is "why hasn't this instance tried
+ * to lead", which `isLeader` alone cannot say: a standby that is not ready is
+ * indistinguishable from one that simply lost the acquire race.
+ */
+export const controlPlaneReady = Metric.gauge("egress_aggregator_control_plane_ready", {
+  description:
+    "1 if this instance's control-plane sink can currently deliver, 0 otherwise. " +
+    "A leader that drops to 0 steps down instead of publishing into nothing.",
+});
+
+/**
  * The liveness signal for the control loop itself, incremented every tick by
  * every instance whether or not it leads.
  *

@@ -8,6 +8,7 @@ import {
   Metric,
   Option as O,
   Ref,
+  Result,
   Schedule,
 } from "effect";
 import * as Breaker from "@egress/domain/Breaker.ts";
@@ -142,8 +143,71 @@ const make = Effect.gen(function* () {
     { discard: true },
   );
 
+  /**
+   * `demote`, plus fencing the sink — but only when this instance actually
+   * held leadership going in. Every path that loses leadership (step-down,
+   * a checkpoint fenced by a newer token, a denied acquire, coordination
+   * gone unreachable) routes through here rather than calling `demote`
+   * directly, so none of them can forget the fence. The guard is what keeps
+   * a standby — already demoted, ticking every `tickMs` while it holds off
+   * or simply fails to acquire — from resetting the connection on every
+   * tick: `sink.resetConnection` runs once, on the transition, not for as
+   * long as the instance stays a standby.
+   */
+  const demoteAndFence = Ref.get(leadership).pipe(
+    Effect.map((l) => l.isLeader),
+    Effect.tap(() => demote),
+    Effect.flatMap((wasLeading) => (wasLeading ? sink.resetConnection : Effect.void)),
+  );
+
   /** Flips only on change, so an outage is two log lines rather than four a second. */
   const coordinationOk = yield* Ref.make(true);
+
+  /** Flips only on change, same reason as coordinationOk above. */
+  const sinkReadyOk = yield* Ref.make(true);
+
+  /**
+   * When this instance last stepped down because its sink went not-ready,
+   * `None` otherwise. Read only to debounce this instance's own next acquire —
+   * see READINESS_HOLD_OFF_MS.
+   */
+  const steppedDownAt = yield* Ref.make<O.Option<number>>(O.none());
+
+  /**
+   * Give the lease back and start the readiness hold-off — shared by the
+   * not-ready step-down below and by a sequenced event's delivery failing
+   * (see `attemptTick`'s reduce): both are "this instance cannot do the one
+   * job the lease gives it right now", and both want the standby able to
+   * take over on this same tick rather than wait out the lease TTL. Best
+   * effort, same reason `releaseOnShutdown`'s is: if the coordinator itself
+   * is unreachable, the lease just expires the slower way.
+   */
+  const releaseAndHoldOff = (now: number) =>
+    leader.release(ha.instanceId).pipe(
+      Effect.andThen(Ref.set(steppedDownAt, O.some(now))),
+      Effect.catch((err) =>
+        Effect.logWarning(
+          `${ha.instanceId}: could not release the lease while stepping down ` +
+          `(${err.operation}) — it will expire instead`,
+        ).pipe(Effect.andThen(Ref.set(steppedDownAt, O.some(now)))),
+      ),
+    );
+
+  /**
+   * How long this instance waits after stepping down for a not-ready sink
+   * before it may try to acquire the lease again.
+   *
+   * One lease TTL: the same timescale a crash failover already waits out, so
+   * there is nothing new here for an operator to learn. It is long enough
+   * that a readiness signal flapping on a sub-second timescale does not turn
+   * into a same-timescale fight over the lease — every step-down becomes
+   * sticky for at least one TTL rather than reversible the very next tick.
+   * When both instances lose the broker together, both hold off equally, so
+   * whichever becomes ready and acquires first gets a full TTL to renew
+   * before the other's own hold-off even expires, instead of the two of them
+   * racing to reacquire on every tick the connection blips.
+   */
+  const READINESS_HOLD_OFF_MS = ha.leaseTtlMs;
 
   /**
    * Stamped every pass, leader or not. `egress_aggregator_ticks_total`
@@ -156,9 +220,59 @@ const make = Effect.gen(function* () {
   const attemptTick = Effect.gen(
     function* () {
       yield* Metric.update(Telemetry.ticks, 1);
-      yield* Clock.currentTimeMillis.pipe(
-        Effect.flatMap((now) => Ref.set(lastTick, now)),
+      const tickNow = yield* Clock.currentTimeMillis;
+      yield* Ref.set(lastTick, tickNow);
+
+      const sinkReady = yield* sink.ready;
+      yield* Metric.update(Telemetry.controlPlaneReady, sinkReady ? 1 : 0);
+
+      if (!sinkReady) {
+        // A leader that cannot deliver is not doing the one job the lease
+        // gives it: give the lease back so the standby — which may still
+        // reach the broker — can take over, rather than keep renewing while
+        // publishing into nothing.
+        const heldBefore = (yield* Ref.get(leadership)).isLeader;
+        yield* Effect.when(releaseAndHoldOff(tickNow), Effect.succeed(heldBefore));
+        yield* demoteAndFence;
+        yield* Metric.update(Telemetry.isLeader, 0);
+        yield* Ref.getAndSet(sinkReadyOk, false).pipe(
+          Effect.flatMap((was) =>
+            was
+              ? Effect.logWarning(
+                  `${ha.instanceId}: control plane not ready — stepping down and ` +
+                  `publishing nothing until it recovers`,
+                )
+              : Effect.void,
+          ),
+        );
+        return [];
+      }
+      yield* Ref.getAndSet(sinkReadyOk, true).pipe(
+        Effect.flatMap((was) =>
+          was ? Effect.void : Effect.logInfo(`${ha.instanceId}: control plane ready again`),
+        ),
       );
+
+      // Not ready is a reason to step down; readiness alone is not (yet) a
+      // reason to try acquiring — see READINESS_HOLD_OFF_MS.
+      const holdingOff = yield* Ref.get(steppedDownAt).pipe(
+        Effect.map((since) =>
+          O.match(since, {
+            onNone: () => false,
+            onSome: (at) => tickNow - at < READINESS_HOLD_OFF_MS,
+          }),
+        ),
+      );
+      if (holdingOff) {
+        // Already demoted by the step-down above (or never leading at all):
+        // demoteAndFence's own guard makes this a no-op fence, correctly, on
+        // every tick spent waiting out READINESS_HOLD_OFF_MS.
+        yield* demoteAndFence;
+        yield* Metric.update(Telemetry.isLeader, 0);
+        return [];
+      }
+      yield* Ref.set(steppedDownAt, O.none());
+
       const tokenOpt = yield* leader.tryAcquireOrRenew(ha.instanceId, ha.leaseTtlMs);
       yield* Ref.getAndSet(coordinationOk, true).pipe(
         Effect.flatMap((wasOk) =>
@@ -171,8 +285,11 @@ const make = Effect.gen(function* () {
 
       if (O.isNone(tokenOpt)) {
         // Standby: do not poll, do not step, do not publish. The only
-        // thing a non-leader instance does is keep trying to acquire.
-        yield* demote;
+        // thing a non-leader instance does is keep trying to acquire. If
+        // this instance held the lease a moment ago (denied a renew — someone
+        // else's acquire won the race), demoteAndFence's guard still catches
+        // it as a genuine loss of leadership.
+        yield* demoteAndFence;
         return [];
       }
       const token = tokenOpt.value;
@@ -186,34 +303,55 @@ const make = Effect.gen(function* () {
       // so `sequence` continues after a failover instead of restarting at
       // zero.
       //
-      // The condition is "no breaker yet", and nothing more. It used to also
-      // require the *acquisition tick*, which quietly meant "only if reports
-      // for that API happened to arrive on the same tick the lease was
-      // taken". A polling source answers immediately, so this held in the
-      // simulator and in every test; the push source cannot, because no
-      // Envoy has streamed to a process that started milliseconds ago. In
-      // `--source=envoy-push` — what docker-compose runs — every leader
-      // change therefore cold-started every API at sequence 0, with the
-      // checkpoint sitting in Redis unread and nothing logged. The daemon
-      // fleet's own duplicate counter is what caught it.
+      // The condition is "no breaker yet", and nothing more — but the set of
+      // APIs it applies to is `fleet.specs`, the full configured list, not
+      // `reports.map(apiId)`. It used to be the latter, which quietly meant
+      // "only APIs this tick's poll happened to mention". A polling source
+      // answers immediately, so this held in the simulator and in every
+      // test; it used to fail one level up for the same reason a narrower
+      // version of this guard used to fail (see the previous fix, still
+      // below): a leader whose poll reports nothing *at all* — a telemetry
+      // blackout, not just a slow first push — computed an empty
+      // `toRehydrate` on every tick for as long as the blackout lasted, so a
+      // leadership change during one left the new leader's registry (and
+      // `/api/state`, and every gauge) with zero entries for every
+      // configured API, not just the ones affected by whatever the blackout
+      // was hiding. Reproduced live: block Envoy's push port to both
+      // aggregators, kill the leader mid-blackout, and the standby takes
+      // over holding nothing — not even the two unrelated APIs that were
+      // sitting at CLOSED a moment before — until the firewall rule lifts.
       //
-      // Dropping the guard costs nothing: `known.has(id)` is true from the
-      // moment an API is seeded, so this is one load per API per instance,
-      // not one per tick. An API first seen long after acquisition now
-      // resumes too, which is the same intent applied honestly.
+      // Keyed off `specs` instead, rehydration depends only on holding the
+      // lease, matching what the guard already claimed to do. An API with
+      // no live report this tick still advances on elapsed time alone via
+      // `Breaker.step` below, exactly like any other registry entry a quiet
+      // tick leaves untouched — seeding it here costs nothing extra.
+      //
+      // Dropping the original guard costs nothing: `known.has(id)` is true
+      // from the moment an API is seeded, so this is one load per API per
+      // instance, not one per tick. An API first seen long after acquisition
+      // now resumes too, which is the same intent applied honestly.
       const known = yield* Ref.get(registry).pipe(Effect.map((reg) => reg.breakers));
-      const toRehydrate = [...new Set(reports.map((r) => r.apiId))].filter(
-        (id) => !known.has(id),
-      );
+      const specs = yield* fleet.specs;
+      const toRehydrate = specs.map((s) => s.apiId).filter((id) => !known.has(id));
       const rehydrated = yield* Effect.forEach(toRehydrate, (apiId) =>
         checkpoints.load(apiId).pipe(Effect.map((cp) => [apiId, cp] as const)),
       );
       const checkpointByApi = new Map(rehydrated);
 
       const events = yield* Ref.modify(registry, (reg) => {
+        // Seed every newly-rehydrated API before folding in this tick's
+        // reports, so one exists to step even when no report arrived for it
+        // this tick — the case `toRehydrate` above exists to cover.
+        const seeded = Arr.reduce(toRehydrate, new Map(reg.breakers), (acc, apiId) =>
+          acc.set(
+            apiId,
+            seedFromCheckpoint(apiId, checkpointByApi.get(apiId) ?? O.none(), cfg, now),
+          ),
+        );
         // Several replicas report the same API, so this is a left fold and
         // not a map: each report folds into the breaker the last one left.
-        const ingested = Arr.reduce(reports, new Map(reg.breakers), (acc, report) =>
+        const ingested = Arr.reduce(reports, seeded, (acc, report) =>
           acc.set(
             report.apiId,
             Breaker.ingest(
@@ -264,74 +402,127 @@ const make = Effect.gen(function* () {
         ];
       });
 
-      // Checkpoint every transition under this tick's token before telling
-      // anyone else about it. A rejection means a newer instance has
-      // already taken the lease — stop publishing immediately rather than
-      // let a demoted instance keep talking; the remaining events in this
-      // tick are dropped, not queued, since the new leader will re-derive
-      // them itself from the next poll.
+      // Deliver every transition before checkpointing it, and checkpoint
+      // under this tick's token before telling anyone else about it.
+      //
+      // Delivery first is what closes the gap this used to have: this sink's
+      // AMQP leg now awaits the broker's confirm (AmqpControlPlaneSink.ts's
+      // `deliver`) rather than forking and forgetting, so a checkpoint here
+      // only ever advances past a sequence the broker actually took. A
+      // rejected checkpoint still means the same thing it always did — a
+      // newer instance has taken the lease — and a failed delivery means
+      // this instance can no longer do the one job the lease gives it.
+      // Either way: stop publishing immediately rather than let a demoted or
+      // undeliverable instance keep talking; the remaining sequenced events
+      // this tick are dropped, not queued or reordered, since the next
+      // leader (this instance re-acquiring, or another) re-derives them from
+      // its own next poll against the checkpoint actually saved.
+      //
+      // Not gapless in one narrow window: a leader that crashes after the
+      // broker confirms but before the checkpoint save leaves its successor
+      // to re-publish the same sequence. Daemons already de-duplicate on
+      // sequence, so that is a harmless duplicate rather than a gap.
       type Publishing = {
         readonly publishable: ReadonlyArray<CircuitEvent>;
-        readonly fenced: boolean;
+        readonly stopped: boolean;
       };
       const { publishable } = yield* Effect.reduce(
         events,
-        (): Publishing => ({ publishable: [], fenced: false }),
+        (): Publishing => ({ publishable: [], stopped: false }),
         (acc, e): Effect.Effect<Publishing, CoordinationUnavailable> =>
-          // Once fenced, the remaining events are dropped rather than
+          // Once stopped, the remaining events are dropped rather than
           // queued: the new leader re-derives them from its own next poll.
-          acc.fenced
+          acc.stopped
             ? Effect.succeed(acc)
             : e.type !== SEQUENCED_EVENT
               ? Effect.succeed({ ...acc, publishable: Arr.append(acc.publishable, e) })
               : Effect.gen(function* () {
-                  const after = (yield* Ref.get(registry)).breakers.get(e.data.apiId);
-                  const checkpoint: Checkpoint = {
-                    state: e.data.state,
-                    // No cast: the published event's `reason` is the vocabulary
-                    // itself now, so what decodes off the wire is already a Reason.
-                    reason: e.data.reason,
-                    sequence: e.data.sequence,
-                    changedAt: now,
-                    openBackoffMs: after?.openBackoffMs ?? cfg.openMs,
-                  };
-                  const fenced = yield* checkpoints.save(e.data.apiId, token, checkpoint).pipe(
-                    Effect.as(false),
-                    Effect.catchTag("CheckpointFenced", (err) =>
-                      Effect.andThen(
-                        Effect.logWarning(
-                          `lost leadership publishing ${e.data.apiId}: ` +
-                          `token ${formatToken(err.attempted)} superseded by ` +
-                          O.match(err.current, {
-                            onNone: () => "an unreadable one",
-                            onSome: formatToken,
-                          }),
-                        ),
-                        Effect.succeed(true),
-                      ),
-                    ),
-                  );
-                  // Same demotion as losing the lease outright, registry drop
-                  // included — being fenced *is* how this instance finds out
-                  // someone else has already moved the sequence on.
-                  return yield* fenced
-                    ? Effect.as(
+                  const delivery = yield* Effect.result(sink.deliver(e));
+                  return yield* Result.match(delivery, {
+                    onFailure: (err) =>
+                      // Same demotion as losing the lease outright or being
+                      // fenced below — an undelivered sequence must not be
+                      // checkpointed, and this instance's in-memory registry
+                      // has already moved past it, so it must not keep
+                      // publishing on top rather than stand down and let a
+                      // (possibly still-reachable) standby take over, same
+                      // as the not-ready step-down above and for the same
+                      // reason: give the lease back now rather than have the
+                      // standby wait out the TTL.
+                      Effect.as(
                         Effect.all(
                           [
-                            demote,
-                            Metric.update(Telemetry.isLeader, 0),
-                            Metric.update(
-                              Metric.withAttributes(Telemetry.fencingConflicts, {
-                                apiId: e.data.apiId,
-                              }),
-                              1,
+                            Effect.logWarning(
+                              `${ha.instanceId}: control plane did not confirm ` +
+                              `${err.apiId} sequence ${e.data.sequence} (${err.cause}) — ` +
+                              `stepping down rather than checkpoint an undelivered sequence`,
                             ),
+                            releaseAndHoldOff(tickNow),
+                            demoteAndFence,
+                            Metric.update(Telemetry.isLeader, 0),
                           ],
                           { discard: true },
                         ),
-                        { ...acc, fenced: true },
-                      )
-                    : Effect.succeed({ ...acc, publishable: Arr.append(acc.publishable, e) });
+                        { ...acc, stopped: true },
+                      ),
+                    onSuccess: () =>
+                      Effect.gen(function* () {
+                        const after = (yield* Ref.get(registry)).breakers.get(e.data.apiId);
+                        const checkpoint: Checkpoint = {
+                          state: e.data.state,
+                          // No cast: the published event's `reason` is the vocabulary
+                          // itself now, so what decodes off the wire is already a Reason.
+                          reason: e.data.reason,
+                          sequence: e.data.sequence,
+                          changedAt: now,
+                          openBackoffMs: after?.openBackoffMs ?? cfg.openMs,
+                        };
+                        const fenced = yield* checkpoints
+                          .save(e.data.apiId, token, checkpoint)
+                          .pipe(
+                            Effect.as(false),
+                            Effect.catchTag("CheckpointFenced", (err) =>
+                              Effect.andThen(
+                                Effect.logWarning(
+                                  `lost leadership publishing ${e.data.apiId}: ` +
+                                  `token ${formatToken(err.attempted)} superseded by ` +
+                                  O.match(err.current, {
+                                    onNone: () => "an unreadable one",
+                                    onSome: formatToken,
+                                  }),
+                                ),
+                                Effect.succeed(true),
+                              ),
+                            ),
+                          );
+                        // Same demotion as losing the lease outright, registry drop,
+                        // reset connection and all — being fenced *is* how this
+                        // instance finds out someone else has already moved the
+                        // sequence on, and it was leading up to this exact instant,
+                        // so demoteAndFence's guard always resets here.
+                        return yield* fenced
+                          ? Effect.as(
+                              Effect.all(
+                                [
+                                  demoteAndFence,
+                                  Metric.update(Telemetry.isLeader, 0),
+                                  Metric.update(
+                                    Metric.withAttributes(Telemetry.fencingConflicts, {
+                                      apiId: e.data.apiId,
+                                    }),
+                                    1,
+                                  ),
+                                ],
+                                { discard: true },
+                              ),
+                              { ...acc, stopped: true },
+                            )
+                          : Effect.succeed({
+                              ...acc,
+                              publishable: Arr.append(acc.publishable, e),
+                            });
+                      }),
+                  });
                 }),
       );
 
@@ -401,14 +592,20 @@ const make = Effect.gen(function* () {
         { discard: true },
       );
 
-      // Publish to the in-process bus first (the console), then hand to the
-      // sink, which forks delivery so a slow subscriber cannot stall the loop.
+      // Publish to the in-process bus first (the console), then hand
+      // snapshots to the sink. Sequenced events already went to the sink
+      // above, awaited, before their checkpoint was allowed to advance —
+      // only what is left, the fire-and-forget snapshot heartbeats, is
+      // handed off here, forked so a slow confirm cannot stall the loop the
+      // way an awaited one deliberately can for a sequenced event.
       yield* Effect.forEach(publishable, (e) => bus.publish(e), {
         discard: true,
       });
-      yield* Effect.forEach(publishable, (e) => sink.deliver(e), {
-        discard: true,
-      });
+      yield* Effect.forEach(
+        publishable.filter((e) => e.type !== SEQUENCED_EVENT),
+        (e) => Effect.forkChild(sink.deliver(e)),
+        { discard: true },
+      );
 
       // Then replay whatever an earlier attempt could not deliver.
       //
@@ -435,7 +632,11 @@ const make = Effect.gen(function* () {
   const tick: Effect.Effect<ReadonlyArray<CircuitEvent>> = attemptTick.pipe(
     Effect.catchTag("CoordinationUnavailable", (err) =>
       Effect.gen(function* () {
-        yield* demote;
+        // Coordination going unreachable does not by itself mean another
+        // instance has taken over — but this instance can no longer confirm
+        // it still holds the lease, so it is exactly as unauthoritative as
+        // any other demotion, and demoteAndFence's guard treats it the same.
+        yield* demoteAndFence;
         yield* Metric.update(Telemetry.coordinationErrors, 1);
         // Say "not the leader" rather than saying nothing. `isLeader` is
         // only updated after an acquire attempt returns, so an instance that

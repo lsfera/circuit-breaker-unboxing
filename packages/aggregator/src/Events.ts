@@ -130,17 +130,39 @@ export class EventSink extends Context.Service<
   EventSink,
   {
     readonly name: string;
-    readonly deliver: (event: CircuitEvent) => Effect.Effect<void>;
+    /** See SinkImpl: completes once delivery is leadership-relevant-confirmed, or fails. */
+    readonly deliver: (event: CircuitEvent) => Effect.Effect<void, DeliveryFailed>;
     readonly deadLetters: Effect.Effect<ReadonlyArray<DeliveryFailed>>;
     /** See SinkImpl: replay what an earlier attempt could not deliver, leader-only. */
     readonly drainOutbox: Effect.Effect<number>;
+    /** See SinkImpl: whether this sink can currently deliver. */
+    readonly ready: Effect.Effect<boolean>;
+    /** See SinkImpl: fence off buffered, unconfirmed publishes on step-down or demotion. */
+    readonly resetConnection: Effect.Effect<void>;
   }
 >()("@egress/aggregator/Events/EventSink") {}
 
 /** The shape every sink builds — split out from the Layer wrapper so main.ts can compose several before mounting the one EventSink tag. */
 export type SinkImpl = {
   readonly name: string;
-  readonly deliver: (event: CircuitEvent) => Effect.Effect<void>;
+  /**
+   * Completes once delivery is confirmed *to the extent leadership depends on
+   * it*, and fails with `DeliveryFailed` if it is not — the caller
+   * (Aggregator.ts's `attemptTick`) awaits this for a sequenced event and
+   * checkpoints only on success, so the sequence guarantee holds across a
+   * leader that loses its transport mid-delivery.
+   *
+   * That is why WebhookSink and AmqpControlPlaneSink keep different shapes
+   * here even though both "fork delivery off the hot path": a subscriber
+   * failure is not a leadership question (WebhookSink forks its attempt and
+   * returns success immediately, same as always), but AmqpControlPlaneSink's
+   * publish *is* the thing leadership is about, so it forks into its own
+   * fenceable scope and then awaits that fork's outcome before returning.
+   * `combineSinks` runs every mounted sink and fails if any does — in
+   * practice only the AMQP leg can make it wait or fail, since the webhook
+   * leg has already returned by the time `Effect.all` reaches it.
+   */
+  readonly deliver: (event: CircuitEvent) => Effect.Effect<void, DeliveryFailed>;
   readonly deadLetters: Effect.Effect<ReadonlyArray<DeliveryFailed>>;
   /**
    * Replay whatever an earlier attempt could not deliver, and answer how many
@@ -153,6 +175,27 @@ export type SinkImpl = {
    * is precisely the break the sequence contract exists to make visible.
    */
   readonly drainOutbox: Effect.Effect<number>;
+  /**
+   * Whether this sink can currently deliver. A leader whose sink is not ready
+   * steps down (Aggregator.ts's `attemptTick`) rather than keep "publishing"
+   * into nothing while the lease says it is doing its one job. A subscriber
+   * failure is not a leadership question — WebhookSink is always ready — but
+   * a transport this instance itself cannot reach is: AmqpControlPlaneSink
+   * ties this to its connection and recent delivery outcomes.
+   */
+  readonly ready: Effect.Effect<boolean>;
+  /**
+   * Fence off anything this sink has written but not yet had confirmed, so a
+   * demoted instance cannot deliver it late, after another leader has moved
+   * the sequence on. Called on step-down and on demotion of a leader — see
+   * `Aggregator.ts`'s `demoteAndFence` — never on a standby's ordinary tick.
+   *
+   * Meaningful only for a transport that buffers past this process's control
+   * — AmqpControlPlaneSink resets its connection and stops retrying whatever
+   * it had in flight. A sink with nothing to fence (WebhookSink, the noop
+   * sink) is a no-op.
+   */
+  readonly resetConnection: Effect.Effect<void>;
 };
 
 /**
@@ -400,15 +443,30 @@ export const makeWebhookSink = Effect.fnUntraced(function* (url: string): Effect
       ),
     );
 
-    return { name: "webhook", deliver, deadLetters: Ref.get(dead), drainOutbox };
+    // Always ready: a subscriber that is down or slow is not a reason for
+    // this instance to give up the publishing lease — see SinkImpl's doc
+    // comment. The outbox above is what carries a webhook subscriber's outage.
+    //
+    // Nothing to fence: HTTP has no confirm to leave dangling, and a failed
+    // POST already goes to the outbox rather than being retried blind.
+    return {
+      name: "webhook",
+      deliver,
+      deadLetters: Ref.get(dead),
+      drainOutbox,
+      ready: Effect.succeed(true),
+      resetConnection: Effect.void,
+    };
 });
 
 /**
- * Fans one event out to every given sink and forks each delivery
- * independently, so a slow or unreachable one (e.g. RabbitMQ down while the
- * webhook is fine) never delays the others. Dead letters from all sinks are
- * pooled — a subscriber checking the delivery contract does not need to
- * know how many sinks are mounted.
+ * Fans one event out to every given sink. Each sink's own `deliver` decides
+ * whether that means "returns once forked" (WebhookSink) or "returns once
+ * confirmed" (AmqpControlPlaneSink) — see SinkImpl's doc comment — so a slow
+ * or unreachable webhook subscriber still never delays this, but a control
+ * plane that will not confirm does delay (and can fail) it, on purpose.
+ * Dead letters from all sinks are pooled — a subscriber checking the
+ * delivery contract does not need to know how many sinks are mounted.
  */
 export const combineSinks = (sinks: ReadonlyArray<SinkImpl>): SinkImpl => ({
   name: sinks.map((s) => s.name).join("+"),
@@ -421,6 +479,12 @@ export const combineSinks = (sinks: ReadonlyArray<SinkImpl>): SinkImpl => ({
   drainOutbox: Effect.all(sinks.map((s) => s.drainOutbox)).pipe(
     Effect.map((counts) => counts.reduce((a, b) => a + b, 0)),
   ),
+  // Ready only if every mounted sink is: nothing published means the leader
+  // is not doing its one job, whichever transport is the one that cannot.
+  ready: Effect.all(sinks.map((s) => s.ready)).pipe(Effect.map((rs) => rs.every((r) => r))),
+  // Every sink fences its own outstanding writes; a demotion does not know
+  // in advance which transport (if any) had something buffered.
+  resetConnection: Effect.all(sinks.map((s) => s.resetConnection), { discard: true }),
 });
 
 /** Used by tests and by --no-webhook runs. */
@@ -429,4 +493,6 @@ export const NoopSinkLayer = Layer.succeed(EventSink, {
   deliver: () => Effect.void,
   deadLetters: Effect.succeed([]),
   drainOutbox: Effect.succeed(0),
+  ready: Effect.succeed(true),
+  resetConnection: Effect.void,
 });

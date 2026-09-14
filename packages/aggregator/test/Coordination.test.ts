@@ -131,6 +131,8 @@ const RecordingSink = (into: Ref.Ref<ReadonlyArray<CircuitEvent>>) =>
     deliver: (event: CircuitEvent) => Ref.update(into, (xs) => [...xs, event]),
     deadLetters: Effect.succeed([]),
     drainOutbox: Effect.succeed(0),
+    ready: Effect.succeed(true),
+    resetConnection: Effect.void,
   });
 
 const instanceLayer = (
@@ -271,8 +273,17 @@ test("a source that reports nothing on the acquisition tick still resumes from i
           Effect.provideService(Config, CFG),
         );
 
+        // Filtered to the sequenced (state_changed) stream, not just any
+        // event for "payments": rehydration now also seeds the registry —
+        // and publishes a checkpoint-derived heartbeat snapshot, at the
+        // checkpoint's own sequence — the moment this instance starts
+        // leading, before the fleet source has said anything at all (see the
+        // blackout test below). Snapshots deliberately repeat the current
+        // sequence (Http.ts's `Integrity` comment), so only state_changed
+        // carries the "continues past the checkpoint" guarantee this test is
+        // actually about.
         const firstAfter = (yield* Ref.get(delivered)).find(
-          (e) => e.data.apiId === "payments",
+          (e) => e.data.apiId === "payments" && e.type === "egress.circuit.state_changed",
         );
         return { handoffSequence, firstAfter };
       }),
@@ -280,12 +291,90 @@ test("a source that reports nothing on the acquisition tick still resumes from i
     ),
   );
 
-  assert.ok(firstAfter, "the instance must publish for payments once reports start");
+  assert.ok(firstAfter, "the instance must publish a transition for payments once reports start");
   assert.ok(
     firstAfter!.data.sequence > handoffSequence,
     `sequence must continue past the checkpoint (${handoffSequence}), got ` +
       `${firstAfter!.data.sequence} — a source that is quiet on the acquisition ` +
       `tick must still rehydrate`,
+  );
+});
+
+/**
+ * The shape the test above does not cover: a source that stays quiet for
+ * longer than "a few ticks" — a genuine telemetry blackout with no end in
+ * sight, rather than a push source's slow first connection. Reproduced live
+ * against the docker-compose stack: block every Envoy's push port to both
+ * aggregators, kill the leader mid-blackout, and the standby takes over
+ * holding nothing at all — not the API the blackout coincides with, not the
+ * two others that had nothing to do with it — until the firewall rule lifts,
+ * because rehydration used to be keyed off that tick's (empty) `reports`
+ * rather than the full configured API list. `/api/state` reads an aggregator
+ * that is leading three APIs as leading none, for as long as the blackout
+ * lasts, which can be indefinite.
+ *
+ * Unlike the test above, this does not wait for reports to resume: it checks
+ * the registry after the very first tick following acquisition, while the
+ * source is still and stays silent.
+ */
+test("a leadership change during a sustained telemetry blackout rehydrates from checkpoint without waiting for reports", async () => {
+  const handoffSequence = 41;
+  const snapshotsWhileSilent = await Effect.runPromise(
+    Effect.provide(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(T0);
+        const coordination = yield* makeInMemoryCoordination;
+        const delivered = yield* Ref.make<ReadonlyArray<CircuitEvent>>([]);
+
+        const token = yield* coordination.leaderElection.tryAcquireOrRenew("gone", 1);
+        assert.ok(O.isSome(token));
+        yield* coordination.checkpointStore.save("payments", token.value, {
+          state: "OPEN",
+          reason: "ALL_ENDPOINTS_EJECTED",
+          sequence: handoffSequence,
+          changedAt: T0,
+          openBackoffMs: 1000,
+        });
+        yield* TestClock.adjust(Duration.millis(2000));
+
+        return yield* Effect.gen(function* () {
+          const agg = yield* Aggregator;
+          // A blackout with no end in sight, unlike `silentUntil(5, ...)`
+          // above: the poll never once reports anything.
+          yield* agg.tick;
+          return yield* agg.snapshots;
+        }).pipe(
+          Effect.provide(
+            Aggregator.layer.pipe(
+              Layer.provideMerge(
+                Layer.mergeAll(
+                  silentUntil(Number.MAX_SAFE_INTEGER, SimFleetLayer(SPECS, 5)),
+                  EventBus.layer,
+                  RecordingSink(delivered),
+                  Layer.succeed(LeaderElection, coordination.leaderElection),
+                  Layer.succeed(CheckpointStore, coordination.checkpointStore),
+                  Layer.succeed(HaSettings, { instanceId: "late", leaseTtlMs: 1000 }),
+                ),
+              ),
+            ),
+          ),
+          Effect.provideService(Config, CFG),
+        );
+      }),
+      TestClock.layer(),
+    ),
+  );
+
+  assert.equal(
+    snapshotsWhileSilent.length,
+    1,
+    "the registry must hold the checkpointed API even though the poll has never once reported anything",
+  );
+  assert.equal(snapshotsWhileSilent[0]!.apiId, "payments");
+  assert.ok(
+    snapshotsWhileSilent[0]!.sequence >= handoffSequence,
+    `the rehydrated breaker must carry at least the checkpointed sequence (${handoffSequence}), ` +
+      `got ${snapshotsWhileSilent[0]!.sequence}`,
   );
 });
 
