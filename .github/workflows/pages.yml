@@ -55,6 +55,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check:diagrams
 
+      # Buildx's docker-container driver, so the gem install and the mermaid
+      # vendoring — the two slow, cacheable layers in docs/Dockerfile — can be
+      # pulled from the GitHub Actions cache instead of redone on every run.
+      - uses: docker/setup-buildx-action@v4
+
       - name: Build the site image
         env:
           OWNER: ${{ github.repository_owner }}
@@ -67,7 +72,12 @@ jobs:
           base=""
           if [ "$REPO" != "$OWNER.github.io" ]; then base="/$REPO"; fi
           echo "building with baseurl '$base'"
-          docker build -f docs/Dockerfile --build-arg BASEURL="$base" -t egress-site:ci .
+          # --load: the next steps do `docker create`/`docker cp` against this
+          # image by name, so it has to land in the local image store rather
+          # than stay inside the buildx cache.
+          docker buildx build -f docs/Dockerfile --build-arg BASEURL="$base" \
+            --cache-from type=gha --cache-to type=gha,mode=max \
+            --load -t egress-site:ci .
 
       - name: Take the site out of the image
         # What gets published is what the image serves, extracted from it —
