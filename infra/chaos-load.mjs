@@ -174,6 +174,9 @@ const fleet = async () =>
         floor: one(body, "egress_daemon_floor_held", m),
         ok: one(body, "egress_daemon_calls_total", { ...m, outcome: "ok" }),
         failed: one(body, "egress_daemon_calls_total", { ...m, outcome: "failed" }),
+        // Envoy's adaptive-concurrency filter shedding a request (429) before it reaches the
+        // third party — backpressure the daemon deliberately does not count as a call failure.
+        shed: one(body, "egress_daemon_calls_total", { ...m, outcome: "shed" }),
         gaps: one(body, "egress_daemon_control_gaps_total", m),
         duplicates: one(body, "egress_daemon_control_duplicates_total", m),
       };
@@ -440,10 +443,17 @@ const withOutage = (detail, cut) =>
     return { detail: `${what} ${detail}`, heal: async () => (await healUpstream(), await heal()) };
   });
 
+const sumShed = (daemons) => daemons.reduce((n, d) => n + (d.shed ?? 0), 0);
+
 /**
  * A journey drives the flaky upstream through a sequence of behaviours and waits,
  * after each, for the transitions that behaviour must produce, in order. Every
  * step starts a fresh spike. `quiet` asserts no transition at all for that long.
+ * `expectShed` asserts the fleet's shed counter (Envoy's adaptive-concurrency
+ * filter rejecting admission, tracked separately from a call failure) rose
+ * during the step — for a fault meant to be absorbed below the breaker rather
+ * than tripping it, this is what tells "nothing happened because nothing was
+ * provoked" apart from "nothing happened because the provocation worked".
  */
 const journey = (steps, { forbid = [] } = {}) =>
   fault("journey", async () => ({
@@ -455,6 +465,7 @@ const journey = (steps, { forbid = [] } = {}) =>
       for (const step of steps) {
         await ctx.spikes.kick();
         const startedAt = Date.now();
+        const shedBefore = step.expectShed ? sumShed(await fleet()) : null;
         await (step.set === "heal" ? healUpstream() : setUpstream(step.set[0], step.set[1]));
         const row = { step: step.label, startedAt, edges: [], quiet: null };
         results.push(row);
@@ -476,6 +487,10 @@ const journey = (steps, { forbid = [] } = {}) =>
           const noisy = tape.events.filter((e) => e.receivedAt >= startedAt);
           row.quiet = { seconds: step.quiet, transitions: noisy.map((e) => `${e.from}→${e.to} (${e.reason})`) };
           console.log(`    ${step.label}: ${noisy.length === 0 ? "quiet" : `NOT quiet: ${row.quiet.transitions.join(", ")}`} for ${step.quiet}s`);
+        }
+        if (step.expectShed) {
+          row.shedDelta = sumShed(await fleet()) - shedBefore;
+          console.log(`    ${step.label}: ${row.shedDelta} calls shed by admission control`);
         }
         if (step.hold) await sleep(step.hold * 1000);
       }
@@ -644,8 +659,22 @@ const FAULTS = {
     ],
     { forbid: ["OPEN"] },
   ),
+  // A uniform latency bump, not a failure: at this fleet's default concurrency
+  // (5 daemons x MAX_IN_FLIGHT=32 = 160 in flight, max) the connection pool
+  // never reaches Envoy's own circuit_breakers.max_pending_requests (256) no
+  // matter how long the delay holds, so `THRESHOLD_OVERFLOW` — which reads
+  // circuit_breakers' overflow counters, not the admission filter's — cannot
+  // fire here by construction, verified against a live run (those counters
+  // stayed at 0 throughout). What actually happens, also verified live: the
+  // adaptive-concurrency filter (layer 4, envoy.yaml) sheds admission for
+  // roughly the first 20-30s, then its own periodic min-RTT recalibration
+  // (min_rtt_calc_params.interval: 30s) adopts the new latency as the normal
+  // baseline and shedding stops — exactly the layering envoy.yaml's own
+  // comment describes this filter for: catching a gradual/uniform shift
+  // before circuit_breakers, or the breaker, ever need to react. `expectShed`
+  // is what tells that apart from the fault silently doing nothing at all.
   "flaky-overflow": journey([
-    { label: "+900ms everywhere under a spike", set: [PAYMENT_PORTS, { delayMs: 900 }], expect: [{ to: "DEGRADED", reason: "THRESHOLD_OVERFLOW" }], within: 45 },
+    { label: "+900ms everywhere under a spike", set: [PAYMENT_PORTS, { delayMs: 900 }], quiet: 45, expectShed: true },
     { label: "healed", set: "heal" },
   ]),
 };
@@ -919,6 +948,7 @@ const runScenario = async (profileName, faultNames) => {
     for (const step of f.journey ?? []) {
       for (const edge of step.edges) check("breaker", edge.got !== null, `${tag} ${step.step}: ${edge.want}`, edge.got ? `${edge.got} after ${edge.afterSeconds}s` : "not seen");
       if (step.quiet) check("breaker", step.quiet.transitions.length === 0, `${tag} ${step.step}: no transition for ${step.quiet.seconds}s`, step.quiet.transitions.join(", "));
+      if (step.shedDelta !== undefined) check("breaker", step.shedDelta > 0, `${tag} ${step.step}: admission control actually shed something`, `+${step.shedDelta} shed`);
     }
     for (const state of f.forbid) check("breaker", !reached(state), `${tag} never ${state}`, path);
   }
