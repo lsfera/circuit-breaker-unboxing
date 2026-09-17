@@ -206,3 +206,22 @@ export const consoleStreams = Metric.gauge("egress_console_streams", {
 export const consoleFramesBuilt = Metric.counter("egress_console_frames_built_total", {
   description: "State frames built for the console, once per interval while any console is connected.",
 });
+
+/**
+ * Consoles connected to the attention view (docs/decisions/015, step 3),
+ * separate from `egress_console_streams` because the two pipelines have
+ * different costs — the point of measuring them apart.
+ */
+export const consoleAttentionStreams = Metric.gauge("egress_console_attention_streams", {
+  description: "Browsers connected to the attention view on this instance.",
+});
+
+/**
+ * Patches (or the bootstrap snapshot) actually published for the attention
+ * view — only on a tick where something changed, unlike
+ * `egress_console_frames_built_total`, which runs every interval regardless.
+ * A quiet fleet keeps this flat.
+ */
+export const consoleAttentionBuilt = Metric.counter("egress_console_attention_built_total", {
+  description: "Attention-view patches published, once per interval something in the view changed.",
+});

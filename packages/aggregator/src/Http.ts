@@ -1,10 +1,12 @@
 import { Clock, Effect, Metric, Option as O, Ref, Schema, Stream } from "effect";
 import { HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import { NodeStream } from "@effect/platform-node";
 import { CircuitEvent, classifySequence, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
 import { metricsResponse } from "@egress/tracing/Metrics.ts";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import * as Zlib from "node:zlib";
 import { Aggregator } from "./Aggregator.ts";
 import * as ConsoleFrames from "./ConsoleFrames.ts";
 import { HaSettings } from "./Coordination.ts";
@@ -153,6 +155,8 @@ export const HttpLive = HttpRouter.use((router) =>
         Metric.update(Telemetry.coordinationErrors, 0),
         Metric.update(Telemetry.consoleStreams, 0),
         Metric.update(Telemetry.consoleFramesBuilt, 0),
+        Metric.update(Telemetry.consoleAttentionStreams, 0),
+        Metric.update(Telemetry.consoleAttentionBuilt, 0),
         ...(["no-node-id", "went-quiet", "unreachable", "incomplete-stats"] as const).map(
           (reason) => Metric.update(Metric.withAttributes(Telemetry.replicasLost, { reason }), 0),
         ),
@@ -193,6 +197,12 @@ export const HttpLive = HttpRouter.use((router) =>
     );
 
     const consoleFrames = yield* ConsoleFrames.make(stateFrame, "400 millis");
+    // The attention view (docs/decisions/015, steps 3–4): counts plus the
+    // worst 50 APIs, as a snapshot-then-patches stream rather than the whole
+    // fleet every 400ms. Built from the same snapshots as `stateFrame`, on
+    // its own schedule and its own shared broadcast — a console that asks
+    // for it does not also pay for the full-frame build.
+    const attention = yield* ConsoleFrames.makeAttention(agg.snapshots, "400 millis");
 
     const sseHeaders = {
       contentType: "text/event-stream",
@@ -203,15 +213,73 @@ export const HttpLive = HttpRouter.use((router) =>
      *  subscription to the bus per run, so per connection. */
     const tape = bus.subscribe.pipe(Stream.map((e) => ConsoleFrames.encodeEvent("cloudevent", e)));
 
-    // The console: shared state frames, built once per interval for every
-    // browser at once, merged with the tape. Both end with the request scope,
-    // so a client that disconnects needs no tear-down of ours.
-    yield* router.add(
-      "GET",
-      "/api/stream",
-      Effect.sync(() =>
-        HttpServerResponse.stream(Stream.merge(consoleFrames.frames, Stream.encodeText(tape)), sseHeaders),
-      ),
+    /** So the attention view's stream — quiet whenever nothing in the view
+     *  changed — does not read as an idle connection to a load balancer. */
+    const keepAlive = Stream.map(Stream.tick("15 seconds"), () => ConsoleFrames.KEEP_ALIVE);
+
+    /**
+     * `Last-Event-ID`, parsed. Anything that is not a non-negative integer —
+     * absent, malformed, a value from before this process last restarted and
+     * its revisions reset — is treated as "no usable resume point" rather
+     * than an error: `ConsoleFrames.makeAttention` responds to `O.none()`
+     * with a fresh snapshot, which is the correct fallback for all of these,
+     * not just a genuinely absent header.
+     */
+    const lastEventIdOf = (request: HttpServerRequest.HttpServerRequest): O.Option<number> =>
+      O.filter(
+        O.map(O.fromUndefinedOr(request.headers["last-event-id"]), Number),
+        (n) => Number.isInteger(n) && n >= 0,
+      );
+
+    /**
+     * gzip on the SSE bytes, flushed after every event rather than buffered —
+     * `node:zlib`'s own streaming compression, the same primitive
+     * `@effect/platform-node`'s `NodeHttpCompression` uses, applied by hand
+     * rather than through `HttpMiddleware.compression`: that middleware skips
+     * a response carrying `Cache-Control: no-transform`, which this route
+     * sets deliberately (below) so a proxy does not buffer or re-encode an
+     * SSE stream it does not know is one. docs/decisions/015 step 5, last
+     * because compression multiplies whatever the earlier steps send —
+     * applied to today's full frames it saves 20x and leaves problems 2–4
+     * untouched; applied after the attention view and patches it is the
+     * 360x row.
+     */
+    const gzip = (bytes: Stream.Stream<Uint8Array>) =>
+      bytes.pipe(NodeStream.pipeThroughSimple(() => Zlib.createGzip({ flush: Zlib.constants.Z_SYNC_FLUSH })));
+
+    const acceptsGzip = (request: HttpServerRequest.HttpServerRequest): boolean =>
+      (request.headers["accept-encoding"] ?? "").includes("gzip");
+
+    // The console. Default view: the shared full-frame state channel,
+    // unchanged, merged with the tape — what today's public/index.html
+    // still reads. `?view=attention` opts into the view a person can use at
+    // a thousand APIs (docs/decisions/015 step 3): a snapshot or resumed
+    // patches (step 4), gzipped when the client accepts it (step 5). Both
+    // end with the request scope, so a client that disconnects needs no
+    // tear-down of ours.
+    yield* router.add("GET", "/api/stream", () =>
+      Effect.gen(function* () {
+        const request = yield* HttpServerRequest.HttpServerRequest;
+        const view = new URL(request.url, "http://localhost").searchParams.get("view");
+
+        if (view !== "attention") {
+          return HttpServerResponse.stream(Stream.merge(consoleFrames.frames, Stream.encodeText(tape)), sseHeaders);
+        }
+
+        const body = Stream.merge(attention.connect(lastEventIdOf(request)), Stream.encodeText(Stream.merge(tape, keepAlive)));
+
+        return acceptsGzip(request)
+          ? HttpServerResponse.stream(gzip(body), {
+              ...sseHeaders,
+              headers: {
+                ...sseHeaders.headers,
+                "content-encoding": "gzip",
+                "cache-control": "no-cache, no-transform",
+                "x-accel-buffering": "no",
+              },
+            })
+          : HttpServerResponse.stream(body, sseHeaders);
+      }),
     );
 
     // The tape alone, for anything that is not a person looking at a console.
