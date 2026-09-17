@@ -80,6 +80,18 @@ const BASELINE = flag("baseline", null);
  * the scenario still passing, it is not.
  */
 const THROTTLE_BUDGET = Number(flag("throttle-budget", 1));
+/**
+ * Below this many observed periods, a throttle share is noise rather than
+ * signal and is not flagged as a budget violation, whatever the percentage.
+ *
+ * `throttledOf` is the number of CFS periods the container was even
+ * scheduled in during the window; a near-idle service (alertmanager in the
+ * demo scenario, say) can have only one or two, so a single throttle inside
+ * a tiny burst reads as 100% throttled. At the default 100ms period, 20
+ * periods is 2 seconds of runnable time — enough that a percentage over it
+ * says something about sustained pressure rather than one unlucky period.
+ */
+const MIN_THROTTLE_PERIODS = Number(flag("min-throttle-periods", 20));
 /** The one way to get a record out of an unbounded stack: how the limits in
  *  docker-compose.yml were sized in the first place. It stamps the record. */
 const ALLOW_UNLIMITED = flag("allow-unlimited", false) === true;
@@ -493,9 +505,12 @@ const main = async () => {
   for (const s of services) {
     if (s.throttledPeriods > 0) {
       const share = (s.throttledPeriods / Math.max(1, s.throttledOf)) * 100;
-      const line = `${s.container} throttled in ${s.throttledPeriods} of ${s.throttledOf} periods (${share.toFixed(1)}%)`;
+      const belowFloor = s.throttledOf < MIN_THROTTLE_PERIODS;
+      const line =
+        `${s.container} throttled in ${s.throttledPeriods} of ${s.throttledOf} periods (${share.toFixed(1)}%)` +
+        (belowFloor ? ` — under the ${MIN_THROTTLE_PERIODS}-period floor, not judged` : "");
       throttling.push(line);
-      if (share > THROTTLE_BUDGET) problems.push(`${line} — over the ${THROTTLE_BUDGET}% budget`);
+      if (!belowFloor && share > THROTTLE_BUDGET) problems.push(`${line} — over the ${THROTTLE_BUDGET}% budget`);
     }
     if (s.oomKilled) problems.push(`${s.service} was OOM-killed`);
   }
@@ -514,6 +529,7 @@ const main = async () => {
     limitsDeclared: unlimited.length === 0,
     scenarioExit: outcome.code,
     throttleBudget: THROTTLE_BUDGET,
+    minThrottlePeriods: MIN_THROTTLE_PERIODS,
     services,
     stack,
     domain,
