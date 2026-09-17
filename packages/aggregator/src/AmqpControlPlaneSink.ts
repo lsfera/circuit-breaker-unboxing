@@ -1,4 +1,4 @@
-import { Clock, Duration, Effect, Exit, Fiber, Ref, Scope } from "effect";
+import { Clock, Duration, Effect, Exit, Fiber, Ref, Schedule, Scope } from "effect";
 import { Rmq, RmqError } from "@egress/rmq/Client.ts";
 import {
   CONTROL_EXCHANGE,
@@ -45,6 +45,45 @@ const FAILURE_STREAK_WINDOW_MS = 10_000;
 const PUBLISH_CONFIRM_TIMEOUT = Duration.seconds(2);
 
 /**
+ * Readiness only reacted to a *real* publish attempt, and a real publish only
+ * happens on a transition or `snapshotMs`'s 15s cadence — so a leader whose
+ * broker connection died between events kept renewing its lease and calling
+ * itself ready for however long it took the breaker to independently notice
+ * the same outage and give this sink something to send. Measured live on
+ * `net-control-partition+outage`: Envoy's own outlier-detection timing took
+ * ≈9.5s to eject every endpoint and trip the breaker, on top of which
+ * CONSECUTIVE_FAILURE_THRESHOLD's own ≈4.1s still had to run — comfortably
+ * past the 5000ms lease TTL the standby was racing on the whole time.
+ *
+ * The heartbeat below tests the same connection on its own clock, so
+ * readiness stops being gated on the breaker having something to say. Each
+ * one is forked, not awaited, so the schedule keeps firing on its own fixed
+ * cadence while an earlier heartbeat is still counting down its own 2s —
+ * without that, a single stuck attempt would push every later one back by
+ * its own timeout too, and this would be no faster than the transition path
+ * it replaces. Overlapping instead, two consecutive failures land one
+ * `PROBE_INTERVAL` apart once the first one fails, not one
+ * `PUBLISH_CONFIRM_TIMEOUT` apart.
+ *
+ * Worst case is a fault landing just after a heartbeat has already gone out:
+ * up to one full `PROBE_INTERVAL` before the next one fires, `+2s` for it to
+ * time out, `+1s` more for the one after it to do the same and cross
+ * CONSECUTIVE_FAILURE_THRESHOLD — `2×PROBE_INTERVAL + PUBLISH_CONFIRM_TIMEOUT`,
+ * ≈4s. Comfortably inside the 5000ms lease TTL with margin, independent of
+ * whatever the breaker itself is doing.
+ */
+const PROBE_INTERVAL = Duration.seconds(1);
+
+/**
+ * `routingKeyFor` always returns `circuit.<apiId>`, and every daemon binds
+ * only its own exact key — so a key with no `circuit.` prefix at all can
+ * never collide with a real API's binding, present or future. An unroutable
+ * message on a topic exchange is simply dropped once confirmed; nothing
+ * downstream ever sees this.
+ */
+export const HEARTBEAT_ROUTING_KEY = "__heartbeat__";
+
+/**
  * A peer to WebhookSink, publishing the same CircuitEvent to
  * `circuit.control` instead of POSTing a webhook — the transport
  * `docs/rmq-control-plane.md`'s daemon fleet actually subscribes to. Same
@@ -62,7 +101,18 @@ const PUBLISH_CONFIRM_TIMEOUT = Duration.seconds(2);
  * module doc for both reproductions). This sink is free to fork a delivery
  * per event without thinking about it.
  */
-export const makeAmqpControlPlaneSink: Effect.Effect<SinkImpl, RmqError, Rmq> = Effect.gen(
+export type AmqpSinkImpl = SinkImpl & {
+  /**
+   * The heartbeat loop — see PROBE_INTERVAL's comment. Never completes on its
+   * own, so the caller forks it (main.ts, alongside `rmq.lost`'s own fork)
+   * into whatever scope should own its lifetime; this module does not fork
+   * it itself so that constructing a sink for a test is inert by default —
+   * only a test that wants the heartbeat's own behavior forks `.probe`.
+   */
+  readonly probe: Effect.Effect<unknown>;
+};
+
+export const makeAmqpControlPlaneSink: Effect.Effect<AmqpSinkImpl, RmqError, Rmq> = Effect.gen(
   function* () {
     const rmq = yield* Rmq;
     yield* rmq.declareTopicExchange(CONTROL_EXCHANGE, CONTROL_EXCHANGE_OPTIONS);
@@ -70,6 +120,52 @@ export const makeAmqpControlPlaneSink: Effect.Effect<SinkImpl, RmqError, Rmq> = 
     const dead = yield* Ref.make<ReadonlyArray<DeliveryFailed>>([]);
     /** Consecutive attempts that failed, and when the last one did; reset on the next successful attempt. */
     const consecutiveFailures = yield* Ref.make({ count: 0, lastAt: 0 });
+
+    /**
+     * A publish-and-confirm with nothing behind it, counted into the same
+     * `consecutiveFailures` a real delivery would be — see PROBE_INTERVAL's
+     * comment for why. `Effect.ignore` at the end: a heartbeat's outcome
+     * lives entirely in the Ref side effect, and nothing calling this needs
+     * its `Exit`.
+     */
+    const heartbeat = rmq.publisherToExchange(CONTROL_EXCHANGE, HEARTBEAT_ROUTING_KEY).pipe(
+      // Its own channel — see `send`'s own doc comment for why: sharing the
+      // default one with real event delivery is what produced a genuine
+      // duplicate on `circuit.control` under load, confirmed live.
+      Effect.flatMap((pub) => rmq.send(pub, "", undefined, HEARTBEAT_ROUTING_KEY)),
+      Effect.mapError(
+        (e: RmqError) =>
+          new DeliveryFailed({ sink: "amqp", apiId: HEARTBEAT_ROUTING_KEY, cause: String(e.cause) }),
+      ),
+      Effect.timeoutOrElse({
+        duration: PUBLISH_CONFIRM_TIMEOUT,
+        orElse: () =>
+          Effect.fail(
+            new DeliveryFailed({
+              sink: "amqp",
+              apiId: HEARTBEAT_ROUTING_KEY,
+              cause: "no publish confirm within 2s",
+            }),
+          ),
+      }),
+      Effect.tapError(() =>
+        Clock.currentTimeMillis.pipe(
+          Effect.flatMap((now) => Ref.update(consecutiveFailures, ({ count }) => ({ count: count + 1, lastAt: now }))),
+        ),
+      ),
+      Effect.tap(() => Ref.set(consecutiveFailures, { count: 0, lastAt: 0 })),
+      Effect.ignore,
+    );
+
+    // Forked per attempt rather than awaited by the loop that fires them, so
+    // a heartbeat still counting down its own PUBLISH_CONFIRM_TIMEOUT never
+    // delays the next one — see PROBE_INTERVAL's comment for the arithmetic
+    // this overlap buys. This loop itself is returned as `probe`, not forked
+    // here: standbys gate even trying to acquire the lease on `sinkReady`
+    // too (`attemptTick`), so it has to keep testing the connection across
+    // every promotion and demotion, not just one leadership epoch — the
+    // caller forks it once, outside any epoch-scoped lifetime.
+    const probe = Effect.repeat(Effect.forkChild(heartbeat), Schedule.spaced(PROBE_INTERVAL));
 
     /**
      * Deliveries are forked into this scope rather than the sink's own, so a
@@ -186,6 +282,7 @@ export const makeAmqpControlPlaneSink: Effect.Effect<SinkImpl, RmqError, Rmq> = 
       drainOutbox: Effect.succeed(0),
       ready,
       resetConnection,
+      probe,
     };
   },
 );

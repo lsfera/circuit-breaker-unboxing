@@ -164,11 +164,26 @@ export interface RmqService {
    * `properties` become message headers. Everything is published persistent, with
    * no flag: on a transient queue the broker ignores it, and on a durable one it is
    * the difference between keeping a message across a restart and appearing to.
+   *
+   * `channelKey` isolates this send onto its own confirm channel, opened lazily
+   * on first use and kept alive across reconnects same as the default one —
+   * omit it for the shared default channel every caller used before this
+   * existed. Without a key of its own, a caller that publishes on a fixed
+   * schedule independent of anything else (a liveness heartbeat, say) queues
+   * its confirms on the same channel as every other publisher, and a broker
+   * or channel under load can make an unrelated caller's own confirm arrive
+   * late enough to look like a timeout — a real publish that succeeded, retried
+   * as if it hadn't, delivered twice. Reproduced live: AmqpControlPlaneSink's
+   * heartbeat (`docs/decisions/017-a-heartbeat-off-the-delivery-channel.md`)
+   * on the shared channel produced exactly that, a genuine duplicate on
+   * `circuit.control`, under `net-control-partition+outage`'s combination of
+   * broker partition and a 9000/s spike. Its own channel removed it.
    */
   readonly send: (
     pub: Publisher,
     body: string,
     properties?: Record<string, string>,
+    channelKey?: string,
   ) => Effect.Effect<void, RmqError>;
   /**
    * Stop delivery, leaving the channel able to settle what it still holds — what
@@ -390,12 +405,34 @@ export const makeRmq = Effect.fnUntraced(function* (
    */
   let connected = true;
 
-  // `null` rather than `Option` on purpose: these are private mutable
-  // interop state — "no channel open right now" and "no reopen in flight" —
-  // not a value anyone outside this closure branches on. See
-  // docs/decisions/006-representing-absence.md.
-  let out: ConfirmChannel | null = null;
-  let opening: Promise<ConfirmChannel> | null = null;
+  /**
+   * One of these per `channelKey` a caller has ever published on — `send`'s
+   * doc comment is why more than one exists at all. `channel`/`opening` are
+   * `null` rather than `Option` for the same reason the old single pair was:
+   * private mutable interop state, not a value anyone outside this closure
+   * branches on. See docs/decisions/006-representing-absence.md.
+   */
+  type PublishChannelState = {
+    channel: ConfirmChannel | null;
+    opening: Promise<ConfirmChannel> | null;
+    /**
+     * Publishes on *this* channel awaiting a confirm, so one 'close' listener
+     * per channel can fail all of them — and only them: the reason this is
+     * per-state rather than the one shared set it used to be. A listener per
+     * publish trips Node's leak warning at eleven concurrent, which the
+     * producer's batching reaches immediately.
+     */
+    readonly pending: Set<(error: Error) => void>;
+  };
+  const DEFAULT_PUBLISH_CHANNEL = "default";
+  const publishChannels = new Map<string, PublishChannelState>();
+  const stateFor = (key: string): PublishChannelState => {
+    const existing = publishChannels.get(key);
+    if (existing) return existing;
+    const fresh: PublishChannelState = { channel: null, opening: null, pending: new Set() };
+    publishChannels.set(key, fresh);
+    return fresh;
+  };
 
   /**
    * The current live model, captured from `setup` (which amqplib runs on
@@ -411,21 +448,14 @@ export const makeRmq = Effect.fnUntraced(function* (
    */
   let currentModel: ChannelModel | null = null;
 
-  /**
-   * Publishes awaiting a confirm, so one 'close' listener per channel can fail
-   * all of them. A listener per publish trips Node's leak warning at eleven
-   * concurrent, which the producer's batching reaches immediately.
-   */
-  const pending = new Set<(error: Error) => void>();
-
-  const watchPublishChannel = (ch: ConfirmChannel) => {
+  const watchPublishChannel = (key: string, state: PublishChannelState, ch: ConfirmChannel) => {
     ch.on("error", (error) => {
-      warn(`publish channel error: ${error.message}`);
+      warn(`publish channel '${key}' error: ${error.message}`);
     });
     ch.on("close", () => {
-      if (out === ch) out = null;
-      const closed = new Error("publish channel closed before the broker confirmed");
-      for (const fail of [...pending]) fail(closed);
+      if (state.channel === ch) state.channel = null;
+      const closed = new Error(`publish channel '${key}' closed before the broker confirmed`);
+      for (const fail of [...state.pending]) fail(closed);
     });
     return ch;
   };
@@ -558,7 +588,21 @@ export const makeRmq = Effect.fnUntraced(function* (
   const setup = async (model: ChannelModel) => {
     currentModel = model;
     await applyTopology(() => model.createChannel());
-    out = watchPublishChannel(await model.createConfirmChannel());
+    // The default channel is always reopened, same as it always has been —
+    // most processes never publish at all before their first real event, but
+    // the ones that do (a leader on its very first tick) should not pay for
+    // opening it there. Any other channelKey only reopens here once a caller
+    // has actually used it once; `stateFor` is what adds it to the map.
+    const defaultState = stateFor(DEFAULT_PUBLISH_CHANNEL);
+    defaultState.channel = watchPublishChannel(
+      DEFAULT_PUBLISH_CHANNEL,
+      defaultState,
+      await model.createConfirmChannel(),
+    );
+    for (const [key, state] of publishChannels) {
+      if (key === DEFAULT_PUBLISH_CHANNEL) continue;
+      state.channel = watchPublishChannel(key, state, await model.createConfirmChannel());
+    }
     for (const entry of live) await attach(() => model.createChannel(), entry);
     connected = true;
   };
@@ -699,23 +743,24 @@ export const makeRmq = Effect.fnUntraced(function* (
     );
   });
 
-  /** The live publish channel, opening one if the last was closed under us. */
-  const publishChannel = (): Promise<ConfirmChannel> => {
-    if (out !== null) return Promise.resolve(out);
+  /** The live publish channel for `key`, opening one if the last was closed under us. */
+  const publishChannel = (key: string): Promise<ConfirmChannel> => {
+    const state = stateFor(key);
+    if (state.channel !== null) return Promise.resolve(state.channel);
     // One reopen at a time. Several sends racing here must not each open a
     // channel and leave all but one orphaned on the broker.
-    opening ??= connection.createConfirmChannel().then(
+    state.opening ??= connection.createConfirmChannel().then(
       (ch) => {
-        out = watchPublishChannel(ch);
-        opening = null;
+        state.channel = watchPublishChannel(key, state, ch);
+        state.opening = null;
         return ch;
       },
       (error) => {
-        opening = null;
+        state.opening = null;
         throw error;
       },
     );
-    return opening;
+    return state.opening;
   };
 
   /**
@@ -747,22 +792,29 @@ export const makeRmq = Effect.fnUntraced(function* (
    * cannot outrun the broker, which is a better bound than watching for
    * 'drain' and a good deal simpler — there is no wait to leave parked.
    */
-  const publish = (pub: Publisher, content: Buffer, options: amqp.Options.Publish) =>
-    publishChannel().then(
+  const publish = (
+    pub: Publisher,
+    content: Buffer,
+    options: amqp.Options.Publish,
+    channelKey: string,
+  ) => {
+    const state = stateFor(channelKey);
+    return publishChannel(channelKey).then(
       (ch) =>
         new Promise<void>((resolve, reject) => {
           const fail = (error: Error) => {
-            pending.delete(fail);
+            state.pending.delete(fail);
             reject(error);
           };
-          pending.add(fail);
+          state.pending.add(fail);
           ch.publish(pub.exchange, pub.routingKey, content, options, (error) => {
-            if (!pending.delete(fail)) return; // already failed by a close
+            if (!state.pending.delete(fail)) return; // already failed by a close
             if (error) reject(error instanceof Error ? error : new Error(String(error)));
             else resolve();
           });
         }),
     );
+  };
 
   /** Forget a consumer, so a recovery does not bring back one we retired. */
   const forget = (c: Consumer) => {
@@ -837,7 +889,7 @@ export const makeRmq = Effect.fnUntraced(function* (
     // caller is inside. Outside a span it resolves to undefined and nothing
     // is added, so an untraced publish carries exactly the bytes it did
     // before — see Trace.ts.
-    send: (pub, body, properties) =>
+    send: (pub, body, properties, channelKey) =>
       Effect.flatMap(traceparent, (tp) => {
         const headers = O.match(tp, {
           onNone: () => properties,
@@ -850,6 +902,7 @@ export const makeRmq = Effect.fnUntraced(function* (
             headers === undefined
               ? { persistent: true }
               : { persistent: true, headers },
+            channelKey ?? DEFAULT_PUBLISH_CHANNEL,
           ),
         );
       }),

@@ -166,6 +166,44 @@ test("a failure streak expires on its own, so an instance that stepped down can 
   );
 });
 
+test("the heartbeat alone discovers a dead connection, with nothing ever delivered", async () => {
+  await Effect.runPromise(
+    Effect.provide(
+      Effect.gen(function* () {
+        const connected = yield* Ref.make(true);
+        // A never-resolving send, same as the "broker never confirms" test
+        // below: the fault this exists for is a silent packet drop, not an
+        // immediate refusal, so only PUBLISH_CONFIRM_TIMEOUT ever ends an
+        // attempt.
+        const sendResult = yield* Ref.make<Effect.Effect<void, RmqError>>(Effect.never);
+        const sink = yield* makeAmqpControlPlaneSink.pipe(
+          Effect.provideService(Rmq, fakeRmq(connected, sendResult)),
+        );
+
+        assert.equal(yield* sink.ready, true, "ready before the probe has run at all");
+
+        // `makeAmqpControlPlaneSink` never forks its own probe — see
+        // `AmqpSinkImpl.probe`'s comment — so nothing here runs until this
+        // test starts it itself, same as main.ts does.
+        const probeFiber = yield* Effect.forkChild(sink.probe);
+        // PROBE_INTERVAL's comment: worst case is 2×PROBE_INTERVAL +
+        // PUBLISH_CONFIRM_TIMEOUT ≈ 4s.
+        yield* TestClock.adjust(Duration.seconds(5));
+
+        assert.equal(
+          yield* sink.ready,
+          false,
+          "two consecutive failed heartbeats must flip readiness off on their own, with no event ever delivered",
+        );
+        assert.equal((yield* sink.deadLetters).length, 0, "a heartbeat is never dead-lettered");
+
+        yield* Fiber.interrupt(probeFiber);
+      }),
+      TestClock.layer(),
+    ),
+  );
+});
+
 test("a publish the broker never confirms counts as a failure", async () => {
   await Effect.runPromise(
     Effect.provide(

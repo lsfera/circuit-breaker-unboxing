@@ -184,9 +184,14 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
       Layer.effect(
         EventSink,
         Effect.gen(function* () {
+          const amqp = yield* makeAmqpControlPlaneSink;
+          // Forked outside any leadership epoch's scope, same reasoning as
+          // `AmqpSinkImpl.probe`'s own comment: a standby needs this running
+          // just as much as the leader does, for as long as the process runs.
+          yield* Effect.forkScoped(amqp.probe);
           const impls = [
             ...(webhookEnabled ? [yield* makeWebhookSink(webhookUrl)] : []),
-            yield* makeAmqpControlPlaneSink,
+            amqp,
           ];
           // A control plane this instance can no longer publish to is the same
           // silent failure a dead control loop is: it keeps serving 200s and
