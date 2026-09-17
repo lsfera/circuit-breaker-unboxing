@@ -508,8 +508,22 @@ export const makeRmq = Effect.fnUntraced(function* (
     const { consumerTag } = await ch.consume(entry.queue, deliver(ch, entry), {
       noAck: false,
     });
+    const previous = entry.handle.channel;
     entry.handle.channel = ch;
     entry.handle.consumerTag = consumerTag;
+    // The usual path here is `rebuild`, where `previous` already fired its
+    // own 'close' and this is a no-op. But `setup` re-attaches every live
+    // entry after a reconnect, and a connection-level failure does not
+    // reliably fire 'close' on each of its channels first — so `previous`
+    // can still be open, still registered as a consumer on the broker, with
+    // nothing left in this process pointing at it. Close it explicitly
+    // rather than trust the broker to notice on its own: an implicit,
+    // un-acked close is exactly how a stale consumer outlives the channel
+    // that should have taken it down, and why the broker's consumer count
+    // climbs while this process only ever sees five.
+    if (previous !== undefined && previous !== ch) {
+      previous.close().catch(() => {});
+    }
   };
 
   /** Replay every declare and binding, in the order they were first made. */
@@ -798,8 +812,20 @@ export const makeRmq = Effect.fnUntraced(function* (
           onMessage,
           prefetch: options.prefetch ?? DEFAULT_PREFETCH,
         };
-        await attach(() => connection.createChannel(), entry);
+        // In `live` before `attach`, not after: `attach` registers the
+        // channel's 'close' handler before it finishes, and a channel that
+        // dies in that window would find `rebuild` seeing `!live.has(entry)`
+        // and silently give up on it — the "goes deaf" failure `rebuild`'s
+        // own comment warns about, for a queue that never got the chance to
+        // be rebuilt once. Roll back on failure so a `consume` that never
+        // succeeded doesn't leave a dead entry for `setup` to trip over.
         live.add(entry);
+        try {
+          await attach(() => connection.createChannel(), entry);
+        } catch (error) {
+          live.delete(entry);
+          throw error;
+        }
         return handle;
       }),
     publisherToExchange: (exchange, routingKey) => Effect.succeed({ exchange, routingKey }),
