@@ -84,7 +84,7 @@ const deliverAndSettle = (
  */
 const SETTLE = Duration.seconds(3);
 
-test("three consecutive failed deliveries flip readiness off; a success resets the counter", async () => {
+test("two consecutive failed attempts flip readiness off; a success resets the counter", async () => {
   await Effect.runPromise(
     Effect.provide(
       Effect.gen(function* () {
@@ -96,19 +96,20 @@ test("three consecutive failed deliveries flip readiness off; a success resets t
 
         assert.equal(yield* sink.ready, true, "ready before anything has been attempted");
 
-        for (let i = 0; i < 3; i++) {
-          yield* deliverAndSettle(sink, event(i), SETTLE);
-        }
+        // One fully-retried delivery already contains 4 failed attempts
+        // (DELIVERY_RETRY), well past CONSECUTIVE_FAILURE_THRESHOLD's 2 — no
+        // second delivery is needed to see readiness flip.
+        yield* deliverAndSettle(sink, event(0), SETTLE);
         assert.equal(
           yield* sink.ready,
           false,
-          "three consecutive fully-retried failures must flip readiness off",
+          "two consecutive failed attempts must flip readiness off",
         );
         const failed = yield* sink.deadLetters;
-        assert.equal(failed.length, 3, "each exhausted delivery is dead-lettered");
+        assert.equal(failed.length, 1, "the exhausted delivery is dead-lettered");
 
         yield* Ref.set(sendResult, Effect.void);
-        yield* deliverAndSettle(sink, event(3), SETTLE);
+        yield* deliverAndSettle(sink, event(1), SETTLE);
 
         assert.equal(
           yield* sink.ready,

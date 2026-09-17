@@ -22,13 +22,18 @@ import type { CircuitEvent } from "@egress/domain/Model.ts";
  * Counted per attempt rather than per delivery so readiness reacts inside
  * the first stuck delivery instead of waiting for DELIVERY_RETRY to exhaust
  * it (four attempts, ≈8.7s) and then two more deliveries on top of that.
- * Three attempts land at ≈6.3s of consecutive confirm timeouts (2s + 100ms
- * backoff + 2s + 200ms backoff + 2s) — inside the lease TTL a standby would
- * otherwise wait out, and close to the leader's own first stuck publish.
- * Three, not one, so a single unlucky event (a transient NACK, a channel
- * mid-rebuild) cannot flip leadership on its own.
+ * Two attempts land at ≈4.1s of consecutive confirm timeouts (2s + 100ms
+ * backoff + 2s) — inside `Coordination.ts`'s 5000ms lease TTL a standby
+ * would otherwise wait out, with margin, rather than racing it: this was
+ * 3 attempts (≈6.3s) until a live run of `net-control-partition+outage`
+ * showed the standby winning on TTL expiry before this sink's own watchdog
+ * ever finished counting, leaving the demoted leader reporting itself
+ * leader for several seconds after it no longer was. Two, not one, so a
+ * single unlucky event (a transient NACK, a channel mid-rebuild) still
+ * cannot flip leadership on its own — just not three, which left this
+ * step-down slower than the failover it exists to beat.
  */
-const CONSECUTIVE_FAILURE_THRESHOLD = 3;
+const CONSECUTIVE_FAILURE_THRESHOLD = 2;
 
 /**
  * How long a failure streak counts against readiness. It has to expire on its own:
