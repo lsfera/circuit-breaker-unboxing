@@ -1,4 +1,4 @@
-import { Clock, Effect, Metric, Option as O, Ref, Schema, Stream } from "effect";
+import { Clock, Effect, Match, Metric, Option as O, Ref, Schema, Stream } from "effect";
 import { HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 import { NodeStream } from "@effect/platform-node";
 import { CircuitEvent, classifySequence, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
@@ -62,22 +62,20 @@ export const record = (self: Integrity, event: CircuitEvent): Integrity => {
   // The rule lives in @egress/domain, shared with the daemon fleet's own
   // observer. What is local here is the shape: one highest sequence per API,
   // because this process watches all of them at once.
-  switch (classifySequence(highest, sequence)) {
-    case "duplicate":
-      return { ...base, bySequence: self.bySequence, duplicates: self.duplicates + 1 };
-    case "gap":
-      return {
-        ...base,
-        bySequence: advanced(),
-        gaps: [
-          ...self.gaps,
-          `${apiId}: jumped ${last} -> ${sequence}`,
-        ].slice(-GAP_BUFFER),
-      };
-    case "first":
-    case "next":
-      return { ...base, bySequence: advanced() };
-  }
+  return Match.value(classifySequence(highest, sequence)).pipe(
+    Match.when("duplicate", () => ({
+      ...base,
+      bySequence: self.bySequence,
+      duplicates: self.duplicates + 1,
+    })),
+    Match.when("gap", () => ({
+      ...base,
+      bySequence: advanced(),
+      gaps: [...self.gaps, `${apiId}: jumped ${last} -> ${sequence}`].slice(-GAP_BUFFER),
+    })),
+    Match.when(Match.is("first", "next"), () => ({ ...base, bySequence: advanced() })),
+    Match.exhaustive,
+  );
 };
 
 /**

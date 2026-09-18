@@ -1,4 +1,4 @@
-import { Config, Console, Effect, Option as O, Ref, Result, Stream } from "effect";
+import { Config, Console, Effect, Match, Option as O, Ref, Result, Stream } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { Sse } from "effect/unstable/encoding";
 import { NodeRuntime, NodeServices } from "@effect/platform-node";
@@ -73,21 +73,25 @@ const program = Effect.fnUntraced(function* (ORIGIN: string) {
               // apply, from a third vantage point. Reimplementing it here — in the
               // subscriber this repo offers as the shape a real one should take —
               // is how three readings of one guarantee end up disagreeing.
-              switch (classifySequence(highest, sequence)) {
+              return Match.value(classifySequence(highest, sequence)).pipe(
                 // Idempotent: an already-applied sequence is a no-op.
-                case "duplicate":
-                  return ["sync", map] as const;
-                case "gap":
-                  // Snapshots deliberately republish ahead of the last
-                  // state_changed, so only that type can reveal a real gap.
-                  return [
-                    event.type === SEQUENCED_EVENT ? "GAP!" : "    ",
-                    new Map(map).set(apiId, { state, sequence }),
-                  ] as const;
-                case "first":
-                case "next":
-                  return ["    ", new Map(map).set(apiId, { state, sequence })] as const;
-              }
+                Match.when("duplicate", () => ["sync", map] as const),
+                // Snapshots deliberately republish ahead of the last
+                // state_changed, so only that type can reveal a real gap.
+                Match.when(
+                  "gap",
+                  () =>
+                    [
+                      event.type === SEQUENCED_EVENT ? "GAP!" : "    ",
+                      new Map(map).set(apiId, { state, sequence }),
+                    ] as const,
+                ),
+                Match.when(
+                  Match.is("first", "next"),
+                  () => ["    ", new Map(map).set(apiId, { state, sequence })] as const,
+                ),
+                Match.exhaustive,
+              );
             }).pipe(Effect.map((tag) => Result.succeed({ tag, event }))),
         }),
       ),

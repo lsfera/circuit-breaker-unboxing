@@ -189,16 +189,15 @@ export const makeAmqpControlPlaneSink: Effect.Effect<SinkImpl, RmqError, Rmq> = 
      * own comment for why the first attempt of every delivery always gets a
      * real, unconditional try.
      */
-    const attempt = (event: CircuitEvent) =>
-      Effect.gen(function* () {
-        const isRetry = yield* Ref.make(false);
-        return yield* Effect.suspend(() =>
-          Ref.getAndSet(isRetry, true).pipe(Effect.flatMap((retry) => publish(event, retry))),
-        ).pipe(
-          Effect.retry(DELIVERY_RETRY),
-          Effect.tap(() => Ref.set(consecutiveFailures, { count: 0, lastAt: 0 })),
-        );
-      });
+    const attempt = Effect.fnUntraced(function* (event: CircuitEvent) {
+      const isRetry = yield* Ref.make(false);
+      return yield* Effect.suspend(() =>
+        Ref.getAndSet(isRetry, true).pipe(Effect.flatMap((retry) => publish(event, retry))),
+      ).pipe(
+        Effect.retry(DELIVERY_RETRY),
+        Effect.tap(() => Ref.set(consecutiveFailures, { count: 0, lastAt: 0 })),
+      );
+    });
 
     /**
      * Forked into the current leadership epoch's scope, same as before this
@@ -216,23 +215,22 @@ export const makeAmqpControlPlaneSink: Effect.Effect<SinkImpl, RmqError, Rmq> = 
      * find out a publish never reached the broker, since that is exactly what
      * must stop its checkpoint from advancing.
      */
-    const deliver = (event: CircuitEvent) =>
-      Effect.gen(function* () {
-        const scope = yield* Ref.get(deliveryScope);
-        const fiber = yield* Effect.forkIn(attempt(event), scope);
-        const exit = yield* Fiber.await(fiber);
-        if (Exit.isSuccess(exit)) return;
-        const failure = new DeliveryFailed({
-          sink: "amqp",
-          apiId: event.data.apiId,
-          cause: String(exit.cause),
-        });
-        // Bounded for the same reason WebhookSink's is: a broker that stays
-        // unreachable would otherwise grow this list for the life of the
-        // process. The exact total lives in the metric.
-        yield* Ref.update(dead, (xs) => [...xs, failure].slice(-DEAD_LETTER_BUFFER));
-        return yield* Effect.fail(failure);
+    const deliver = Effect.fnUntraced(function* (event: CircuitEvent) {
+      const scope = yield* Ref.get(deliveryScope);
+      const fiber = yield* Effect.forkIn(attempt(event), scope);
+      const exit = yield* Fiber.await(fiber);
+      if (Exit.isSuccess(exit)) return;
+      const failure = new DeliveryFailed({
+        sink: "amqp",
+        apiId: event.data.apiId,
+        cause: String(exit.cause),
       });
+      // Bounded for the same reason WebhookSink's is: a broker that stays
+      // unreachable would otherwise grow this list for the life of the
+      // process. The exact total lives in the metric.
+      yield* Ref.update(dead, (xs) => [...xs, failure].slice(-DEAD_LETTER_BUFFER));
+      return yield* Effect.fail(failure);
+    });
 
     // Nothing durable behind this one: an event the control-plane exchange
     // could not take is dead-lettered and counted, not replayed. The daemons

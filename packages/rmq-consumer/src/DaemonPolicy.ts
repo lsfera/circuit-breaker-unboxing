@@ -1,3 +1,4 @@
+import { Match } from "effect";
 import { createHash } from "node:crypto";
 import { State } from "@egress/domain/Model.ts";
 
@@ -85,31 +86,29 @@ export const step = (
   circuitState: State,
   now: number,
 ): DaemonPolicyState => {
-  switch (circuitState) {
-    case State.CLOSED: {
-      // Arriving from a state that was not ramping — OPEN, or a probe — starts
-      // at once, at one daemon. `floor` is what distinguishes "the first rung"
-      // from "not running", since both have a fraction of zero. Arriving from
-      // DEGRADED continues the ramp from where it already is rather than
-      // dropping back to one.
+  return Match.value(circuitState).pipe(
+    // Arriving from a state that was not ramping — OPEN, or a probe — starts
+    // at once, at one daemon. `floor` is what distinguishes "the first rung"
+    // from "not running", since both have a fraction of zero. Arriving from
+    // DEGRADED continues the ramp from where it already is rather than
+    // dropping back to one.
+    Match.when(State.CLOSED, () => {
       if (!prior.floor) return { fraction: RAMP_SCHEDULE[0] ?? 0, floor: true, rungSince: now };
       if (prior.fraction >= 1) return { fraction: 1, floor: true, rungSince: prior.rungSince };
       if (now - prior.rungSince < RAMP_DWELL_MS) return prior;
       const next = RAMP_SCHEDULE.find((rung) => rung > prior.fraction) ?? 1;
       return { fraction: next, floor: true, rungSince: now };
-    }
-    case State.DEGRADED:
-      // Half the fleet, and never none of it: the floor is the reason this can
-      // be a fraction at all.
-      return { fraction: 0.5, floor: true, rungSince: now };
-    case State.OPEN:
-      return { fraction: 0, floor: false, rungSince: now };
-    case State.HALF_OPEN:
-      // No daemon pulls work here. The one call this state permits is the
-      // prober's, elected by the broker, and `desired` refuses the work
-      // consumer outright — so there is nothing for a fraction to say.
-      return { fraction: 0, floor: false, rungSince: now };
-  }
+    }),
+    // Half the fleet, and never none of it: the floor is the reason this can
+    // be a fraction at all.
+    Match.when(State.DEGRADED, () => ({ fraction: 0.5, floor: true, rungSince: now })),
+    Match.when(State.OPEN, () => ({ fraction: 0, floor: false, rungSince: now })),
+    // No daemon pulls work here. The one call this state permits is the
+    // prober's, elected by the broker, and `desired` refuses the work
+    // consumer outright — so there is nothing for a fraction to say.
+    Match.when(State.HALF_OPEN, () => ({ fraction: 0, floor: false, rungSince: now })),
+    Match.exhaustive,
+  );
 };
 
 /**

@@ -266,12 +266,13 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
       outcome,
       outcome === "failed" ? delivery.properties[ATTEMPTS_HEADER] : undefined,
     );
-    switch (decision._tag) {
-      case "accept":
+    return Match.valueTags(decision, {
+      accept: async (): Promise<Settlement> => {
         counts.ok++;
         return "accept";
+      },
 
-      case "release": {
+      release: async (): Promise<Settlement> => {
         // Envoy's adaptive-concurrency filter shedding this request before it
         // reached the third party — backpressure, not a failed call, and not
         // this message's fault. `release` (a requeuing nack) hands it back
@@ -283,9 +284,9 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
           SHED_BACKOFF_MIN_MS + Math.random() * (SHED_BACKOFF_MAX_MS - SHED_BACKOFF_MIN_MS);
         await new Promise((resolve) => setTimeout(resolve, jitter));
         return "release";
-      }
+      },
 
-      case "republish": {
+      republish: async (decision): Promise<Settlement> => {
         // A failed call is retried by republishing a new message carrying
         // the key forward, never by `requeue`: a broker requeue hands back
         // the original message, with no way to add a header to it, and the
@@ -335,8 +336,8 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
           return "requeue";
         }
         return "accept";
-      }
-    }
+      },
+    });
   };
 
   /**

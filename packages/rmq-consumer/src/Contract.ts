@@ -1,4 +1,4 @@
-import { Option as O } from "effect";
+import { Match, Option as O } from "effect";
 import { classifySequence, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
 import type { EventType } from "@egress/domain/Model.ts";
 
@@ -37,15 +37,12 @@ export const observe = (
   sequence: number,
 ): ContractState => {
   if (eventType !== SEQUENCED_EVENT) return self;
-  switch (classifySequence(self.lastSequence, sequence)) {
-    case "duplicate":
-      // The only verdict that does not move the mark: a stale event must not
-      // drag it backwards and turn the next live one into a gap.
-      return { ...self, duplicates: self.duplicates + 1 };
-    case "gap":
-      return { ...self, lastSequence: O.some(sequence), gaps: self.gaps + 1 };
-    case "first":
-    case "next":
-      return { ...self, lastSequence: O.some(sequence) };
-  }
+  return Match.value(classifySequence(self.lastSequence, sequence)).pipe(
+    // The only verdict that does not move the mark: a stale event must not
+    // drag it backwards and turn the next live one into a gap.
+    Match.when("duplicate", () => ({ ...self, duplicates: self.duplicates + 1 })),
+    Match.when("gap", () => ({ ...self, lastSequence: O.some(sequence), gaps: self.gaps + 1 })),
+    Match.when(Match.is("first", "next"), () => ({ ...self, lastSequence: O.some(sequence) })),
+    Match.exhaustive,
+  );
 };

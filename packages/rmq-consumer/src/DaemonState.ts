@@ -1,3 +1,4 @@
+import { Match } from "effect";
 import { State } from "@egress/domain/Model.ts";
 import { initial as initialPolicy, runsWork, step } from "./DaemonPolicy.ts";
 import type { DaemonPolicyState } from "./DaemonPolicy.ts";
@@ -76,9 +77,9 @@ export const reduce = (
   state: DaemonState,
   command: Command,
   redriveOnClose: boolean,
-): Transition => {
-  switch (command._tag) {
-    case "CircuitChanged": {
+): Transition =>
+  Match.valueTags(command, {
+    CircuitChanged: (command): Transition => {
       const next: DaemonState = {
         ...state,
         circuit: command.state,
@@ -95,46 +96,46 @@ export const reduce = (
         actions.push({ _tag: "PublishRedriveTrigger", sequence: command.sequence });
       }
       return { next, actions };
-    }
+    },
 
-    case "RampTick": {
+    RampTick: (command): Transition => {
       // Only while CLOSED: every other state is a level, not a ramp.
       if (state.circuit !== State.CLOSED) return { next: state, actions: [] };
       return {
         next: { ...state, policy: step(state.policy, state.circuit, command.at) },
         actions: [],
       };
-    }
+    },
 
-    case "ProbeTriggered":
+    ProbeTriggered: (command): Transition => {
       if (command.sequence <= state.probedSequence) return { next: state, actions: [] };
       return {
         next: { ...state, probedSequence: command.sequence },
         actions: [{ _tag: "Probe" }],
       };
+    },
 
-    case "RedriveTriggered":
+    RedriveTriggered: (command): Transition => {
       if (command.sequence <= state.redrivenSequence) return { next: state, actions: [] };
       return {
         next: { ...state, redrivenSequence: command.sequence },
         actions: [{ _tag: "Redrive" }],
       };
+    },
 
     // No sequence, so no dedupe and no state change — a sweep either finds the
     // circuit CLOSED and itself the floor right now, or it doesn't, and the next
     // one thirty seconds later decides fresh. `redriveOnce` is what makes a
     // sweep that finds nothing to do, or one that overlaps a pass already
     // running, harmless — see Redrive.ts.
-    case "SweepTick":
-      return {
-        next: state,
-        actions:
-          redriveOnClose && state.circuit === State.CLOSED && command.isFloor
-            ? [{ _tag: "Redrive" }]
-            : [],
-      };
-  }
-};
+    SweepTick: (command): Transition => ({
+      next: state,
+      actions:
+        redriveOnClose && state.circuit === State.CLOSED && command.isFloor
+          ? [{ _tag: "Redrive" }]
+          : [],
+    }),
+  });
 
 /** Which connections are allowed to exist in this state. */
 type Connections = {

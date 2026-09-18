@@ -648,7 +648,7 @@ export const makeRmq = Effect.fnUntraced(function* (
    */
   const amqpReplyCode = (error: Error): number | undefined => {
     const code = (error as { readonly code?: unknown }).code;
-    return typeof code === "number" ? code : undefined;
+    return Predicate.isNumber(code) ? code : undefined;
   };
 
   connection.on("error", (error) => {
