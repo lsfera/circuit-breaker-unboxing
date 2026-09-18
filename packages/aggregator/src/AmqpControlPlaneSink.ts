@@ -4,6 +4,7 @@ import {
   CONTROL_EXCHANGE,
   CONTROL_EXCHANGE_OPTIONS,
   encodeCircuitEvent,
+  HEARTBEAT_ROUTING_KEY,
   routingKeyFor,
 } from "@egress/rmq/ControlPlane.ts";
 import { DeliveryFailed } from "@egress/domain/Model.ts";
@@ -73,15 +74,6 @@ const PUBLISH_CONFIRM_TIMEOUT = Duration.seconds(2);
  * whatever the breaker itself is doing.
  */
 const PROBE_INTERVAL = Duration.seconds(1);
-
-/**
- * `routingKeyFor` always returns `circuit.<apiId>`, and every daemon binds
- * only its own exact key — so a key with no `circuit.` prefix at all can
- * never collide with a real API's binding, present or future. An unroutable
- * message on a topic exchange is simply dropped once confirmed; nothing
- * downstream ever sees this.
- */
-export const HEARTBEAT_ROUTING_KEY = "__heartbeat__";
 
 /**
  * A peer to WebhookSink, publishing the same CircuitEvent to
