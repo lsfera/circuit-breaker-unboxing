@@ -7,18 +7,19 @@ import {
   workQueueFor,
   workQueueOptions,
 } from "@egress/rmq/ControlPlane.ts";
+import * as Breaker from "./Breaker.ts";
 import * as Telemetry from "./Telemetry.ts";
+import type { CircuitState } from "cockatiel";
 import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
 
 /**
- * The base scenario: one competing-consumer daemon, no circuit awareness at
- * all. It knows nothing about the other daemons in its own fleet and nothing
- * about whether the third party is degrading — only whether *its own* last
- * call succeeded. A failed call is handed back to the broker with `requeue`,
- * and the broker's own `x-delivery-limit` (see `workQueueOptions`) is what
- * eventually dead-letters it. Nothing here backs off, coordinates, or stops.
- * That absence is the point: it is what the rest of this article series is
- * about adding, one piece at a time.
+ * One competing-consumer daemon, now with an in-process circuit breaker
+ * (see Breaker.ts) — and still nothing else. It knows nothing about the
+ * other daemons in its own fleet: its breaker's state is private to this
+ * process, formed from only the calls this process itself has made. Five
+ * replicas means five independent breakers that will open and close at
+ * different times, for the same incident. That absence — no shared verdict
+ * — is what the next branch in this series adds.
  */
 
 export type ConsumerConfig = {
@@ -28,6 +29,7 @@ export type ConsumerConfig = {
   readonly apiPath: string;
   /** Concurrent third-party calls, applied as the work consumer's prefetch. */
   readonly maxInFlight: number;
+  readonly breaker: Breaker.BreakerConfig;
 };
 
 /** Body shape the producer publishes: `{ apiId, n }`. `n` is what makes the idempotency key stable across a broker redelivery of the same message. */
@@ -51,14 +53,36 @@ const parse = (body: string): WorkMessage | undefined => {
   }
 };
 
+/** A non-2xx is thrown, not returned — cockatiel's `handleAll` policy classifies by thrown errors. */
+class UpstreamCallFailed extends Error {}
+
 /**
  * Whether a call outcome should be accepted or handed back to the broker.
  * Pulled out as a total function of the one thing that matters — pure,
- * exhaustively testable, no broker or fetch involved.
+ * exhaustively testable, no broker, breaker, or fetch involved.
+ *
+ * `"open"` and `"failed"` both requeue: the difference between them is
+ * whether a call was actually attempted, which is a telemetry fact, not a
+ * settlement fact. What differs operationally is upstream of this function
+ * — see `OPEN_REQUEUE_DELAY_*` in `call` below.
  */
-export type CallOutcome = "ok" | "failed";
+export type CallOutcome = "ok" | "failed" | "open";
 export const decide = (outcome: CallOutcome): Settlement =>
   outcome === "ok" ? "accept" : "requeue";
+
+/**
+ * Held before releasing a breaker-open rejection back to the broker. Without
+ * this, a message rejected instantly by an open local breaker (no call made,
+ * no wait) goes straight back onto the queue and straight back to this same
+ * consumer, which can spin against its own in-memory breaker at whatever
+ * rate the broker will redeliver — hammering the *broker* even though the
+ * third party is no longer being hammered. Same constants, same reasoning as
+ * the shed-`429` hold the article series' predecessor daemon used before it
+ * was removed: jittered so a fleet whose breakers open together doesn't
+ * requeue in lockstep either.
+ */
+const OPEN_REQUEUE_DELAY_MIN_MS = 100;
+const OPEN_REQUEUE_DELAY_MAX_MS = 400;
 
 export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   const rmq = yield* Rmq;
@@ -75,37 +99,62 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   const services = yield* Effect.context<never>();
   const runInContext = Effect.runPromiseWith(services);
 
+  // One breaker for the process's whole life, shared across every message —
+  // see Breaker.ts for why that sharing is load-bearing, not incidental.
+  const breaker = Breaker.make(cfg.breaker);
+
+  breaker.onStateChange((state: CircuitState) =>
+    runInContext(Metric.update(Telemetry.breakerState, Breaker.STATE_CODE[state])),
+  );
+  breaker.onBreak(() => {
+    runInContext(Metric.update(Telemetry.breakerTrips, 1));
+    runInContext(Effect.log(`${cfg.apiId}/consumer: breaker opened`));
+  });
+  breaker.onReset(() => runInContext(Effect.log(`${cfg.apiId}/consumer: breaker closed`)));
+
   let inFlight = 0;
   const track = (outcome: CallOutcome) =>
     runInContext(Metric.update(Metric.withAttributes(Telemetry.calls, { outcome }), 1));
+
+  const callUpstream = async (n: number): Promise<void> => {
+    inFlight++;
+    runInContext(Metric.update(Telemetry.inFlight, inFlight));
+    try {
+      const res = await fetch(`${cfg.egressAddr}${cfg.apiPath}`, {
+        signal: AbortSignal.timeout(2000),
+        headers: { [IDEMPOTENCY_KEY_HEADER]: `${cfg.apiId}:${n}` },
+      });
+      // Drain the body even though nothing wants it: an unconsumed response
+      // holds its connection out of the pool.
+      await res.text().catch(() => {});
+      if (!res.ok) throw new UpstreamCallFailed(`status ${res.status}`);
+    } finally {
+      inFlight--;
+      runInContext(Metric.update(Telemetry.inFlight, inFlight));
+    }
+  };
 
   const call = async (body: string, _delivery: DeliveryInfo): Promise<Settlement> => {
     const message = parse(body);
     if (message === undefined) return "discard";
 
-    inFlight++;
-    runInContext(Metric.update(Telemetry.inFlight, inFlight));
     let outcome: CallOutcome;
     try {
-      const res = await fetch(`${cfg.egressAddr}${cfg.apiPath}`, {
-        signal: AbortSignal.timeout(2000),
-        headers: { [IDEMPOTENCY_KEY_HEADER]: `${cfg.apiId}:${message.n}` },
-      });
-      // Drain the body even though nothing wants it: an unconsumed response
-      // holds its connection out of the pool.
-      await res.text().catch(() => {});
-      outcome = res.ok ? "ok" : "failed";
-    } catch {
-      // Timeout or connection refused — the ordinary shape of a third party
-      // that is down. Nothing here distinguishes it from any other failure:
-      // that distinction is exactly what a breaker exists to make.
-      outcome = "failed";
-    } finally {
-      inFlight--;
-      runInContext(Metric.update(Telemetry.inFlight, inFlight));
+      await breaker.execute(() => callUpstream(message.n));
+      outcome = "ok";
+    } catch (err) {
+      // Breaker.isBrokenCircuitError: rejected locally, no call attempted —
+      // this replica's own breaker is open. Anything else is a real call
+      // that failed (timeout, connection refused, or UpstreamCallFailed).
+      outcome = Breaker.isBrokenCircuitError(err) ? "open" : "failed";
     }
 
     track(outcome);
+    if (outcome === "open") {
+      const jitter =
+        OPEN_REQUEUE_DELAY_MIN_MS + Math.random() * (OPEN_REQUEUE_DELAY_MAX_MS - OPEN_REQUEUE_DELAY_MIN_MS);
+      await new Promise((resolve) => setTimeout(resolve, jitter));
+    }
     return decide(outcome);
   };
 
@@ -113,7 +162,11 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
     prefetch: cfg.maxInFlight,
   });
 
+  // Set at startup so the series exists before the first state change.
+  yield* Metric.update(Telemetry.breakerState, Breaker.INITIAL_STATE_CODE);
+
   yield* Effect.log(
-    `${cfg.apiId}/consumer: up — maxInFlight=${cfg.maxInFlight} egress=${cfg.egressAddr}${cfg.apiPath} work=${workQueue}`,
+    `${cfg.apiId}/consumer: up — maxInFlight=${cfg.maxInFlight} egress=${cfg.egressAddr}${cfg.apiPath} work=${workQueue} ` +
+      `breaker=${cfg.breaker.consecutiveFailures}consecutive/${cfg.breaker.initialDelayMs}-${cfg.breaker.maxDelayMs}ms`,
   );
 });

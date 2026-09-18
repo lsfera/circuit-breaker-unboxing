@@ -1,6 +1,7 @@
-# The base scenario: one producer, one broker, a fleet of competing-consumer
-# daemons calling a third party directly. No circuit breaker anywhere in this
-# file — that is the point of this branch. See README.md.
+# One producer, one broker, a fleet of competing-consumer daemons — each with
+# its own in-process circuit breaker (cockatiel), private to that replica.
+# No coordination between them anywhere in this file — that is the point of
+# this branch. See README.md.
 #
 # Every service also joins the host devcontainer's own external network so it
 # can be reached directly by service name from outside this compose project.
@@ -91,9 +92,11 @@ services:
 
   # One service, scaled — `docker compose up -d --scale rmq-consumer=N` is
   # the whole of resizing the fleet. Every replica is anonymous: there is no
-  # hash-space position, no floor, no election, because nothing here
-  # coordinates the fleet at all. Prometheus tells replicas apart by the IP
-  # DNS hands back for the service name (see infra/monitoring/prometheus.yml).
+  # hash-space position, no floor, no election, and now an in-process circuit
+  # breaker (packages/consumer/src/Breaker.ts) that is entirely this
+  # replica's own — nothing here coordinates the fleet's breakers with each
+  # other. Prometheus tells replicas apart by the IP DNS hands back for the
+  # service name (see infra/monitoring/prometheus.yml).
   rmq-consumer:
     <<: *rmq-node
     command: node packages/consumer/src/main.ts
@@ -105,6 +108,12 @@ services:
       EGRESS_ADDR: http://flaky-upstream:8080
       API_PATH: /payments
       MAX_IN_FLIGHT: "20"
+      # Trips after 5 calls fail in a row; the half-open probe starts 1s
+      # after that and doubles (cockatiel's own exponential-backoff-with-
+      # jitter default) up to 30s if the probe keeps failing.
+      BREAKER_THRESHOLD: "5"
+      BREAKER_INITIAL_DELAY_MS: "1000"
+      BREAKER_MAX_DELAY_MS: "30000"
     deploy:
       replicas: 5
       <<: *limits-daemon
@@ -132,7 +141,7 @@ services:
       # dashboard — and the first thing anyone sees looks like nothing was
       # provisioned at all. Path is inside the container, off the same
       # read-only mount the dashboard provisioner already uses.
-      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/base-scenario.json
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/in-process-breaker.json
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
