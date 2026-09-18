@@ -10,13 +10,25 @@ here makes them agree with each other.
 ```mermaid
 flowchart LR
   producer["Producer"] --> queue[("payments-provider.work")]
-  queue --> c1["consumer 1\n[breaker]"]
-  queue --> c2["consumer 2\n[breaker]"]
-  queue --> c3["consumer N\n[breaker]"]
-  c1 --> api[("Third-party API\n(flaky-upstream)")]
-  c2 --> api
-  c3 --> api
+  subgraph c1["consumer 1"]
+    b1{{"breaker\n(cockatiel)"}}
+  end
+  subgraph c2["consumer 2"]
+    b2{{"breaker\n(cockatiel)"}}
+  end
+  subgraph c3["consumer N"]
+    b3{{"breaker\n(cockatiel)"}}
+  end
+  queue --> c1
+  queue --> c2
+  queue --> c3
+  b1 --> api[("Third-party API\n(flaky-upstream)")]
+  b2 --> api
+  b3 --> api
 ```
+
+Each replica's breaker is its own `CircuitBreakerPolicy` instance — the
+subgraphs are the point: nothing here draws a line *between* them.
 
 ## The breaker
 
