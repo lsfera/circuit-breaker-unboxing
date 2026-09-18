@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Skill(update-config)",
-      "Skill(update-config:*)"
+      "Skill(update-config:*)",
+      "Bash(rtk proxy *)",
+      "Bash(rtk ls *)",
+      "Bash(rtk grep *)",
+      "Bash(rtk git *)",
+      "Bash(rtk read *)"
     ]
   },
   "enabledMcpjsonServers": [

@@ -1,53 +1,7 @@
 global:
-  scrape_interval: 2s # fast enough that a demo incident shows up within a tick or two
-
-# Alerting on "the thing that should be moving has stopped" — see alerts.yml
-# for why each rule exists, and docs/runbooks/ for what to do about each one.
-rule_files:
-  - /etc/prometheus/alerts.yml
-
-# Rules that evaluate and go nowhere are the same failure they are written to
-# catch: something that looks like it is working because it is running. These
-# reach Alertmanager, which groups, inhibits and forwards them to a receiver
-# that logs (infra/alert-sink.mjs) — swap that receiver for a real integration
-# and nothing else here changes.
-alerting:
-  alertmanagers:
-    - static_configs:
-        - targets: ["alertmanager:9093"]
+  scrape_interval: 2s # fast enough that an incident shows up within a tick or two
 
 scrape_configs:
-  # The aggregator's own registry: per-API circuit state, transitions, webhook
-  # delivery, and the subscriber's delivery-integrity counters. Same endpoint
-  # regardless of --source=sim or --source=envoy.
-  - job_name: aggregator
-    static_configs:
-      # Both real HA instances (see docker-compose.yml) — the `instance`
-      # label Prometheus adds from each target address is what lets
-      # egress_aggregator_is_leader show which one is currently active.
-      - targets: ["aggregator:8088", "aggregator-2:8088"]
-        labels: { deployment: "docker-compose" }
-      # There used to be a `host.docker.internal:8088` target here, to reach
-      # `pnpm start` running on the host for the sim-fleet demo, with a comment
-      # calling it "harmless if nothing is listening there". It was not
-      # harmless when something *was*: the compose aggregator publishes 8088 to
-      # the host, so Prometheus scraped the same process twice, under two
-      # instance labels. `sum(egress_aggregator_is_leader)` then read 2 with a
-      # single leader, and SplitBrain — the alert for the worst correctness
-      # failure this system can have — fired on a duplicate scrape target.
-      #
-      # To watch a host-run instance, add it back on a port compose does not
-      # publish, and keep the `deployment` label so the rules stay per
-      # deployment (see alerts.yml).
-
-  # Envoy's own admin stats, in its native Prometheus format — the per-replica
-  # ground truth the aggregator is reconciling. Useful side-by-side with the
-  # aggregator's fleet-wide view to see the disagreement the console visualizes.
-  - job_name: envoy
-    metrics_path: /stats/prometheus
-    static_configs:
-      - targets: ["envoy-00:9901", "envoy-01:9901", "envoy-02:9901"]
-
   # RabbitMQ's own exporter. `rabbitmq_prometheus` ships enabled in the
   # management image on 15692, so this costs one line and no new container.
   #
@@ -62,34 +16,27 @@ scrape_configs:
   - job_name: rabbitmq-queues
     metrics_path: /metrics/detailed
     params:
-      # Depth, consumers and bytes, plus the flow through
-      # each queue: published (by exchange), acked, redelivered, basic.get. Flow is the broker's to report — an
-      # application counter dies with its process and never sees the redrive,
-      # a restart or the dead-lettering the broker does on its own.
+      # Depth, consumers and the flow through each queue: published, acked,
+      # redelivered. This is where payments-provider.work's backlog and
+      # payments-provider.work.dead's growth become visible — the broker's to
+      # report, because an application counter dies with its process and
+      # never sees a redelivery or a restart.
       family: [queue_coarse_metrics, queue_consumer_count, queue_metrics, queue_delivery_metrics, queue_exchange_metrics]
     static_configs:
       - targets: ["rabbitmq:15692"]
 
-  # The daemon fleet — the other half of the system, and until now the half
-  # with no metrics at all. Each daemon serves the same `/metrics` route the
-  # aggregator does, from the same in-process `effect` registry, so
-  # `egress_daemon_*` and `egress_circuit_*` land on one dashboard and can be
-  # read against each other. Prometheus's own `instance` label is what tells
-  # the daemons apart.
-  #
-  # Discovered rather than listed: the fleet is one compose service scaled to N,
-  # so there are no container names to enumerate and `--scale rmq-daemon=12`
-  # must not need an edit here. Docker's DNS returns an A record per replica,
-  # and Prometheus scrapes each one it finds.
-  - job_name: rmq-fleet
-    dns_sd_configs:
-      - names: ["rmq-daemon"]
-        type: A
-        port: 9464
-    # 10s, matching the scrape interval: a replica that has just been scaled
-    # away should stop being scraped about as fast as it stopped existing.
-    # Prometheus re-resolves on this schedule.
-
   - job_name: rmq-producer
     static_configs:
       - targets: ["rmq-producer:9464"]
+
+  # The consumer fleet — one compose service scaled to N, so there are no
+  # container names to enumerate here and `--scale rmq-consumer=N` must not
+  # need an edit. Docker's DNS returns an A record per replica.
+  - job_name: rmq-consumer-fleet
+    dns_sd_configs:
+      - names: ["rmq-consumer"]
+        type: A
+        port: 9464
+    # Matching the scrape interval: a replica that has just been scaled away
+    # should stop being scraped about as fast as it stopped existing.
+    # Prometheus re-resolves on this schedule.

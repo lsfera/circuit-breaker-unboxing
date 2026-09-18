@@ -188,47 +188,13 @@ importers:
         specifier: ^7.0.2
         version: 7.0.2
 
-  packages/aggregator:
-    dependencies:
-      '@effect/platform-node':
-        specifier: 'catalog:'
-        version: 4.0.0-rc.115(effect@4.0.0-rc.115)(redis@6.2.1(@opentelemetry/api@1.9.1))
-      '@egress/config':
-        specifier: workspace:*
-        version: link:../config
-      '@egress/domain':
-        specifier: workspace:*
-        version: link:../domain
-      '@egress/rmq':
-        specifier: workspace:*
-        version: link:../rmq
-      '@egress/tracing':
-        specifier: workspace:*
-        version: link:../tracing
-      '@grpc/grpc-js':
-        specifier: ^1.14.4
-        version: 1.14.4
-      '@grpc/proto-loader':
-        specifier: ^0.8.1
-        version: 0.8.1
-      effect:
-        specifier: 'catalog:'
-        version: 4.0.0-rc.115
-      ioredis:
-        specifier: ^6.0.0
-        version: 6.0.0
-    devDependencies:
-      testcontainers:
-        specifier: ^12.1.0
-        version: 12.1.0
-
   packages/config:
     dependencies:
       effect:
         specifier: 'catalog:'
         version: 4.0.0-rc.115
 
-  packages/demo:
+  packages/consumer:
     dependencies:
       '@effect/platform-node':
         specifier: 'catalog:'
@@ -236,24 +202,18 @@ importers:
       '@egress/config':
         specifier: workspace:*
         version: link:../config
-      '@egress/domain':
+      '@egress/rmq':
         specifier: workspace:*
-        version: link:../domain
-      effect:
-        specifier: 'catalog:'
-        version: 4.0.0-rc.115
-
-  packages/domain:
-    dependencies:
+        version: link:../rmq
+      '@egress/tracing':
+        specifier: workspace:*
+        version: link:../tracing
       effect:
         specifier: 'catalog:'
         version: 4.0.0-rc.115
 
   packages/rmq:
     dependencies:
-      '@egress/domain':
-        specifier: workspace:*
-        version: link:../domain
       amqplib:
         specifier: ^2.0.1
         version: 2.0.1
@@ -264,27 +224,6 @@ importers:
       testcontainers:
         specifier: ^12.1.0
         version: 12.1.0
-
-  packages/rmq-consumer:
-    dependencies:
-      '@effect/platform-node':
-        specifier: 'catalog:'
-        version: 4.0.0-rc.115(effect@4.0.0-rc.115)(redis@6.2.1(@opentelemetry/api@1.9.1))
-      '@egress/config':
-        specifier: workspace:*
-        version: link:../config
-      '@egress/domain':
-        specifier: workspace:*
-        version: link:../domain
-      '@egress/rmq':
-        specifier: workspace:*
-        version: link:../rmq
-      '@egress/tracing':
-        specifier: workspace:*
-        version: link:../tracing
-      effect:
-        specifier: 'catalog:'
-        version: 4.0.0-rc.115
 
   packages/rmq-producer:
     dependencies:
@@ -300,21 +239,6 @@ importers:
       '@egress/tracing':
         specifier: workspace:*
         version: link:../tracing
-      effect:
-        specifier: 'catalog:'
-        version: 4.0.0-rc.115
-
-  packages/subscriber:
-    dependencies:
-      '@effect/platform-node':
-        specifier: 'catalog:'
-        version: 4.0.0-rc.115(effect@4.0.0-rc.115)(redis@6.2.1(@opentelemetry/api@1.9.1))
-      '@egress/config':
-        specifier: workspace:*
-        version: link:../config
-      '@egress/domain':
-        specifier: workspace:*
-        version: link:../domain
       effect:
         specifier: 'catalog:'
         version: 4.0.0-rc.115
@@ -493,9 +417,6 @@ packages:
 
   '@iconify/utils@3.1.7':
     resolution: {integrity: sha512-JZHlwdID+dy+lTgbYC8NEC4zeugqeYsc6jewvzb4c58kHauJn+X7rNwQjxz5p2qSjqaEeQoLkCIQ9v/H4PK0/w==}
-
-  '@ioredis/commands@2.0.0':
-    resolution: {integrity: sha512-vrx0AE/T0h7cRZwfo1M39Cr+ZhZrkf0V8mQN75wucKCxCLD9l/VX6no3gFvrLqD1IlG/1LtzWovqEw3t0Vr9zg==}
 
   '@isaacs/cliui@8.0.2':
     resolution: {integrity: sha512-O8jcjabXaleOG9DQ0+ARXWZBTfnP4WNAqzuiJK7ll44AmxGKv/J2M4TPjxjY3znBCfvBXFzucm1twdyFybFqEA==}
@@ -1037,10 +958,6 @@ packages:
     resolution: {integrity: sha512-BSeNnyus75C4//NQ9gQt1/csTXyo/8Sb+afLAkzAptFuMsod9HFokGNudZpi/oQV73hnVK+sR+5PVRMd+Dr7YQ==}
     engines: {node: '>=12'}
 
-  cluster-key-slot@1.1.1:
-    resolution: {integrity: sha512-rwHwUfXL40Chm1r08yrhU3qpUvdVlgkKNeyeGPOxnW8/SyVDvgRaed/Uz54AqWNaTCAThlj6QAs3TZcKI0xDEw==}
-    engines: {node: '>=0.10.0'}
-
   cluster-key-slot@1.1.2:
     resolution: {integrity: sha512-RMr0FhtfXemyinomL4hrWcYJxmX6deFdCxpJzhDttxgO1+bcCnkk+9drydLVDmAMG7NE6aN/fl4F7ucU/90gAA==}
     engines: {node: '>=0.10.0'}
@@ -1272,10 +1189,6 @@ packages:
   delaunator@5.1.0:
     resolution: {integrity: sha512-AGrQ4QSgssa1NGmWmLPqN5NY2KajF5MqxetNEO+o0n3ZwZZeTmt7bBnvzHWrmkZFxGgr4HdyFgelzgi06otLuQ==}
 
-  denque@2.1.0:
-    resolution: {integrity: sha512-HVQE3AAb/pxF8fQAoiqpvg9i3evqug3hoiwakOyZAwJm+6vZehbkYXZ0l4JxS+I3QxM97v5aaRNhj8v5oBhekw==}
-    engines: {node: '>=0.10'}
-
   docker-compose@1.4.2:
     resolution: {integrity: sha512-rPHigTKGaEHpkUmfd69QgaOp+Os5vGJwG/Ry8lcr8W/382AmI+z/D7qoa9BybKIkqNppaIbs8RYeHSevdQjWww==}
     engines: {node: '>= 6.0.0'}
@@ -1383,10 +1296,6 @@ packages:
   internmap@2.0.3:
     resolution: {integrity: sha512-5Hh7Y1wQbvY5ooGgPbDaL5iYLAPzMTUrjMulskHLH6wnv/A+1q5rgEaiuqEjB+oxGXIVZs1FF+R/KPN3ZSQYYg==}
     engines: {node: '>=12'}
-
-  ioredis@6.0.0:
-    resolution: {integrity: sha512-f+Dtubxfpf6KYFq7WVXJoOLn0bk4TJrMrN9SzeE+jrWrCWj7XX3fA6vkryafhADX+GMymRxgDJDOI33COkJc0w==}
-    engines: {node: '>=20.0.0'}
 
   is-fullwidth-code-point@3.0.0:
     resolution: {integrity: sha512-zymm5+u+sCsSWyD9qNaejV3DFvhCKclKdizYaJUuHA83RLjb7nSuGnddCHGv0hk+KY7BMAlsWeK4Ueg6EV6XQg==}
@@ -1566,10 +1475,6 @@ packages:
   readdir-glob@1.1.3:
     resolution: {integrity: sha512-v05I2k7xN8zXvPD9N+z/uhXPaj0sUFCe2rcWZIpBsqxfP7xXFQ0tipAd/wjj1YxWyWtUS5IDJpOG82JKt2EAVA==}
 
-  redis-errors@1.2.0:
-    resolution: {integrity: sha512-1qny3OExCf0UvUV/5wpYKf2YwPcOqXzkwKKSmKHiE6ZMQs5heeE/c8eXK+PNllPvmjgAbfnsbpkGZWy8cBpn9w==}
-    engines: {node: '>=4'}
-
   redis@6.2.1:
     resolution: {integrity: sha512-Z9VHtgYs48PiQC77X9O2Er8Hj4T+5BtFjT91/vi5Is1D04N72cA946ZslM1ImJw8ZctFBZWAVjM7S5wJNeHMpg==}
     engines: {node: '>= 20.0.0'}
@@ -1636,9 +1541,6 @@ packages:
   ssh2@1.17.0:
     resolution: {integrity: sha512-wPldCk3asibAjQ/kziWQQt1Wh3PgDFpC0XpwclzKcdT1vql6KeYxf5LIt4nlFkUeR8WuphYMKqUA56X4rjbfgQ==}
     engines: {node: '>=10.16.0'}
-
-  standard-as-callback@2.1.0:
-    resolution: {integrity: sha512-qoRRSyROncaz1z0mvYqIE4lCd9p2R90i6GxW3uZv5ucSu8tU7B5HXUP1gG8pVZsYNVaXjk8ClXHPttLyxAL48A==}
 
   streamx@2.28.1:
     resolution: {integrity: sha512-zEzXb0s5Cds7tqMH6rhZ05lcJydCWiQPEwiNngVqzsxCc962vLY4Uw+mW7od8kDH258k2Uz/JrOkdIAAhSh9VA==}
@@ -1957,8 +1859,6 @@ snapshots:
       '@iconify/types': 2.0.0
       import-meta-resolve: 4.2.0
 
-  '@ioredis/commands@2.0.0': {}
-
   '@isaacs/cliui@8.0.2':
     dependencies:
       string-width: 5.1.2
@@ -2267,7 +2167,7 @@ snapshots:
 
   '@types/ws@8.18.1':
     dependencies:
-      '@types/node': 24.13.4
+      '@types/node': 26.5.1
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     optional: true
@@ -2468,8 +2368,6 @@ snapshots:
       string-width: 4.2.3
       strip-ansi: 6.0.1
       wrap-ansi: 7.0.0
-
-  cluster-key-slot@1.1.1: {}
 
   cluster-key-slot@1.1.2: {}
 
@@ -2728,8 +2626,6 @@ snapshots:
     dependencies:
       robust-predicates: 3.0.3
 
-  denque@2.1.0: {}
-
   docker-compose@1.4.2:
     dependencies:
       yaml: 2.9.1
@@ -2833,17 +2729,6 @@ snapshots:
   internmap@1.0.1: {}
 
   internmap@2.0.3: {}
-
-  ioredis@6.0.0:
-    dependencies:
-      '@ioredis/commands': 2.0.0
-      cluster-key-slot: 1.1.1
-      debug: 4.4.3
-      denque: 2.1.0
-      redis-errors: 1.2.0
-      standard-as-callback: 2.1.0
-    transitivePeerDependencies:
-      - supports-color
 
   is-fullwidth-code-point@3.0.0: {}
 
@@ -3060,8 +2945,6 @@ snapshots:
     dependencies:
       minimatch: 5.1.9
 
-  redis-errors@1.2.0: {}
-
   redis@6.2.1(@opentelemetry/api@1.9.1):
     dependencies:
       '@redis/bloom': 6.2.1(@redis/client@6.2.1(@opentelemetry/api@1.9.1))
@@ -3126,8 +3009,6 @@ snapshots:
     optionalDependencies:
       cpu-features: 0.0.10
       nan: 2.28.0
-
-  standard-as-callback@2.1.0: {}
 
   streamx@2.28.1:
     dependencies:

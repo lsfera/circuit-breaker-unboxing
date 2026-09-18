@@ -2,7 +2,7 @@
   "name": "@egress/rmq",
   "private": true,
   "type": "module",
-  "description": "Effect wrapper over amqplib (AMQP 0-9-1) plus the circuit.control exchange helpers — shared by @egress/aggregator's AmqpControlPlaneSink and @egress/rmq-consumer's daemon fleet.",
+  "description": "Effect wrapper over amqplib (AMQP 0-9-1) plus the generic work-queue naming/options a producer and a competing-consumer fleet share.",
   "exports": {
     "./Client.ts": "./src/Client.ts",
     "./ControlPlane.ts": "./src/ControlPlane.ts",
@@ -13,7 +13,6 @@
     "test:rmq": "node --test 'test/integration/*.test.ts'"
   },
   "dependencies": {
-    "@egress/domain": "workspace:*",
     "amqplib": "^2.0.1",
     "effect": "catalog:"
   },

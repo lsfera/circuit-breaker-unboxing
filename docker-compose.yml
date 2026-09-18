@@ -1,443 +1,129 @@
-# Three Envoy replicas against shared upstreams. The replicas each run their own
-# outlier detection and will legitimately disagree — that divergence is the
-# thing the aggregator exists to resolve.
+# The base scenario: one producer, one broker, a fleet of competing-consumer
+# daemons calling a third party directly. No circuit breaker anywhere in this
+# file — that is the point of this branch. See README.md.
 #
 # Every service also joins the host devcontainer's own external network so it
-# can be reached directly by service name from outside this compose project
-# (e.g. a devcontainer shell), not just from other containers in this stack.
-# `default` remains how services in this project reach each other — nothing
-# about that changes.
+# can be reached directly by service name from outside this compose project.
+# `default` remains how services in this project reach each other.
 networks:
   devcontainer:
     name: devcontainer
     external: true
 
-# ---------------------------------------------------------------------------
-# The measurement envelope.
-#
-# Every number this repo publishes about what the stack costs used to come from
-# a human reading `docker stats` on a machine with nothing limiting it, which
-# makes the number a property of that machine. A container with no ceiling is
-# sized by whatever the host had spare, so the same scenario on sixteen cores
-# and on four produces different numbers and neither of them is wrong.
-#
-# So every service declares one. These are not guesses: each is roughly twice
-# the highest one-second peak `node infra/instrument.mjs demo` measured on
-# 2026-09-12, listed in docs/measurements.md next to the run that produced it.
-# Twice, because a limit that the work actually reaches stops measuring the
-# work and starts measuring the limit — and the harness fails a run in which
-# the kernel throttled anything, precisely so that confusion cannot be quoted.
-#
-# Two of these are sized by something other than headroom:
-#
-# - rabbitmq gets 2g against a 391 MiB peak, because its own flow-control
-#   watermark has to fit *inside* the limit with room to act. The broker does
-#   not read its cgroup limit under cgroup v2 — it sized the watermark from the
-#   host's 48 GiB — so infra/rabbitmq.conf declares 1 GiB explicitly. Without
-#   both numbers the container limit is reached by the OOM killer before the
-#   broker ever refuses a publish, in the one component whose backlog is the
-#   thing being demonstrated.
-# - rmq-daemon gets 1.5 cpus against a fleet-wide mean near 0.03, because
-#   exactly one daemon — the one the broker elected — runs the redrive, and
-#   that burst is what the ramp back is made of. It is the only container here
-#   whose peak is an order of magnitude above its own mean.
-#
-# `deploy.resources` is honoured by `docker compose up` outside swarm; the
-# limits are visible in `docker inspect` as NanoCpus and Memory, and
-# infra/instrument.mjs refuses to produce a record from a stack missing them.
-x-limits-tiny: &limits-tiny { resources: { limits: { cpus: "0.25", memory: 128m } } }
+# Resource limits, same rationale as the full system this branch was pruned
+# from: a container with no ceiling is sized by whatever the host had spare,
+# which makes any number this stack publishes a property of the laptop it ran
+# on rather than of the scenario. These are starting points, not measured
+# peaks — nothing in this branch has been profiled the way the full system's
+# `docs/measurements.md` was.
 x-limits-small: &limits-small { resources: { limits: { cpus: "0.50", memory: 256m } } }
 x-limits-node: &limits-node { resources: { limits: { cpus: "1.00", memory: 512m } } }
 x-limits-daemon: &limits-daemon { resources: { limits: { cpus: "2.00", memory: 512m } } }
-# The two load fixtures get a whole core each against peaks of 0.23 and 0.15,
-# and not for headroom's sake: they are what the system under test is measured
-# *through*. A throttled generator sends fewer requests, so Envoy sees a
-# different upstream and the run measures the fixture's ceiling. Both of them
-# throttled at 0.50 — the quota is enforced per 100ms, and a second that
-# averages 0.23 cpus still contains tenths that do not.
 x-limits-driver: &limits-driver { resources: { limits: { cpus: "1.00", memory: 256m } } }
 x-limits-store: &limits-store { resources: { limits: { cpus: "1.00", memory: 768m } } }
 x-limits-broker: &limits-broker { resources: { limits: { cpus: "2.00", memory: 2g } } }
-# Envoy and the producer are the first two ceilings infra/load-sweep.mjs reaches,
-# so a sweep can lift them without changing the envelope everything else is measured in.
-x-limits-envoy: &limits-envoy { resources: { limits: { cpus: "${ENVOY_CPUS:-0.50}", memory: 256m } } }
 x-limits-producer: &limits-producer { resources: { limits: { cpus: "${PRODUCER_CPUS:-1.00}", memory: 512m } } }
 
-# Shared by every daemon replica. It stayed an anchor after the fleet collapsed
-# into one scaled service because the producer and the daemons still share most
-# of it, and because YAML's `<<:` replaces a key wholesale rather than merging
-# into it — anything that redeclared `environment:` would otherwise drop every
-# other variable.
-# Tracing is opt-in, and this is the opt. Unset on the host, this interpolates
-# to the empty string, which @egress/tracing treats as "no endpoint" and
-# installs no tracer at all — so the default stack traces nothing and pays
-# nothing. To turn it on, start the tracing profile as well:
-#
-#   OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 \
-#     docker compose --profile tracing up -d
-#
-# Pointed at the collector rather than at Jaeger directly, because the sampling
-# decision is made there: every process exports every span and
-# infra/otel-collector.yaml decides what is worth keeping once each trace is
-# complete.
-x-tracing-env: &tracing-env
-  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT-}
-
-x-daemon-env: &daemon-env
-  <<: *tracing-env
-  RMQ: rabbitmq:5672
-  API_ID: payments-provider
-  # One address, no replica names, no admin ports — a daemon is a client of
-  # the egress listener and knows nothing about Envoy's topology, exactly
-  # like infra/traffic-generator.mjs.
-  EGRESS_ADDR: http://envoy:10000
-  API_PATH: /payments
-  # Each daemon serves the same /metrics route the aggregator does, from the
-  # same in-process effect registry. Not published to the host: Prometheus
-  # scrapes them by service name on this network (infra/monitoring/
-  # prometheus.yml), so five identical port numbers never collide.
-  METRICS_PORT: "9464"
-  # Self-healing for the dead-letter queue: when the circuit closes, one
-  # daemon — elected by the broker on a second SAC queue — replays
-  # payments-provider.work.dead back onto the work queue. On here because the
-  # demo is precisely about recovering from a third-party outage; off by
-  # default in code, because whether stale work is still worth doing is a
-  # question about the workload rather than about the transport.
-  REDRIVE_ON_CLOSE: "true"
-  REDRIVE_MAX: "5000"
-
 services:
-  # Stays on the stock Node image with a single file bind-mounted: this is a
-  # fake third party, not part of the product, and it has no dependencies to
-  # install. Putting it in the application image would ship the test fixture
-  # inside the artifact.
+  # A fake third party: configurable failure rate, hang, connection reset or
+  # delay via POST /__fail, and a per-message audit trail via /__audit. Not
+  # part of the product, so it stays a bind-mounted file on the stock Node
+  # image with no dependencies to install.
   flaky-upstream:
     image: &node-image node:26-alpine@sha256:ef24c5053d50fdc3e4e56eb4e7ddb7861874ab0fdc797046ba897581deb8e868
     working_dir: /app
     volumes: ["$HOST_WORKSPACE_FOLDER/infra/flaky-upstream.mjs:/app/flaky-upstream.mjs:ro"]
     command: node flaky-upstream.mjs
-    # One port per upstream endpoint: 8080-8085 payments-provider, 8090-8093
-    # shipping-rates, 8094-8096 tax-calc — the same endpoint counts the
-    # simulated fleet uses, so both FleetSource layers can reach the same
-    # states. See infra/flaky-upstream.mjs for why one host per cluster
-    # cannot. Two ranges rather than one because 8088/8089 belong to the
-    # aggregator pair below, and a contiguous range through them fails to
-    # bind.
-    ports: ["8080-8085:8080-8085", "8090-8096:8090-8096"]
+    # Only payments-provider's range: this scenario is one API, one address —
+    # there is no proxy here to spread load across the other five hosts the
+    # full system's Envoy config ejects individually.
+    ports: ["8080-8085:8080-8085"]
     restart: unless-stopped
     networks: [default, devcontainer]
     deploy: *limits-driver
 
-  # envoy-01/02 merge in everything from envoy-00 via the &envoy/<<: anchor —
-  # same image, config and command — and only override the admin port mapping,
-  # so all three run identically and stay in sync by construction.
-  envoy-00: &envoy
-    image: envoyproxy/envoy:v1.39-latest@sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4
-    volumes: ["$HOST_WORKSPACE_FOLDER/infra/envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro"]
-    # List (exec) form, so these are argv straight to the envoy binary — no
-    # shell involved, so none of the sh -c/YAML-folding pitfalls below apply.
-    # --service-node is what a pushed stats stream identifies itself by: the
-    # aggregator polls by URL and therefore names replicas itself, but a replica
-    # that pushes has to say who it is, once, in the first message of the
-    # stream. Each replica overrides this; without it all three arrive as one.
-    command: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "egress", "--service-node", "envoy-00"]
-    restart: unless-stopped
-    depends_on: [flaky-upstream]
-    ports: ["19001:9901"]
-    # All three replicas answer to this one alias on the data-plane port.
-    # Anything that is a *client* of the egress listener (traffic generator,
-    # a real service) resolves "envoy" and never learns there are three of
-    # them or what they're individually named — that topology stays known to
-    # exactly one thing: the aggregator, which polls envoy-00/01/02's admin
-    # ports by name below because per-replica polling is its actual job.
-    networks:
-      default:
-        aliases: [envoy]
-      devcontainer: {}
-    deploy: *limits-envoy
-  envoy-01:
-    <<: *envoy
-    command: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "egress", "--service-node", "envoy-01"]
-    ports: ["19002:9901"]
-  envoy-02:
-    <<: *envoy
-    command: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "egress", "--service-node", "envoy-02"]
-    ports: ["19003:9901"]
-
-  # Backs LeaderElection/CheckpointStore (Coordination.ts) for the two
-  # aggregator instances below — no bind mount, so this one needed nothing
-  # special to run even before HOST_WORKSPACE_FOLDER was set correctly.
-  redis:
-    image: redis:8-alpine@sha256:becdda6c7f4b3fb42e42fd7f120bbf5c54c4caaaf16f26da24e4563d2c1f0576
-    # AOF, because this is the checkpoint store. Without persistence a restart
-    # loses every checkpoint, and a newly promoted leader resumes from nothing
-    # rather than from where the last one stopped — a sequence reset, which is
-    # the one thing the published contract promises never happens. Fencing is
-    # safe across a wipe (tokens carry an epoch, see Coordination.ts), but safe
-    # is not the same as intact.
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes: ["redis-data:/data"]
-    restart: unless-stopped
-    networks: [default, devcontainer]
-    deploy: *limits-small
-
-  # The control plane and the work queue both live here, over AMQP 0-9-1
-  # (docs/decisions/004-downgrade-to-amqp-0-9-1.md). 4.x for quorum queues'
-  # `x-delivery-limit`, which holds the redelivery budget in the queue. Management
-  # UI on http://localhost:15672 (guest/guest) is how you watch
-  # payments-provider.work's depth climb during an outage and drain on the
-  # ramp back — the single most legible view of what this fleet does.
+  # The control plane and the work queue both live here, over AMQP 0-9-1.
+  # Management UI on http://localhost:15672 (guest/guest) is how you watch
+  # payments-provider.work's depth climb during an outage — the single most
+  # legible view of what this fleet does, or rather does not do, about it.
   rabbitmq:
     image: rabbitmq:4.3-management-alpine@sha256:b3b8b7f95f5382a19f9ea33540e604f30aad081d37ad9aba72255135765373a1
     # The broker's data lives under its node name, rabbit@<hostname>, and a
     # container's default hostname is its id. Without this, every recreation
-    # booted a new, empty node beside the last one's queues: the volume held
-    # four such node directories before it was pinned.
+    # boots a new, empty node beside the last one's queues.
     hostname: rabbitmq
     # 15692 is rabbitmq_prometheus, enabled by default in the management
-    # image — the per-queue depth on the Grafana dashboard comes from there,
-    # so the queue filling and draining is visible in the same place as the
-    # circuit that caused it, not only in the management UI.
+    # image — queue depth and dead-letter growth come from there.
     ports: ["5672:5672", "15672:15672", "15692:15692"]
-    # Everything downstream gates on this rather than on container start:
-    # a daemon that connects before the broker is listening just dies, and
-    # `depends_on` alone does not wait for readiness.
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s
       timeout: 5s
       retries: 20
-    # Durable quorum queues keep their messages across a container being
-    # recreated only if the data directory outlives the container *and* the
-    # node name does not change — the volume here, `hostname` above. Neither is
-    # a queue argument.
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
       # conf.d rather than replacing rabbitmq.conf: the image writes its own
-      # there from the RABBITMQ_* environment, and this only adds to it. See
-      # the file for why the broker cannot be left to work its own limit out.
+      # there from the RABBITMQ_* environment, and this only adds to it.
       - $HOST_WORKSPACE_FOLDER/infra/rabbitmq.conf:/etc/rabbitmq/conf.d/10-egress.conf:ro
     restart: unless-stopped
     networks: [default, devcontainer]
     deploy: *limits-broker
 
-  # Two real instances against the shared Redis lease, not one — this is
-  # what makes HA a demonstrated property of the stack instead of a design
-  # only exercised in tests. `egress_aggregator_is_leader` on whichever one
-  # is currently active reads 1; the other reads 0 and is doing nothing but
-  # trying to acquire. Kill the leader's container and the other takes over
-  # within lease_ttl_ms, resuming `sequence` from its last checkpoint rather
-  # than restarting at zero — the same property Coordination.test.ts and
-  # RedisCoordination.test.ts prove, now visible from outside the process.
-  aggregator: &aggregator
-    # One image for every process this repo runs — see Dockerfile. Built here
-    # rather than bind-mounted: what runs is an artifact with its dependencies
-    # already inside it, so cold start is a container start rather than a pnpm
-    # install, and the thing that boots is the thing that was built.
+  # The load: a steady stream onto payments-provider.work, never backing off,
+  # never reading anything about whether the third party is healthy — because
+  # there is nothing yet to read. See packages/rmq-producer/src/producer.ts.
+  rmq-producer: &rmq-node
     image: &app-image egress-breaker:dev
     build: &app-build
       context: .
       dockerfile: Dockerfile
-    # Runs main.ts against the three real Envoy replicas, which push their
-    # stats here over gRPC (not the sim fleet — --source=envoy-push is what
-    # makes this stack's outlier detection real instead of simulated), with
-    # Redis-backed HA instead of the in-memory default, since two instances
-    # are genuinely competing here. --source=envoy is the polling alternative;
-    # see "Ingestion" in README.md for the measurement that chose between them.
-    #
-    # Keep node's args after "src/main.ts" on this one line. With YAML `>`
-    # folding, only lines indented the SAME as the first content line
-    # ("sh -c ...") get their newline folded to a space; lines indented
-    # further keep a literal newline. Splitting --source=... /
-    # --envoy=... onto their own (more-indented) lines silently turned them
-    # into separate shell commands that never reached node's argv — the
-    # aggregator ran in sim mode with no error, so nothing looked wrong until
-    # a demo run against real Envoy never tripped the circuit.
-    # --rmq mounts AmqpControlPlaneSink *alongside* the webhook sink, so the
-    # SSE/subscriber demo is untouched and the daemon fleet below also gets
-    # every event on circuit.control. Only the leader publishes, so the two
-    # instances never double-deliver.
-    command: >
-      node packages/aggregator/src/main.ts --source=envoy-push --push-port=9900 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-1
-    # Restarting matters more here than it looks: a killed leader whose
-    # container never comes back leaves the survivor with nowhere to fail
-    # over to next time, so the second failover in a demo has no candidate.
-    restart: unless-stopped
-    depends_on:
-      envoy-00: {condition: service_started}
-      envoy-01: {condition: service_started}
-      envoy-02: {condition: service_started}
-      redis: {condition: service_started}
-      rabbitmq: {condition: service_healthy}
-    ports: ["8088:8088"]
-    networks: [default, devcontainer]
-    deploy: *limits-node
-
-  aggregator-2:
-    <<: *aggregator
-    command: >
-      node packages/aggregator/src/main.ts --source=envoy-push --push-port=9900 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-2
-    ports: ["8089:8088"]
-
-  # The scenario from docs/rmq-control-plane.md, running for real: a producer
-  # flooding payments-provider.work, and five competing consumers draining it
-  # through the egress listener, one third-party call per message.
-  #
-  # Five separate containers, not one process simulating five daemons. That
-  # matters twice over: DaemonPolicy's active-count decision is only
-  # meaningful if the daemons are independently killable, and the HALF_OPEN
-  # prober election is x-single-active-consumer contended by five real
-  # connections rather than five fibers sharing one.
-  rmq-producer: &rmq-node
-    image: *app-image
-    build: *app-build
-    command: >
-      node packages/rmq-producer/src/main.ts
-    environment:
-      <<: *tracing-env
+    command: node packages/rmq-producer/src/main.ts
+    environment: &rmq-node-env
       RMQ: rabbitmq:5672
       API_ID: payments-provider
-      # Overridable so infra/load-sweep.mjs can step the arrival rate without a second producer.
       RATE_PER_SECOND: ${RATE_PER_SECOND:-200}
       METRICS_PORT: "9464"
-    # Restarting is what makes the crash-fast stance coherent. Less reaches it
-    # than it used to: the AMQP client reconnects and rebuilds its own topology
-    # and consumers (docs/decisions/005-connection-recovery.md), so this covers
-    # what recovery cannot — a broker unreachable for about five minutes, and
-    # any unhandled defect. Without a policy here, "fatal" just meant "stays
-    # dead".
     restart: unless-stopped
     depends_on: &rmq-depends
       rabbitmq: {condition: service_healthy}
     networks: [default, devcontainer]
     deploy: *limits-producer
 
-  # One service, scaled. There is no index and no fleet size to keep in step
-  # any more — a daemon applies the published fraction to its own position in
-  # the hash space — so `--scale rmq-daemon=N` is the whole of resizing the
-  # fleet, with no restart of the daemons already running. See ADR 013.
-  #
-  #   docker compose up -d --scale rmq-daemon=12
-  #
-  # INSTANCE_ID is the container hostname: unique per replica without compose
-  # having to name them, stable across a restart of that container, and what
-  # names the control queue. A replaced container takes a new identity and a new
-  # position, and the queue it leaves behind expires on its own.
-  rmq-daemon:
+  # One service, scaled — `docker compose up -d --scale rmq-consumer=N` is
+  # the whole of resizing the fleet. Every replica is anonymous: there is no
+  # hash-space position, no floor, no election, because nothing here
+  # coordinates the fleet at all. Prometheus tells replicas apart by the IP
+  # DNS hands back for the service name (see infra/monitoring/prometheus.yml).
+  rmq-consumer:
     <<: *rmq-node
-    command: >
-      sh -c 'exec node packages/rmq-consumer/src/main.ts
-      --instance-id "$$(hostname)"'
+    command: node packages/consumer/src/main.ts
     environment:
-      <<: *daemon-env
+      <<: *rmq-node-env
+      # One address, the fake third party directly — no proxy, no LB we
+      # control. This is the address a real client of a real third party
+      # would be given: everything behind it is opaque.
+      EGRESS_ADDR: http://flaky-upstream:8080
+      API_PATH: /payments
+      MAX_IN_FLIGHT: "20"
     deploy:
       replicas: 5
       <<: *limits-daemon
-    depends_on:
-      <<: *rmq-depends
-      envoy-00: {condition: service_started}
+    depends_on: *rmq-depends
 
-  # Without this, /__fail changes nothing: outlier detection only reacts to
-  # requests it actually sees. Part of the default `docker compose up`, not
-  # optional — same role flaky-upstream itself plays.
-  traffic:
-    image: *node-image
-    working_dir: /app
-    volumes: ["$HOST_WORKSPACE_FOLDER/infra/traffic-generator.mjs:/app/traffic-generator.mjs:ro"]
-    command: node traffic-generator.mjs
-    environment:
-      # One address, same one any real client would use. The generator
-      # discovers the replicas behind it via DNS (see the alias on the envoy
-      # services above) rather than being handed their names directly.
-      EGRESS_ADDR: http://envoy:10000
-    restart: unless-stopped
-    depends_on: [envoy-00, envoy-01, envoy-02]
-    networks: [default, devcontainer]
-    deploy: *limits-driver
-
-  # Runs demo/driver.ts against this stack, end to end: `docker compose
-  # --profile demo run --rm demo` (or `-- shipping-rates` for a different API).
-  # Not part of plain `docker compose up` — this is a one-shot, not a daemon.
-  demo:
-    image: *app-image
-    build: *app-build
-    # Runs the driver (see the module comment in
-    # demo/driver.ts for what it does). No extra node args here, but if any
-    # get added, keep them on this same line — see the aggregator command
-    # above for why a more-indented continuation line breaks silently.
-    command: >
-      node packages/demo/src/driver.ts
-    environment:
-      # Both instances, because only the leader publishes and which one that
-      # is depends on who won the lease — the driver resolves it at startup.
-      AGGREGATOR: http://aggregator:8088,http://aggregator-2:8088
-      FAILURE_MODE: envoy
-      FLAKY_UPSTREAM: http://flaky-upstream
-      # Lets the driver assert the daemon fleet's reaction too, not just the
-      # aggregator's published stream — it reads egress_daemon_* and the
-      # broker's queue depths back out of Prometheus. Unset, that step is
-      # skipped rather than failed.
-      PROMETHEUS: http://prometheus:9090
-    # No restart policy: this one is a one-shot that is supposed to exit.
-    depends_on:
-      aggregator: {condition: service_started}
-      traffic: {condition: service_started}
-    profiles: [demo]
-    networks: [default, devcontainer]
-    deploy: *limits-node
-
-  # Scrapes the aggregator's /metrics (same registry the console reads from)
-  # plus each Envoy's native /stats/prometheus. See monitoring/prometheus.yml.
+  # Scrapes RabbitMQ's own Prometheus plugin and both fleets' /metrics. See
+  # infra/monitoring/prometheus.yml.
   prometheus:
     image: prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - $HOST_WORKSPACE_FOLDER/infra/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
-      # Otherwise every incident this stack demonstrates is gone the moment the
-      # container is recreated, including the ones worth comparing against.
       - prometheus-data:/prometheus
-    # Lets Prometheus also reach `pnpm start` running on the host, so the same
-    # stack works for the sim-fleet demo, not just this docker-compose one.
-    extra_hosts: ["host.docker.internal:host-gateway"]
     restart: unless-stopped
     ports: ["9090:9090"]
     networks: [default, devcontainer]
     deploy: *limits-store
 
-  # Where alerts.yml's rules actually go. Prometheus evaluated them and routed
-  # them nowhere until now, which is the same failure shape the rules are about:
-  # something that looks fine because it is running.
-  alertmanager:
-    image: prom/alertmanager:v0.34.0@sha256:690c7b525f4367aa91f73e2f91c632206d32e97c6384bdbf2fb7a861b420340d
-    volumes:
-      - $HOST_WORKSPACE_FOLDER/infra/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
-    restart: unless-stopped
-    depends_on: [alert-sink]
-    ports: ["9093:9093"]
-    networks: [default, devcontainer]
-    deploy: *limits-tiny
-
-  # Stands in for Slack or PagerDuty: it logs what it is sent, so routing is
-  # something you can watch rather than infer. Not the product, so it stays a
-  # bind-mounted file on the stock Node image like the other fixtures.
-  alert-sink:
-    image: *node-image
-    working_dir: /app
-    volumes: ["$HOST_WORKSPACE_FOLDER/infra/alert-sink.mjs:/app/alert-sink.mjs:ro"]
-    command: node alert-sink.mjs
-    restart: unless-stopped
-    networks: [default, devcontainer]
-    deploy: *limits-tiny
-
   grafana:
     image: grafana/grafana:13.2.1@sha256:f772d434e8fab0049deb2b1b30abd43342bcfca1537614aa8d36080232cf4283
-    environment:
-      GF_AUTH_ANONYMOUS_ENABLED: "true"
-      # Viewer, not Editor: the dashboard is provisioned from a file in this
-      # repo, and an anonymous visitor being able to overwrite it means the
-      # thing you demo and the thing in git quietly stop matching.
-      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
-      GF_AUTH_DISABLE_LOGIN_FORM: "true"
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
@@ -448,39 +134,7 @@ services:
     networks: [default, devcontainer]
     deploy: *limits-node
 
-  # Where every span goes, and where most of them stop. See
-  # infra/otel-collector.yaml for the policies — errors and slow traces kept in
-  # full, a 2% baseline of the ordinary, everything else dropped once the trace
-  # is complete and it is clear which it was.
-  otel-collector:
-    profiles: [tracing]
-    image: otel/opentelemetry-collector-contrib:0.160.0@sha256:799dc6cf12c96192af37b5bdba804da8c10b3bc563b43cb90c3f3c58d9572ad6
-    command: ["--config=/etc/otel/config.yaml"]
-    volumes:
-      - $HOST_WORKSPACE_FOLDER/infra/otel-collector.yaml:/etc/otel/config.yaml:ro
-    restart: unless-stopped
-    depends_on: [jaeger]
-    networks: [default, devcontainer]
-    deploy: *limits-small
-
-  # The trace view. Jaeger v2, whose default configuration is all-in-one with
-  # in-memory storage and OTLP on 4317/4318 — right for a demo and wrong for
-  # anything else, since losing traces on restart costs nothing here and would
-  # cost a lot in production. v1, and its all-in-one image, is end of life.
-  jaeger:
-    profiles: [tracing]
-    image: jaegertracing/jaeger:2.20.0@sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8
-    restart: unless-stopped
-    ports: ["16686:16686"]
-    networks: [default, devcontainer]
-    deploy: *limits-store
-
-# Named, not bind-mounted: this is service state, not repo content, and it must
-# survive a container being recreated. Everything stateful in the stack has one
-# now — before this, "durable" was a property of a queue in a broker whose
-# entire data directory lived in a container's writable layer.
 volumes:
-  redis-data:
   rabbitmq-data:
   prometheus-data:
   grafana-data:

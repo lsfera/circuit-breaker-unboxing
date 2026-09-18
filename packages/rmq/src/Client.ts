@@ -917,8 +917,8 @@ export const makeRmq = Effect.fnUntraced(function* (
  * its defects are just as invisible to `Layer.launch` as a lost connection
  * would be without this function. A caller with such a fiber catches its
  * defect, fails a `Deferred` from that handler, and passes `Deferred.await`
- * of it here — mirroring `@egress/aggregator`'s `Fatal`-deferred pattern,
- * which has no `Rmq` to race against and so cannot use this function.
+ * of it here — the same `Fatal`-deferred pattern every entry point in this
+ * repo uses for its own long-running fiber.
  */
 export const launchWithRmq = <ROut, E, RIn, E2 = never>(
   layer: Layer.Layer<ROut | Rmq, E, RIn>,

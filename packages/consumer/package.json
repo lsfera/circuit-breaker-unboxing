@@ -1,0 +1,16 @@
+{
+  "name": "@egress/consumer",
+  "private": true,
+  "type": "module",
+  "description": "The naive competing-consumer fleet: pulls off <apiId>.work and calls the third party directly, with no circuit awareness at all. The base scenario the article series starts from, before any breaker exists.",
+  "scripts": {
+    "start": "node src/main.ts"
+  },
+  "dependencies": {
+    "@effect/platform-node": "catalog:",
+    "@egress/config": "workspace:*",
+    "@egress/rmq": "workspace:*",
+    "@egress/tracing": "workspace:*",
+    "effect": "catalog:"
+  }
+}

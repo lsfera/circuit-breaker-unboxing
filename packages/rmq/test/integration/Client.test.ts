@@ -22,9 +22,8 @@ import type { Consumer } from "../../src/Client.ts";
  * are no publisher links to race, so they pass by construction; they stay
  * because "by construction" is a claim, and this is the thing that checks it.
  *
- * Opt-in (`pnpm run test:rmq`), same shape as @egress/aggregator's Redis
- * integration test: needs Docker, runs against a real broker, and skips
- * rather than fails when Docker is unavailable. `harness.ts` owns which
+ * Opt-in (`pnpm run test:rmq`): needs Docker, runs against a real broker,
+ * and skips rather than fails when Docker is unavailable. `harness.ts` owns which
  * broker and how the skip works.
  */
 

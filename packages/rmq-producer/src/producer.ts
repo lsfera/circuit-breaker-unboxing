@@ -45,14 +45,11 @@ export const runProducer = Effect.fnUntraced(function* (cfg: ProducerConfig) {
     // inside a 100ms tick — measured at 165/s against a target of 200. AMQP
     // pipelines confirms, so having the whole batch in flight at once is the
     // ordinary way to use them. Nothing downstream cares in what order these
-    // particular messages arrive: they are independent units of work, and
-    // the ordering this repo does guarantee is per-API on circuit.control,
-    // which the aggregator publishes one at a time.
-    // No idempotency key here: it is not a producer concern. The consumer
-    // mints one on a message's first call attempt and every retry of that
-    // attempt — a broker requeue or the daemon's own republish — reuses it,
-    // which is the only way the key protects the third party. See
-    // packages/rmq-consumer/src/Attempts.ts.
+    // particular messages arrive: they are independent units of work.
+    // No idempotency key here: it is not a producer concern. `n` is what
+    // makes one, downstream — a broker requeue redelivers this exact body, so
+    // whoever calls the third party can derive a stable key straight from it
+    // without minting or carrying one forward. See packages/consumer/src/consumer.ts.
     const batch = Array.from({ length: perTick }, () => JSON.stringify({ apiId: cfg.apiId, n: sent++ }));
     yield* Effect.forEach(
       batch,

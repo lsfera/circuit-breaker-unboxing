@@ -1,0 +1,95 @@
+{
+ "title": "Base scenario — no breaker yet",
+ "uid": "base-scenario",
+ "schemaVersion": 39,
+ "version": 1,
+ "editable": true,
+ "refresh": "2s",
+ "time": {
+  "from": "now-10m",
+  "to": "now"
+ },
+ "templating": {
+  "list": [
+   {
+    "name": "DS_PROMETHEUS",
+    "type": "datasource",
+    "query": "prometheus",
+    "current": {},
+    "hide": 0
+   }
+  ]
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "timeseries",
+   "title": "Work queue depth — payments-provider.work",
+   "description": "Messages ready plus in flight. Only climbs when the third party fails slowly enough to pin every consumer's in-flight slots (e.g. flaky-upstream's hang mode) — a fast failure dead-letters before a backlog can form. See the dead-letter panel for that case.",
+   "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+   "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+   "targets": [
+    {
+     "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+     "expr": "rabbitmq_detailed_queue_messages_ready{queue=\"payments-provider.work\"}",
+     "legendFormat": "ready",
+     "refId": "A"
+    },
+    {
+     "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+     "expr": "rabbitmq_detailed_queue_messages_unacked{queue=\"payments-provider.work\"}",
+     "legendFormat": "unacked (in flight)",
+     "refId": "B"
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "type": "timeseries",
+   "title": "Dead-letter queue depth — payments-provider.work.dead",
+   "description": "Messages that exhausted the broker's own delivery limit (x-delivery-limit, 3 attempts). Nothing here recovers them — that is a later article's problem.",
+   "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+   "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+   "targets": [
+    {
+     "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+     "expr": "rabbitmq_detailed_queue_messages_ready{queue=\"payments-provider.work.dead\"}",
+     "legendFormat": "dead-lettered",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 3,
+   "type": "timeseries",
+   "title": "Calls to the third party, by outcome",
+   "description": "egress_consumer_calls_total, from the fleet's own /metrics. No circuit state to break this down by — only whether each daemon's own last call worked.",
+   "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+   "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+   "targets": [
+    {
+     "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+     "expr": "sum by (outcome) (rate(egress_consumer_calls_total[1m]))",
+     "legendFormat": "{{outcome}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "type": "timeseries",
+   "title": "Active consumers on the work queue",
+   "description": "The broker's own count — should track --scale rmq-consumer=N. A gap between this and the replica count means a daemon has stopped consuming.",
+   "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+   "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+   "targets": [
+    {
+     "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+     "expr": "rabbitmq_detailed_queue_consumers{queue=\"payments-provider.work\"}",
+     "legendFormat": "consumers",
+     "refId": "A"
+    }
+   ]
+  }
+ ]
+}

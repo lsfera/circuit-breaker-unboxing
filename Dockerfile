@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
 
-# One image for every process this repo runs: the aggregator pair, the RabbitMQ
-# producer and daemon fleet, the subscriber, and the demo driver. They differ
-# only by argv, which is what `command:` in docker-compose.yml is for — an
-# image per package would be five images that install the same workspace.
+# One image for every process this repo runs: the RabbitMQ producer and the
+# consumer fleet. They differ only by argv, which is what `command:` in
+# docker-compose.yml is for — an image per package would be two images that
+# install the same workspace.
 #
 # Pinned by digest, not by tag. `node:26-alpine` moves, and an image that moves
 # is an image nobody can reproduce: the whole point of building an artifact is
@@ -29,14 +29,10 @@ RUN npm install --global "$(node -p 'require("./package.json").packageManager')"
 # missing here installs none of its dependencies, and the failure surfaces as
 # ERR_MODULE_NOT_FOUND at runtime rather than as a build error. Adding
 # @egress/tracing is exactly how that was learned.
-COPY packages/aggregator/package.json packages/aggregator/
+COPY packages/consumer/package.json packages/consumer/
 COPY packages/config/package.json packages/config/
-COPY packages/demo/package.json packages/demo/
-COPY packages/domain/package.json packages/domain/
 COPY packages/rmq/package.json packages/rmq/
-COPY packages/rmq-consumer/package.json packages/rmq-consumer/
 COPY packages/rmq-producer/package.json packages/rmq-producer/
-COPY packages/subscriber/package.json packages/subscriber/
 COPY packages/tracing/package.json packages/tracing/
 # --prod drops typescript and testcontainers, which exist for `pnpm run check`
 # and the opt-in integration suites and have no business in a runtime image.
@@ -72,7 +68,7 @@ COPY --chown=node:node packages ./packages
 # Nothing here writes to disk, so it has no reason to be root.
 USER node
 
-# Overridden per service in docker-compose.yml. The default is the aggregator
+# Overridden per service in docker-compose.yml. The default is the consumer
 # because a container started with no arguments should do the thing this repo
-# is named after.
-CMD ["node", "packages/aggregator/src/main.ts"]
+# is named after: pull work off the queue and call the third party.
+CMD ["node", "packages/consumer/src/main.ts"]
