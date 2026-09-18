@@ -36,9 +36,19 @@ docker compose up -d --scale rmq-consumer=12   # resize the fleet, no restart ne
 - RabbitMQ management UI: <http://localhost:15672> (guest/guest) — watch
   `payments-provider.work`'s depth climb during an outage and drain once it
   ends.
-- Grafana: <http://localhost:3000> — anonymous viewer access, no login
-  needed — a small dashboard (queue depth, dead-letter growth, calls by
-  outcome, active consumers).
+- Grafana: <http://localhost:3000/d/base-scenario/base-scenario-e28094-no-breaker-yet>
+  — anonymous viewer access, no login needed. (Plain `:3000` lands on
+  Grafana's own "Welcome" screen, not this dashboard — Grafana 13's
+  anonymous Viewer role can't be granted the permission a *default home
+  dashboard* needs, so there's no way to make `:3000` redirect here without
+  requiring login. Use the direct link, or `Dashboards` in the left nav.)
+  Panels: work-queue depth, dead-letter-queue depth, calls by outcome,
+  active consumers.
+- Grafana's own nav bar fires two calls (`/api/user/teams`,
+  `/api/user/stars`) that need a real signed-in user and 401 for an
+  anonymous session — a known rough edge in Grafana's anonymous-auth mode,
+  not something this compose file controls. It shows as a stray toast on
+  first load; the dashboard and its data are unaffected.
 - Prometheus: <http://localhost:9090>.
 
 ## Injecting a failure
