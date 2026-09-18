@@ -1,10 +1,14 @@
 {
+  "permissions": {
+    "allow": [
+      "Skill(update-config)",
+      "Skill(update-config:*)"
+    ]
+  },
   "enabledMcpjsonServers": [
-    "shadcn",
     "memory",
     "github",
-    "docker",
-    "better-auth"
+    "docker"
   ],
   "disabledMcpjsonServers": [
     "exa"

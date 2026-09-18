@@ -2,6 +2,9 @@
   "attribution": {
     "commit": ""
   },
+  "env": {
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "55"
+  },
   "permissions": {
     "allow": [
       "Bash",
@@ -25,5 +28,11 @@
         "url": "https://github.com/wshobson/agents.git"
       }
     }
+  },
+  "autoMode": {
+    "allow": [
+      "$defaults",
+      "Managing the local docker-compose stack for this repo's own devcontainer (docker compose stop/start/restart/up/down, docker run/exec/volume against services in /workspace/docker-compose.yml) — this is the user's own local dev environment, not a shared/production workload."
+    ]
   }
 }
