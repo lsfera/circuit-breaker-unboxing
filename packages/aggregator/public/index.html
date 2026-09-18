@@ -78,16 +78,61 @@ aside{background:var(--panel);border:1px solid var(--rule);position:sticky;top:1
 .t-move{display:block;margin-top:.15rem}
 .snap{color:var(--muted)}
 .empty{padding:1.5rem 1.1rem;color:var(--muted);font-size:13px}
+
+/* Attention view (docs/decisions/015, step 3): a thousand APIs shown as
+   counts plus a capped, ranked list, not a thousand cards. */
+.modetoggle{margin-left:auto;font:400 13px/1 var(--sans);background:var(--panel);
+  color:var(--ink);border:1px solid var(--rule);padding:.45rem .8rem;cursor:pointer}
+.modetoggle:hover{border-color:var(--muted)}
+
+.summary{background:var(--panel);border:1px solid var(--rule);padding:.85rem 1.1rem;
+  margin-bottom:.85rem;font:500 14px/1.5 var(--mono);display:flex;gap:1.1rem;flex-wrap:wrap}
+.summary span[data-state=CLOSED]{color:var(--closed)}
+.summary span[data-state=DEGRADED]{color:var(--degraded)}
+.summary span[data-state=OPEN]{color:var(--open)}
+.summary span[data-state=HALF_OPEN]{color:var(--half)}
+.truncnote{margin:0 0 .85rem;padding:.6rem 1.1rem;background:#fdf6e6;
+  border:1px solid var(--rule);font:400 13px/1.4 var(--sans);color:var(--degraded)}
+
+.alist{list-style:none;margin:0;padding:0}
+.arow{background:var(--panel);border:1px solid var(--rule);border-left:5px solid var(--rule);
+  margin-bottom:.5rem}
+.arow[data-state=CLOSED]{border-left-color:var(--closed)}
+.arow[data-state=DEGRADED]{border-left-color:var(--degraded)}
+.arow[data-state=OPEN]{border-left-color:var(--open)}
+.arow[data-state=HALF_OPEN]{border-left-color:var(--half)}
+.arow.flash{animation:flash .7s ease-out}
+@media(prefers-reduced-motion:reduce){.arow.flash{animation:none}}
+.asummary{width:100%;display:flex;align-items:baseline;gap:.75rem;padding:.7rem 1.1rem;
+  background:none;border:0;cursor:pointer;font:inherit;color:inherit;text-align:left}
+.asummary:hover{background:#f6f8fa}
+.asummary .name{flex:0 0 auto}
+.asummary .astate{font:600 13px/1 var(--sans);letter-spacing:-.01em;flex:0 0 auto}
+.arow[data-state=CLOSED] .astate{color:var(--closed)}
+.arow[data-state=DEGRADED] .astate{color:var(--degraded)}
+.arow[data-state=OPEN] .astate{color:var(--open)}
+.arow[data-state=HALF_OPEN] .astate{color:var(--half)}
+.asummary .why{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.asummary .achanged{flex:0 0 auto;color:var(--muted)}
+.adetail{padding:0 1.25rem 1.1rem;border-top:1px solid var(--rule)}
+.adetail .strip{margin-top:1rem}
 </style>
 </head>
 <body>
 <header>
   <h1>Egress circuit breakers</h1>
   <span class="meta" id="meta">connecting…</span>
+  <button type="button" id="modeToggle" class="modetoggle">Attention view →</button>
 </header>
 
 <main>
   <section id="apis" aria-live="polite"></section>
+
+  <section id="attention" hidden aria-live="polite">
+    <div class="summary" id="summary"></div>
+    <p class="truncnote" id="truncNote" hidden></p>
+    <ul class="alist" id="alist"></ul>
+  </section>
 
   <aside>
     <div class="asidehead">
@@ -235,10 +280,126 @@ function renderEvent(e){
   while (tapeEl.children.length > 60) tapeEl.lastChild.remove();
 }
 
-const es = new EventSource("/api/stream");
-es.addEventListener("state", e => renderState(JSON.parse(e.data)));
-es.addEventListener("cloudevent", e => renderEvent(JSON.parse(e.data)));
-es.onerror = () => document.getElementById("meta").textContent = "disconnected — is the server running?";
+/**
+ * Attention view (docs/decisions/015, step 3): the same page, a second mode.
+ * `?view=attention` sends counts plus the worst 50 APIs as a snapshot then
+ * patches, not the whole fleet every 400ms — see ConsoleFrames.ts. Its
+ * payload carries no `leader`/`subscriber`/`specs`: those are full-view-only,
+ * so this mode shows connection state instead, and skips the fault-injection
+ * sliders — it is the "which of a thousand needs a look" view, not the demo
+ * control surface, and every API it lists already carries full detail
+ * (replicas included), so a click needs no extra request.
+ */
+const STATE_CODE = { CLOSED: 0, DEGRADED: 1, OPEN: 2, HALF_OPEN: 3 };
+const attentionApis = new Map();
+let attentionCounts = null;
+let attentionTruncated = null;
+let selectedApiId = null;
+let lastAttentionRevision = 0;
+let mode = "full";
+let es = null;
+
+function sortedAttention(){
+  return [...attentionApis.values()].sort((a, b) =>
+    STATE_CODE[b.state] - STATE_CODE[a.state] || b.changedAt - a.changedAt);
+}
+
+function attentionRow(api){
+  const open = api.apiId === selectedApiId;
+  const distinct = new Set(api.replicas.map(r => r.vote)).size;
+  const row = `
+    <button type="button" class="asummary" data-api="${api.apiId}" aria-expanded="${open}">
+      <span class="name">${api.apiId}</span>
+      <span class="astate">${api.state.replace("_"," ")}</span>
+      <span class="why">${api.reason.toLowerCase().replace(/_/g," ")}</span>
+      <span class="achanged">${new Date(api.changedAt).toLocaleTimeString("en-GB")}</span>
+    </button>`;
+  if (!open) return row;
+  const strip = api.replicas.map(r =>
+    `<span class="rep" data-vote="${r.vote}" title="${r.replicaId}: ${r.healthy}/${r.total} endpoints healthy, ${r.ejectionsActive ?? 0} ejected"></span>`
+  ).join("");
+  return row + `
+    <div class="adetail">
+      <div class="strip" role="img" aria-label="${api.replicas.length} replicas: ${api.votes.OK} ok, ${api.votes.DEGRADED} degraded, ${api.votes.DOWN} down">${strip}</div>
+      <div class="striplabel">
+        <span class="${distinct > 1 ? "diverged" : ""}">${distinct > 1 ? `${api.replicas.length} replicas disagree` : `${api.replicas.length} replicas agree`}</span>
+        <span>${api.healthyEndpoints}/${api.totalEndpoints} endpoints</span>
+      </div>
+    </div>`;
+}
+
+function renderAttention(){
+  document.getElementById("summary").innerHTML = STATES.map(s =>
+    `<span data-state="${s}">${s.replace("_"," ")} ${attentionCounts[s]}</span>`).join("");
+
+  const note = document.getElementById("truncNote");
+  note.hidden = !attentionTruncated;
+  if (attentionTruncated) {
+    note.textContent = `${attentionTruncated.total} need attention, ${attentionTruncated.shown} shown`;
+  }
+
+  if (selectedApiId !== null && !attentionApis.has(selectedApiId)) selectedApiId = null;
+
+  const list = sortedAttention();
+  const listEl = document.getElementById("alist");
+  listEl.innerHTML = list.length === 0
+    ? `<li class="empty">Nothing needs attention.</li>`
+    : list.map(api => `<li class="arow" data-state="${api.state}">${attentionRow(api)}</li>`).join("");
+
+  document.getElementById("meta").textContent = `attention view · revision ${lastAttentionRevision}`;
+}
+
+function renderSnapshot(msg){
+  attentionApis.clear();
+  for (const api of msg.apis) attentionApis.set(api.apiId, api);
+  attentionCounts = msg.counts;
+  attentionTruncated = msg.truncated;
+  lastAttentionRevision = msg.revision;
+  renderAttention();
+}
+
+function renderPatch(msg){
+  for (const api of msg.upserts) attentionApis.set(api.apiId, api);
+  for (const id of msg.removed) attentionApis.delete(id);
+  attentionCounts = msg.counts;
+  attentionTruncated = msg.truncated;
+  lastAttentionRevision = msg.revision;
+  renderAttention();
+}
+
+document.getElementById("alist").addEventListener("click", e => {
+  const btn = e.target.closest(".asummary");
+  if (!btn) return;
+  const id = btn.dataset.api;
+  selectedApiId = selectedApiId === id ? null : id;
+  renderAttention();
+});
+
+function connect(){
+  if (es) es.close();
+  const url = mode === "attention" ? "/api/stream?view=attention" : "/api/stream";
+  es = new EventSource(url);
+  es.addEventListener("cloudevent", e => renderEvent(JSON.parse(e.data)));
+  es.onerror = () => document.getElementById("meta").textContent = "disconnected — is the server running?";
+  if (mode === "attention") {
+    es.addEventListener("snapshot", e => renderSnapshot(JSON.parse(e.data)));
+    es.addEventListener("patch", e => renderPatch(JSON.parse(e.data)));
+  } else {
+    es.addEventListener("state", e => renderState(JSON.parse(e.data)));
+  }
+}
+
+document.getElementById("modeToggle").addEventListener("click", () => {
+  mode = mode === "full" ? "attention" : "full";
+  document.getElementById("modeToggle").textContent = mode === "full" ? "Attention view →" : "← Full view";
+  document.getElementById("apis").hidden = mode !== "full";
+  document.getElementById("attention").hidden = mode !== "attention";
+  document.getElementById("meta").textContent = "connecting…";
+  selectedApiId = null;
+  connect();
+});
+
+connect();
 </script>
 </body>
 </html>
