@@ -65,7 +65,10 @@ As of 2026-09-13. Verify against `git log` and the ADRs before acting.
 - **Local disk:** about 120 MiB of unreferenced upstream Effect history sits in
   `.git` from `git subtree add`. `git gc` prunes it eventually; never pushed.
 
-- **The 2026-09-13 load/chaos/reliability work is uncommitted and partly
-  half-finished** — see [[chaos-reliability-work-2026-09-13]] before anything else.
+- **The 2026-09-13 load/chaos/reliability work is now committed** — see
+  [[chaos-reliability-work-2026-09-13]] for what it covered, and
+  [[chaos-reliability-work-2026-09-17]] for the 2026-09-17/18 follow-up (first
+  live chaos-load run against the real stack, a consumer-rebuild bug, and the
+  full ADR 017 split-brain arc — all resolved and committed).
 
-Related: [[rmq-control-plane-design]], [[egress-breaker-session-record]], [[chaos-reliability-work-2026-09-13]].
+Related: [[rmq-control-plane-design]], [[egress-breaker-session-record]], [[chaos-reliability-work-2026-09-13]], [[chaos-reliability-work-2026-09-17]].

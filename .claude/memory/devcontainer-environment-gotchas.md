@@ -66,5 +66,25 @@ Facts about this environment, each learned by losing time to it (2026-09-12/13):
   configs to `--mode validate` via `--config-yaml "$(cat …)"`, not a /tmp mount.
 - **netshoot (`nicolaka/netshoot:v0.14`) with `--net container:X --cap-add NET_ADMIN`**
   works for tc netem / iptables; every container has two IPs (default + devcontainer).
+- **`curl localhost:<port>` from inside this devcontainer does not reach
+  docker-compose's published ports** — `docker compose up`'s port mapping binds
+  the actual Docker host, and this devcontainer is a sibling container on the
+  `workspace_default`/`devcontainer` network, not that host. `localhost:9090`
+  etc. just gets connection refused, even with `dangerouslyDisableSandbox`.
+  Use the compose service's own hostname instead (`http://prometheus:9090`,
+  `http://rabbitmq:15672`, ...) — DNS resolves it via the shared network
+  (confirm with `getent hosts <service>` or `docker inspect <container>
+  --format '{{json .NetworkSettings.Networks}}'`). Cost a dead end on
+  2026-09-17 chasing a phantom "prometheus is down" before finding this.
+- **Never add a trailing `&` when already passing `run_in_background: true`
+  to the Bash tool.** The tool's own backgrounding wraps the whole command; an
+  extra `&` inside it backgrounds the *real* process a second time and lets
+  the outer wrapper (e.g. an `echo "started pid $!"` after it) exit
+  immediately. The tool then reports the task "completed" right away — that's
+  the wrapper finishing, not the real process, which keeps running detached
+  and untracked. Cost a false "chaos-load crashed" scare on 2026-09-17/18 (it
+  hadn't; it was still running, just orphaned from the tool's tracking). If a
+  background command needs its own long-lived process, let
+  `run_in_background: true` do the only backgrounding.
 
 Related: [[rmq-control-plane-design]].
