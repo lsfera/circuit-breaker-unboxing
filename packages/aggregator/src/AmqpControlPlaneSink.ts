@@ -1,10 +1,9 @@
-import { Clock, Duration, Effect, Exit, Fiber, Ref, Schedule, Scope } from "effect";
+import { Clock, Duration, Effect, Exit, Fiber, Ref, Scope } from "effect";
 import { Rmq, RmqError } from "@egress/rmq/Client.ts";
 import {
   CONTROL_EXCHANGE,
   CONTROL_EXCHANGE_OPTIONS,
   encodeCircuitEvent,
-  HEARTBEAT_ROUTING_KEY,
   routingKeyFor,
 } from "@egress/rmq/ControlPlane.ts";
 import { DeliveryFailed } from "@egress/domain/Model.ts";
@@ -56,24 +55,21 @@ const PUBLISH_CONFIRM_TIMEOUT = Duration.seconds(2);
  * CONSECUTIVE_FAILURE_THRESHOLD's own ≈4.1s still had to run — comfortably
  * past the 5000ms lease TTL the standby was racing on the whole time.
  *
- * The heartbeat below tests the same connection on its own clock, so
- * readiness stops being gated on the breaker having something to say. Each
- * one is forked, not awaited, so the schedule keeps firing on its own fixed
- * cadence while an earlier heartbeat is still counting down its own 2s —
- * without that, a single stuck attempt would push every later one back by
- * its own timeout too, and this would be no faster than the transition path
- * it replaces. Overlapping instead, two consecutive failures land one
- * `PROBE_INTERVAL` apart once the first one fails, not one
- * `PUBLISH_CONFIRM_TIMEOUT` apart.
- *
- * Worst case is a fault landing just after a heartbeat has already gone out:
- * up to one full `PROBE_INTERVAL` before the next one fires, `+2s` for it to
- * time out, `+1s` more for the one after it to do the same and cross
- * CONSECUTIVE_FAILURE_THRESHOLD — `2×PROBE_INTERVAL + PUBLISH_CONFIRM_TIMEOUT`,
- * ≈4s. Comfortably inside the 5000ms lease TTL with margin, independent of
- * whatever the breaker itself is doing.
+ * An earlier version of this sink fixed that with its own forked,
+ * message-level heartbeat — publish-and-confirm on a fixed clock,
+ * independent of whether the breaker had anything to send. It worked, but it
+ * duplicated something already sitting misconfigured one layer down:
+ * `Client.ts`'s `amqp.connect` never set a `heartbeat`, so it negotiated
+ * RabbitMQ's own 60s default, and amqplib already tracks broker activity and
+ * closes the connection on its own once that times out — the same
+ * `isConnected` this sink already reads, with zero application code. Tuning
+ * that down (`heartbeat: 1`, Client.ts) and consulting `rmq.isConnected` on
+ * every attempt below, not just at tick start, measured *faster* than the
+ * bespoke heartbeat had: 2.76s to detect a live `net-control-partition+outage`
+ * drop, 3.46s to step down, against the message-level heartbeat's own
+ * ≈3.8s/≈4s. See docs/decisions/017's second amendment for the removed
+ * heartbeat and the run that replaced it.
  */
-const PROBE_INTERVAL = Duration.seconds(1);
 
 /**
  * A peer to WebhookSink, publishing the same CircuitEvent to
@@ -93,18 +89,7 @@ const PROBE_INTERVAL = Duration.seconds(1);
  * module doc for both reproductions). This sink is free to fork a delivery
  * per event without thinking about it.
  */
-export type AmqpSinkImpl = SinkImpl & {
-  /**
-   * The heartbeat loop — see PROBE_INTERVAL's comment. Never completes on its
-   * own, so the caller forks it (main.ts, alongside `rmq.lost`'s own fork)
-   * into whatever scope should own its lifetime; this module does not fork
-   * it itself so that constructing a sink for a test is inert by default —
-   * only a test that wants the heartbeat's own behavior forks `.probe`.
-   */
-  readonly probe: Effect.Effect<unknown>;
-};
-
-export const makeAmqpControlPlaneSink: Effect.Effect<AmqpSinkImpl, RmqError, Rmq> = Effect.gen(
+export const makeAmqpControlPlaneSink: Effect.Effect<SinkImpl, RmqError, Rmq> = Effect.gen(
   function* () {
     const rmq = yield* Rmq;
     yield* rmq.declareTopicExchange(CONTROL_EXCHANGE, CONTROL_EXCHANGE_OPTIONS);
@@ -112,79 +97,6 @@ export const makeAmqpControlPlaneSink: Effect.Effect<AmqpSinkImpl, RmqError, Rmq
     const dead = yield* Ref.make<ReadonlyArray<DeliveryFailed>>([]);
     /** Consecutive attempts that failed, and when the last one did; reset on the next successful attempt. */
     const consecutiveFailures = yield* Ref.make({ count: 0, lastAt: 0 });
-
-    /**
-     * True once the streak the heartbeat and real deliveries share has
-     * already crossed CONSECUTIVE_FAILURE_THRESHOLD — the same condition
-     * `ready` reports, minus the `isConnected` flag (see `ready` for why it
-     * stays separate). `publish` below consults this on every attempt, not
-     * only `ready`: a live run showed why the difference matters. The
-     * heartbeat detected a dead connection at 2 consecutive failures, ~3.8s
-     * after a fault — right on this design's target — but a real event's own
-     * delivery had already started before that point and, without this
-     * check, ran its whole independent DELIVERY_RETRY chain to conclusion
-     * regardless (~8.7s worst case), oblivious to what the heartbeat had
-     * already established. Consulting the shared streak on every attempt,
-     * not just at tick start, lets a retry already in flight cut short the
-     * moment the heartbeat's answer catches up to it. See docs/decisions/017.
-     */
-    const failureStreakActive = Effect.all([Ref.get(consecutiveFailures), Clock.currentTimeMillis]).pipe(
-      Effect.map(
-        ([{ count, lastAt }, now]) => count >= CONSECUTIVE_FAILURE_THRESHOLD && now - lastAt < FAILURE_STREAK_WINDOW_MS,
-      ),
-    );
-
-    /**
-     * A publish-and-confirm with nothing behind it, counted into the same
-     * `consecutiveFailures` a real delivery would be — see PROBE_INTERVAL's
-     * comment for why. `Effect.ignore` at the end: a heartbeat's outcome
-     * lives entirely in the Ref side effect, and nothing calling this needs
-     * its `Exit`.
-     */
-    const heartbeat = rmq.publisherToExchange(CONTROL_EXCHANGE, HEARTBEAT_ROUTING_KEY).pipe(
-      // Its own channel — see `send`'s own doc comment for why: sharing the
-      // default one with real event delivery is what produced a genuine
-      // duplicate on `circuit.control` under load, confirmed live.
-      Effect.flatMap((pub) => rmq.send(pub, "", undefined, HEARTBEAT_ROUTING_KEY)),
-      Effect.mapError(
-        (e: RmqError) =>
-          new DeliveryFailed({ sink: "amqp", apiId: HEARTBEAT_ROUTING_KEY, cause: String(e.cause) }),
-      ),
-      Effect.timeoutOrElse({
-        duration: PUBLISH_CONFIRM_TIMEOUT,
-        orElse: () =>
-          Effect.fail(
-            new DeliveryFailed({
-              sink: "amqp",
-              apiId: HEARTBEAT_ROUTING_KEY,
-              cause: "no publish confirm within 2s",
-            }),
-          ),
-      }),
-      Effect.tapError((e) =>
-        Clock.currentTimeMillis.pipe(
-          Effect.tap((now) => Effect.logDebug(`heartbeat failed at ${now}: ${e.cause}`)),
-          Effect.flatMap((now) => Ref.update(consecutiveFailures, ({ count }) => ({ count: count + 1, lastAt: now }))),
-        ),
-      ),
-      Effect.tap(() =>
-        Clock.currentTimeMillis.pipe(
-          Effect.tap((now) => Effect.logDebug(`heartbeat ok at ${now}`)),
-          Effect.flatMap(() => Ref.set(consecutiveFailures, { count: 0, lastAt: 0 })),
-        ),
-      ),
-      Effect.ignore,
-    );
-
-    // Forked per attempt rather than awaited by the loop that fires them, so
-    // a heartbeat still counting down its own PUBLISH_CONFIRM_TIMEOUT never
-    // delays the next one — see PROBE_INTERVAL's comment for the arithmetic
-    // this overlap buys. This loop itself is returned as `probe`, not forked
-    // here: standbys gate even trying to acquire the lease on `sinkReady`
-    // too (`attemptTick`), so it has to keep testing the connection across
-    // every promotion and demotion, not just one leadership epoch — the
-    // caller forks it once, outside any epoch-scoped lifetime.
-    const probe = Effect.repeat(Effect.forkChild(heartbeat), Schedule.spaced(PROBE_INTERVAL));
 
     /**
      * Deliveries are forked into this scope rather than the sink's own, so a
@@ -195,15 +107,52 @@ export const makeAmqpControlPlaneSink: Effect.Effect<AmqpSinkImpl, RmqError, Rmq
      */
     const deliveryScope = yield* Ref.make(yield* Scope.make());
 
-    const publish = (event: CircuitEvent) =>
-      failureStreakActive.pipe(
+    /**
+     * Whether the confirm-failure streak alone — not `isConnected` — is
+     * currently active: CONSECUTIVE_FAILURE_THRESHOLD crossed within
+     * FAILURE_STREAK_WINDOW_MS. Unlike `isConnected`, this is a decaying
+     * signal that only a *success* can reset early, which is exactly why
+     * `publish` below consults it only on a retry, never on a delivery's
+     * first attempt: consulting it unconditionally would mean that once two
+     * confirms failed, nothing could ever prove the connection had recovered
+     * — every subsequent delivery's own first attempt would be short-circuited
+     * by the same stale streak, for up to the full window, with no attempt
+     * ever reaching the broker to reset it.
+     */
+    const failureStreakActive = Effect.all([Ref.get(consecutiveFailures), Clock.currentTimeMillis]).pipe(
+      Effect.map(
+        ([{ count, lastAt }, now]) => count >= CONSECUTIVE_FAILURE_THRESHOLD && now - lastAt < FAILURE_STREAK_WINDOW_MS,
+      ),
+    );
+
+    /**
+     * True once either signal already says this connection cannot be
+     * trusted: `rmq.isConnected` (Client.ts's own tracking — driven by the
+     * tuned AMQP protocol heartbeat among every other disconnect reason), or
+     * `failureStreakActive`. `ready` reports this as-is. `publish` below
+     * only consults the combined signal on a retry (see
+     * `failureStreakActive`'s comment for why not on a first attempt) — but
+     * consults `isConnected` alone on every attempt including the first,
+     * since it carries no such risk: it flips back the instant a connection
+     * actually recovers, not on a timer, so it can never strand a delivery
+     * the way the decaying streak can. A retry already in flight cuts short
+     * the moment either signal catches up to it, rather than running its
+     * whole independent DELIVERY_RETRY chain regardless (~8.7s worst case)
+     * — measured live, see docs/decisions/017's second amendment.
+     */
+    const knownBad = Effect.all([failureStreakActive, rmq.isConnected]).pipe(
+      Effect.map(([streak, connected]) => streak || !connected),
+    );
+
+    const publish = (event: CircuitEvent, isRetry: boolean) =>
+      (isRetry ? knownBad : Effect.map(rmq.isConnected, (connected) => !connected)).pipe(
         Effect.flatMap((bad) =>
           bad
             ? Effect.fail(
                 new DeliveryFailed({
                   sink: "amqp",
                   apiId: event.data.apiId,
-                  cause: "connection already known bad — the heartbeat found it first",
+                  cause: "connection already known bad",
                 }),
               )
             : rmq.publisherToExchange(CONTROL_EXCHANGE, routingKeyFor(event.data.apiId)).pipe(
@@ -231,12 +180,25 @@ export const makeAmqpControlPlaneSink: Effect.Effect<AmqpSinkImpl, RmqError, Rmq
         ),
       );
 
-    /** One publish plus its confirm, retried per DELIVERY_RETRY — see CONSECUTIVE_FAILURE_THRESHOLD's comment for the worst-case ~8.7s this can take. */
+    /**
+     * One publish plus its confirm, retried per DELIVERY_RETRY — see
+     * CONSECUTIVE_FAILURE_THRESHOLD's comment for the worst-case ~8.7s this
+     * can take. `isRetry` starts false and flips after the first evaluation
+     * (`Effect.suspend` re-reads it on every retry, same closure): `publish`
+     * is only told "this is a retry" from the second attempt on — see its
+     * own comment for why the first attempt of every delivery always gets a
+     * real, unconditional try.
+     */
     const attempt = (event: CircuitEvent) =>
-      publish(event).pipe(
-        Effect.retry(DELIVERY_RETRY),
-        Effect.tap(() => Ref.set(consecutiveFailures, { count: 0, lastAt: 0 })),
-      );
+      Effect.gen(function* () {
+        const isRetry = yield* Ref.make(false);
+        return yield* Effect.suspend(() =>
+          Ref.getAndSet(isRetry, true).pipe(Effect.flatMap((retry) => publish(event, retry))),
+        ).pipe(
+          Effect.retry(DELIVERY_RETRY),
+          Effect.tap(() => Ref.set(consecutiveFailures, { count: 0, lastAt: 0 })),
+        );
+      });
 
     /**
      * Forked into the current leadership epoch's scope, same as before this
@@ -276,9 +238,7 @@ export const makeAmqpControlPlaneSink: Effect.Effect<AmqpSinkImpl, RmqError, Rmq
     // could not take is dead-lettered and counted, not replayed. The daemons
     // re-learn the real state from the next snapshot, which is what
     // `snapshotMs` is for — a queue of stale transitions helps nobody.
-    const ready = Effect.all([rmq.isConnected, failureStreakActive]).pipe(
-      Effect.map(([connected, bad]) => connected && !bad),
-    );
+    const ready = Effect.map(knownBad, (bad) => !bad);
 
     /**
      * Fence off this instance's outstanding publishes on step-down or
@@ -310,7 +270,6 @@ export const makeAmqpControlPlaneSink: Effect.Effect<AmqpSinkImpl, RmqError, Rmq
       drainOutbox: Effect.succeed(0),
       ready,
       resetConnection,
-      probe,
     };
   },
 );

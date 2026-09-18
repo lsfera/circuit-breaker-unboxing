@@ -1,11 +1,13 @@
 # 017 — A heartbeat off the delivery channel
 
-**Status**: decided — `AmqpControlPlaneSink` heartbeats the broker on its own
-channel and its own clock; `CONSECUTIVE_FAILURE_THRESHOLD` corrected to match
-`Coordination.ts`'s lease TTL; real-event delivery now short-circuits against
-the same failure streak the heartbeat maintains, closing the gap this record
-originally left open.
-**Date**: 2026-09-17, amended 2026-09-18.
+**Status**: decided, then simplified same day — `AmqpControlPlaneSink` no
+longer runs its own message-level heartbeat; `Client.ts`'s AMQP protocol
+heartbeat, tuned down, does the same detection job with far less code. See
+the third amendment. `CONSECUTIVE_FAILURE_THRESHOLD` still corrected to match
+`Coordination.ts`'s lease TTL; real-event delivery still short-circuits
+against known-bad state, now `rmq.isConnected` and the confirm-failure streak
+rather than a bespoke heartbeat feeding the latter.
+**Date**: 2026-09-17, amended 2026-09-18 (twice).
 **Context**: the first live run of `infra/chaos-load.mjs --profiles=high`
 against the real stack (never run before today) found `packages/rmq/src/Client.ts`'s
 consumer-rebuild bug — fixed separately, see `git log` — and, once that was
@@ -151,3 +153,92 @@ see `AmqpControlPlaneSink.test.ts`'s first test.
 Re-run: `never two leaders at once — 0s`, `no daemon saw a gap or duplicate
 on circuit.control — 0 gaps, 0 duplicates`, `pnpm run check` 147/147. The
 gap this record opened with is closed, not just narrowed.
+
+## Amendment, 2026-09-18 (second): the heartbeat was reinventing a protocol feature
+
+A question about the whole approach, prompted by the code this record's
+first version added: RabbitMQ already heartbeats a connection. Checked what
+this codebase actually did with that — nothing. `Client.ts`'s `amqp.connect`
+never set a `heartbeat`, so every connection negotiated RabbitMQ's own 60s
+default (confirmed against the live broker's management API). amqplib
+already tracks broker activity independently on both sides of a connection
+and closes it — emitting the same `'error'` then `'disconnect'` any other
+failure does, which `Client.ts:690-693` already turns into `isConnected =
+false` — after ~2-3 missed intervals, with zero application code
+(`amqplib/lib/heartbeat.js`). At 60s, that is far too slow to matter for a
+5000ms lease TTL, which is exactly why nobody watching this codebase's own
+`isConnected` for `net-control-partition+outage` would ever have seen it
+help. At 1s, it should not be.
+
+**Tested it directly.** Set `heartbeat: 1` on `amqp.connect`, disabled the
+message-level heartbeat entirely (did not fork `amqp.probe`), and added one
+thing the bespoke heartbeat's fix had not needed: `AmqpControlPlaneSink.ts`'s
+`publish` now also fails fast on `rmq.isConnected` alone, per attempt, the
+same way it already did on the confirm-failure streak. Live re-run of
+`net-control-partition+outage`: `never two leaders at once — 0s`, same as
+the fully-built heartbeat. The actual trace explains why it was in some ways
+*faster*: this fault is a one-directional `iptables drop` (the partitioned
+instance's outbound packets only), so it was the *broker's* side of the
+now-1s heartbeat that timed out first — it stopped hearing from the
+partitioned instance and closed the connection from its end, and that close
+still reached the partitioned instance as `ECONNRESET`, since only the
+outbound direction was ever blocked. Disconnect logged at 2.76s after
+injection, step-down at 3.46s — against the message-level heartbeat's own
+≈3.8s/≈4s from the previous amendment, with none of that heartbeat running
+at all.
+
+**One real gap the message-level heartbeat covered that this does not:** a
+broker that keeps answering protocol heartbeat frames but has stopped
+confirming *publishes* specifically — a resource alarm, a wedged channel.
+`net-control-partition+outage` is a network fault, not that one, and it was
+not tested here. `CONSECUTIVE_FAILURE_THRESHOLD`'s own confirm-timeout
+tracking — unrelated to either heartbeat, and older than this whole record —
+already exists for exactly that case and was kept.
+
+## Amendment, 2026-09-18 (third): the message-level heartbeat removed
+
+Given the second amendment's result, simplified rather than kept both:
+
+- `Client.ts`'s `heartbeat: 1` is now the permanent setting, not an
+  experiment — every process built on this client negotiates it, confirmed
+  against the live broker across the whole fleet, not just the aggregators.
+- `AmqpControlPlaneSink.ts` no longer forks a heartbeat loop. `HEARTBEAT_ROUTING_KEY`
+  (`ControlPlane.ts`) is gone. `Client.ts`'s `channelKey` — built for the
+  first amendment's duplicate-under-load fix, and the only thing that ever
+  called it — is gone too, back to the one shared confirm channel every
+  caller used before this record started: nothing else in the codebase had
+  taken up the "supported general capability" the first amendment named, and
+  keeping unused generality around is exactly the kind of thing this
+  codebase's own conventions warn against.
+- `AmqpControlPlaneSink.ts`'s `publish` now consults two signals instead of
+  one, and not identically: `rmq.isConnected` on *every* attempt, including a
+  delivery's first, since it self-corrects the instant a connection actually
+  recovers and carries no risk of getting stuck; the confirm-failure streak
+  (`failureStreakActive`) only on a *retry*, never a first attempt. That
+  split is a bug this simplification would otherwise have reintroduced: with
+  no heartbeat left to reset `consecutiveFailures` independently, checking
+  the streak unconditionally — as the second amendment's fix and the
+  message-level-heartbeat-era design both did — would have meant that once
+  two confirms failed, nothing could ever prove the connection had recovered:
+  every later delivery's own first attempt would have been short-circuited by
+  the same stale streak for up to `FAILURE_STREAK_WINDOW_MS`, with no attempt
+  ever reaching the broker to reset it. Caught before it shipped, by tracing
+  through the second amendment's fix against a unit test that expected a bare
+  delivery success to resume readiness. Restoring the original test's
+  simplest form (no probe to fork) is what confirmed the fix.
+- One test removed outright (`the heartbeat alone discovers a dead
+  connection...`) — the property it covered, readiness reacting to a dead
+  connection with nothing ever delivered, is `rmq.isConnected` doing exactly
+  what it already did before this whole record, and stays covered by `ready
+  is false while disconnected, even with no delivery attempts`. One
+  integration test removed with `channelKey` itself.
+
+Live re-run after all of it: `never two leaders at once — 0s`, `0 gaps, 0
+duplicates` on `circuit.control`, held. `pnpm run check`: 146/146 (one test
+fewer, the removed heartbeat one). `pnpm run test:rmq`: 20/20 against a real
+broker (one fewer, the removed `channelKey` isolation test).
+
+This record now ends with less code than the version of it that first closed
+the gap: a one-line connect option, a two-line per-attempt check split across
+two signals for a reason each has a comment, and the confirm-failure
+tracking that predates this record entirely.

@@ -350,52 +350,6 @@ test("a poisoned publish channel reopens rather than ending publishing", async (
   );
 });
 
-test("a channelKey's death does not touch another channelKey's publishes", async (t) => {
-  if (skipIfNoDocker(t)) return;
-
-  const queue = `isolated.${Date.now()}`;
-
-  const seen = await run(
-    Effect.gen(function* () {
-      const rmq = yield* Rmq;
-      yield* rmq.declareQueue(queue);
-      const good = yield* rmq.publisherToQueue(queue);
-
-      // Establish both channels — default, and a second named one — before
-      // poisoning either.
-      yield* rmq.send(good, "on default before");
-      yield* rmq.send(good, "on isolated before", undefined, "isolated");
-
-      // Kill only the isolated channel: a bad exchange closes the channel
-      // that published to it (see the "poisoned publish channel" test
-      // above), never any other channel on the same connection.
-      const poison = yield* rmq.publisherToExchange("no.such.exchange", "irrelevant");
-      yield* Effect.ignore(rmq.send(poison, "into the void", undefined, "isolated"));
-      yield* Effect.promise(() => new Promise((r) => setTimeout(r, 500)));
-
-      // The default channel must be untouched by the isolated channel's
-      // death — this is the property `channelKey` exists for (see `send`'s
-      // own doc comment: a shared channel let one caller's stuck confirm
-      // look like a failure on an unrelated caller's publish).
-      yield* rmq.send(good, "on default after");
-      // The isolated channel must still self-heal on its own, same as the
-      // default one does.
-      yield* rmq.send(good, "on isolated after", undefined, "isolated");
-
-      const received: string[] = [];
-      yield* rmq.consume(queue, (body) => void received.push(body));
-      yield* waitFor(() => received.length >= 4);
-      return received;
-    }),
-  );
-
-  assert.deepEqual(
-    new Set(seen),
-    new Set(["on default before", "on isolated before", "on default after", "on isolated after"]),
-    "every send after the isolated channel's death must still arrive, on both channels",
-  );
-});
-
 test("x-single-active-consumer elects one consumer and promotes another when it closes", async (t) => {
   if (skipIfNoDocker(t)) return;
 

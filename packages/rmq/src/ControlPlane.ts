@@ -49,20 +49,6 @@ export const ORIGIN_REASON_HEADER = "x-egress-origin-reason";
 /** One routing key per API: a fleet binds only its own and never sees other APIs' events. */
 export const routingKeyFor = (apiId: string): string => `circuit.${apiId}`;
 
-/**
- * Reserved on `CONTROL_EXCHANGE` for `@egress/aggregator`'s liveness heartbeat
- * — a publish-and-confirm with nothing behind it, independent of any real
- * CircuitEvent. `routingKeyFor` always returns `circuit.<apiId>`, so a key
- * with no `circuit.` prefix at all can never collide with a real API's
- * binding, present or future, however that binding is shaped. An unroutable
- * message on a topic exchange is simply dropped once confirmed; nothing
- * downstream ever sees this. Lives here, not in the aggregator package that
- * publishes it, so the daemon fleet — every other reader of this
- * exchange's topology — sees it too, same as every other reserved name on
- * this exchange.
- */
-export const HEARTBEAT_ROUTING_KEY = "__heartbeat__";
-
 /** Every daemon process gets its own queue on the control exchange, never shared. */
 export const controlQueueFor = (apiId: string, instanceId: string): string =>
   `${apiId}.control.${instanceId}`;

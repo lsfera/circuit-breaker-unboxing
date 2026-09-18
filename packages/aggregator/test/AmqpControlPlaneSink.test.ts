@@ -108,26 +108,13 @@ test("two consecutive failed attempts flip readiness off; a success resets the c
         const failed = yield* sink.deadLetters;
         assert.equal(failed.length, 1, "the exhausted delivery is dead-lettered");
 
-        // Post-fix, a real delivery's own attempts short-circuit once the
-        // shared streak is known bad (see AmqpControlPlaneSink.ts's
-        // failureStreakActive) — recovery is proven by the heartbeat, which
-        // main.ts always runs regardless of delivery traffic, not by a bare
-        // real-event success.
         yield* Ref.set(sendResult, Effect.void);
-        const probeFiber = yield* Effect.forkChild(sink.probe);
-        yield* TestClock.adjust(Duration.seconds(1));
-        assert.equal(
-          yield* sink.ready,
-          true,
-          "the heartbeat's own next success resets the consecutive-failure counter",
-        );
-        yield* Fiber.interrupt(probeFiber);
-
         yield* deliverAndSettle(sink, event(1), SETTLE);
+
         assert.equal(
           yield* sink.ready,
           true,
-          "a delivery succeeds normally once the connection is known good again",
+          "a single success must reset the consecutive-failure counter",
         );
       }),
       TestClock.layer(),
@@ -173,44 +160,6 @@ test("a failure streak expires on its own, so an instance that stepped down can 
         // A stepped-down instance delivers nothing, so no success can reset the streak.
         yield* TestClock.adjust(Duration.seconds(10));
         assert.equal(yield* sink.ready, true, "with no attempts for the window, readiness returns");
-      }),
-      TestClock.layer(),
-    ),
-  );
-});
-
-test("the heartbeat alone discovers a dead connection, with nothing ever delivered", async () => {
-  await Effect.runPromise(
-    Effect.provide(
-      Effect.gen(function* () {
-        const connected = yield* Ref.make(true);
-        // A never-resolving send, same as the "broker never confirms" test
-        // below: the fault this exists for is a silent packet drop, not an
-        // immediate refusal, so only PUBLISH_CONFIRM_TIMEOUT ever ends an
-        // attempt.
-        const sendResult = yield* Ref.make<Effect.Effect<void, RmqError>>(Effect.never);
-        const sink = yield* makeAmqpControlPlaneSink.pipe(
-          Effect.provideService(Rmq, fakeRmq(connected, sendResult)),
-        );
-
-        assert.equal(yield* sink.ready, true, "ready before the probe has run at all");
-
-        // `makeAmqpControlPlaneSink` never forks its own probe — see
-        // `AmqpSinkImpl.probe`'s comment — so nothing here runs until this
-        // test starts it itself, same as main.ts does.
-        const probeFiber = yield* Effect.forkChild(sink.probe);
-        // PROBE_INTERVAL's comment: worst case is 2×PROBE_INTERVAL +
-        // PUBLISH_CONFIRM_TIMEOUT ≈ 4s.
-        yield* TestClock.adjust(Duration.seconds(5));
-
-        assert.equal(
-          yield* sink.ready,
-          false,
-          "two consecutive failed heartbeats must flip readiness off on their own, with no event ever delivered",
-        );
-        assert.equal((yield* sink.deadLetters).length, 0, "a heartbeat is never dead-lettered");
-
-        yield* Fiber.interrupt(probeFiber);
       }),
       TestClock.layer(),
     ),
