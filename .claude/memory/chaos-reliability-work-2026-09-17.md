@@ -40,13 +40,33 @@ against the real stack found real bugs, worked one by one, each verified live
   4. Live re-verified: `never two leaders at once — 0s` (was unbounded, then
      4s, then 3-4s across the fixes above), `0 gaps, 0 duplicates` on
      `circuit.control` held throughout. `pnpm run check`: 147/147.
+  5. **Then removed again, same day.** User pushback: RabbitMQ already
+     heartbeats a connection — why build a message-level one? Checked:
+     `Client.ts` never set `heartbeat` on `amqp.connect`, so it negotiated
+     RabbitMQ's 60s default; amqplib already independently detects a dead
+     connection and closes it (feeding the same `isConnected`) for zero
+     code. Tuned it to 1s, disabled the bespoke heartbeat, re-ran live:
+     same `0s` result, in this run's trace *faster* (broker-side heartbeat
+     timeout closed the connection, reaching the partitioned instance as
+     `ECONNRESET` at 2.76s). Removed `HEARTBEAT_ROUTING_KEY`, the probe
+     loop, and `Client.ts`'s `channelKey` (nothing else had ever used it).
+     Net -99 lines. Caught one real bug while simplifying: checking the
+     confirm-failure streak unconditionally (not just `isConnected`) would
+     have meant no delivery could ever prove recovery once two confirms
+     failed, since nothing but a success resets that streak and every
+     first attempt would have been blocked by it too — fixed by only
+     consulting the streak on a *retry*, never a delivery's first attempt.
 
 Pattern worth repeating: at every stage a new run surfaced a *new* problem
 (the duplicate; then "heartbeat isn't the bottleneck"; then the timing
-contradiction) — each was reported plainly, with the live measurement, before
-touching code again, rather than patching silently. See
-[[reliability-testing-preferences]] for the standing stop-fix-relaunch
-expectation this followed.
+contradiction; then "why does this exist at all") — each was reported
+plainly, with the live measurement, before touching code again, rather than
+patching silently. See [[reliability-testing-preferences]] for the standing
+stop-fix-relaunch expectation this followed. The last round is worth its own
+lesson: **check whether the protocol/library already does what you're about
+to hand-build before building it** — a whole ADR's worth of machinery
+(routing key, isolated channel, probe loop) turned out to duplicate a
+misconfigured default one connect option away from doing the same job.
 
 Related: [[egress-breaker-open-threads]], [[reliability-testing-preferences]],
 [[devcontainer-environment-gotchas]].

@@ -5,7 +5,8 @@
 - [Devcontainer gotchas](devcontainer-environment-gotchas.md) — host suspends corrupt timing runs, git subtree path, pkill self-kill, 600s tool cap, RabbitMQ ignores cgroup memory.
 - [Egress breaker session record](egress-breaker-session-record.md) — article source material: the early build-out and the later measurements that overturned beliefs.
 - [Chaos & reliability work, 2026-09-13/14](chaos-reliability-work-2026-09-13.md) — harness, 3 bugs fixed 09-14, 1 new one found (main.ts hangs forever), open decisions; now committed.
-- [Chaos & reliability work, 2026-09-17/18](chaos-reliability-work-2026-09-17.md) — first live chaos-load run: consumer-rebuild bug, full ADR 017 split-brain arc, closed to 0s and committed.
+- [Chaos & reliability work, 2026-09-17/18](chaos-reliability-work-2026-09-17.md) — first live chaos-load run: consumer-rebuild bug, full ADR 017 split-brain arc, closed to 0s, then simplified away.
+- [Check before building](check-before-building.md) — verify a library/protocol doesn't already solve it (read the real source) before hand-building infra like heartbeats or retries.
 - [Reliability testing preferences](reliability-testing-preferences.md) — correctness = no loss + empty DLQ, stop-fix-relaunch, subagents, RabbitMQ-sourced metrics, plain explanations.
 - [Devcontainer rebuild](devcontainer-rebuild.md) — what survives rebuilding the devcontainer (workspace, volumes, Docker Desktop) and what is lost (~/.claude transcripts, login, user settings, a global skill).
 - [Use rtk for command output](use-rtk-for-command-output.md) — wrap git/grep/pnpm/etc with `rtk <subcommand>` for condensed output; check `rtk --help`.
