@@ -1,8 +1,10 @@
 # 015 — The console at a thousand APIs
 
-**Status**: proposed 2026-09-12; steps 1 and 2 built 2026-09-13, steps 3–5
-still proposed. The proposal below is as written; the amendment at the end
-says what building the first two measured, and corrects one thing it got wrong.
+**Status**: proposed 2026-09-12; steps 1 and 2 built 2026-09-13; steps 3–5's
+backend and step 3's browser UI built 2026-09-17/18 — see "Steps 3–5, built"
+below for what that leaves open. The proposal below is as written; the
+amendments at the end say what building each part measured, and correct
+what it got wrong.
 **Date**: 2026-09-12.
 **Context**: [measured limits](../measurements.md#at-a-size-nobody-runs-it-at)
 found that the console breaks first at a thousand APIs — `/api/stream` re-sends
@@ -345,4 +347,80 @@ effect is too small to matter and the comparison could not be taken cleanly —
 the host suspended during two instrumented runs, which read 2,169 and 1,047
 seconds of wall clock inside a five-minute timeout. The harness recorded both
 windows; neither is quoted.
+
+---
+
+## Steps 3–5, built
+
+Added 2026-09-17 (backend, commit `591c8b9afb`) and 2026-09-18 (browser UI,
+commit `57c3998ac0`).
+
+**The backend.** `ConsoleFrames.makeAttention` builds the view steps 3 and 4
+asked for — counts by state, the worst 50 APIs (worst state first, then most
+recently changed), truncation stated rather than silent — and publishes it as
+a `snapshot` on connect, `patch` events afterwards, each carrying an SSE `id`
+so a reconnecting browser's `Last-Event-ID` resumes from `PubSub`'s own
+replay buffer (the last `RETAINED_PATCHES` = 64 revisions) rather than a
+hand-rolled one, falling back to a fresh snapshot when the gap is too old or
+from a revision this process never published. Step 5's gzip is applied by
+hand, since `HttpMiddleware.compression` skips a response carrying
+`Cache-Control: no-transform`, which this route sets deliberately so a proxy
+does not buffer or re-encode a stream it does not know is SSE. All of it is
+opt-in via `/api/stream?view=attention`, so the shipped frontend was
+untouched by this alone.
+
+One real bug found and fixed while building it: a `Last-Event-ID` from the
+future — most often a stale id from before this process last restarted, when
+its revision counter reset to zero — was treated as "already caught up"
+instead of falling back to a snapshot, which would have left a client
+waiting forever on a live tail it could never catch up to. Regression test
+added; 14 tests in `ConsoleFrames.test.ts` cover the attention view alone.
+Verified at the time: `pnpm run check` (146/146), plus a live smoke test
+against the running aggregator confirming headers and the
+snapshot/patch/resume/gzip behavior.
+
+**The browser UI.** Nothing rendered any of this for a day: `public/index.html`
+still only read the default full-frame channel. Added a client-side toggle
+("Attention view →") that switches the same page's `EventSource` to
+`?view=attention` and renders what it sends — a counts bar, the capped
+worst-first list with the truncation stated when the cap cuts it, and a
+detail pane that opens inline under a clicked row. The detail pane needed no
+new backend route: every API the attention view lists already carries its
+full `ApiSnapshot` — replicas included — because step 4 chose whole objects
+over diffed fields for exactly this reason. Verified against the live
+stack rather than merely typechecked, since there is still no browser in
+this devcontainer: captured real `snapshot`/`patch`/`removed` frames from
+`/api/stream?view=attention` while failing and healing `payments-provider`'s
+upstream — OPEN through HALF_OPEN back to CLOSED — and replayed them through
+the actual render functions in Node, confirming correct list ordering, row
+and detail markup, and the `removed` path firing on recovery. `pnpm run
+check`: 147/147.
+
+**Left out of the UI, deliberately.** The fault-injection sliders
+(`public/index.html`'s existing `/api/failure` controls): this view is "which
+of a thousand needs a look" for a real incident, not the demo control
+surface, and per-slider control of a thousand APIs was never the ADR's ask.
+The leader/standby banner and the subscriber integrity panel: neither is in
+the attention payload — both are full-view-only fields (`leader`,
+`subscriber`, `specs`) that step 3's design never included, since they are
+demo/operational furniture rather than part of "which APIs need attention."
+
+**Still not done, honestly:**
+
+- **No per-API detail route** (`GET /api/stream?api=<id>`) and **no search**
+  (`GET /api/state?q=`) — both named in the original proposal. The detail
+  route turned out unnecessary for the UI actually built (see above); search
+  was not attempted.
+- **No diffing on the default full-frame channel** — `/api/stream` without
+  `?view=` is byte-for-byte what it always was, still 2.77 MB/s at a
+  thousand APIs. Only the opt-in view got steps 3–5.
+- **The ADR's own verification table was never re-run.** `pnpm run check`
+  covers correctness; `scripts/measure-console-stream.mjs` against the real
+  implementation, to confirm the under-10-KB/s and under-1-KB/s targets this
+  ADR set for itself, has not been done. Until it is, "the numbers work" is
+  an inference from the individual pieces' design, not a measurement — the
+  same distinction steps 1 and 2's own build called out for the control
+  loop's CPU before that was actually re-measured.
+- **Browser-side rendering cost remains unmeasured**, same limitation named
+  at every stage of this ADR: no browser in this devcontainer.
 
