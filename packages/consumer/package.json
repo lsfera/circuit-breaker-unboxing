@@ -2,7 +2,7 @@
   "name": "@egress/consumer",
   "private": true,
   "type": "module",
-  "description": "The naive competing-consumer fleet: pulls off <apiId>.work and calls the third party directly, with no circuit awareness at all. The base scenario the article series starts from, before any breaker exists.",
+  "description": "The competing-consumer fleet: pulls off <apiId>.work and calls the third party through an in-process circuit breaker (cockatiel). Each replica's breaker is independent — nothing here coordinates the fleet yet.",
   "scripts": {
     "start": "node src/main.ts"
   },
@@ -11,6 +11,7 @@
     "@egress/config": "workspace:*",
     "@egress/rmq": "workspace:*",
     "@egress/tracing": "workspace:*",
+    "cockatiel": "^4.0.0",
     "effect": "catalog:"
   }
 }

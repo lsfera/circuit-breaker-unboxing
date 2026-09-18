@@ -10,14 +10,15 @@ import { TracingLive } from "@egress/tracing/Tracing.ts";
 import { runConsumer } from "./consumer.ts";
 
 /**
- * The base-scenario daemon, its own component like `rmq-producer`:
+ * The consumer daemon, its own component like `rmq-producer`:
  *
  *   node src/main.ts
  *
  * One address, no replica names — a client of whatever the third party
- * exposes, exactly like `producer.ts` is a client of the broker. There is no
- * control queue, no policy, no elections, because there is nothing yet to
- * coordinate the fleet's reaction: see consumer.ts for why that's the point.
+ * exposes, exactly like `producer.ts` is a client of the broker. Each
+ * process gets its own in-process circuit breaker (Breaker.ts); there is
+ * still no control queue, no policy, no elections, because there is nothing
+ * yet to make five replicas' breakers agree with each other.
  */
 
 const flags = {
@@ -43,6 +44,24 @@ const flags = {
     Flag.withDefault(20),
     Flag.withDescription("Concurrent third-party calls this daemon allows itself"),
   ),
+  breakerThreshold: Flag.Int("breaker-threshold").pipe(
+    Flag.withSchema(PositiveInt),
+    Flag.withFallbackConfig(Config.schema(PositiveInt, "BREAKER_THRESHOLD")),
+    Flag.withDefault(5),
+    Flag.withDescription("Consecutive failures before this replica's breaker opens"),
+  ),
+  breakerInitialDelayMs: Flag.Int("breaker-initial-delay-ms").pipe(
+    Flag.withSchema(PositiveInt),
+    Flag.withFallbackConfig(Config.schema(PositiveInt, "BREAKER_INITIAL_DELAY_MS")),
+    Flag.withDefault(1000),
+    Flag.withDescription("First half-open probe after the breaker opens"),
+  ),
+  breakerMaxDelayMs: Flag.Int("breaker-max-delay-ms").pipe(
+    Flag.withSchema(PositiveInt),
+    Flag.withFallbackConfig(Config.schema(PositiveInt, "BREAKER_MAX_DELAY_MS")),
+    Flag.withDefault(30_000),
+    Flag.withDescription("Ceiling the half-open backoff grows to"),
+  ),
   metricsPort: metricsPortFlag,
 };
 
@@ -57,9 +76,21 @@ const consumer = Command.make("consumer", flags, (settings) => {
   const fatal = Deferred.makeUnsafe<never, Fatal>();
   const stop = (reason: string) => Effect.asVoid(Deferred.fail(fatal, new Fatal({ reason })));
 
+  const consumerConfig = {
+    apiId: settings.apiId,
+    egressAddr: settings.egressAddr,
+    apiPath: settings.apiPath,
+    maxInFlight: settings.maxInFlight,
+    breaker: {
+      consecutiveFailures: settings.breakerThreshold,
+      initialDelayMs: settings.breakerInitialDelayMs,
+      maxDelayMs: settings.breakerMaxDelayMs,
+    },
+  };
+
   const Consumer = Layer.effectDiscard(
     Effect.forkScoped(
-      Effect.orDie(runConsumer(settings)).pipe(
+      Effect.orDie(runConsumer(consumerConfig)).pipe(
         Effect.catchDefect((defect) =>
           Effect.logFatal("consumer died, restarting the process", defect).pipe(
             Effect.andThen(stop("consumer died")),

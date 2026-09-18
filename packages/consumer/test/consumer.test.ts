@@ -75,3 +75,10 @@ test("a daemon declines a content type or encoding it cannot read", () => {
     assert.equal(readsWorkFormat(declared(type, encoding, kind)), false, `${type} / ${encoding} / ${kind}`);
   }
 });
+
+test("a call rejected by this replica's own open breaker also requeues", () => {
+  // Same settlement as "failed" — the difference is telemetry (no call was
+  // attempted), not what happens to the message. See consumer.ts's comment
+  // on CallOutcome for why that distinction lives upstream of this function.
+  assert.equal(decide("open"), "requeue");
+});

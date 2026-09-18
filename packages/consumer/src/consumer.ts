@@ -1,4 +1,5 @@
-import { Effect, Metric, Option as O } from "effect";
+import { Data, Effect, Match, Metric, Option as O } from "effect";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { HttpClient } from "effect/unstable/http";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
@@ -9,20 +10,20 @@ import {
   workQueueFor,
   workQueueOptions,
 } from "@egress/rmq/ControlPlane.ts";
+import * as Breaker from "./Breaker.ts";
 import * as Telemetry from "./Telemetry.ts";
 import * as Upstream from "./Upstream.ts";
-import type { CallOutcome } from "./Upstream.ts";
+import type { CircuitState } from "cockatiel";
 import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
 
 /**
- * The base scenario: one competing-consumer daemon, no circuit awareness at
- * all. It knows nothing about the other daemons in its own fleet and nothing
- * about whether the third party is degrading — only whether *its own* last
- * call succeeded. A failed call is handed back to the broker with `requeue`,
- * and the broker's own `x-delivery-limit` (see `workQueueOptions`) is what
- * eventually dead-letters it. Nothing here backs off, coordinates, or stops.
- * That absence is the point: it is what the rest of this article series is
- * about adding, one piece at a time.
+ * One competing-consumer daemon, now with an in-process circuit breaker
+ * (see Breaker.ts) — and still nothing else. It knows nothing about the
+ * other daemons in its own fleet: its breaker's state is private to this
+ * process, formed from only the calls this process itself has made. Five
+ * replicas means five independent breakers that will open and close at
+ * different times, for the same incident. That absence — no shared verdict
+ * — is what the next branch in this series adds.
  */
 
 export type ConsumerConfig = {
@@ -32,15 +33,39 @@ export type ConsumerConfig = {
   readonly apiPath: string;
   /** Concurrent third-party calls, applied as the work consumer's prefetch. */
   readonly maxInFlight: number;
+  readonly breaker: Breaker.BreakerConfig;
 };
+
+/** A failed call is thrown, not returned — cockatiel's `handleAll` policy classifies by thrown errors. */
+class UpstreamCallFailed extends Data.TaggedError("UpstreamCallFailed")<{}> {}
 
 /**
  * Whether a call outcome should be accepted or handed back to the broker.
  * Pulled out as a total function of the one thing that matters — pure,
- * exhaustively testable, no broker or fetch involved.
+ * exhaustively testable, no broker, breaker, or fetch involved.
+ *
+ * `"open"` and `"failed"` both requeue: the difference between them is
+ * whether a call was actually attempted, which is a telemetry fact, not a
+ * settlement fact. What differs operationally is upstream of this function
+ * — see `OPEN_REQUEUE_DELAY_*` in `attempt` below.
  */
+export type CallOutcome = Upstream.CallOutcome | "open";
 export const decide = (outcome: CallOutcome): Settlement =>
   outcome === "ok" ? "accept" : "requeue";
+
+/**
+ * Held before releasing a breaker-open rejection back to the broker. Without
+ * this, a message rejected instantly by an open local breaker (no call made,
+ * no wait) goes straight back onto the queue and straight back to this same
+ * consumer, which can spin against its own in-memory breaker at whatever
+ * rate the broker will redeliver — hammering the *broker* even though the
+ * third party is no longer being hammered. Same constants, same reasoning as
+ * the shed-`429` hold the article series' predecessor daemon used before it
+ * was removed: jittered so a fleet whose breakers open together doesn't
+ * requeue in lockstep either.
+ */
+const OPEN_REQUEUE_DELAY_MIN_MS = 100;
+const OPEN_REQUEUE_DELAY_SPREAD_MS = 300;
 
 export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   const rmq = yield* Rmq;
@@ -57,19 +82,52 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   const services = yield* Effect.context<HttpClient.HttpClient>();
   const runInContext = Effect.runPromiseWith(services);
 
+  // One breaker for the process's whole life, shared across every message —
+  // see Breaker.ts for why that sharing is load-bearing, not incidental.
+  const breaker = Breaker.make(cfg.breaker);
+
+  breaker.onStateChange((state: CircuitState) =>
+    runInContext(Metric.update(Telemetry.breakerState, Breaker.STATE_CODE[state])),
+  );
+  breaker.onBreak(() => {
+    runInContext(Metric.update(Telemetry.breakerTrips, 1));
+    runInContext(Effect.log(`${cfg.apiId}/consumer: breaker opened`));
+  });
+  breaker.onReset(() => runInContext(Effect.log(`${cfg.apiId}/consumer: breaker closed`)));
+
   let inFlight = 0;
   const setInFlight = (delta: 1 | -1) =>
     Effect.suspend(() => Metric.update(Telemetry.inFlight, (inFlight += delta)));
 
-  const attempt = (key: string): Promise<Settlement> =>
+  const callUpstream = (key: string): Promise<void> =>
     runInContext(
       setInFlight(1).pipe(
         Effect.andThen(Upstream.call(`${cfg.egressAddr}${cfg.apiPath}`, key)),
         Effect.ensuring(setInFlight(-1)),
-        Effect.tap((outcome) => Metric.update(Metric.withAttributes(Telemetry.calls, { outcome }), 1)),
-        Effect.map(decide),
+        Effect.filterOrFail(
+          (outcome) => outcome === "ok",
+          () => new UpstreamCallFailed(),
+        ),
+        Effect.asVoid,
       ),
     );
+
+  const attempt = async (key: string): Promise<Settlement> => {
+    const outcome: CallOutcome = await breaker.execute(() => callUpstream(key)).then(
+      (): CallOutcome => "ok",
+      // Breaker.isBrokenCircuitError: rejected locally, no call attempted —
+      // this replica's own breaker is open. Anything else is a real call
+      // that failed (timeout, connection refused, a non-2xx).
+      (err): CallOutcome => (Breaker.isBrokenCircuitError(err) ? "open" : "failed"),
+    );
+
+    runInContext(Metric.update(Metric.withAttributes(Telemetry.calls, { outcome }), 1));
+    await Match.value(outcome).pipe(
+      Match.when("open", () => sleep(OPEN_REQUEUE_DELAY_MIN_MS + Math.random() * OPEN_REQUEUE_DELAY_SPREAD_MS)),
+      Match.orElse(() => Promise.resolve()),
+    );
+    return decide(outcome);
+  };
 
   // A body that declares a content type, encoding or message type this daemon
   // cannot read, does not decode, or carries no `message_id` to use as its
@@ -119,7 +177,11 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
     prefetch: cfg.maxInFlight,
   });
 
+  // Set at startup so the series exists before the first state change.
+  yield* Metric.update(Telemetry.breakerState, Breaker.INITIAL_STATE_CODE);
+
   yield* Effect.log(
-    `${cfg.apiId}/consumer: up — maxInFlight=${cfg.maxInFlight} egress=${cfg.egressAddr}${cfg.apiPath} work=${workQueue}`,
+    `${cfg.apiId}/consumer: up — maxInFlight=${cfg.maxInFlight} egress=${cfg.egressAddr}${cfg.apiPath} work=${workQueue} ` +
+      `breaker=${cfg.breaker.consecutiveFailures}consecutive/${cfg.breaker.initialDelayMs}-${cfg.breaker.maxDelayMs}ms`,
   );
 });

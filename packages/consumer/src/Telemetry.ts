@@ -1,15 +1,14 @@
 import { Metric } from "effect";
 
 /**
- * Everything this fleet exposes to Prometheus. Deliberately two metrics, not
- * the dozen `@egress/rmq-consumer` grew once a control plane existed to react
- * to: there is no circuit state to publish, no target fraction, no floor —
- * only whether a call to the third party succeeded, and how many are in
- * flight right now.
+ * Everything this fleet exposes to Prometheus. `breakerState` is a gauge per
+ * replica — Prometheus's own `instance` label (from the DNS-SD scrape) is
+ * what turns this into "one line per breaker" on the dashboard, which is the
+ * whole point: nothing here aggregates the five replicas into one verdict.
  */
 
 export const calls = Metric.counter("egress_consumer_calls_total", {
-  description: "Calls made straight to the third party, by outcome (ok or failed).",
+  description: "Calls made toward the third party, by outcome (ok, failed, or open — rejected locally by this replica's own breaker, no call made).",
 });
 
 export const discarded = Metric.counter("egress_consumer_discarded_total", {
@@ -18,4 +17,12 @@ export const discarded = Metric.counter("egress_consumer_discarded_total", {
 
 export const inFlight = Metric.gauge("egress_consumer_in_flight", {
   description: "Third-party calls this daemon currently has open.",
+});
+
+export const breakerState = Metric.gauge("egress_consumer_breaker_state", {
+  description: "This replica's own breaker state (0=closed 1=open 2=half-open). Compare across instances — nothing here makes them agree.",
+});
+
+export const breakerTrips = Metric.counter("egress_consumer_breaker_trips_total", {
+  description: "Times this replica's breaker has opened.",
 });
