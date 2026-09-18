@@ -2,9 +2,10 @@
 
 **Status**: decided — `AmqpControlPlaneSink` heartbeats the broker on its own
 channel and its own clock; `CONSECUTIVE_FAILURE_THRESHOLD` corrected to match
-`Coordination.ts`'s lease TTL. A separate, deeper gap in the same fault is
-identified and left open — see Consequences.
-**Date**: 2026-09-17.
+`Coordination.ts`'s lease TTL; real-event delivery now short-circuits against
+the same failure streak the heartbeat maintains, closing the gap this record
+originally left open.
+**Date**: 2026-09-17, amended 2026-09-18.
 **Context**: the first live run of `infra/chaos-load.mjs --profiles=high`
 against the real stack (never run before today) found `packages/rmq/src/Client.ts`'s
 consumer-rebuild bug — fixed separately, see `git log` — and, once that was
@@ -108,3 +109,45 @@ its own comment already claimed.
   one-off: any future caller with the same "test the connection independent
   of real traffic" need can ask for its own `channelKey` rather than
   re-deriving this fix.
+
+## Amendment, 2026-09-18: the gap closed, and the fiber-scheduler hypothesis was wrong
+
+Instrumented the heartbeat with per-attempt timestamps and re-ran
+`net-control-partition+outage` live. The heartbeat fired exactly on its
+designed ~1s cadence straight through the fault — two consecutive failures
+logged at 2.76s and 3.76s after injection, matching `PROBE_INTERVAL`'s own
+worst-case arithmetic almost to the millisecond. That rules out the leading
+hypothesis from the previous section: nothing was starving Effect's fiber
+scheduler, and the heartbeat's own detection was never the slow part.
+
+The actual step-down still didn't happen until 11.3s after injection,
+driven by the real transition event's own delivery failure, not the
+heartbeat. The reason: `consecutiveFailures` had already crossed the
+threshold by 3.76s, but nothing told the in-flight delivery for that event.
+It had started before the streak flipped and, once started, ran its own
+independent `DELIVERY_RETRY` chain to exhaustion (~8.7s) regardless of what
+the heartbeat had since learned on a different fiber. Two readers of the
+same state, one of them not reading it.
+
+The fix predicted at the end of the previous section — "restructuring
+`attemptTick`'s delivery path to consult `sinkReady` before a real event
+retries from scratch" — is what was built, scoped down to exactly the
+state that mattered: `AmqpControlPlaneSink.ts`'s `publish` (the real-event
+path, not the heartbeat) now checks the same `consecutiveFailures` streak on
+every attempt, including each `DELIVERY_RETRY` retry, and fails immediately
+if it is already known bad, instead of re-discovering the outage from
+scratch. This runs on every attempt rather than once at tick start
+specifically because the live trace showed the streak could flip *mid-chain*
+— a retry already in flight needs to notice, not just the next delivery.
+
+One consequence worth naming: with real deliveries now trusting the shared
+streak instead of always attempting for themselves, recovery detection
+during a live streak depends on the heartbeat's own next success (which
+`main.ts` always runs, independent of leadership or delivery traffic) rather
+than on a real event happening to get through. A unit test that assumed a
+bare real-event success alone would reset the counter was updated to match —
+see `AmqpControlPlaneSink.test.ts`'s first test.
+
+Re-run: `never two leaders at once — 0s`, `no daemon saw a gap or duplicate
+on circuit.control — 0 gaps, 0 duplicates`, `pnpm run check` 147/147. The
+gap this record opened with is closed, not just narrowed.

@@ -108,13 +108,26 @@ test("two consecutive failed attempts flip readiness off; a success resets the c
         const failed = yield* sink.deadLetters;
         assert.equal(failed.length, 1, "the exhausted delivery is dead-lettered");
 
+        // Post-fix, a real delivery's own attempts short-circuit once the
+        // shared streak is known bad (see AmqpControlPlaneSink.ts's
+        // failureStreakActive) — recovery is proven by the heartbeat, which
+        // main.ts always runs regardless of delivery traffic, not by a bare
+        // real-event success.
         yield* Ref.set(sendResult, Effect.void);
-        yield* deliverAndSettle(sink, event(1), SETTLE);
-
+        const probeFiber = yield* Effect.forkChild(sink.probe);
+        yield* TestClock.adjust(Duration.seconds(1));
         assert.equal(
           yield* sink.ready,
           true,
-          "a single success must reset the consecutive-failure counter",
+          "the heartbeat's own next success resets the consecutive-failure counter",
+        );
+        yield* Fiber.interrupt(probeFiber);
+
+        yield* deliverAndSettle(sink, event(1), SETTLE);
+        assert.equal(
+          yield* sink.ready,
+          true,
+          "a delivery succeeds normally once the connection is known good again",
         );
       }),
       TestClock.layer(),

@@ -122,6 +122,27 @@ export const makeAmqpControlPlaneSink: Effect.Effect<AmqpSinkImpl, RmqError, Rmq
     const consecutiveFailures = yield* Ref.make({ count: 0, lastAt: 0 });
 
     /**
+     * True once the streak the heartbeat and real deliveries share has
+     * already crossed CONSECUTIVE_FAILURE_THRESHOLD — the same condition
+     * `ready` reports, minus the `isConnected` flag (see `ready` for why it
+     * stays separate). `publish` below consults this on every attempt, not
+     * only `ready`: a live run showed why the difference matters. The
+     * heartbeat detected a dead connection at 2 consecutive failures, ~3.8s
+     * after a fault — right on this design's target — but a real event's own
+     * delivery had already started before that point and, without this
+     * check, ran its whole independent DELIVERY_RETRY chain to conclusion
+     * regardless (~8.7s worst case), oblivious to what the heartbeat had
+     * already established. Consulting the shared streak on every attempt,
+     * not just at tick start, lets a retry already in flight cut short the
+     * moment the heartbeat's answer catches up to it. See docs/decisions/017.
+     */
+    const failureStreakActive = Effect.all([Ref.get(consecutiveFailures), Clock.currentTimeMillis]).pipe(
+      Effect.map(
+        ([{ count, lastAt }, now]) => count >= CONSECUTIVE_FAILURE_THRESHOLD && now - lastAt < FAILURE_STREAK_WINDOW_MS,
+      ),
+    );
+
+    /**
      * A publish-and-confirm with nothing behind it, counted into the same
      * `consecutiveFailures` a real delivery would be — see PROBE_INTERVAL's
      * comment for why. `Effect.ignore` at the end: a heartbeat's outcome
@@ -148,12 +169,18 @@ export const makeAmqpControlPlaneSink: Effect.Effect<AmqpSinkImpl, RmqError, Rmq
             }),
           ),
       }),
-      Effect.tapError(() =>
+      Effect.tapError((e) =>
         Clock.currentTimeMillis.pipe(
+          Effect.tap((now) => Effect.logDebug(`heartbeat failed at ${now}: ${e.cause}`)),
           Effect.flatMap((now) => Ref.update(consecutiveFailures, ({ count }) => ({ count: count + 1, lastAt: now }))),
         ),
       ),
-      Effect.tap(() => Ref.set(consecutiveFailures, { count: 0, lastAt: 0 })),
+      Effect.tap(() =>
+        Clock.currentTimeMillis.pipe(
+          Effect.tap((now) => Effect.logDebug(`heartbeat ok at ${now}`)),
+          Effect.flatMap(() => Ref.set(consecutiveFailures, { count: 0, lastAt: 0 })),
+        ),
+      ),
       Effect.ignore,
     );
 
@@ -177,26 +204,38 @@ export const makeAmqpControlPlaneSink: Effect.Effect<AmqpSinkImpl, RmqError, Rmq
     const deliveryScope = yield* Ref.make(yield* Scope.make());
 
     const publish = (event: CircuitEvent) =>
-      rmq.publisherToExchange(CONTROL_EXCHANGE, routingKeyFor(event.data.apiId)).pipe(
-        Effect.flatMap((pub) => rmq.send(pub, encodeCircuitEvent(event))),
-        Effect.mapError(
-          (e: RmqError) =>
-            new DeliveryFailed({ sink: "amqp", apiId: event.data.apiId, cause: String(e.cause) }),
-        ),
-        // A broker whose packets are being dropped never confirms and never errors: without
-        // this the publish waits forever, nothing counts as failed, and the leader never steps down.
-        Effect.timeoutOrElse({
-          duration: PUBLISH_CONFIRM_TIMEOUT,
-          orElse: () =>
-            Effect.fail(new DeliveryFailed({ sink: "amqp", apiId: event.data.apiId, cause: "no publish confirm within 2s" })),
-        }),
-        // Every attempt counts on its own, not only the delivery as a whole —
-        // see CONSECUTIVE_FAILURE_THRESHOLD. This runs before DELIVERY_RETRY
-        // decides whether to try again, so readiness can flip mid-delivery.
-        Effect.tapError(() =>
-          Clock.currentTimeMillis.pipe(
-            Effect.flatMap((now) => Ref.update(consecutiveFailures, ({ count }) => ({ count: count + 1, lastAt: now }))),
-          ),
+      failureStreakActive.pipe(
+        Effect.flatMap((bad) =>
+          bad
+            ? Effect.fail(
+                new DeliveryFailed({
+                  sink: "amqp",
+                  apiId: event.data.apiId,
+                  cause: "connection already known bad — the heartbeat found it first",
+                }),
+              )
+            : rmq.publisherToExchange(CONTROL_EXCHANGE, routingKeyFor(event.data.apiId)).pipe(
+                Effect.flatMap((pub) => rmq.send(pub, encodeCircuitEvent(event))),
+                Effect.mapError(
+                  (e: RmqError) =>
+                    new DeliveryFailed({ sink: "amqp", apiId: event.data.apiId, cause: String(e.cause) }),
+                ),
+                // A broker whose packets are being dropped never confirms and never errors: without
+                // this the publish waits forever, nothing counts as failed, and the leader never steps down.
+                Effect.timeoutOrElse({
+                  duration: PUBLISH_CONFIRM_TIMEOUT,
+                  orElse: () =>
+                    Effect.fail(new DeliveryFailed({ sink: "amqp", apiId: event.data.apiId, cause: "no publish confirm within 2s" })),
+                }),
+                // Every attempt counts on its own, not only the delivery as a whole —
+                // see CONSECUTIVE_FAILURE_THRESHOLD. This runs before DELIVERY_RETRY
+                // decides whether to try again, so readiness can flip mid-delivery.
+                Effect.tapError(() =>
+                  Clock.currentTimeMillis.pipe(
+                    Effect.flatMap((now) => Ref.update(consecutiveFailures, ({ count }) => ({ count: count + 1, lastAt: now }))),
+                  ),
+                ),
+              ),
         ),
       );
 
@@ -245,11 +284,8 @@ export const makeAmqpControlPlaneSink: Effect.Effect<AmqpSinkImpl, RmqError, Rmq
     // could not take is dead-lettered and counted, not replayed. The daemons
     // re-learn the real state from the next snapshot, which is what
     // `snapshotMs` is for — a queue of stale transitions helps nobody.
-    const ready = Effect.all([rmq.isConnected, Ref.get(consecutiveFailures), Clock.currentTimeMillis]).pipe(
-      Effect.map(
-        ([connected, { count, lastAt }, now]) =>
-          connected && (count < CONSECUTIVE_FAILURE_THRESHOLD || now - lastAt >= FAILURE_STREAK_WINDOW_MS),
-      ),
+    const ready = Effect.all([rmq.isConnected, failureStreakActive]).pipe(
+      Effect.map(([connected, bad]) => connected && !bad),
     );
 
     /**
