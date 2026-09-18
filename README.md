@@ -36,9 +36,9 @@ docker compose up -d --scale rmq-consumer=12   # resize the fleet, no restart ne
 - RabbitMQ management UI: <http://localhost:15672> (guest/guest) — watch
   `payments-provider.work`'s depth climb during an outage and drain once it
   ends.
-- Grafana: <http://localhost:3000> (admin/admin, default install — login is
-  required, no anonymous access configured) — a small dashboard (queue
-  depth, dead-letter growth, calls by outcome, active consumers).
+- Grafana: <http://localhost:3000> — anonymous viewer access, no login
+  needed — a small dashboard (queue depth, dead-letter growth, calls by
+  outcome, active consumers).
 - Prometheus: <http://localhost:9090>.
 
 ## Injecting a failure
