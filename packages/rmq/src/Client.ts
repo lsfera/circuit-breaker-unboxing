@@ -27,6 +27,20 @@ export type Consumer = { channel: Channel; consumerTag: string };
 export type Publisher = { readonly exchange: string; readonly routingKey: string };
 
 /**
+ * One message fetched by `get`, held unsettled on its own channel until
+ * `ack`/`nack` runs. Mirrors `consume`'s settle-when-done shape rather than
+ * inventing a second vocabulary — `ack` drops it, `nack` requeues it (the
+ * `requeue`/`release` split `Settlement` makes doesn't apply here: `get` has
+ * no delivery-limit-bearing queue in mind, just "done with it" or "put it
+ * back").
+ */
+export type GotMessage = {
+  readonly body: string;
+  readonly ack: Effect.Effect<void>;
+  readonly nack: Effect.Effect<void>;
+};
+
+/**
  * Effect wrapper over amqplib (AMQP 0-9-1). Why this protocol and not 1.0:
  * docs/decisions/004-downgrade-to-amqp-0-9-1.md.
  *
@@ -154,6 +168,15 @@ export interface RmqService {
     ) => void | Settlement | Promise<void | Settlement>,
     options?: { readonly prefetch?: number },
   ) => Effect.Effect<Consumer, RmqError>;
+  /**
+   * A single non-blocking fetch — `basic.get`, not a subscription. `None`
+   * when the queue was empty at the moment of asking; nothing here waits for
+   * a message to arrive. Its own throwaway channel, held open only until the
+   * returned `GotMessage` is settled — unlike `consume`'s long-lived one,
+   * there is no ongoing delivery to recover after a reconnect, so this isn't
+   * part of `topology` replay.
+   */
+  readonly get: (queue: string) => Effect.Effect<O.Option<GotMessage>, RmqError>;
   /** One publisher per fixed (exchange, routingKey) or (queue) target. */
   readonly publisherToExchange: (
     exchange: string,
@@ -846,6 +869,37 @@ export const makeRmq = Effect.fnUntraced(function* (
           throw error;
         }
         return handle;
+      }),
+    get: (queue) =>
+      wrap("get", async () => {
+        const ch = await connection.createChannel();
+        ch.on("error", () => {});
+        const msg = await ch.get(queue, { noAck: false });
+        if (msg === false) {
+          await ch.close().catch(() => {});
+          return O.none();
+        }
+        // A `get` this codebase only ever uses for a single-token queue, so
+        // there is exactly one settle per fetch — guarded rather than
+        // trusted, the same defensiveness `settle` above has for a channel
+        // that closed under a caller sitting on an unsettled delivery.
+        let settled = false;
+        const settleOnce = (act: () => void) =>
+          Effect.sync(() => {
+            if (settled) return;
+            settled = true;
+            try {
+              act();
+            } catch {
+              // channel already gone; the broker has the delivery back
+            }
+            ch.close().catch(() => {});
+          });
+        return O.some({
+          body: msg.content.toString("utf8"),
+          ack: settleOnce(() => ch.ack(msg)),
+          nack: settleOnce(() => ch.nack(msg, false, true)),
+        });
       }),
     publisherToExchange: (exchange, routingKey) => Effect.succeed({ exchange, routingKey }),
     publisherToQueue: (queue) =>

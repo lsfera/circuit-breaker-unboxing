@@ -9,7 +9,7 @@ import {
 } from "@egress/rmq/ControlPlane.ts";
 import * as Breaker from "./Breaker.ts";
 import * as Telemetry from "./Telemetry.ts";
-import type { CircuitState } from "cockatiel";
+import { CircuitState } from "cockatiel";
 import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
 
 /**
@@ -95,13 +95,20 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   // Captured so the plain-async handler below (amqplib's own callback, not an
   // Effect fiber) can still update metrics through this process's services —
   // see rmq-consumer/src/daemon.ts's identical comment on why the bare
-  // `Effect.run*` entry points are wrong here.
-  const services = yield* Effect.context<never>();
+  // `Effect.run*` entry points are wrong here. `Rmq` itself is in the
+  // capture now too: `Breaker.withPermit` needs it to run the probe-permit
+  // queue's own `get`/`nack`.
+  const services = yield* Effect.context<Rmq>();
   const runInContext = Effect.runPromiseWith(services);
 
   // One breaker for the process's whole life, shared across every message —
   // see Breaker.ts for why that sharing is load-bearing, not incidental.
   const breaker = Breaker.make(cfg.breaker);
+
+  // Every replica seeds the same permit queue; RabbitMQ's own
+  // x-max-length/x-overflow keeps exactly one token regardless of how many
+  // replicas race this on startup — see Breaker.ts's module doc.
+  yield* Breaker.seedPermit(cfg.apiId);
 
   breaker.onStateChange((state: CircuitState) =>
     runInContext(Metric.update(Telemetry.breakerState, Breaker.STATE_CODE[state])),
@@ -138,15 +145,32 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
     const message = parse(body);
     if (message === undefined) return "discard";
 
+    // Checked before execute() rather than inside the wrapped function:
+    // cockatiel decides Closed/Open/HalfOpen itself when execute() actually
+    // runs, so a race between this read and that decision is possible but
+    // harmless — worst case one call takes the wrong branch below for a
+    // state that flipped in the last few microseconds, and cockatiel's own
+    // switch still applies the real rule regardless of which function it
+    // was handed. Only HalfOpen changes behavior: Closed and Open are
+    // unaffected by which function this passes to execute().
+    const attemptUpstream =
+      breaker.state === CircuitState.HalfOpen
+        ? () => runInContext(Breaker.withPermit(cfg.apiId, () => callUpstream(message.n)))
+        : () => callUpstream(message.n);
+
     let outcome: CallOutcome;
     try {
-      await breaker.execute(() => callUpstream(message.n));
+      await breaker.execute(attemptUpstream);
       outcome = "ok";
     } catch (err) {
       // Breaker.isBrokenCircuitError: rejected locally, no call attempted —
-      // this replica's own breaker is open. Anything else is a real call
-      // that failed (timeout, connection refused, or UpstreamCallFailed).
-      outcome = Breaker.isBrokenCircuitError(err) ? "open" : "failed";
+      // this replica's own breaker is open. Breaker.NoPermit: a half-open
+      // probe this replica wanted to make, but lost the fleet-wide permit
+      // race for — also no call attempted, same telemetry story as being
+      // open. Anything else is a real call that failed (timeout, connection
+      // refused, or UpstreamCallFailed).
+      outcome =
+        Breaker.isBrokenCircuitError(err) || err instanceof Breaker.NoPermit ? "open" : "failed";
     }
 
     track(outcome);

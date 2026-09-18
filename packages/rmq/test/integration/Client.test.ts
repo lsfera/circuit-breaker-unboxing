@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { Effect, Exit, Scope } from "effect";
+import { Effect, Exit, Option, Scope } from "effect";
 import {
   broker,
   brokerExec,
@@ -384,6 +384,48 @@ test("x-single-active-consumer elects one consumer and promotes another when it 
       const promoted = [...new Set(received.map((r) => r.id))];
       assert.equal(promoted.length, 1, `exactly one consumer should be active after promotion, got ${promoted}`);
       assert.notEqual(promoted[0], activeId, "a different consumer should have been promoted");
+    }),
+  );
+});
+
+test("get is a non-blocking fetch: empty returns None, and an unsettled message blocks a second get", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const queue = "get.permit";
+
+  await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      // The permit-queue shape article/03 actually declares: exactly one
+      // token, ever — `get` doesn't need that to behave, but this is the
+      // real caller.
+      yield* rmq.declareQueue(queue, {
+        args: { "x-max-length": 1, "x-overflow": "reject-publish" },
+      });
+
+      assert.equal(Option.isNone(yield* rmq.get(queue)), true, "an empty queue returns None");
+
+      const pub = yield* rmq.publisherToQueue(queue);
+      yield* rmq.send(pub, "token");
+
+      const first = yield* rmq.get(queue);
+      assert.equal(Option.isSome(first), true);
+      assert.equal(Option.getOrThrow(first).body, "token");
+
+      // Fetched but not yet settled: a second get must not see it too — get
+      // is exclusive access to the one message, not a peek.
+      assert.equal(
+        Option.isNone(yield* rmq.get(queue)),
+        true,
+        "an unsettled message must not be handed to a second get",
+      );
+
+      yield* Option.getOrThrow(first).nack;
+      const afterNack = yield* rmq.get(queue);
+      assert.equal(Option.isSome(afterNack), true, "nack must requeue it for the next get");
+      yield* Option.getOrThrow(afterNack).ack;
+
+      assert.equal(Option.isNone(yield* rmq.get(queue)), true, "ack must remove it for good");
     }),
   );
 });
