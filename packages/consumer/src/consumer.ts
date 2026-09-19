@@ -37,7 +37,9 @@ import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
  * to be a one-way trip. RabbitMQ's `x-single-active-consumer` elects exactly
  * one replica per API to redrive it — see Redrive.ts and README.md's "The
  * redrive" section — gated on that one elected replica's own breaker, same
- * local-view tradeoff the probe permit already made.
+ * local-view tradeoff the probe permit already made. A pass starts either on
+ * a transition into Closed or on a fixed clock (`REDRIVE_SWEEP_MS`), since a
+ * message can dead-letter without any transition happening at all.
  */
 
 export type ConsumerConfig = {
@@ -110,6 +112,9 @@ export const decide = (outcome: CallOutcome): Settlement =>
  */
 const OPEN_REQUEUE_DELAY_MIN_MS = 100;
 const OPEN_REQUEUE_DELAY_MAX_MS = 400;
+
+/** How often the elected replica re-triggers a redrive pass even without a fresh breaker transition — see the sweep's own comment in `runConsumer`. */
+const REDRIVE_SWEEP_MS = 30_000;
 
 export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   const rmq = yield* Rmq;
@@ -313,6 +318,17 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   // would otherwise wait for a fresh breaker trip and reset before anything
   // looks at it again.
   triggerRedrive();
+
+  // A message can dead-letter while this replica's breaker is already
+  // Closed (a redelivery exhausting `x-delivery-limit` needs no breaker
+  // transition at all), and `onReset`/startup above only trigger on one. Left
+  // at just those two, such a message would wait for the breaker to open and
+  // close again — which might not happen for a long time — before anything
+  // looked at it. A clock-driven sweep, independent of transitions, is what
+  // closes that gap; interval matches the one measured sufficient upstream.
+  setInterval(() => {
+    if (breaker.state === CircuitState.Closed) triggerRedrive();
+  }, REDRIVE_SWEEP_MS).unref();
 
   yield* Effect.log(
     `${cfg.apiId}/consumer: up — maxInFlight=${cfg.maxInFlight} egress=${cfg.egressAddr}${cfg.apiPath} work=${workQueue} ` +

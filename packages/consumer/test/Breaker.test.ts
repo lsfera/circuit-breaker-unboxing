@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CircuitState } from "cockatiel";
-import { Effect, Option } from "effect";
+import { Effect, Option as O } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
 import type { RmqService } from "@egress/rmq/Client.ts";
 import * as Breaker from "../src/Breaker.ts";
@@ -86,10 +86,10 @@ const fakePermitRmq = (): RmqService => {
     consume: unimplemented("consume"),
     get: () =>
       Effect.sync(() => {
-        if (token === null) return Option.none();
+        if (token === null) return O.none();
         const held = token;
         token = null;
-        return Option.some({
+        return O.some({
           body: held,
           properties: {},
           ack: Effect.sync(() => {}),

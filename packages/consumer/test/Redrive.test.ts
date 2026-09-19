@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Effect, Option } from "effect";
+import { Effect, Option as O } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
 import type { GotMessage, RmqService } from "@egress/rmq/Client.ts";
 import { REDRIVE_COUNT_HEADER } from "@egress/rmq/ControlPlane.ts";
@@ -57,7 +57,7 @@ const fakeRedriveRmq = (dead: ReadonlyArray<GotMessage>) => {
     declareTopicExchange: unimplemented("declareTopicExchange"),
     bind: unimplemented("bind"),
     consume: unimplemented("consume"),
-    get: () => Effect.sync(() => (queue.length === 0 ? Option.none() : Option.some(queue.shift()!))),
+    get: () => Effect.sync(() => (queue.length === 0 ? O.none() : O.some(queue.shift()!))),
     publisherToExchange: unimplemented("publisherToExchange"),
     publisherToQueue: (queueName) => Effect.succeed({ exchange: "", routingKey: queueName }),
     send: (pub, body, properties) =>

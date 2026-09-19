@@ -7,7 +7,7 @@ import {
   isBrokenCircuitError,
 } from "cockatiel";
 import type { CircuitBreakerPolicy } from "cockatiel";
-import { Effect, Option } from "effect";
+import { Effect, Option as O } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
 
 /**
@@ -136,7 +136,7 @@ export class NoPermit extends Error {}
 export const withPermit = Effect.fn(function* <A>(apiId: string, attempt: () => Promise<A>) {
   const rmq = yield* Rmq;
   const got = yield* rmq.get(permitQueueFor(apiId));
-  if (Option.isNone(got)) return yield* Effect.fail(new NoPermit());
+  if (O.isNone(got)) return yield* Effect.fail(new NoPermit());
   return yield* Effect.tryPromise({ try: attempt, catch: (cause) => cause }).pipe(
     Effect.ensuring(got.value.nack),
   );

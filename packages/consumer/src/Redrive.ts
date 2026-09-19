@@ -1,4 +1,4 @@
-import { Effect, Option } from "effect";
+import { Effect, Option as O } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
   deadLetterQueueFor,
@@ -14,7 +14,10 @@ import {
  * has failed too many times to be an outage rather than poison. Election
  * (exactly one replica ever runs a pass) and the trigger that starts one are
  * `consumer.ts`'s job — this module is broker-agnostic of who's in charge,
- * same split `Breaker.ts` has from `consumer.ts`'s `onStateChange`.
+ * same split `Breaker.ts` has from `consumer.ts`'s `onStateChange`. A pass
+ * is triggered either by a breaker transition into Closed or by a fixed
+ * clock — a message can dead-letter while the breaker never leaves Closed at
+ * all, so a transition-only trigger can leave it unread for a long time.
  */
 
 /**
@@ -74,7 +77,7 @@ export const runPass = Effect.fn(function* (opts: RedriveOptions) {
     if (!closed) return;
 
     const got = yield* rmq.get(deadQueue);
-    if (Option.isNone(got)) return;
+    if (O.isNone(got)) return;
 
     const decision = nextRedrive(got.value.properties[REDRIVE_COUNT_HEADER]);
     if (decision.destination === "work") {

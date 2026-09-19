@@ -7,6 +7,16 @@
 
 export type ReplicaState = "closed" | "open" | "half_open" | "isolated";
 
+const REPLICA_STATES: ReadonlySet<string> = new Set<ReplicaState>([
+  "closed",
+  "open",
+  "half_open",
+  "isolated",
+]);
+
+/** A real membership check against the four states a replica can actually publish — not a bare `typeof`, which lets any string through as if it were a known state. */
+export const isReplicaState = (x: string): x is ReplicaState => REPLICA_STATES.has(x);
+
 /** The `circuit.control` wire shape every replica publishes on its own breaker's `onStateChange`. */
 export type ReplicaEvent = {
   readonly apiId: string;
@@ -47,3 +57,16 @@ export const openFraction = (registry: ApiRegistry): number => {
 /** A fraction and a threshold in, one verdict out — the whole decision, isolated from how the fraction was computed. */
 export const verdictFor = (fraction: number, threshold: number): Verdict =>
   fraction >= threshold ? "open" : "closed";
+
+/**
+ * Whether a newly-arrived event should overwrite what's already known about
+ * its instance. A redelivered or delayed `circuit.control` event carries an
+ * `at` no newer than one already folded in — accepting it anyway would
+ * regress that instance's tracked state to something older than what the
+ * registry already believed, purely because of redelivery timing rather than
+ * anything that actually changed at the source.
+ */
+export const shouldAccept = (
+  existing: { readonly at: number } | undefined,
+  incoming: { readonly at: number },
+): boolean => existing === undefined || incoming.at >= existing.at;

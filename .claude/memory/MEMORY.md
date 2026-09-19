@@ -12,4 +12,4 @@
 - [Use rtk for command output](use-rtk-for-command-output.md) — wrap git/grep/pnpm/etc with `rtk <subcommand>` for condensed output; check `rtk --help`.
 - [Incident-report limits-grid gotcha](incident-report-limits-grid-gotcha.md) — ol.limits li needs exactly one child div; a sibling badge breaks the grid, bit twice.
 - [RabbitMQ reject-publish nacks](rabbitmq-reject-publish-nacks.md) — x-overflow reject-publish nacks the loser's confirm, doesn't silently drop; verify broker-argument wire behavior, don't assume it.
-- [Chaos-test new components](chaos-test-new-components.md) — every new article-series component needs fault-injection-under-load, not just the single scripted incident.mjs run.
+- [Chaos-test new components](chaos-test-new-components.md) — every new article-series component needs fault-injection-under-load; also holds the 2026-09-19 ADR-compliance pass (kill-broker fault, redrive sweep, fleet-known-replicas gauge).

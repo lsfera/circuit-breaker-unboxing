@@ -32,6 +32,7 @@ const parseEvent = (body: string): Verdict.ReplicaEvent | undefined => {
       typeof (value as { apiId?: unknown }).apiId === "string" &&
       typeof (value as { instance?: unknown }).instance === "string" &&
       typeof (value as { state?: unknown }).state === "string" &&
+      Verdict.isReplicaState((value as { state: string }).state) &&
       typeof (value as { at?: unknown }).at === "number"
     ) {
       return value as Verdict.ReplicaEvent;
@@ -60,14 +61,38 @@ export const runAggregator = Effect.fnUntraced(function* (cfg: AggregatorConfig)
     Effect.gen(function* () {
       const now = Date.now();
       const perApi = yield* Ref.get(registries);
-      const pruned = Verdict.prune(perApi.get(event.apiId) ?? new Map(), now, cfg.stalenessMs);
-      const updated = new Map(pruned).set(event.instance, { state: event.state, at: event.at });
+      const previous = perApi.get(event.apiId) ?? new Map();
+      const pruned = Verdict.prune(previous, now, cfg.stalenessMs);
+
+      // The registry's size is the fraction's denominator (ADR 009): an
+      // instance dropped here changes what the same fraction *means* at the
+      // same number, silently, unless something says so.
+      for (const instance of previous.keys()) {
+        if (!pruned.has(instance)) {
+          yield* Effect.logWarning(
+            `aggregator: ${event.apiId} dropped stale replica ${instance} (silent for > ${cfg.stalenessMs}ms)`,
+          );
+        }
+      }
+
+      const updated = Verdict.shouldAccept(pruned.get(event.instance), event)
+        ? new Map(pruned).set(event.instance, { state: event.state, at: event.at })
+        : pruned;
+      if (updated === pruned) {
+        yield* Effect.logDebug(
+          `aggregator: ${event.apiId} dropped stale/reordered event from ${event.instance} (at=${event.at})`,
+        );
+      }
       yield* Ref.update(registries, (m) => new Map(m).set(event.apiId, updated));
 
       const fraction = Verdict.openFraction(updated);
       const verdict = Verdict.verdictFor(fraction, cfg.verdictThreshold);
 
       yield* Metric.update(Metric.withAttributes(Telemetry.openFraction, { apiId: event.apiId }), fraction);
+      yield* Metric.update(
+        Metric.withAttributes(Telemetry.knownReplicas, { apiId: event.apiId }),
+        updated.size,
+      );
       yield* Metric.update(
         Metric.withAttributes(Telemetry.verdictState, { apiId: event.apiId }),
         verdict === "open" ? 1 : 0,

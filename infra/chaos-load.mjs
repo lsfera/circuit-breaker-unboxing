@@ -60,13 +60,28 @@ const auth = "Basic " + Buffer.from("guest:guest").toString("base64");
 
 // ---- reading the stack ------------------------------------------------
 
+// `undefined` on any failure, matching `breakerStates`/`fleetVerdict` below —
+// a `kill-broker` fault means this endpoint is briefly unreachable by
+// design, not a harness bug, and the settle loop below already treats
+// "no fresh answer this tick" as "not settled yet."
 const queueDepth = async (name) => {
   const res = await fetch(`${RABBITMQ_MGMT}/api/queues/%2F/${encodeURIComponent(name)}`, {
     headers: { Authorization: auth },
-  });
-  if (!res.ok) throw new Error(`queue ${name}: ${res.status}`);
-  const body = await res.json();
+  }).catch(() => undefined);
+  if (!res || !res.ok) return undefined;
+  const body = await res.json().catch(() => undefined);
+  if (!body) return undefined;
   return { ready: body.messages_ready ?? 0, unacked: body.messages_unacknowledged ?? 0, total: body.messages ?? 0 };
+};
+
+/** Retries until the management API answers, for the few reads that need a real number rather than "not yet" — the loop already tolerates absence, these don't. */
+const queueDepthReady = async (name, retries = 10, delayMs = 1000) => {
+  for (let i = 0; i < retries; i++) {
+    const d = await queueDepth(name);
+    if (d) return d;
+    await sleep(delayMs);
+  }
+  throw new Error(`queue ${name}: management API unreachable after ${retries} retries`);
 };
 
 const purgeQueue = (name) =>
@@ -191,6 +206,17 @@ const FAULTS = {
       await Promise.all(names.map(dockerKillAndRestart));
     },
   },
+  "kill-broker": {
+    description: "SIGKILLs the RabbitMQ broker itself, then explicitly restarts it and waits for the management API — master's own decisive ADR-016 fault",
+    async run() {
+      const names = await dockerNames(`${PROJECT}-rabbitmq-`);
+      if (names.length === 0) throw new Error("no rabbitmq container found");
+      console.log(`    killing ${names.join(", ")}`);
+      await Promise.all(names.map(dockerKillAndRestart));
+      console.log(`    waiting for the management API to answer again...`);
+      await queueDepthReady(WORK, 30, 1000);
+    },
+  },
   "flaky-storm": {
     description: "cycles flaky-upstream through error -> hang -> reset -> healthy under one spike",
     async run({ faultSeconds }) {
@@ -256,7 +282,11 @@ const runOneFault = async (name) => {
   await setFailure(0); // in case the fault itself left the upstream unhealthy
 
   const settleStart = Date.now();
-  let work = await queueDepth(WORK);
+  // No fallback value: a queue read failing before the loop's first tick
+  // (plausible right after a `kill-broker` fault) must read as "not settled,"
+  // never as an empty queue — `work.total === 0` below only evaluates once
+  // `work` is defined.
+  let work;
   let breakersClosed = false;
   let verdictClosed = false;
   let sawOpenBreaker = false;
@@ -268,17 +298,18 @@ const runOneFault = async (name) => {
     if (verdict === 1) sawOpenVerdict = true;
     breakersClosed = states !== undefined && states.length > 0 && states.every((s) => s.state === 0);
     verdictClosed = verdict === 0;
-    work = await queueDepth(WORK);
-    if (work.total === 0 && breakersClosed) break;
+    work = (await queueDepth(WORK)) ?? work;
+    if (work?.total === 0 && breakersClosed) break;
     await sleep(1000);
   }
   const settleMs = Date.now() - settleStart;
+  work ??= { ready: 0, unacked: 0, total: -1 }; // -1: never got a real read, distinguishable from a genuine 0
 
   publisher.send({ type: "stop" });
   await new Promise((resolve) => publisher.on("exit", resolve));
 
-  const dead = await queueDepth(DEAD);
-  const parked = await queueDepth(PARKED);
+  const dead = await queueDepthReady(DEAD);
+  const parked = await queueDepthReady(PARKED);
   const auditResult = await audit();
 
   const confirmedBits = finalStats ? Buffer.from(finalStats.bits, "base64") : Buffer.alloc(0);

@@ -54,3 +54,25 @@ test("pruning a dead replica's last open vote lets the fraction recover", () => 
   const pruned = Verdict.prune(registry, 100_000, 60_000);
   assert.equal(Verdict.openFraction(pruned), 0, "the dead replica's vote must stop counting");
 });
+
+test("isReplicaState accepts exactly the four known states, nothing else", () => {
+  assert.equal(Verdict.isReplicaState("closed"), true);
+  assert.equal(Verdict.isReplicaState("open"), true);
+  assert.equal(Verdict.isReplicaState("half_open"), true);
+  assert.equal(Verdict.isReplicaState("isolated"), true);
+  assert.equal(Verdict.isReplicaState("degraded"), false, "not one of this fleet's real states");
+  assert.equal(Verdict.isReplicaState(""), false);
+});
+
+test("shouldAccept takes the first event for an instance unconditionally", () => {
+  assert.equal(Verdict.shouldAccept(undefined, { at: 0 }), true);
+});
+
+test("shouldAccept takes an event no older than what's already known", () => {
+  assert.equal(Verdict.shouldAccept({ at: 100 }, { at: 100 }), true, "equal at is accepted, not just newer");
+  assert.equal(Verdict.shouldAccept({ at: 100 }, { at: 200 }), true);
+});
+
+test("shouldAccept rejects a redelivered or delayed event older than what's already known", () => {
+  assert.equal(Verdict.shouldAccept({ at: 200 }, { at: 100 }), false);
+});

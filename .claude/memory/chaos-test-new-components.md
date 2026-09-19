@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: feedback
   originSessionId: 5ee1dde4-09c2-4ea3-8453-6ae6c140ccbc
-  modified: 2026-09-19T09:13:39.079Z
+  modified: 2026-09-19T12:01:39.115Z
 ---
 
 Whenever a new component is introduced (the cockatiel breaker, the
@@ -77,6 +77,53 @@ by a per-run id. And watching a queue drain to exactly zero while the
 publisher keeps producing at a rate near the fleet's own throughput ceiling
 never terminates — cut inflow to zero before measuring settle time, don't
 just drop back to the pre-fault baseline rate.
+
+**ADR-compliance pass, 2026-09-19 (article/06-uncounted-open):** checked
+this harness and every past article's real components against `master`'s
+17 ADRs (`docs/decisions/`, `master`-only — the pruned article branches
+carry none of their own). Found and fixed five gaps, two of them
+substantive rather than cosmetic:
+
+- **Added `kill-broker`** (SIGKILL the RabbitMQ container, explicit
+  `docker start`, wait for the management API) — the fault `master`'s own
+  decisive ADR 016 measurement came from, and one this harness didn't have.
+  Needed `queueDepth` to return `undefined` on a transient fetch failure
+  instead of throwing (matching `breakerStates`/`fleetVerdict`'s existing
+  `.catch(() => undefined)`), since the settle loop otherwise crashes the
+  whole run the instant this fault kills the broker mid-poll. Passed clean
+  at light load: zero unaccounted, ~7s settle, no breaker ever opened (an
+  AMQP reconnect isn't an upstream call failure).
+- **`consumer.ts` now sweeps every 30s** (`REDRIVE_SWEEP_MS`), triggering a
+  redrive pass whenever the elected replica's breaker is closed, independent
+  of any transition — closing the exact stall this memory's earlier
+  "redriver never fired" note and article 5/6's own reports had already
+  documented as accepted. Master's ADR 016 named the same gap and built the
+  same fix first. Live-verified: published a synthetic message straight
+  into `work.dead` via the management API with every breaker already
+  closed and no transition anywhere, and the sweep moved it back to `work`
+  within one tick, `egress_consumer_redrives_total{outcome="moved"}`
+  climbing from nothing to 1 with zero transitions in between.
+- **`aggregator.ts` now publishes `egress_fleet_known_replicas`** (the
+  pruned registry's size, i.e. `openFraction`'s denominator) and logs a
+  warning the moment an instance is dropped for staleness — master's ADR
+  009 decision for this exact hazard (a registry whose size silently
+  changes what a fraction means at the same number) was not to fix the
+  arithmetic but to make the movement loud. Live-verified the gauge reads 5
+  against the real 5-replica fleet.
+- **`aggregator.ts`'s `parseEvent` now validates `state` against the real
+  four-value vocabulary** (`Verdict.isReplicaState`) instead of a bare
+  `typeof === "string"` — the same shape of bug ADR 007 fixed for `reason`
+  on master. **`onEvent` now rejects a redelivered/delayed event older than
+  what's already known** (`Verdict.shouldAccept`, comparing `at`), so a
+  late redelivery can't regress an instance's tracked state.
+- **`Breaker.ts`/`Redrive.ts` renamed to `Option as O`**, matching
+  `packages/rmq`'s existing alias — ADR 006 (one spelling, consistently)
+  had already fixed this exact two-spellings problem once.
+
+Full details, file-by-file, in the session transcript; the fixes are
+committed on `article/06-uncounted-open`. Re-running the full matrix
+(including the new `kill-broker`) at the light profile: all five faults
+passed, zero unaccounted messages.
 
 Related: [[reliability-testing-preferences]], [[check-before-building]],
 [[egress-breaker-open-threads]], [[devcontainer-environment-gotchas]].

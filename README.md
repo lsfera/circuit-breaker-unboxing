@@ -175,6 +175,17 @@ in quick succession doesn't parallelize or speed anything up — most of them
 are simply wasted. Both are real limits of this branch's design, not bugs;
 see "what this still doesn't fix."
 
+**Since resolved:** checked against `master`'s own ADR for this
+(`docs/decisions/016-*.md`, `master`-only), which names this exact stall —
+"messages dead-letter while `CLOSED` too... nothing would ever replay them
+until the breaker happened to open and close again, which might not happen
+for a long time" — and fixes it with a periodic sweep on top of the
+transition trigger, not instead of it. `consumer.ts` now does the same:
+every 30 seconds, if this replica's own breaker is closed, it fires the same
+`triggerRedrive()` a reset would. A message that dead-letters with no
+breaker ever moving now waits at most 30s for a pass to find it, not
+indefinitely.
+
 ## The aggregator
 
 Checked `master`'s own design essay for how it justified this piece, and
@@ -299,13 +310,12 @@ human would look. `x-delivery-limit` was, among other things, an accidental
 circuit-breaker on backlog growth; this branch removes it for exactly the
 messages it used to catch, without replacing it with anything else.
 
-**Redrive only progresses on a breaker transition, not continuously.**
-Measured live (see "The redrive" above): a backlog can sit completely
-unmoved for well over 20 seconds after the third party has fully
-recovered, simply because nothing in the fleet has transitioned since the
-last pass finished. A very large backlog recovers in whatever number of
-~200-message chunks the fleet's own transitions happen to produce, not in
-one continuous drain.
+~~Redrive only progresses on a breaker transition, not continuously~~ —
+resolved (see "The redrive"'s "Since resolved" note): a 30s clock-driven
+sweep now triggers a pass independently of any transition, matching
+`master`'s own ADR 016 fix. A very large backlog still recovers in
+~200-message chunks per pass, just no longer gated on the fleet
+transitioning to produce one.
 
 **A trigger arriving mid-pass is dropped, not queued.** Only one pass runs
 at a time per elected replica; anything that arrives while it's running is
@@ -333,6 +343,17 @@ two, so `openFraction` was 2/2 = 100% and the verdict opened instantly —
 0.0s measured lag — rather than waiting for something closer to half the
 real fleet. The verdict is honest about what it's heard, not about the
 fleet's actual size.
+
+Checked against `master`'s own ADR for this exact hazard (`docs/decisions/
+009-*.md`, `master`-only): its decision wasn't to fix the arithmetic —
+there's no way to know the real fleet size without inventing a heartbeat
+this branch doesn't have — but to make the denominator's movement loud
+rather than silent. This branch now does the same: `egress_fleet_known_
+replicas` exposes the pruned registry's size per `apiId` next to
+`openFraction`, and a replica dropped for staleness is logged
+(`Effect.logWarning`) at the moment it's dropped. The 2/2-vs-5-replica gap
+above is still real and still not solved — now it's at least visible on
+the same dashboard as the fraction it's the denominator of.
 
 **The verdict doesn't gate anything.** No consumer reads
 `egress_fleet_verdict_state` — that's the point, per the design essay
@@ -484,13 +505,15 @@ run's duration. Correctness is per-message, not from broker counters:
 every bit the publisher's own confirmed-bitmap sets must show up either in
 `flaky-upstream`'s processed-bitmap or still physically sitting in
 `work`/`work.dead`/`work.parked` — anything else is a genuine loss and
-stops the run. Four faults exist today: `kill-one-consumer`,
-`kill-all-consumers`, `kill-aggregator`, and `flaky-storm` (cycles
-`error`→`hang`→`reset`→healthy under one spike).
+stops the run. Five faults exist today: `kill-one-consumer`,
+`kill-all-consumers`, `kill-aggregator`, `kill-broker` (SIGKILLs the
+RabbitMQ container itself — `master`'s own decisive fault for its ADR 016
+measurement), and `flaky-storm` (cycles `error`→`hang`→`reset`→healthy
+under one spike).
 
 First full run (2026-09-19, light and heavy load profiles, ~350k confirmed
-messages total): all four faults passed with zero unaccounted messages.
-Two things worth knowing, neither a correctness bug:
+messages total): all four faults that existed then passed with zero
+unaccounted messages. Two things worth knowing, neither a correctness bug:
 
 - A mixed-mode outage can leave a breaker open for well over 90 seconds
   after the upstream is fully healthy again — cycling through three
@@ -502,6 +525,17 @@ Two things worth knowing, neither a correctness bug:
   dead-letter, so real dead-lettering under chaos has gotten genuinely
   rare. Exercising the redriver under chaos would need a fault purpose-built
   to force that narrow case — not built yet.
+
+`kill-broker` was added checking this harness against `master`'s own ADRs
+rather than only this branch's components — `kill-one-consumer` through
+`flaky-storm` never touch the broker itself, and master's ADR 016 was
+decided from exactly that fault. Adding it needed `queueDepth` to survive
+the broker being briefly unreachable (it now returns `undefined` rather
+than throwing, matching `breakerStates`/`fleetVerdict`'s existing style);
+without that fix the settle loop crashed the whole run the instant the
+fault killed the broker mid-poll. Passed clean at the light profile: zero
+unaccounted messages, settled in ~7s, no breaker ever opened (an AMQP
+reconnect isn't an upstream call failure).
 
 ## Layout
 
