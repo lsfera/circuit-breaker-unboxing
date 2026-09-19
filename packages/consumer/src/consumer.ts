@@ -79,14 +79,23 @@ class UpstreamCallFailed extends Error {}
  * Pulled out as a total function of the one thing that matters — pure,
  * exhaustively testable, no broker, breaker, or fetch involved.
  *
- * `"open"` and `"failed"` both requeue: the difference between them is
- * whether a call was actually attempted, which is a telemetry fact, not a
- * settlement fact. What differs operationally is upstream of this function
- * — see `OPEN_REQUEUE_DELAY_*` in `call` below.
+ * `"open"` releases rather than requeues — reversing an earlier version of
+ * this comment, which called the difference from `"failed"` "a telemetry
+ * fact, not a settlement fact." It's both. `"open"` means no call was ever
+ * attempted (`isBrokenCircuitError`, or `Breaker.NoPermit` losing the
+ * fleet-wide permit race): `Settlement`'s own doc comment (`Client.ts`)
+ * names exactly this case for `"release"` — held for backpressure, not
+ * because the work failed — and `Client.ts`'s `settle()` comment records
+ * that RabbitMQ 4.3 doesn't count a `release`'s nack-with-requeue toward a
+ * quorum queue's `x-delivery-limit`. With `WORK_DELIVERY_LIMIT` at 3, three
+ * redeliveries landing on an open breaker — plausible within milliseconds
+ * of each other during a real outage — used to dead-letter a message that
+ * had never once reached the third party. `"failed"` still `"requeue"`s: a
+ * real call was made and did fail, which is exactly what the budget is for.
  */
 export type CallOutcome = "ok" | "failed" | "open";
 export const decide = (outcome: CallOutcome): Settlement =>
-  outcome === "ok" ? "accept" : "requeue";
+  outcome === "ok" ? "accept" : outcome === "open" ? "release" : "requeue";
 
 /**
  * Held before releasing a breaker-open rejection back to the broker. Without

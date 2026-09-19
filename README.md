@@ -1,21 +1,23 @@
-# Five breakers, one way back
+# Every dead letter earned it
 
 One producer, one broker, a fleet of competing-consumer daemons, each with
 its own [cockatiel](https://github.com/connor4312/cockatiel) circuit
-breaker, a shared probe permit, and a single aggregator publishing one
-fleet-wide verdict — plus, new this branch, a way for dead-lettered work to
-come back. This is the fifth step in a circuit-breaker article series,
-built on `article/04-fleet-verdict`. Every report in this series has named
-the same standing problem, since article 1: a message dead-lettered during
-an outage stays dead-lettered forever, even once the third party recovers.
-This branch is the first to do anything about it.
+breaker, a shared probe permit, a single aggregator publishing one
+fleet-wide verdict, and a way for dead-lettered work to come back — plus,
+new this branch, a fix to what "dead-lettered" even means. This is the
+sixth step in a circuit-breaker article series, built on
+`article/05-dead-letter-redrive`. Every report in this series has named the
+same standing problem, since article 1: a message can be dead-lettered
+without the third party ever seeing it. This branch is what finally stops
+that from happening.
 
-Same pattern as the permit and the aggregator before it: checked `master`
-(the original, full system this series incrementally re-derives) for real
-prior art rather than designing from scratch, took the smallest piece that
-actually closes this branch's one named problem, and named what was left
-out on purpose rather than hiding it. See "The redrive" below for what
-that meant here.
+Same pattern as every branch before it: checked `master` for real prior
+art rather than designing from scratch, and this time also checked this
+series' own history — `consumer.ts`'s `decide()` function already carried a
+doc comment defending the exact behavior this branch reverses, on the
+grounds that it was "a telemetry fact, not a settlement fact." It turns out
+to be both. See "Counted attempts" below for what changed and why the
+earlier reasoning was wrong.
 
 ```mermaid
 flowchart LR
@@ -66,6 +68,50 @@ consumer subgraph. `redrive-trigger` is a third, unrelated fan-in with the
 same one-way shape: every replica may publish to it, but RabbitMQ delivers
 to exactly one bound consumer at a time, so only one replica's redrive
 passes ever touch `work.dead`.
+
+## Counted attempts
+
+The change is one line in `packages/consumer/src/consumer.ts`'s `decide()`:
+
+```ts
+// before (articles 1–5)
+outcome === "ok" ? "accept" : "requeue"
+// after (this branch)
+outcome === "ok" ? "accept" : outcome === "open" ? "release" : "requeue"
+```
+
+`WORK_DELIVERY_LIMIT` is 3. Before this branch, every non-`"ok"` outcome —
+whether a real call was attempted and failed, or the local breaker rejected
+the message with no network attempt at all — settled as `"requeue"`, which
+counts toward that limit. A sustained outage opens the breaker almost
+immediately, and every message after that gets the `"open"` outcome purely
+locally. Three redeliveries landing on an open breaker — plausible within
+milliseconds of each other — dead-lettered a message that had never once
+reached the third party.
+
+The fix was already sitting unused: `@egress/rmq/Client.ts`'s `Settlement`
+type has a `"release"` outcome whose own doc comment names this exact
+case — *"a local 503 from a concurrency limiter is the case this
+exists for"* — and its `settle()` implementation's nack-with-requeue is
+one this same file's comments already confirm RabbitMQ 4.3 doesn't count
+toward a quorum queue's `x-delivery-limit`. Master's own
+`packages/rmq-consumer/src/Attempts.ts` draws exactly this line: a
+`"shed"` outcome (never reached the third party) releases; a `"failed"`
+one (a real call, failed) republishes with an incremented attempts count.
+`"failed"` still `"requeue"`s here, unchanged — a real call was made and
+did fail, which is exactly what the budget is for.
+
+**Measured live, not assumed:** a 40-second sustained outage (`rate=1.0`,
+every call fails) that would have dead-lettered roughly 1,785 messages in
+its first 15 seconds under article 5's behavior instead kept
+`payments-provider.work.dead` at **zero for the entire outage**. Nothing
+was lost that was never tried. The trade is real, not free: the work queue
+itself grew unbounded instead — 6,800 messages backlogged by the 40-second
+mark and still climbing — because a message rejected locally now cycles
+between the queue and an uncounted release for as long as the breaker
+stays open, at whatever rate `OPEN_REQUEUE_DELAY_MIN_MS`/`MAX_MS` allows,
+rather than escaping to `work.dead` after three quick tries. See "what
+this still doesn't fix" for what that trade costs.
 
 ## The redrive
 
@@ -244,6 +290,15 @@ used for a shed `429`.
 
 ## What this still doesn't fix
 
+**An outage the third party never recovers from grows the work queue
+without bound.** This branch's own trade, measured above: a message
+rejected locally no longer escapes to `work.dead` after three tries, so a
+genuinely permanent third-party failure — not a transient outage, a real
+one — now backlogs forever instead of eventually being parked somewhere a
+human would look. `x-delivery-limit` was, among other things, an accidental
+circuit-breaker on backlog growth; this branch removes it for exactly the
+messages it used to catch, without replacing it with anything else.
+
 **Redrive only progresses on a breaker transition, not continuously.**
 Measured live (see "The redrive" above): a backlog can sit completely
 unmoved for well over 20 seconds after the third party has fully
@@ -309,9 +364,12 @@ cockatiel has no way to tell "my probe failed because the third party is
 unhealthy" apart from "my probe never got the permit" — both call
 `recordHalfOpenFailure` and grow the same backoff.
 
-**A message can still be dead-lettered without ever reaching the third
-party** — unchanged since article 1. ~~Dead-lettered work still has no way
-back~~ — resolved this branch, with its own new limits above.
+~~A message can still be dead-lettered without ever reaching the third
+party~~ — resolved this branch (see "Counted attempts"), with its own new
+limit above: nothing dead-letters that was never tried, but nothing bounds
+the work queue's growth during a genuinely permanent failure either.
+~~Dead-lettered work still has no way back~~ — resolved article 5, with
+its own limits further above.
 
 ## Running it
 
@@ -419,9 +477,11 @@ packages/
   consumer/    the competing-consumer fleet, each with its own in-process
                breaker (src/Breaker.ts) sharing one probe-permit queue
                during half-open, publishing every transition to
-               circuit.control, and (as of this branch) redriving
-               work.dead when SAC-elected to (src/Redrive.ts) — see
-               src/consumer.ts for how the pieces fit together
+               circuit.control, redriving work.dead when SAC-elected to
+               (src/Redrive.ts), and (as of this branch) only spending
+               x-delivery-limit's budget on calls actually attempted —
+               see src/consumer.ts's decide() for how the pieces fit
+               together
   aggregator/  @egress/aggregator — single instance, folds circuit.control
                into one published verdict per apiId (src/Verdict.ts is the
                pure, unit-tested decision; src/aggregator.ts wires it to
