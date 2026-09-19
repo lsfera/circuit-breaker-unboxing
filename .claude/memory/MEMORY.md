@@ -10,3 +10,5 @@
 - [Reliability testing preferences](reliability-testing-preferences.md) — correctness = no loss + empty DLQ, stop-fix-relaunch, subagents, RabbitMQ-sourced metrics, plain explanations.
 - [Devcontainer rebuild](devcontainer-rebuild.md) — what survives rebuilding the devcontainer (workspace, volumes, Docker Desktop) and what is lost (~/.claude transcripts, login, user settings, a global skill).
 - [Use rtk for command output](use-rtk-for-command-output.md) — wrap git/grep/pnpm/etc with `rtk <subcommand>` for condensed output; check `rtk --help`.
+- [Incident-report limits-grid gotcha](incident-report-limits-grid-gotcha.md) — ol.limits li needs exactly one child div; a sibling badge breaks the grid, bit twice.
+- [RabbitMQ reject-publish nacks](rabbitmq-reject-publish-nacks.md) — x-overflow reject-publish nacks the loser's confirm, doesn't silently drop; verify broker-argument wire behavior, don't assume it.

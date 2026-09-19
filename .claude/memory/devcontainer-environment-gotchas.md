@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: reference
   originSessionId: d23c6dbd-5c0e-471a-a8fc-5ed6afc8c7c7
-  modified: 2026-09-13T23:28:17.256Z
+  modified: 2026-09-19T00:03:48.074Z
 ---
 
 Facts about this environment, each learned by losing time to it (2026-09-12/13):
@@ -58,6 +58,23 @@ Facts about this environment, each learned by losing time to it (2026-09-12/13):
 - **Changing a queue's arguments** needs the queue deleted (`DELETE` without
   `if-empty` — quorum queues reject that with 400); daemons meanwhile hang at
   declare silently rather than crash.
+- **Prometheus does not hot-reload `prometheus.yml`.** Adding a new
+  `static_configs` job (e.g. a new service to scrape) needs
+  `docker restart <prometheus-container>` before it shows up in
+  `/api/v1/targets` at all — no error, the target is just silently absent
+  until restarted. Grafana has the analogous issue for *new panels* added to
+  an already-provisioned dashboard file (distinct from the uid-rename
+  collision this same file doesn't cover): the container needs a restart to
+  pick the change up, confirmed 2026-09-18 adding a panel to
+  `in-process-breaker.json` without changing its uid.
+- **Two processes declaring the same RabbitMQ exchange must agree on
+  `durable`,** or the second one's declare is a connection-closing `406
+  PRECONDITION-FAILED` — and `@egress/rmq`'s `declareTopicExchange` defaults
+  to `durable: false`, so a durable exchange declared once (by hand, by an
+  earlier version of the code, however) stays durable on the broker forever
+  and silently disagrees with every later declare that omits the option.
+  Always pass `{ durable: true }` explicitly for anything meant to survive a
+  restart, everywhere it's declared.
 - **`consumer_capacity` reads 0 for every quorum queue** — useless as a stall signal.
 - **Host suspend shows as clock skew:** `Date.now() - performance.timeOrigin -
   performance.now()` grows only across a sleep; chaos-load.mjs voids such runs.
