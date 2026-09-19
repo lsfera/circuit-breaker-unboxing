@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: reference
   originSessionId: d23c6dbd-5c0e-471a-a8fc-5ed6afc8c7c7
-  modified: 2026-09-19T00:03:48.074Z
+  modified: 2026-09-19T09:11:46.691Z
 ---
 
 Facts about this environment, each learned by losing time to it (2026-09-12/13):
@@ -93,6 +93,19 @@ Facts about this environment, each learned by losing time to it (2026-09-12/13):
   (confirm with `getent hosts <service>` or `docker inspect <container>
   --format '{{json .NetworkSettings.Networks}}'`). Cost a dead end on
   2026-09-17 chasing a phantom "prometheus is down" before finding this.
+- **`restart: unless-stopped` does not actually fire on `docker kill` in this
+  Docker Desktop devcontainer.** Confirmed live 2026-09-19: killing a
+  container leaves it `exited`, `RestartCount` stuck at 0, for 30+ seconds
+  with nothing happening — not a slow backoff, the restart supervisor
+  simply never attempts it here. `docker events` shows the `kill`/`die`
+  pair and then silence; the container only came back when something
+  explicitly ran `docker start`/`docker compose up`. A chaos-testing fault
+  that kills a container must explicitly restart it afterward rather than
+  trusting the policy — this is an environment quirk, not something to
+  design application code around (a real orchestrator — Kubernetes, ECS,
+  Swarm on a real host — restarts a crashed container reliably; this
+  devcontainer's Docker Desktop just doesn't for a killed compose
+  container).
 - **Never add a trailing `&` when already passing `run_in_background: true`
   to the Bash tool.** The tool's own backgrounding wraps the whole command; an
   extra `&` inside it backgrounds the *real* process a second time and lets

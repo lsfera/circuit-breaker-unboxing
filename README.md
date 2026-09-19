@@ -460,6 +460,49 @@ RATE_PER_SECOND=500 docker compose up -d rmq-producer
 Combine with `--scale rmq-consumer=N` and `infra/incident.mjs`'s `RATE`/
 `WINDOW_MS` env vars to drive a specific incident shape.
 
+## Chaos testing
+
+`infra/incident.mjs` drives one clean, single-fault scenario — the kind
+each article's own report is built on. `infra/chaos-load.mjs` is different:
+process and flaky-service faults injected under sustained load, judged
+first on whether any confirmed message ever actually goes missing, and
+only then on whether the breakers/aggregator behaved as documented. Every
+component this series has introduced gets run through it, not just the
+one it was added for.
+
+```bash
+node infra/chaos-load.mjs --list
+node infra/chaos-load.mjs                                    # every fault
+node infra/chaos-load.mjs --faults=kill-one-consumer
+node infra/chaos-load.mjs --rate=500 --spike=3000 --fault-seconds=25
+```
+
+All traffic during a run comes from one forked publisher
+(`infra/chaos-publisher.mjs`, unmodified from master — it already speaks
+this repo's exact wire format); the compose producer is stopped for the
+run's duration. Correctness is per-message, not from broker counters:
+every bit the publisher's own confirmed-bitmap sets must show up either in
+`flaky-upstream`'s processed-bitmap or still physically sitting in
+`work`/`work.dead`/`work.parked` — anything else is a genuine loss and
+stops the run. Four faults exist today: `kill-one-consumer`,
+`kill-all-consumers`, `kill-aggregator`, and `flaky-storm` (cycles
+`error`→`hang`→`reset`→healthy under one spike).
+
+First full run (2026-09-19, light and heavy load profiles, ~350k confirmed
+messages total): all four faults passed with zero unaccounted messages.
+Two things worth knowing, neither a correctness bug:
+
+- A mixed-mode outage can leave a breaker open for well over 90 seconds
+  after the upstream is fully healthy again — cycling through three
+  failure modes back to back lets `ExponentialBackoff` climb close to its
+  30s ceiling before the storm even ends. It does close eventually.
+- The redriver never fired in any run — `work.dead` stayed at 0 throughout.
+  Article 6's fix means only a message unlucky enough to be in flight in
+  the narrow window *before* a replica's breaker trips can still
+  dead-letter, so real dead-lettering under chaos has gotten genuinely
+  rare. Exercising the redriver under chaos would need a fault purpose-built
+  to force that narrow case — not built yet.
+
 ## Layout
 
 ```
@@ -496,6 +539,12 @@ infra/
                         published verdict's timing compared, and how much
                         of the incident's dead-lettered backlog actually
                         redrove back onto the work queue
+  chaos-publisher.mjs  the chaos harness's load generator, forked by
+                        chaos-load.mjs — survived article 1's pruning
+                        unmodified, already speaks this repo's wire format
+  chaos-load.mjs       process/flaky-service faults injected under load,
+                        judged first on per-message correctness — see
+                        "Chaos testing" above
   monitoring/          Prometheus scrape config and the Grafana dashboard
 docker-compose.yml     the whole stack
 ```
