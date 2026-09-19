@@ -1,13 +1,12 @@
 /**
  * Naming conventions for the work-queue shape shared by the producer and any
- * competing-consumer fleet that drains it. This used to also carry the
- * `circuit.control` exchange (SAC queues, election triggers, the published
- * circuit event) for the breaker's control plane — removed on this branch
- * along with the packages that used it (`@egress/aggregator`,
- * `@egress/domain`, the circuit-aware `@egress/rmq-consumer`). What's left is
- * the generic part: a durable work queue with a dead-letter destination, the
- * broker's own delivery-limit budget, and the idempotency-key convention a
- * caller and a fake third party can agree on.
+ * competing-consumer fleet that drains it, plus (as of article 4) the
+ * `circuit.control` exchange every replica's breaker transitions go out on.
+ * Article 1 removed this exchange's full master-branch shape — SAC election
+ * queues, the domain package, an HA aggregator — along with the packages
+ * that used it. Article 4 restores only the naming convention below, for a
+ * single-instance, notification-only aggregator (`@egress/aggregator`); the
+ * rest stays out of scope. See that package and this branch's README for why.
  */
 
 /**
@@ -16,6 +15,21 @@
  * party from being charged twice for one logical attempt.
  */
 export const IDEMPOTENCY_KEY_HEADER = "x-idempotency-key";
+
+/**
+ * Every replica's breaker transitions go out here, and `@egress/aggregator`
+ * is the only subscriber. A topic exchange (not fanout) because the routing
+ * key already carries the `apiId` a binding might one day want to filter
+ * on — this deployment only ever runs one, but the exchange type shouldn't
+ * have to change the day a second one shows up. Every declarer must pass
+ * `{ durable: true }` — `declareTopicExchange`'s own default is `false`,
+ * and a redeclare that disagrees with what's on the broker is a connection-
+ * closing `406 PRECONDITION-FAILED`, not a warning.
+ */
+export const CONTROL_EXCHANGE = "circuit.control";
+
+/** One routing key per API — `circuit.*` binds every one a deployment runs. */
+export const routingKeyFor = (apiId: string): string => `circuit.${apiId}`;
 
 /** The primary competing-consumer work queue daemons drain. */
 export const workQueueFor = (apiId: string): string => `${apiId}.work`;

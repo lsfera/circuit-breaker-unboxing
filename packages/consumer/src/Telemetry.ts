@@ -3,8 +3,10 @@ import { Metric } from "effect";
 /**
  * Everything this fleet exposes to Prometheus. `breakerState` is a gauge per
  * replica — Prometheus's own `instance` label (from the DNS-SD scrape) is
- * what turns this into "one line per breaker" on the dashboard, which is the
- * whole point: nothing here aggregates the five replicas into one verdict.
+ * what turns this into "one line per breaker" on the dashboard, and nothing
+ * here aggregates them: `@egress/aggregator` does that from a different
+ * signal entirely (`circuit.control`, see `consumer.ts`'s `onStateChange`),
+ * off this process and off the hot path.
  */
 
 export const calls = Metric.counter("egress_consumer_calls_total", {

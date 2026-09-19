@@ -59,6 +59,19 @@ export const STATE_CODE: Record<CircuitState, number> = {
 /** What every breaker starts as, before its first `onStateChange` fires. */
 export const INITIAL_STATE_CODE: number = STATE_CODE[CircuitState.Closed];
 
+/**
+ * The wire form of a state, for the `circuit.control` event `onStateChange`
+ * publishes (see `consumer.ts`) — a string rather than `STATE_CODE`'s number,
+ * since this crosses a process boundary and JSON with a named state reads
+ * without cross-referencing this file.
+ */
+export const STATE_NAME: Record<CircuitState, string> = {
+  [CircuitState.Closed]: "closed",
+  [CircuitState.Open]: "open",
+  [CircuitState.HalfOpen]: "half_open",
+  [CircuitState.Isolated]: "isolated",
+};
+
 export { isBrokenCircuitError };
 
 /**

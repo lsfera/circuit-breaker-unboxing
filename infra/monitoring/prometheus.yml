@@ -29,6 +29,12 @@ scrape_configs:
     static_configs:
       - targets: ["rmq-producer:9464"]
 
+  # Single instance, so a plain static target — no DNS-SD needed the way the
+  # consumer fleet does, because this service is deliberately never scaled.
+  - job_name: aggregator
+    static_configs:
+      - targets: ["aggregator:9464"]
+
   # The consumer fleet — one compose service scaled to N, so there are no
   # container names to enumerate here and `--scale rmq-consumer=N` must not
   # need an edit. Docker's DNS returns an A record per replica.

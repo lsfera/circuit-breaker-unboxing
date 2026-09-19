@@ -1,9 +1,10 @@
 // Drives one incident against the fleet and reports what actually happened —
 // including whether five independent, in-process breakers agree with each
-// other about the same third party. They share nothing (see
-// packages/consumer/src/Breaker.ts), so this is the measured version of the
-// article series' own claim that per-process breakers disagree, produced by
-// this branch's own run rather than quoted from elsewhere.
+// other about the same third party (they share nothing, see
+// packages/consumer/src/Breaker.ts) and, since article 4, how long
+// @egress/aggregator's own published verdict took to catch up with the
+// first replica to notice — measured, not asserted, same as everything
+// else here.
 //
 //   node infra/incident.mjs
 //   WINDOW_MS=30000 RATE=0.6 node infra/incident.mjs   # a partial failure instead
@@ -80,17 +81,44 @@ const report = (label, depth) =>
 /** Agreement bookkeeping, shared across the incident window and the drain — divergence during recovery (each replica's own half-open probe, on its own clock) is the more interesting half. */
 const agreement = { ticksWithData: 0, ticksAgreed: 0, peakOpen: 0, replicaCount: 0 };
 
+/** One reading of @egress/aggregator's published verdict for API_ID, or `undefined` if Prometheus has nothing yet. */
+const fleetVerdict = async () => {
+  const query = encodeURIComponent(`egress_fleet_verdict_state{apiId="${API_ID}"}`);
+  const res = await fetch(`${PROMETHEUS}/api/v1/query?query=${query}`).catch(() => undefined);
+  if (!res || !res.ok) return undefined;
+  const body = await res.json();
+  if (body.status !== "success" || body.data.result.length === 0) return undefined;
+  return Number(body.data.result[0].value[1]);
+};
+
+/**
+ * When the first replica individually noticed versus when the aggregator's
+ * own published verdict caught up — set once each, on whichever poll first
+ * sees the condition. `startedAt` is stamped when the injected failure
+ * actually starts, so both are "ms into the incident," comparable to each
+ * other regardless of which tick observes them.
+ */
+const lag = { startedAt: 0, firstReplicaOpenAt: undefined, verdictOpenAt: undefined };
+
 const pollBreakers = async (label) => {
   const states = await breakerStates();
-  if (!states || states.length === 0) return;
-  agreement.ticksWithData++;
-  agreement.replicaCount = Math.max(agreement.replicaCount, states.length);
-  const distinct = new Set(states.map((s) => s.state)).size;
-  if (distinct === 1) agreement.ticksAgreed++;
-  const openCount = states.filter((s) => s.state === 1).length;
-  agreement.peakOpen = Math.max(agreement.peakOpen, openCount);
-  const summary = states.map((s) => STATE_NAME[s.state] ?? s.state).join(",");
-  console.log(`  ${label} breakers: [${summary}]`);
+  const verdict = await fleetVerdict();
+  const elapsed = Date.now() - lag.startedAt;
+
+  if (states && states.length > 0) {
+    agreement.ticksWithData++;
+    agreement.replicaCount = Math.max(agreement.replicaCount, states.length);
+    const distinct = new Set(states.map((s) => s.state)).size;
+    if (distinct === 1) agreement.ticksAgreed++;
+    const openCount = states.filter((s) => s.state === 1).length;
+    agreement.peakOpen = Math.max(agreement.peakOpen, openCount);
+    if (openCount > 0 && lag.firstReplicaOpenAt === undefined) lag.firstReplicaOpenAt = elapsed;
+  }
+  if (verdict === 1 && lag.verdictOpenAt === undefined) lag.verdictOpenAt = elapsed;
+
+  const summary = states ? states.map((s) => STATE_NAME[s.state] ?? s.state).join(",") : "no data";
+  const verdictText = verdict === undefined ? "no data" : verdict === 1 ? "OPEN" : "CLOSED";
+  console.log(`  ${label} breakers: [${summary}]  fleet verdict: ${verdictText}`);
 };
 
 const main = async () => {
@@ -100,6 +128,7 @@ const main = async () => {
   await pollBreakers("t+0s");
 
   console.log(`\n== Injecting failure: rate=${RATE} mode=${MODE ?? "error"} for ${WINDOW_MS}ms ==`);
+  lag.startedAt = Date.now();
   await setFailure(RATE);
 
   let peakBacklog = 0;
@@ -151,6 +180,16 @@ const main = async () => {
     console.log(`  peak replicas OPEN at once: ${agreement.peakOpen} of ${agreement.replicaCount}`);
   } else {
     console.log(`  breaker agreement: no data — is Prometheus reachable at ${PROMETHEUS}?`);
+  }
+  if (lag.firstReplicaOpenAt !== undefined && lag.verdictOpenAt !== undefined) {
+    const deltaMs = lag.verdictOpenAt - lag.firstReplicaOpenAt;
+    console.log(
+      deltaMs >= 0
+        ? `  fleet verdict lagged the first replica to open by ${(deltaMs / 1000).toFixed(1)}s`
+        : `  fleet verdict opened ${(-deltaMs / 1000).toFixed(1)}s BEFORE any single replica did (threshold crossed early)`,
+    );
+  } else {
+    console.log(`  fleet verdict lag: no data — is aggregator up and scraped by ${PROMETHEUS}?`);
   }
 };
 

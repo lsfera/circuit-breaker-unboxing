@@ -22,11 +22,42 @@
  },
  "panels": [
   {
+   "id": 7,
+   "type": "state-timeline",
+   "title": "Fleet verdict",
+   "description": "egress_fleet_verdict_state, published by @egress/aggregator from every replica's own circuit.control events — one line, computed off the hot path from the same transitions the panel below shows disagreeing. Never read back into any replica's own decision; this is notification only.",
+   "gridPos": { "x": 0, "y": 0, "w": 24, "h": 5 },
+   "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+   "targets": [
+    {
+     "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+     "expr": "egress_fleet_verdict_state",
+     "legendFormat": "{{apiId}}",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": { "text": "CLOSED", "color": "green" },
+        "1": { "text": "OPEN", "color": "red" }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": { "mergeValues": true, "showValue": "always" }
+  },
+  {
    "id": 5,
    "type": "state-timeline",
    "title": "Breaker state per replica",
    "description": "egress_consumer_breaker_state, one line per instance. Each replica's breaker is entirely its own — this panel is where that shows: watch them open and close at different moments for the same incident, not together.",
-   "gridPos": { "x": 0, "y": 0, "w": 24, "h": 7 },
+   "gridPos": { "x": 0, "y": 5, "w": 24, "h": 7 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
     {
@@ -58,7 +89,7 @@
    "type": "timeseries",
    "title": "Work queue depth — payments-provider.work",
    "description": "Messages ready plus in flight. Only climbs when the third party fails slowly enough to pin every consumer's in-flight slots (e.g. flaky-upstream's hang mode) — a fast failure dead-letters before a backlog can form. See the dead-letter panel for that case.",
-   "gridPos": { "x": 0, "y": 7, "w": 12, "h": 8 },
+   "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
     {
@@ -80,7 +111,7 @@
    "type": "timeseries",
    "title": "Dead-letter queue depth — payments-provider.work.dead",
    "description": "Messages that exhausted the broker's own delivery limit (x-delivery-limit, 3 attempts). Nothing here recovers them — that is a later article's problem.",
-   "gridPos": { "x": 12, "y": 7, "w": 12, "h": 8 },
+   "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
     {
@@ -96,7 +127,7 @@
    "type": "timeseries",
    "title": "Calls to the third party, by outcome",
    "description": "egress_consumer_calls_total. \"open\" is new since article 1: a call this replica's own breaker rejected without ever reaching the third party.",
-   "gridPos": { "x": 0, "y": 15, "w": 12, "h": 8 },
+   "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
     {
@@ -112,7 +143,7 @@
    "type": "timeseries",
    "title": "Breaker trips",
    "description": "sum(rate(egress_consumer_breaker_trips_total)) across all replicas. Each trip is one replica's own breaker opening — this counts events, not the disagreement between them; see the state-timeline panel for that.",
-   "gridPos": { "x": 12, "y": 15, "w": 12, "h": 8 },
+   "gridPos": { "x": 12, "y": 20, "w": 12, "h": 8 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
     {
@@ -128,7 +159,7 @@
    "type": "timeseries",
    "title": "Active consumers on the work queue",
    "description": "The broker's own count — should track --scale rmq-consumer=N. A gap between this and the replica count means a daemon has stopped consuming.",
-   "gridPos": { "x": 0, "y": 23, "w": 24, "h": 7 },
+   "gridPos": { "x": 0, "y": 28, "w": 24, "h": 7 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
     {

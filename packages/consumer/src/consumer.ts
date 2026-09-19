@@ -1,9 +1,12 @@
 import { Effect, Metric } from "effect";
+import { randomUUID } from "node:crypto";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
+  CONTROL_EXCHANGE,
   deadLetterQueueFor,
   deadLetterQueueOptions,
   IDEMPOTENCY_KEY_HEADER,
+  routingKeyFor,
   workQueueFor,
   workQueueOptions,
 } from "@egress/rmq/ControlPlane.ts";
@@ -13,13 +16,17 @@ import { CircuitState } from "cockatiel";
 import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
 
 /**
- * One competing-consumer daemon, now with an in-process circuit breaker
- * (see Breaker.ts) — and still nothing else. It knows nothing about the
- * other daemons in its own fleet: its breaker's state is private to this
- * process, formed from only the calls this process itself has made. Five
- * replicas means five independent breakers that will open and close at
- * different times, for the same incident. That absence — no shared verdict
- * — is what the next branch in this series adds.
+ * One competing-consumer daemon with an in-process circuit breaker (see
+ * Breaker.ts). Its breaker's decision is still entirely private to this
+ * process, formed from only the calls this process itself has made — that
+ * hasn't changed, and this branch doesn't change it: each replica keeps
+ * protecting itself exactly as article 2/3 built it. What's new is a
+ * second, independent channel — every transition also goes out on
+ * `circuit.control` for `@egress/aggregator` to fold into one published,
+ * fleet-wide verdict. Publishing that event and acting on this replica's
+ * own breaker are unrelated: the verdict is for telling the rest of the
+ * system about an outage, not for this replica's own protection. See
+ * README.md for why those are kept as different problems.
  */
 
 export type ConsumerConfig = {
@@ -110,9 +117,39 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   // replicas race this on startup — see Breaker.ts's module doc.
   yield* Breaker.seedPermit(cfg.apiId);
 
-  breaker.onStateChange((state: CircuitState) =>
-    runInContext(Metric.update(Telemetry.breakerState, Breaker.STATE_CODE[state])),
-  );
+  // This replica's identity on `circuit.control` only — Prometheus tells
+  // replicas apart by scrape IP already, but an AMQP event has no IP to
+  // reuse, and nothing needs this id to be anything but unique per process.
+  const instance = randomUUID();
+  // Durable: a control-plane exchange should survive a broker restart the
+  // same way every queue here already does — declareTopicExchange's own
+  // default is false, sized for a throwaway exchange, not this one.
+  yield* rmq.declareTopicExchange(CONTROL_EXCHANGE, { durable: true });
+  const controlPub = yield* rmq.publisherToExchange(CONTROL_EXCHANGE, routingKeyFor(cfg.apiId));
+
+  breaker.onStateChange((state: CircuitState) => {
+    runInContext(Metric.update(Telemetry.breakerState, Breaker.STATE_CODE[state]));
+    // Off the hot path — transitions are rare, never per-message — so a
+    // fire-and-forget publish costs nothing here the way it would inside
+    // `call`. Logged and dropped on failure rather than retried: this
+    // branch stays single-instance and notification-only on purpose, see
+    // README.md's "what this still doesn't fix."
+    runInContext(
+      rmq.send(
+        controlPub,
+        JSON.stringify({
+          apiId: cfg.apiId,
+          instance,
+          state: Breaker.STATE_NAME[state],
+          at: Date.now(),
+        }),
+      ),
+    ).catch((err: unknown) => {
+      runInContext(
+        Effect.logWarning(`${cfg.apiId}/consumer: circuit.control publish failed`, err),
+      ).catch(() => {});
+    });
+  });
   breaker.onBreak(() => {
     runInContext(Metric.update(Telemetry.breakerTrips, 1));
     runInContext(Effect.log(`${cfg.apiId}/consumer: breaker opened`));

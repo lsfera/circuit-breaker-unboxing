@@ -29,6 +29,7 @@ RUN npm install --global "$(node -p 'require("./package.json").packageManager')"
 # missing here installs none of its dependencies, and the failure surfaces as
 # ERR_MODULE_NOT_FOUND at runtime rather than as a build error. Adding
 # @egress/tracing is exactly how that was learned.
+COPY packages/aggregator/package.json packages/aggregator/
 COPY packages/consumer/package.json packages/consumer/
 COPY packages/config/package.json packages/config/
 COPY packages/rmq/package.json packages/rmq/
