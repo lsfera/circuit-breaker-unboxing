@@ -36,6 +36,8 @@ export type Publisher = { readonly exchange: string; readonly routingKey: string
  */
 export type GotMessage = {
   readonly body: string;
+  /** Headers carried on the message, as strings — same shape as `DeliveryInfo.properties`, for the same reason: Redrive.ts reads `REDRIVE_COUNT_HEADER` off a `get`, same as any `consume` handler would. */
+  readonly properties: Readonly<Record<string, string>>;
   readonly ack: Effect.Effect<void>;
   readonly nack: Effect.Effect<void>;
 };
@@ -297,6 +299,10 @@ type RmqConnectOptions = {
   readonly password?: string;
 };
 
+/** Headers as amqplib hands them back (values of unknown type) to the string-keyed, string-valued shape every caller here wants. */
+const stringifyHeaders = (headers: Record<string, unknown>): Readonly<Record<string, string>> =>
+  Object.fromEntries(Object.entries(headers).map(([k, v]) => [k, String(v)]));
+
 const describe = (delivery: ConsumeMessage): DeliveryInfo => {
   const headers = delivery.properties.headers ?? {};
   let deadLetter: DeliveryInfo["deadLetter"] | undefined;
@@ -317,11 +323,7 @@ const describe = (delivery: ConsumeMessage): DeliveryInfo => {
       return deadLetter;
     },
     get properties() {
-      if (properties === undefined) {
-        properties = Object.fromEntries(
-          Object.entries(headers).map(([k, v]) => [k, String(v)]),
-        );
-      }
+      if (properties === undefined) properties = stringifyHeaders(headers);
       return properties;
     },
     get idempotencyKey() {
@@ -897,6 +899,7 @@ export const makeRmq = Effect.fnUntraced(function* (
           });
         return O.some({
           body: msg.content.toString("utf8"),
+          properties: stringifyHeaders(msg.properties.headers ?? {}),
           ack: settleOnce(() => ch.ack(msg)),
           nack: settleOnce(() => ch.nack(msg, false, true)),
         });

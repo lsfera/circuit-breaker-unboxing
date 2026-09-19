@@ -91,6 +91,7 @@ const fakePermitRmq = (): RmqService => {
         token = null;
         return Option.some({
           body: held,
+          properties: {},
           ack: Effect.sync(() => {}),
           nack: Effect.sync(() => {
             token = held;

@@ -1,10 +1,12 @@
 // Drives one incident against the fleet and reports what actually happened —
 // including whether five independent, in-process breakers agree with each
 // other about the same third party (they share nothing, see
-// packages/consumer/src/Breaker.ts) and, since article 4, how long
+// packages/consumer/src/Breaker.ts), since article 4, how long
 // @egress/aggregator's own published verdict took to catch up with the
-// first replica to notice — measured, not asserted, same as everything
-// else here.
+// first replica to notice, and since article 5, whether the messages this
+// incident dead-lettered actually come back once the elected redriver's own
+// breaker closes (packages/consumer/src/Redrive.ts) — measured, not
+// asserted, same as everything else here.
 //
 //   node infra/incident.mjs
 //   WINDOW_MS=30000 RATE=0.6 node infra/incident.mjs   # a partial failure instead
@@ -27,6 +29,16 @@ const RATE = Number(process.env.RATE ?? "1.0");
 const MODE = process.env.MODE; // unset = "error" (flaky-upstream's default)
 const WINDOW_MS = Number(process.env.WINDOW_MS ?? "20000");
 const DRAIN_TIMEOUT_MS = Number(process.env.DRAIN_TIMEOUT_MS ?? "60000");
+// How long to watch the dead-letter/parked queues after the work queue
+// drains before giving up on the redrive — separate from DRAIN_TIMEOUT_MS
+// and deliberately generous. Redrive only starts once the SAC-elected
+// replica's own breaker closes, and that replica is whichever one RabbitMQ
+// happens to have chosen — not necessarily the fastest to recover. Measured
+// against this stack's own BREAKER_MAX_DELAY_MS=30000: the elected leader
+// can take up to that long after the third party is actually healthy again
+// before its own backoff clock lets it probe and close.
+const REDRIVE_WAIT_MS = Number(process.env.REDRIVE_WAIT_MS ?? "40000");
+const REDRIVE_IDLE_MS = 6000;
 const POLL_MS = 1000;
 
 const auth = "Basic " + Buffer.from("guest:guest").toString("base64");
@@ -74,6 +86,7 @@ const audit = async (run) => {
 
 const workQueue = `${API_ID}.work`;
 const deadQueue = `${API_ID}.work.dead`;
+const parkedQueue = `${API_ID}.work.parked`;
 
 const report = (label, depth) =>
   console.log(`  ${label}: ready=${depth.ready} unacked=${depth.unacked} total=${depth.total}`);
@@ -156,7 +169,25 @@ const main = async () => {
   const drainMs = Date.now() - restoredAt;
   const drained = work.total === 0;
 
+  const deadAtDrainEnd = (await queueDepth(deadQueue)).total;
+  const parkedBefore = (await queueDepth(parkedQueue)).total;
+
+  console.log(`\n== Waiting for the elected redriver ==`);
+  const redriveStart = Date.now();
+  let lastDead = deadAtDrainEnd;
+  let idleSince = Date.now();
+  while (Date.now() - redriveStart < REDRIVE_WAIT_MS) {
+    await sleep(POLL_MS);
+    const now = (await queueDepth(deadQueue)).total;
+    if (now !== lastDead) {
+      idleSince = Date.now();
+      lastDead = now;
+    }
+    console.log(`  +${Math.round((Date.now() - redriveStart) / 1000)}s dead=${now}`);
+    if (Date.now() - idleSince > REDRIVE_IDLE_MS) break;
+  }
   const dead = await queueDepth(deadQueue);
+  const parkedAfter = (await queueDepth(parkedQueue)).total;
   const stats = await audit(API_ID);
 
   console.log(`\n== Summary ==`);
@@ -166,6 +197,10 @@ const main = async () => {
     drained
       ? `  drained to 0 in ${(drainMs / 1000).toFixed(1)}s after restore`
       : `  did NOT drain within ${DRAIN_TIMEOUT_MS}ms (${work.total} left)`,
+  );
+  console.log(
+    `  redrive: ${deadAtDrainEnd - dead.total} moved back onto the work queue, ` +
+      `${parkedAfter - parkedBefore} parked as poison, ${dead.total} still dead-lettered`,
   );
   if (stats) {
     console.log(

@@ -1,27 +1,21 @@
-# One verdict, five opinions
+# Five breakers, one way back
 
 One producer, one broker, a fleet of competing-consumer daemons, each with
 its own [cockatiel](https://github.com/connor4312/cockatiel) circuit
-breaker and a shared probe permit — plus, new this branch, a single
-aggregator that folds every replica's own breaker transitions into one
-published verdict. This is the fourth step in a circuit-breaker article
-series, built on `article/03-probe-permit`. Every report in this series has
-named the same standing problem: no signal about an outage leaves any one
-process. This branch gives the fleet exactly one voice for that — without
-changing how any replica protects itself.
+breaker, a shared probe permit, and a single aggregator publishing one
+fleet-wide verdict — plus, new this branch, a way for dead-lettered work to
+come back. This is the fifth step in a circuit-breaker article series,
+built on `article/04-fleet-verdict`. Every report in this series has named
+the same standing problem, since article 1: a message dead-lettered during
+an outage stays dead-lettered forever, even once the third party recovers.
+This branch is the first to do anything about it.
 
-That split is deliberate, not a shortcut. Checked `master` (the original,
-full system this series incrementally re-derives) for how it actually
-solved this, and its own design essay states the reasoning directly:
-**protecting the request path and telling the rest of the system about an
-outage are different problems with different correct answers.** Sharing
-breaker state across replicas *before* deciding whether to call is the
-tempting fix and the wrong one — it puts a network round trip and a shared
-failure domain in the hot path of the one component whose job is surviving
-other people's failures. So the aggregator here computes its verdict from
-events published *after* each replica has already decided for itself, off
-the hot path, and publishes it for anyone who wants to know — a dashboard,
-an alert, another service — never back into any replica's own breaker.
+Same pattern as the permit and the aggregator before it: checked `master`
+(the original, full system this series incrementally re-derives) for real
+prior art rather than designing from scratch, took the smallest piece that
+actually closes this branch's one named problem, and named what was left
+out on purpose rather than hiding it. See "The redrive" below for what
+that meant here.
 
 ```mermaid
 flowchart LR
@@ -29,6 +23,9 @@ flowchart LR
   permit[("probe-permit\n(1 token)")]
   control[["circuit.control"]]
   aggregator["aggregator\n(one verdict)"]
+  dead[("work.dead")]
+  parked[("work.parked")]
+  rtrigger[["redrive-trigger\n(SAC)"]]
   subgraph c1["consumer 1"]
     b1{{"breaker\n(cockatiel)"}}
   end
@@ -52,15 +49,98 @@ flowchart LR
   b3 -.->|"onStateChange"| control
   control --> aggregator
   aggregator -.->|"verdict"| prom[("Prometheus")]
+  queue -.->|"exhausts delivery limit"| dead
+  b1 -.->|"onReset"| rtrigger
+  b2 -.->|"onReset"| rtrigger
+  b3 -.->|"onReset"| rtrigger
+  rtrigger -.->|"elects exactly one"| dead
+  dead -->|"redrive pass"| queue
+  dead -.->|"MAX_REDRIVES exceeded"| parked
 ```
 
 Each replica's breaker is still its own `CircuitBreakerPolicy` instance —
 nothing draws a line *between* the subgraphs, same as before. `circuit.control`
 is a one-way, off-the-hot-path fan-in: every replica publishes to it, only
 the aggregator reads it, and nothing reads back from the aggregator into any
-consumer subgraph.
+consumer subgraph. `redrive-trigger` is a third, unrelated fan-in with the
+same one-way shape: every replica may publish to it, but RabbitMQ delivers
+to exactly one bound consumer at a time, so only one replica's redrive
+passes ever touch `work.dead`.
+
+## The redrive
+
+`packages/consumer/src/Redrive.ts` plus wiring in `consumer.ts`. The
+problem this closes: every article since 1 has measured real messages
+piling up in `<api>.work.dead` with nothing ever reading them back —
+1,975 in one 15s outage in article 3's report, 1,777 in article 4's.
+
+Checked `master`'s own prior art first
+(`packages/rmq-consumer/src/Redrive.ts`): one daemon per API, elected by a
+`x-single-active-consumer` trigger queue, runs bounded passes moving
+messages from the dead-letter queue back onto the work queue, incrementing
+a redrive-count header each time and parking anything that's failed
+`MAX_REDRIVES` (5) times as poison rather than replaying it forever. The
+election itself needs no code of this project's own — the same broker
+guarantee article 3's permit queue already leaned on, just applied to a
+different problem: RabbitMQ promotes a new active consumer automatically if
+the elected one disconnects.
+
+Two scope choices, made explicitly rather than defaulted into:
+
+- **What gates a pass.** Master gates on the elected daemon's own local
+  breaker being closed. The alternative — gate on `@egress/aggregator`'s
+  published fleet verdict instead — would have finally given that verdict
+  something to act on, closing article 4's own "the verdict doesn't gate
+  anything" finding. This branch keeps master's original choice: the
+  elected replica's own local view. Lower risk, proven design — the
+  verdict-gating idea is a documented option not taken, not a rejected one.
+- **How much of master's Redrive.ts to port.** Master's dead-letter queue
+  is shared with malformed messages from its own SAC trigger queues, so it
+  carries origin-queue/origin-reason attribution logic to tell real work
+  apart from that. In this repo's topology the trigger queue never carries
+  a payload of consequence — nothing is ever published to it but the
+  trigger itself — so `work.dead` can only ever hold real dead-lettered
+  work. That whole defensive layer has nothing to guard against here and is
+  left out.
+
+A pass (`Redrive.runPass`) drains `work.dead` with the same non-blocking
+`rmq.get` article 3's permit queue uses — a natural fit, since "replay
+what's there, stop when it's empty" needs no idle timer the way a
+long-lived `consume` subscription would. Each iteration re-checks the gate
+fresh, publishes to `work` or `work.parked` before acking the original
+(never the reverse — a crash between the two redelivers a duplicate;
+acking first would lose the message outright), and stops at 200 messages
+per pass so one pass can't hog the queue's single active-consumer slot
+indefinitely. A trigger is published on every `onReset` (this replica's own
+breaker just closed — "the outage might be over" first becomes true here)
+and once at startup, so a backlog already sitting in `work.dead` when a
+replica restarts closed doesn't wait for a fresh trip.
+
+**Measured live, not assumed:** redrive only progresses on a breaker
+transition, not continuously. Driving an incident and watching afterward,
+`work.dead` dropped from ~1,480 to 1,225 over the first 30 seconds after
+recovery, then sat at exactly 1,225 for the next 20+ seconds with every
+replica already closed — nothing left to trigger another pass. Publishing
+manual triggers by hand resumed it immediately, in the same ~200-message
+steps, confirming the mechanism itself was never stuck, only untriggered.
+A second thing manual triggering surfaced: a trigger that arrives while a
+pass is already running is silently dropped, not queued, so firing several
+in quick succession doesn't parallelize or speed anything up — most of them
+are simply wasted. Both are real limits of this branch's design, not bugs;
+see "what this still doesn't fix."
 
 ## The aggregator
+
+Checked `master`'s own design essay for how it justified this piece, and
+it states the reasoning directly: **protecting the request path and
+telling the rest of the system about an outage are different problems
+with different correct answers.** Sharing breaker state across replicas
+*before* deciding whether to call is the tempting fix and the wrong one —
+it puts a network round trip and a shared failure domain in the hot path
+of the one component whose job is surviving other people's failures. So
+the aggregator computes its verdict from events published *after* each
+replica has already decided for itself, off the hot path, and publishes it
+for anyone who wants to know — never back into any replica's own breaker.
 
 `packages/aggregator` is a small, single-instance service — no scaling, no
 leader election, no persistence, a real SPOF this branch names rather than
@@ -88,8 +168,6 @@ Restarting the aggregator starts it from "no data yet": the registry is
 pure memory, and it repopulates within a few replicas' worth of
 transitions. That's an explicit trade for staying single-instance this
 branch, not an oversight.
-
-## The permit
 
 ## The permit
 
@@ -166,6 +244,30 @@ used for a shed `429`.
 
 ## What this still doesn't fix
 
+**Redrive only progresses on a breaker transition, not continuously.**
+Measured live (see "The redrive" above): a backlog can sit completely
+unmoved for well over 20 seconds after the third party has fully
+recovered, simply because nothing in the fleet has transitioned since the
+last pass finished. A very large backlog recovers in whatever number of
+~200-message chunks the fleet's own transitions happen to produce, not in
+one continuous drain.
+
+**A trigger arriving mid-pass is dropped, not queued.** Only one pass runs
+at a time per elected replica; anything that arrives while it's running is
+a silent no-op. Firing several triggers in quick succession — by hand, or
+from several replicas resetting close together — wastes most of them
+rather than queuing follow-up work.
+
+**Redrive timing is tied to whichever replica happens to be SAC-elected,
+not to the fleet's fastest or its published verdict.** The same
+local-view tradeoff the probe permit already made, applied to a new
+problem: if the elected replica is the last one to close, the whole
+fleet's dead letters wait on that one replica's own backoff clock — up to
+`BREAKER_MAX_DELAY_MS` (30s) after the third party is already healthy
+again — even while every other replica, and the aggregator's own verdict,
+has already said `closed`. Gating on the verdict instead was a considered
+option (see "The redrive"); this branch didn't take it.
+
 **The registry's denominator is "replicas that have ever transitioned," not
 "the actual fleet."** A replica that's stayed `closed` the whole time has
 never published to `circuit.control` at all — `onStateChange` only fires on
@@ -208,8 +310,8 @@ unhealthy" apart from "my probe never got the permit" — both call
 `recordHalfOpenFailure` and grow the same backoff.
 
 **A message can still be dead-lettered without ever reaching the third
-party**, and **dead-lettered work still has no way back** — both unchanged
-since articles 1–3.
+party** — unchanged since article 1. ~~Dead-lettered work still has no way
+back~~ — resolved this branch, with its own new limits above.
 
 ## Running it
 
@@ -223,9 +325,10 @@ docker compose up -d --scale rmq-consumer=12   # resize the fleet, no restart ne
   `payments-provider.work`'s depth and `payments-provider.work.dead`'s
   growth.
 - Grafana: <http://localhost:3000/d/in-process-breaker/in-process-breaker-e28094-five-not-one>
-  — same dashboard as articles 2 and 3, one new panel on top: "Fleet
-  verdict," the one calm line `egress_fleet_verdict_state` draws next to
-  the five disagreeing ones in "Breaker state per replica" right below it.
+  — same dashboard as articles 2–4, two new panels at the bottom: "Parked
+  queue depth" (should stay at 0 — a nonzero value means genuine poison,
+  not just an outage) and "Redrives" (moved vs. parked, by rate — only ever
+  nonzero on whichever replica is currently SAC-elected).
   Anonymous viewer access, no login needed. (Plain `:3000` lands on
   Grafana's own "Welcome" screen, not this dashboard — Grafana 13's
   anonymous Viewer role can't be granted the permission a *default home
@@ -233,7 +336,7 @@ docker compose up -d --scale rmq-consumer=12   # resize the fleet, no restart ne
   requiring login. Use the direct link, or `Dashboards` in the left nav.)
   Panels: fleet verdict, breaker state per replica, work-queue depth,
   dead-letter-queue depth, calls by outcome, breaker trips, active
-  consumers.
+  consumers, parked-queue depth, redrives.
 - Grafana's own nav bar fires two calls (`/api/user/teams`,
   `/api/user/stars`) that need a real signed-in user and 401 for an
   anonymous session — a known rough edge in Grafana's anonymous-auth mode,
@@ -272,12 +375,21 @@ ticks saw every replica in the *same* state, and the peak number open at
 once. That's the concrete, measured version of "five independent breakers
 disagree" — produced by this branch's own run, not asserted.
 
-New this branch: it also reads `egress_fleet_verdict_state` and reports how
+Since article 4, it also reads `egress_fleet_verdict_state` and reports how
 many seconds the published verdict lagged behind the first replica to
 individually notice the outage (or, if the threshold happens to trip on a
 sparser sample before every replica's own state is visible again, how many
 seconds it led — that's a polling artifact of two separate Prometheus
 queries per tick, not a claim the aggregator somehow knew first).
+
+New this branch: after the work queue drains, it keeps polling the
+dead-letter and parked queues until they go idle (`REDRIVE_WAIT_MS`,
+default 40s — generous on purpose, since redrive only starts once the
+SAC-elected replica's own breaker closes, which can trail recovery by up
+to that replica's own backoff) and reports how many of the incident's
+dead-lettered messages actually came back onto the work queue versus were
+parked as poison versus are still sitting dead-lettered when the script
+gives up.
 
 ## Load
 
@@ -297,15 +409,19 @@ packages/
   config/      @egress/config — settings declared once, decoded at boot
   rmq/         @egress/rmq — Effect wrapper over amqplib, plus the generic
                work-queue naming/options a producer and a consumer fleet
-               share, and (as of this branch) the circuit.control naming
-               convention (ControlPlane.ts). `get` (src/Client.ts, article
-               3) is what the probe-permit queue runs on.
+               share, the circuit.control naming convention, and (as of
+               this branch) the redrive-trigger/parked-queue naming
+               (ControlPlane.ts). `get` (src/Client.ts, article 3, now also
+               carrying message headers for article 5's redrive-count
+               check) is what both the probe-permit queue and a redrive
+               pass run on.
   rmq-producer/  the load: a steady stream onto <apiId>.work, never backing off
   consumer/    the competing-consumer fleet, each with its own in-process
                breaker (src/Breaker.ts) sharing one probe-permit queue
-               during half-open, and now publishing every transition to
-               circuit.control — see src/consumer.ts for what that channel
-               is and isn't for
+               during half-open, publishing every transition to
+               circuit.control, and (as of this branch) redriving
+               work.dead when SAC-elected to (src/Redrive.ts) — see
+               src/consumer.ts for how the pieces fit together
   aggregator/  @egress/aggregator — single instance, folds circuit.control
                into one published verdict per apiId (src/Verdict.ts is the
                pure, unit-tested decision; src/aggregator.ts wires it to
@@ -316,8 +432,10 @@ infra/
   flaky-upstream.mjs   the fake third party: configurable failures, an audit trail
   rabbitmq.conf        the broker's flow-control watermark
   incident.mjs         drives one incident, reports what happened including
-                        whether the fleet's breakers agreed and how the
-                        published verdict's timing compared
+                        whether the fleet's breakers agreed, how the
+                        published verdict's timing compared, and how much
+                        of the incident's dead-lettered backlog actually
+                        redrove back onto the work queue
   monitoring/          Prometheus scrape config and the Grafana dashboard
 docker-compose.yml     the whole stack
 ```

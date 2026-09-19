@@ -110,7 +110,7 @@
    "id": 2,
    "type": "timeseries",
    "title": "Dead-letter queue depth — payments-provider.work.dead",
-   "description": "Messages that exhausted the broker's own delivery limit (x-delivery-limit, 3 attempts). Nothing here recovers them — that is a later article's problem.",
+   "description": "Messages that exhausted the broker's own delivery limit (x-delivery-limit, 3 attempts). Since article 5, one SAC-elected replica redrives these back onto the work queue once its own breaker closes — see the Redrives panel and packages/consumer/src/Redrive.ts. Redrive only progresses on a breaker transition, so this can sit unmoved for a while even after the third party recovers, if nothing transitions again.",
    "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
@@ -166,6 +166,38 @@
      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
      "expr": "rabbitmq_detailed_queue_consumers{queue=\"payments-provider.work\"}",
      "legendFormat": "consumers",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 8,
+   "type": "timeseries",
+   "title": "Parked queue depth — payments-provider.work.parked",
+   "description": "Messages redriven MAX_REDRIVES (5) times without succeeding — true poison, not just caught in an outage. Should stay at 0 for any incident this series injects (transient, not permanent, failures); a nonzero value here means something the third party will never accept.",
+   "gridPos": { "x": 0, "y": 35, "w": 12, "h": 8 },
+   "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+   "targets": [
+    {
+     "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+     "expr": "rabbitmq_detailed_queue_messages_ready{queue=\"payments-provider.work.parked\"}",
+     "legendFormat": "parked",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 9,
+   "type": "timeseries",
+   "title": "Redrives",
+   "description": "sum(rate(egress_consumer_redrives_total)) by outcome. Only ever nonzero on whichever replica RabbitMQ currently elects active on <api>.redrive-trigger — a single SAC-elected redriver, not the whole fleet at once.",
+   "gridPos": { "x": 12, "y": 35, "w": 12, "h": 8 },
+   "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+   "targets": [
+    {
+     "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+     "expr": "sum(rate(egress_consumer_redrives_total[1m])) by (outcome)",
+     "legendFormat": "{{outcome}}/s",
      "refId": "A"
     }
    ]

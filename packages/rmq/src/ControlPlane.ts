@@ -53,6 +53,54 @@ const deadLetterArgs = (apiId: string): Record<string, unknown> => ({
 const workQueueArgs = deadLetterArgs;
 
 /**
+ * Article 5's redrive election. A durable quorum queue whose only job is
+ * picking exactly one replica: `x-single-active-consumer` means the broker
+ * delivers to one bound consumer and holds the rest as backups, promoting
+ * automatically if the active one disconnects. Nothing is ever published
+ * here but the trigger itself (see `consumer.ts`), so unlike master's
+ * version of this queue there is no malformed-payload case to dead-letter
+ * defensively against — the only thing that can ever land on it is a
+ * trigger this same codebase minted.
+ */
+export const redriveTriggerQueueFor = (apiId: string): string => `${apiId}.redrive-trigger`;
+
+export const redriveTriggerQueueOptions = () => ({
+  args: { "x-queue-type": "quorum", "x-single-active-consumer": true },
+  durable: true,
+});
+
+/**
+ * Where a message goes once it has been redriven `MAX_REDRIVES` times
+ * without succeeding — treated as poison rather than unlucky, so the
+ * elected redriver's periodic passes stop replaying it forever. Terminal
+ * like the dead-letter queue, and for the same reason never allowed to drop
+ * at a delivery limit.
+ */
+export const parkedQueueFor = (apiId: string): string => `${apiId}.work.parked`;
+
+export const parkedQueueOptions = () => ({
+  args: { "x-queue-type": "quorum", "x-delivery-limit": -1 },
+  durable: true,
+});
+
+/**
+ * Stamped on a redriven message so the next pass can tell a message caught
+ * in its second outage from one that has failed every single time. Absent
+ * means zero — a message dead-lettered by the broker directly, never yet
+ * redriven.
+ */
+export const REDRIVE_COUNT_HEADER = "x-egress-redrive-count";
+
+/**
+ * Redrives before a message is treated as poison rather than unlucky. Each
+ * redrive republishes onto the work queue, which grants a fresh
+ * `WORK_DELIVERY_LIMIT`-attempt budget — so this bounds outages survived,
+ * not attempts: five outages' worth of the third party rejecting the same
+ * message is enough evidence it will never be accepted.
+ */
+export const MAX_REDRIVES = 5;
+
+/**
  * Attempts before the broker parks a message. The budget belongs to the queue,
  * not the daemon: an in-process counter is lost the moment the message moves to
  * another consumer, which is what an outage causes.

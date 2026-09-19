@@ -1,4 +1,4 @@
-import { Effect, Metric } from "effect";
+import { Effect, Metric, Ref } from "effect";
 import { randomUUID } from "node:crypto";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
@@ -6,11 +6,16 @@ import {
   deadLetterQueueFor,
   deadLetterQueueOptions,
   IDEMPOTENCY_KEY_HEADER,
+  parkedQueueFor,
+  parkedQueueOptions,
+  redriveTriggerQueueFor,
+  redriveTriggerQueueOptions,
   routingKeyFor,
   workQueueFor,
   workQueueOptions,
 } from "@egress/rmq/ControlPlane.ts";
 import * as Breaker from "./Breaker.ts";
+import * as Redrive from "./Redrive.ts";
 import * as Telemetry from "./Telemetry.ts";
 import { CircuitState } from "cockatiel";
 import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
@@ -27,6 +32,12 @@ import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
  * own breaker are unrelated: the verdict is for telling the rest of the
  * system about an outage, not for this replica's own protection. See
  * README.md for why those are kept as different problems.
+ *
+ * Article 5 adds a third, unrelated concern on top: `<api>.work.dead` used
+ * to be a one-way trip. RabbitMQ's `x-single-active-consumer` elects exactly
+ * one replica per API to redrive it — see Redrive.ts and README.md's "The
+ * redrive" section — gated on that one elected replica's own breaker, same
+ * local-view tradeoff the probe permit already made.
  */
 
 export type ConsumerConfig = {
@@ -127,6 +138,62 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   yield* rmq.declareTopicExchange(CONTROL_EXCHANGE, { durable: true });
   const controlPub = yield* rmq.publisherToExchange(CONTROL_EXCHANGE, routingKeyFor(cfg.apiId));
 
+  // Article 5: recovering `<api>.work.dead`. `parkedQueue` needs declaring
+  // even on the four replicas that will never redrive into it — every
+  // process that might touch a queue has to agree on its arguments, and
+  // container startup is unordered.
+  yield* rmq.declareQueue(parkedQueueFor(cfg.apiId), parkedQueueOptions());
+  const redriveQueue = redriveTriggerQueueFor(cfg.apiId);
+  yield* rmq.declareQueue(redriveQueue, redriveTriggerQueueOptions());
+  const redriveTriggerPub = yield* rmq.publisherToQueue(redriveQueue);
+
+  const triggerRedrive = () =>
+    runInContext(rmq.send(redriveTriggerPub, "redrive")).catch((err: unknown) => {
+      runInContext(
+        Effect.logWarning(`${cfg.apiId}/consumer: redrive trigger publish failed`, err),
+      ).catch(() => {});
+    });
+
+  // Guards against two triggers arriving close together starting two
+  // overlapping passes on whichever replica the broker has elected active —
+  // `Ref.modify` reads and marks the claim in one synchronous step, so
+  // there's no gap between them for a second trigger to race into.
+  const redriving = yield* Ref.make(false);
+
+  // Never more than one bound consumer here actually receives anything:
+  // `redriveTriggerQueueOptions`'s `x-single-active-consumer` is the whole
+  // election, promoted automatically by the broker if the active replica
+  // disconnects — no leader-election code of this project's own, the same
+  // broker guarantee article 3's permit queue already leaned on.
+  yield* rmq.consume(redriveQueue, () => {
+    runInContext(
+      Ref.modify(redriving, (running) => [running, true] as const).pipe(
+        Effect.flatMap((alreadyRunning) =>
+          alreadyRunning
+            ? Effect.void
+            : Redrive.runPass({
+                apiId: cfg.apiId,
+                // The elected replica's own view — this is the same tradeoff
+                // the probe permit already made, not a new one. See
+                // README.md's "what this still doesn't fix."
+                isClosed: Effect.sync(() => breaker.state === CircuitState.Closed),
+                onOutcome: (outcome) => {
+                  runInContext(
+                    Metric.update(Metric.withAttributes(Telemetry.redrives, { outcome }), 1),
+                  );
+                },
+              }).pipe(Effect.ensuring(Ref.set(redriving, false))),
+        ),
+      ),
+    ).catch((err: unknown) => {
+      runInContext(Ref.set(redriving, false));
+      runInContext(Effect.logWarning(`${cfg.apiId}/consumer: redrive pass failed`, err)).catch(
+        () => {},
+      );
+    });
+    return "accept";
+  });
+
   breaker.onStateChange((state: CircuitState) => {
     runInContext(Metric.update(Telemetry.breakerState, Breaker.STATE_CODE[state]));
     // Off the hot path — transitions are rare, never per-message — so a
@@ -154,7 +221,13 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
     runInContext(Metric.update(Telemetry.breakerTrips, 1));
     runInContext(Effect.log(`${cfg.apiId}/consumer: breaker opened`));
   });
-  breaker.onReset(() => runInContext(Effect.log(`${cfg.apiId}/consumer: breaker closed`)));
+  breaker.onReset(() => {
+    runInContext(Effect.log(`${cfg.apiId}/consumer: breaker closed`));
+    // The moment this replica's own breaker closes is the moment "the
+    // outage might be over" first becomes true for it — worth a trigger
+    // even though only the elected replica will ever act on it.
+    triggerRedrive();
+  });
 
   let inFlight = 0;
   const track = (outcome: CallOutcome) =>
@@ -225,6 +298,12 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
 
   // Set at startup so the series exists before the first state change.
   yield* Metric.update(Telemetry.breakerState, Breaker.INITIAL_STATE_CODE);
+
+  // A backlog already sitting in the dead-letter queue when this replica
+  // starts — from a redrive-eligible outage that ended before any restart —
+  // would otherwise wait for a fresh breaker trip and reset before anything
+  // looks at it again.
+  triggerRedrive();
 
   yield* Effect.log(
     `${cfg.apiId}/consumer: up — maxInFlight=${cfg.maxInFlight} egress=${cfg.egressAddr}${cfg.apiPath} work=${workQueue} ` +
