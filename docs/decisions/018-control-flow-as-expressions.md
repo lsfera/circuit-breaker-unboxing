@@ -196,6 +196,43 @@ shape does not pass, not that it fails an assertion.
 article branches still have one connection, and their `Rmq` test fakes will need
 nothing new from this change, though `isConnected` now means both.
 
+## Amendment — 2026-09-20: the idempotency key is the `message_id`
+
+The key used to live in three places: an AMQP header `x-idempotency-key` that
+nothing on the consumer path read, the body's `n` from which the consumer built
+`${apiId}:${n}`, and the HTTP header on the call. It is now one thing: the AMQP
+`message_id`, assigned once by the producer as `<run>:<n>` (`workMessageId`), read
+by the daemon as `delivery.messageId` and sent as the third party's
+`x-idempotency-key` HTTP header (renamed `IDEMPOTENCY_KEY_HTTP_HEADER`, since that
+name is the third party's contract and only that). `DeliveryInfo.idempotencyKey`
+and the AMQP header are gone.
+
+Why the run is in it: `n` restarts at zero with every producer process, so
+`${apiId}:${n}` reissued the key of different work after a restart, which a real
+third party would drop as a duplicate. `<run>:<n>` cannot repeat.
+
+- **No id, no call.** A delivery with no `message_id` is discarded and counted
+  as `keyless`, next to `format` and `malformed`. Stricter than before, when the
+  key was derived from the body and always existed.
+- **A republish must carry it.** `send` takes `{ headers, messageId }` and
+  stamps a fresh id only when none is given, so the redrive has to pass
+  `messageId: delivery.messageId` or the replay is a new message with a new key. The
+  dead-letter test pins both halves: the id survives dead-lettering, a republish
+  that carries it keeps it, one that drops it gets a different id.
+- **The audit moved with it.** The fake third party buckets by the key's prefix,
+  which is now the producer's run rather than `apiId`, so it gained
+  `__audit?run=*` (totals across runs) and `incident.mjs` reads that.
+
+**Checked:** 25 of 25 integration tests and 14 unit tests, and end to end with a
+real producer and daemon (scratch API id, local fake third party): 435 messages
+processed under one run with no duplicates and no foreign keys; then a message
+with no id, one declaring `text/plain`, and one that was not JSON were injected,
+each counted (`keyless`, `format`, `malformed`) and dead-lettered (3 in the
+dead-letter queue), while a well-formed one was called. **Not done:** the later
+branches. Their redrive must carry `messageId`, their chaos harness reads the
+audit by `apiId` and now needs the run, and `body.n` is still in the message
+though nothing keys on it.
+
 ## What this does not settle
 
 - **`when` is an `if` under another name.** It removes the statement, not the
