@@ -27,6 +27,7 @@ const RATE = Number(process.env.RATE ?? "1.0");
 const MODE = process.env.MODE; // unset = "error" (flaky-upstream's default)
 const WINDOW_MS = Number(process.env.WINDOW_MS ?? "20000");
 const DRAIN_TIMEOUT_MS = Number(process.env.DRAIN_TIMEOUT_MS ?? "60000");
+const RECOVERY_TIMEOUT_MS = Number(process.env.RECOVERY_TIMEOUT_MS ?? "90000");
 const POLL_MS = 1000;
 const DRAIN_POLL_MS = 200;
 
@@ -45,6 +46,27 @@ const channel = await connection.createChannel();
 const queueDepth = async (name) => ({ ready: (await channel.checkQueue(name)).messageCount });
 
 const STATE_NAME = ["CLOSED", "OPEN", "HALF_OPEN"];
+
+/** Breaker openings so far, fleet-wide: `onBreak` fires once per replica per opening, not once per incident. */
+const breakerTrips = async () => {
+  const res = await fetch(`${PROMETHEUS}/api/v1/query?query=sum(egress_consumer_breaker_trips_total)`).catch(
+    () => undefined,
+  );
+  const body = res?.ok ? await res.json() : undefined;
+  const value = body?.data?.result?.[0]?.value?.[1];
+  return value === undefined ? undefined : Number(value);
+};
+
+/** Attempts by outcome so far, fleet-wide: `failed` reached the third party, `open` was turned away by the replica's own breaker. */
+const callsByOutcome = async () => {
+  const res = await fetch(`${PROMETHEUS}/api/v1/query?query=sum by (outcome)(egress_consumer_calls_total)`).catch(
+    () => undefined,
+  );
+  const body = res?.ok ? await res.json() : undefined;
+  return body?.data?.result
+    ? Object.fromEntries(body.data.result.map((r) => [r.metric.outcome, Number(r.value[1])]))
+    : undefined;
+};
 
 /** One reading per replica, or `undefined` if Prometheus isn't reachable — never fails the run over it. */
 const breakerStates = async () => {
@@ -82,7 +104,7 @@ const agreement = { ticksWithData: 0, ticksAgreed: 0, peakOpen: 0, replicaCount:
 
 const pollBreakers = async (label) => {
   const states = await breakerStates();
-  if (!states || states.length === 0) return;
+  if (!states || states.length === 0) return states;
   agreement.ticksWithData++;
   agreement.replicaCount = Math.max(agreement.replicaCount, states.length);
   const distinct = new Set(states.map((s) => s.state)).size;
@@ -91,6 +113,7 @@ const pollBreakers = async (label) => {
   agreement.peakOpen = Math.max(agreement.peakOpen, openCount);
   const summary = states.map((s) => STATE_NAME[s.state] ?? s.state).join(",");
   console.log(`  ${label} breakers: [${summary}]`);
+  return states;
 };
 
 const main = async () => {
@@ -99,6 +122,8 @@ const main = async () => {
   report(deadQueue, await queueDepth(deadQueue));
   await pollBreakers("t+0s");
 
+  const tripsBefore = await breakerTrips();
+  const callsBefore = await callsByOutcome();
   console.log(`\n== Injecting failure: rate=${RATE} mode=${MODE ?? "error"} for ${WINDOW_MS}ms ==`);
   await setFailure(RATE);
 
@@ -127,6 +152,21 @@ const main = async () => {
   const drainMs = Date.now() - restoredAt;
   const drained = work.ready === 0;
 
+  // The queue is empty long before the breakers are: each replica closes on
+  // its own half-open clock, and that recovery is the half of the incident
+  // where they disagree most. Stopping the observation at the drain would
+  // measure agreement over a window that mostly excludes it.
+  let states = await pollBreakers(`+${Math.round((Date.now() - restoredAt) / 1000)}s`);
+  while (states?.some((s) => s.state !== 0) && Date.now() - restoredAt < RECOVERY_TIMEOUT_MS) {
+    await sleep(POLL_MS);
+    states = await pollBreakers(`+${Math.round((Date.now() - restoredAt) / 1000)}s`);
+  }
+  const recoveredMs = Date.now() - restoredAt;
+  await sleep(2500); // one scrape interval, so the counter has caught up
+  const tripsAfter = await breakerTrips();
+  const callsAfter = await callsByOutcome();
+  const recovered = states?.every((s) => s.state === 0);
+
   const dead = await queueDepth(deadQueue);
   const stats = await audit("*"); // every producer run: a message id is `<run>:<n>`
 
@@ -141,6 +181,22 @@ const main = async () => {
   if (stats) {
     console.log(
       `  audit: processed=${stats.processed ?? "?"} duplicates=${stats.duplicates ?? "?"}`,
+    );
+  }
+  if (tripsBefore !== undefined && tripsAfter !== undefined) {
+    console.log(`  breaker openings across the fleet: ${tripsAfter - tripsBefore}`);
+  }
+  if (callsBefore && callsAfter) {
+    const delta = (outcome) => (callsAfter[outcome] ?? 0) - (callsBefore[outcome] ?? 0);
+    console.log(
+      `  attempts during the incident: ${delta("ok")} ok, ${delta("failed")} reached the third party and failed, ${delta("open")} turned away by an open breaker`,
+    );
+  }
+  if (states) {
+    console.log(
+      recovered
+        ? `  every breaker CLOSED ${(recoveredMs / 1000).toFixed(1)}s after restore`
+        : `  breakers still not all CLOSED ${(recoveredMs / 1000).toFixed(1)}s after restore`,
     );
   }
   if (agreement.ticksWithData > 0) {
