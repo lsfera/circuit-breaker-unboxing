@@ -10,8 +10,9 @@
 //   MODE=hang node infra/incident.mjs                  # this is the one that grows the work queue
 //
 // Assumes `docker compose up -d` is already running.
+import { createRequire } from "node:module";
 
-const RABBITMQ_MGMT = process.env.RABBITMQ_MGMT ?? "http://localhost:15672";
+const BROKER = process.env.BROKER ?? "amqp://guest:guest@localhost:5672";
 const FLAKY_UPSTREAM = process.env.FLAKY_UPSTREAM ?? "http://localhost:8080";
 const API_ID = process.env.API_ID ?? "payments-provider";
 const RATE = Number(process.env.RATE ?? "1.0");
@@ -27,22 +28,21 @@ const MODE = process.env.MODE; // unset = "error" (flaky-upstream's default)
 const WINDOW_MS = Number(process.env.WINDOW_MS ?? "20000");
 const DRAIN_TIMEOUT_MS = Number(process.env.DRAIN_TIMEOUT_MS ?? "60000");
 const POLL_MS = 1000;
+const DRAIN_POLL_MS = 200;
 
-const auth = "Basic " + Buffer.from("guest:guest").toString("base64");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const queueDepth = async (name) => {
-  const res = await fetch(`${RABBITMQ_MGMT}/api/queues/%2F/${encodeURIComponent(name)}`, {
-    headers: { Authorization: auth },
-  });
-  if (!res.ok) throw new Error(`queue ${name}: ${res.status}`);
-  const body = await res.json();
-  return {
-    ready: body.messages_ready ?? 0,
-    unacked: body.messages_unacknowledged ?? 0,
-    total: body.messages ?? 0,
-  };
-};
+// Depth comes from the broker itself, over AMQP, not from the management API:
+// the management API's queue figures are refreshed every 5s, so a read taken
+// at the moment the outage ends can be seconds stale — an incident that
+// dead-lettered 4,000 messages read as 2,200, and every drain read as 0.0s.
+// A passive declare answers from the queue's own state. It counts ready
+// messages only; the unacked few (at most a prefetch window) finish within a
+// round trip of the third party coming back.
+const amqp = createRequire(new URL("../packages/rmq/package.json", import.meta.url))("amqplib");
+const connection = await amqp.connect(BROKER);
+const channel = await connection.createChannel();
+const queueDepth = async (name) => ({ ready: (await channel.checkQueue(name)).messageCount });
 
 const setFailure = (rate) =>
   fetch(`${FLAKY_UPSTREAM}/__fail`, {
@@ -60,7 +60,7 @@ const workQueue = `${API_ID}.work`;
 const deadQueue = `${API_ID}.work.dead`;
 
 const report = (label, depth) =>
-  console.log(`  ${label}: ready=${depth.ready} unacked=${depth.unacked} total=${depth.total}`);
+  console.log(`  ${label}: ready=${depth.ready}`);
 
 const main = async () => {
   console.log(`== Steady state ==`);
@@ -76,9 +76,9 @@ const main = async () => {
     await sleep(POLL_MS);
     const work = await queueDepth(workQueue);
     const dead = await queueDepth(deadQueue);
-    peakBacklog = Math.max(peakBacklog, work.total);
+    peakBacklog = Math.max(peakBacklog, work.ready);
     console.log(
-      `  t+${Math.round((Date.now() - started) / 1000)}s  work=${work.total} dead=${dead.total}`,
+      `  t+${Math.round((Date.now() - started) / 1000)}s  work=${work.ready} dead=${dead.ready}`,
     );
   }
 
@@ -87,23 +87,23 @@ const main = async () => {
   const restoredAt = Date.now();
 
   let work = await queueDepth(workQueue);
-  while (work.total > 0 && Date.now() - restoredAt < DRAIN_TIMEOUT_MS) {
-    await sleep(POLL_MS);
+  while (work.ready > 0 && Date.now() - restoredAt < DRAIN_TIMEOUT_MS) {
+    await sleep(DRAIN_POLL_MS);
     work = await queueDepth(workQueue);
   }
   const drainMs = Date.now() - restoredAt;
-  const drained = work.total === 0;
+  const drained = work.ready === 0;
 
   const dead = await queueDepth(deadQueue);
   const stats = await audit("*"); // every producer run: a message id is `<run>:<n>`
 
   console.log(`\n== Summary ==`);
-  console.log(`  peak backlog (work queue): ${peakBacklog}`);
-  console.log(`  dead-lettered: ${dead.total}`);
+  console.log(`  peak backlog (work queue, ready): ${peakBacklog}`);
+  console.log(`  dead-lettered: ${dead.ready}`);
   console.log(
     drained
       ? `  drained to 0 in ${(drainMs / 1000).toFixed(1)}s after restore`
-      : `  did NOT drain within ${DRAIN_TIMEOUT_MS}ms (${work.total} left)`,
+      : `  did NOT drain within ${DRAIN_TIMEOUT_MS}ms (${work.ready} left)`,
   );
   if (stats) {
     console.log(
@@ -112,7 +112,9 @@ const main = async () => {
   }
 };
 
-main().catch((err) => {
-  console.error(err);
-  process.exitCode = 1;
-});
+main()
+  .catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  })
+  .finally(() => connection.close());
