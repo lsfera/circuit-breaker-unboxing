@@ -53,7 +53,7 @@ per call would never accumulate a failure count).
   breaker rejected the call itself; **no call reached the third party**,
   requeue after a short jittered hold).
 
-That hold (100–400ms, `OPEN_REQUEUE_DELAY_MIN_MS`/`MAX_MS` in
+That hold (100–400ms, `OPEN_REQUEUE_DELAY_MIN_MS`/`SPREAD_MS` in
 `consumer.ts`) exists because an open breaker rejects instantly — with no
 hold, a rejected message goes straight back onto the queue and straight back
 to the same consumer, which can spin against its own in-memory breaker at
