@@ -196,3 +196,11 @@ list whose indices are the contract. See `history/findings.md`.
 A hot path where an `Option` allocation per item is measurable. Nothing here
 qualifies: the highest-rate `Option` in the codebase is `DeliveryInfo.parent`,
 computed lazily and read once per delivery.
+
+## Amendment — 2026-09-20
+
+The memoisation sentinel above (`let cached: T | undefined`) is no longer
+written. `Option<Option<T>>` was the objection, and it is only a type: see
+[018](018-control-flow-as-expressions.md), where `Client.ts` holds the memo as an
+`Option` and reads it without an `if`. Lookups and optional inputs still arrive
+as `undefined` and are converted at their first use.

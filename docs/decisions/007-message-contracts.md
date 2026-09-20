@@ -166,3 +166,12 @@ value that had nothing to do with the run. `build` takes `now` from the caller,
 which already had it, and the assertion is now that every published `time`
 falls inside the window the test clock was advanced through. Confirmed to fail
 when `new Date()` is put back.
+
+## Amendment — 2026-09-20
+
+The work message was the one kind left with a hand-written reader (a `typeof`
+chain in the consumer) beside a `JSON.stringify` in the producer. It now has a
+declaration in `ControlPlane.ts` that both use, with `n` required to be an
+integer because the idempotency key is built from it. See
+[018](018-control-flow-as-expressions.md). `controlEvent` is still written out
+independently on each side of the wire.
