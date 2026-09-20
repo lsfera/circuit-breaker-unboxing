@@ -111,6 +111,38 @@ from a publisher that set none. **Not run:** a daemon discarding a `gzip`
 message end to end against a live fleet; that path is covered by the pure
 function and the property round-trip, not by an observed dead letter.
 
+## Amendment — 2026-09-20: the same pass against RabbitMQ's guidance
+
+The content-type work above was checked against RabbitMQ's publisher, consumer
+and reliability guides. It matched on properties, manual acks, prefetch,
+persistence and confirms, idempotency, dead-lettering and recovery, and turned up
+five gaps, all closed:
+
+| Gap | Now |
+| --- | --- |
+| A message a daemon declined left no trace (the consumer guide: log a delivery you cannot handle) | `egress_consumer_discarded_total{reason}` counts every one; a warning naming the message id, type, content type and encoding is logged at most once a second |
+| `mandatory` was never set, so a publish to a queue that no longer exists vanished (publisher guide: set it and handle returns) | queue publishers are `mandatory`; the broker's `basic.return` is matched to the publish by `message_id` and `send` fails with `Unroutable`. Exchange publishers are not, since a topic with nothing bound is an ordinary state |
+| A handler that threw, or whose promise rejected, was **acknowledged** (reliability guide: acknowledge only after the work is done) | it is logged and dead-lettered (`reject`, no requeue): kept where the queue has somewhere to put it, and never a tight requeue loop on a queue with no delivery limit. This is the one behaviour change with a judgement in it |
+| A blocked connection hung its publishers silently | `blocked`/`unblocked` are logged with the broker's reason |
+| `type`, `timestamp` and `message_id` were unused | `send` stamps a message id and a timestamp on every publish, a publisher may declare a `type` (the work producer says `egress.work`), and a daemon declines a work message of another type |
+
+**Checked:** the unit tests (14) and the integration suite against a real broker,
+24 of 24 (four new: stamped properties, unroutable, a still-routable queue and
+topic, and a throwing handler that dead-letters). The `Unroutable` test was run
+against its own negative control: with `mandatory` switched off it fails. The
+blocked path was exercised for real by lowering the broker's memory watermark to
+1 MiB and back: the client logged `connection blocked by the broker: low on
+memory`, a publish made during the alarm completed once it cleared, and the
+broker was left at 1 GiB. **Not run:** a daemon's discard counter and log
+observed on a live fleet, and the throwing-handler change against the consumer
+package's own handlers (none of them throws; it is a guard).
+
+**Kept, with reasons:** `basic.get` for the permit and verdict queues, which the
+consumer guide advises against in favour of long-lived consumers, is used only
+for single-token peeks at low rates where its throughput concern does not apply;
+and one publish channel shared by concurrent `send`s, which the publisher guide
+warns about for threaded clients and amqplib's single event loop does not have.
+
 ## What this does not settle
 
 - **`when` is an `if` under another name.** It removes the statement, not the
