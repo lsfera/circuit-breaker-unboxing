@@ -84,6 +84,33 @@ benchmark has looked at.
 - **Unknown fields on a work message are ignored**, which is `Schema.Struct`'s
   default and what the hand-written check did by not looking.
 
+## Amendment — 2026-09-20: the message says what it is
+
+The codec above decodes any body that parses. RabbitMQ's own guidance is that a
+message should also say what it is: it "does not validate or use" `content_type`
+and `content_encoding` — publishers set them, consumers are expected to respect
+them ([consumers#content-type-and-encoding](https://www.rabbitmq.com/docs/consumers#content-type-and-encoding)).
+So the format is now declared and read at both ends, the same rule as the
+schema:
+
+- A `Publisher` carries an optional `contentType` and `contentEncoding`,
+  stamped on every message; the work producer declares `application/json`.
+- `DeliveryInfo` exposes both as `Option`, read directly since a daemon decides
+  on them before it looks at the body.
+- A daemon reads JSON (parameters like `charset` ignored), unencoded (no
+  encoding, or `identity`), **and a message that declares nothing**, because
+  publishers that predate this and anything publishing raw (the chaos
+  publisher) say nothing. Anything else is discarded to the dead-letter queue
+  unread. `gzip` is refused, not inflated: nothing here compresses, so a
+  `gzip` message was not published by this fleet.
+
+Checked: 14 unit tests (the negotiation is a pure function of the two
+declarations) and the integration suite against a real broker, 20 of 20, one of
+them new and confirming both properties survive a publish and arrive as `None`
+from a publisher that set none. **Not run:** a daemon discarding a `gzip`
+message end to end against a live fleet; that path is covered by the pure
+function and the property round-trip, not by an observed dead letter.
+
 ## What this does not settle
 
 - **`when` is an `if` under another name.** It removes the statement, not the
