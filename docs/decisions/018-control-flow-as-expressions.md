@@ -172,6 +172,30 @@ and 7 ready, its acknowledgements unread until the alarm cleared. The daemons on
 the later branches publish and consume on one connection. The fix is a second
 connection for publishing; it is not made.
 
+## Amendment — 2026-09-20: the open finding, closed on `article/01`
+
+The client now opens **two** connections: one for consuming (consumers, and
+declares, which are not publishes) and one that owns the confirm channel and
+nothing else, so a broker alarm blocks only the one that publishes. Each is
+recovered independently; `isConnected` needs both; either one failing for good
+fails `lost`; `resetConnection` destroys both sockets; and only the publishing
+connection logs `blocked`/`unblocked`. RabbitMQ's own wording is that it is
+"advisable to only use individual connections for either producing or consuming".
+
+**Checked:** the integration suite against a real broker, 25 of 25 (one new: 12
+messages waiting, a prefetch of 2, the memory alarm raised through `rabbitmqctl`,
+and a publish issued under it to get the publishing connection blocked; the
+consumer received and acknowledged all 12, and the publish stayed held until the
+alarm cleared), and 14 unit tests. **The negative control is weaker than the
+others:** with the confirm channel put back on the consuming connection the test
+did not fail cleanly, it hung until the runner cancelled it after 250 seconds
+(a blocked connection cannot even complete its own close), so it shows the old
+shape does not pass, not that it fails an assertion.
+
+**Costs:** a second socket and heartbeat per process. Not measured. The later
+article branches still have one connection, and their `Rmq` test fakes will need
+nothing new from this change, though `isConnected` now means both.
+
 ## What this does not settle
 
 - **`when` is an `if` under another name.** It removes the statement, not the
