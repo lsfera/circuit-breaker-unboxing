@@ -1,60 +1,160 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CircuitState } from "cockatiel";
+import { Deferred, Effect, Fiber } from "effect";
 import * as Breaker from "../src/Breaker.ts";
+import type { Consumer } from "@egress/rmq/Client.ts";
 
 /**
- * Exercises the real cockatiel library against a fake failing function — no
- * network, no broker — rather than re-testing cockatiel's own internals.
- * Real timers, short delays: cockatiel's backoff runs on wall-clock time with
- * no virtual-clock hook to drive instead.
+ * The state machine against a fake world: no broker, no third party, no
+ * timers. What the fake records is exactly what would reach RabbitMQ — which
+ * consumers exist, which tokens are in flight — because in this breaker those
+ * *are* the state.
  */
 
-test("stays closed and rethrows the real error until the threshold is reached", async () => {
-  // cockatiel's ConsecutiveBreaker trips on the Nth failure itself
-  // (`++count >= threshold`), not after an (N+1)th — confirmed by reading
-  // ConsecutiveBreaker.js rather than assuming "more than N" from its doc
-  // comment, which describes the effect loosely.
-  const breaker = Breaker.make({ consecutiveFailures: 3, initialDelayMs: 20, maxDelayMs: 50 });
-  const boom = () => Promise.reject(new Error("boom"));
+const cfg: Breaker.BreakerConfig = { consecutiveFailures: 3, initialDelaySeconds: 2, maxDelaySeconds: 60 };
 
-  for (let i = 0; i < 2; i++) {
-    await assert.rejects(breaker.execute(boom), /boom/);
-    assert.equal(breaker.state, CircuitState.Closed);
-  }
+test("a hold doubles per failed probe, jittered into its upper half, and stops at the ceiling", () => {
+  const at = (attempt: number, r: number) => Breaker.holdSeconds(cfg, attempt, () => r);
+  assert.deepEqual([0, 1, 2, 3].map((n) => at(n, 1)), [2, 4, 8, 16]);
+  assert.deepEqual([0, 1, 2, 3].map((n) => at(n, 0)), [1, 2, 4, 8]);
+  assert.equal(at(20, 1), 60);
+  assert.equal(at(20, 0), 30);
 });
 
-test("opens after the threshold, rejecting locally without calling the function", async () => {
-  const breaker = Breaker.make({ consecutiveFailures: 3, initialDelayMs: 20, maxDelayMs: 50 });
-  const boom = () => Promise.reject(new Error("boom"));
-
-  for (let i = 0; i < 3; i++) await breaker.execute(boom).catch(() => {});
-  assert.equal(breaker.state, CircuitState.Open);
-
-  let called = false;
-  const err = await breaker.execute(() => {
-    called = true;
-    return Promise.resolve();
-  }).catch((e: unknown) => e);
-
-  assert.equal(called, false, "the function must not run while the breaker is open");
-  assert.equal(Breaker.isBrokenCircuitError(err), true);
+test("a hold is never shorter than the chain's one-second resolution", () => {
+  assert.equal(Breaker.holdSeconds({ ...cfg, initialDelaySeconds: 1 }, 0, () => 0), 1);
 });
 
-test("half-opens after the backoff and closes on a successful probe", async () => {
-  const breaker = Breaker.make({ consecutiveFailures: 1, initialDelayMs: 15, maxDelayMs: 50 });
-  await breaker.execute(() => Promise.reject(new Error("boom"))).catch(() => {});
-  assert.equal(breaker.state, CircuitState.Open);
-
-  await new Promise((resolve) => setTimeout(resolve, 30));
-
-  await breaker.execute(() => Promise.resolve("ok"));
-  assert.equal(breaker.state, CircuitState.Closed);
+test("every phase has its own gauge value, closed first", () => {
+  assert.deepEqual(Breaker.PHASE_CODE, { closed: 0, open: 1, "half-open": 2 });
 });
 
-test("STATE_CODE gives every reachable state a stable number, closed is the initial one", () => {
-  assert.equal(Breaker.STATE_CODE[CircuitState.Closed], 0);
-  assert.equal(Breaker.STATE_CODE[CircuitState.Open], 1);
-  assert.equal(Breaker.STATE_CODE[CircuitState.HalfOpen], 2);
-  assert.equal(Breaker.INITIAL_STATE_CODE, Breaker.STATE_CODE[CircuitState.Closed]);
-});
+/** A world the test steers: `wake` releases the token in flight, `report` plays the calls a consumer makes. */
+const world = () => {
+  const log: string[] = [];
+  const consumers: Array<{ role: string; report: Breaker.Report; live: boolean }> = [];
+  const holds: Array<{ seconds: number; attempt: number; wake: Deferred.Deferred<void> }> = [];
+  const io: Breaker.Io = {
+    subscribe: (role, report) =>
+      Effect.sync(() => {
+        const entry = { role, report, live: true };
+        consumers.push(entry);
+        log.push(`subscribe ${role}`);
+        return entry as unknown as Consumer;
+      }),
+    retire: (c) =>
+      Effect.sync(() => {
+        (c as unknown as { live: boolean }).live = false;
+        log.push("retire");
+      }),
+    hold: (seconds, attempt) =>
+      Effect.gen(function* () {
+        const wake = yield* Deferred.make<void>();
+        holds.push({ seconds, attempt, wake });
+        log.push(`hold ${attempt}`);
+        yield* Deferred.await(wake);
+        return attempt;
+      }),
+    onPhase: (phase) => Effect.sync(() => void log.push(phase)),
+  };
+  const until = (done: () => boolean) =>
+    Effect.gen(function* () {
+      for (let i = 0; i < 200 && !done(); i++) yield* Effect.sleep(1);
+      assert.ok(done(), `never got there: ${log.join(" > ")}`);
+    });
+  return { io, log, consumers, holds, until };
+};
+
+const drive = (body: (w: ReturnType<typeof world>) => Effect.Effect<void>) =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const w = world();
+      const fiber = yield* Effect.forkChild(Breaker.supervise(cfg, w.io));
+      yield* body(w);
+      yield* Fiber.interrupt(fiber);
+    }),
+  );
+
+test("it stays closed while successes interrupt the failures, and trips on the Nth in a row", () =>
+  drive((w) =>
+    Effect.gen(function* () {
+      yield* w.until(() => w.consumers.length === 1);
+      const work = w.consumers[0]!;
+      [false, false, true, false, false].forEach(work.report);
+      yield* Effect.sleep(5);
+      assert.deepEqual(w.log, ["closed", "subscribe work"], "two, a success, two: never three in a row");
+      work.report(false);
+      yield* w.until(() => w.holds.length === 1);
+      assert.deepEqual(w.log, ["closed", "subscribe work", "retire", "open", "hold 0"]);
+    }),
+  ));
+
+test("open means no consumer: nothing is subscribed until the token comes back", () =>
+  drive((w) =>
+    Effect.gen(function* () {
+      yield* w.until(() => w.consumers.length === 1);
+      [false, false, false].forEach(w.consumers[0]!.report);
+      yield* w.until(() => w.holds.length === 1);
+      yield* Effect.sleep(10);
+      assert.equal(w.consumers.filter((c) => c.live).length, 0);
+      assert.equal(w.consumers.length, 1);
+    }),
+  ));
+
+test("the token's return half-opens with a single probe; a good one closes the breaker", () =>
+  drive((w) =>
+    Effect.gen(function* () {
+      yield* w.until(() => w.consumers.length === 1);
+      [false, false, false].forEach(w.consumers[0]!.report);
+      yield* w.until(() => w.holds.length === 1);
+      yield* Deferred.succeed(w.holds[0]!.wake, undefined);
+      yield* w.until(() => w.consumers.length === 2);
+      assert.equal(w.consumers[1]!.role, "probe");
+      w.consumers[1]!.report(true);
+      yield* w.until(() => w.consumers.length === 3);
+      assert.equal(w.consumers[2]!.role, "work");
+      assert.deepEqual(w.log.slice(-5), ["half-open", "subscribe probe", "retire", "closed", "subscribe work"]);
+    }),
+  ));
+
+test("a failed probe reopens with a longer hold, carried by the token's attempt", () =>
+  drive((w) =>
+    Effect.gen(function* () {
+      yield* w.until(() => w.consumers.length === 1);
+      [false, false, false].forEach(w.consumers[0]!.report);
+      yield* w.until(() => w.holds.length === 1);
+      yield* Deferred.succeed(w.holds[0]!.wake, undefined);
+      yield* w.until(() => w.consumers.length === 2);
+      w.consumers[1]!.report(false);
+      yield* w.until(() => w.holds.length === 2);
+      assert.equal(w.holds[1]!.attempt, 1);
+      assert.ok(w.holds[1]!.seconds > w.holds[0]!.seconds || w.holds[1]!.seconds >= 2, "the hold grows");
+      assert.equal(w.consumers.length, 2, "and nothing consumes while it does");
+      assert.equal(w.consumers.filter((c) => c.live).length, 0);
+    }),
+  ));
+
+test("a breaker that has closed forgets: the next outage starts from the first hold again", () =>
+  drive((w) =>
+    Effect.gen(function* () {
+      yield* w.until(() => w.consumers.length === 1);
+      [false, false, false].forEach(w.consumers[0]!.report);
+      yield* w.until(() => w.holds.length === 1);
+      yield* Deferred.succeed(w.holds[0]!.wake, undefined);
+      yield* w.until(() => w.consumers.length === 2);
+      w.consumers[1]!.report(true);
+      yield* w.until(() => w.consumers.length === 3);
+      [false, false, false].forEach(w.consumers[2]!.report);
+      yield* w.until(() => w.holds.length === 2);
+      assert.equal(w.holds[1]!.attempt, 0);
+    }),
+  ));
+
+test("a work consumer is told how long the run of failures is, and a success ends it", () =>
+  drive((w) =>
+    Effect.gen(function* () {
+      yield* w.until(() => w.consumers.length === 1);
+      const work = w.consumers[0]!;
+      assert.deepEqual([false, false, true, false].map((ok) => work.report(ok)), [1, 2, 0, 1]);
+    }),
+  ));

@@ -26,11 +26,22 @@
    "type": "state-timeline",
    "title": "Breaker state per replica",
    "description": "egress_consumer_breaker_state, one line per instance. Each replica's breaker is entirely its own — this panel is where that shows: watch them open and close at different moments for the same incident, not together.",
-   "gridPos": { "x": 0, "y": 0, "w": 24, "h": 7 },
-   "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 7
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS_PROMETHEUS}"
+   },
    "targets": [
     {
-     "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS_PROMETHEUS}"
+     },
      "expr": "egress_consumer_breaker_state",
      "legendFormat": "{{instance}}",
      "refId": "A"
@@ -42,33 +53,59 @@
       {
        "type": "value",
        "options": {
-        "0": { "text": "CLOSED", "color": "green" },
-        "1": { "text": "OPEN", "color": "red" },
-        "2": { "text": "HALF_OPEN", "color": "blue" }
+        "0": {
+         "text": "CLOSED",
+         "color": "green"
+        },
+        "1": {
+         "text": "OPEN",
+         "color": "red"
+        },
+        "2": {
+         "text": "HALF_OPEN",
+         "color": "blue"
+        }
        }
       }
      ]
     },
     "overrides": []
    },
-   "options": { "mergeValues": true, "showValue": "always" }
+   "options": {
+    "mergeValues": true,
+    "showValue": "always"
+   }
   },
   {
    "id": 1,
    "type": "timeseries",
    "title": "Work queue depth — payments-provider.work",
    "description": "Messages ready plus in flight. Only climbs when the third party fails slowly enough to pin every consumer's in-flight slots (e.g. flaky-upstream's hang mode) — a fast failure dead-letters before a backlog can form. See the dead-letter panel for that case.",
-   "gridPos": { "x": 0, "y": 7, "w": 12, "h": 8 },
-   "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+   "gridPos": {
+    "x": 0,
+    "y": 7,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS_PROMETHEUS}"
+   },
    "targets": [
     {
-     "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS_PROMETHEUS}"
+     },
      "expr": "rabbitmq_detailed_queue_messages_ready{queue=\"payments-provider.work\"}",
      "legendFormat": "ready",
      "refId": "A"
     },
     {
-     "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS_PROMETHEUS}"
+     },
      "expr": "rabbitmq_detailed_queue_messages_unacked{queue=\"payments-provider.work\"}",
      "legendFormat": "unacked (in flight)",
      "refId": "B"
@@ -80,11 +117,22 @@
    "type": "timeseries",
    "title": "Dead-letter queue depth — payments-provider.work.dead",
    "description": "Messages that exhausted the broker's own delivery limit (x-delivery-limit, 3 attempts). Nothing here recovers them — that is a later article's problem.",
-   "gridPos": { "x": 12, "y": 7, "w": 12, "h": 8 },
-   "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+   "gridPos": {
+    "x": 12,
+    "y": 7,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS_PROMETHEUS}"
+   },
    "targets": [
     {
-     "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS_PROMETHEUS}"
+     },
      "expr": "rabbitmq_detailed_queue_messages_ready{queue=\"payments-provider.work.dead\"}",
      "legendFormat": "dead-lettered",
      "refId": "A"
@@ -95,12 +143,23 @@
    "id": 3,
    "type": "timeseries",
    "title": "Calls to the third party, by outcome",
-   "description": "egress_consumer_calls_total. \"open\" is new since article 1: a call this replica's own breaker rejected without ever reaching the third party.",
-   "gridPos": { "x": 0, "y": 15, "w": 12, "h": 8 },
-   "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+   "description": "egress_consumer_calls_total. Only ok and failed: an open breaker has no consumer, so nothing is rejected locally — the queue holds the work instead.",
+   "gridPos": {
+    "x": 0,
+    "y": 15,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS_PROMETHEUS}"
+   },
    "targets": [
     {
-     "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS_PROMETHEUS}"
+     },
      "expr": "sum by (outcome) (rate(egress_consumer_calls_total[1m]))",
      "legendFormat": "{{outcome}}",
      "refId": "A"
@@ -112,11 +171,22 @@
    "type": "timeseries",
    "title": "Breaker trips",
    "description": "sum(rate(egress_consumer_breaker_trips_total)) across all replicas. Each trip is one replica's own breaker opening — this counts events, not the disagreement between them; see the state-timeline panel for that.",
-   "gridPos": { "x": 12, "y": 15, "w": 12, "h": 8 },
-   "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+   "gridPos": {
+    "x": 12,
+    "y": 15,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS_PROMETHEUS}"
+   },
    "targets": [
     {
-     "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS_PROMETHEUS}"
+     },
      "expr": "sum(rate(egress_consumer_breaker_trips_total[1m]))",
      "legendFormat": "trips/s",
      "refId": "A"
@@ -127,14 +197,52 @@
    "id": 4,
    "type": "timeseries",
    "title": "Active consumers on the work queue",
-   "description": "The broker's own count — should track --scale rmq-consumer=N. A gap between this and the replica count means a daemon has stopped consuming.",
-   "gridPos": { "x": 0, "y": 23, "w": 24, "h": 7 },
-   "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+   "description": "The broker's own count. With this breaker it is also the fleet's state: a replica whose breaker is open has cancelled its consumer, so the line steps down by one per open replica and back up as each half-opens (a half-open replica consumes with prefetch 1, so it counts). It should track --scale rmq-consumer=N only while every breaker is closed.",
+   "gridPos": {
+    "x": 0,
+    "y": 23,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS_PROMETHEUS}"
+   },
    "targets": [
     {
-     "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS_PROMETHEUS}"
+     },
      "expr": "rabbitmq_detailed_queue_consumers{queue=\"payments-provider.work\"}",
      "legendFormat": "consumers",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 7,
+   "type": "timeseries",
+   "title": "Wake tokens held by RabbitMQ — the open breakers",
+   "description": "rabbitmq_detailed_queue_messages for the delay chain (rmq.delay.level.NN), one line per level a token is waiting in. Level n holds a token for 2^n seconds, so a token in level 4 is a breaker that has been told to stay open 16s, and a token in level 16 would be an 18-hour hold. Each open replica is exactly one token here; a closed fleet has none. Read alongside the panel to the left: consumers leave the work queue as tokens enter the chain.",
+   "gridPos": {
+    "x": 12,
+    "y": 23,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS_PROMETHEUS}"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS_PROMETHEUS}"
+     },
+     "expr": "sum by (queue) (rabbitmq_detailed_queue_messages{queue=~\"rmq.delay.level.*\"}) > 0",
+     "legendFormat": "{{queue}}",
      "refId": "A"
     }
    ]

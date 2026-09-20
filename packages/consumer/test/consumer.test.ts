@@ -76,9 +76,15 @@ test("a daemon declines a content type or encoding it cannot read", () => {
   }
 });
 
-test("a call rejected by this replica's own open breaker also requeues", () => {
-  // Same settlement as "failed" — the difference is telemetry (no call was
-  // attempted), not what happens to the message. See consumer.ts's comment
-  // on CallOutcome for why that distinction lives upstream of this function.
-  assert.equal(decide("open"), "requeue");
+test("a failed probe is released, not charged to the message that happened to carry it", () => {
+  assert.equal(decide("failed", "probe"), "release");
+  assert.equal(decide("ok", "probe"), "accept");
+  assert.equal(decide("failed", "work"), "requeue");
+});
+
+test("a failure that stands alone is charged; one that follows another is the third party's, not the message's", () => {
+  assert.equal(decide("failed", "work", 1), "requeue", "a poison message between successes still spends its budget");
+  assert.equal(decide("failed", "work", 2), "release");
+  assert.equal(decide("failed", "work", 5), "release");
+  assert.equal(decide("ok", "work", 5), "accept");
 });

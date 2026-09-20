@@ -92,9 +92,9 @@ services:
 
   # One service, scaled — `docker compose up -d --scale rmq-consumer=N` is
   # the whole of resizing the fleet. Every replica is anonymous: there is no
-  # hash-space position, no floor, no election, and now an in-process circuit
-  # breaker (packages/consumer/src/Breaker.ts) that is entirely this
-  # replica's own — nothing here coordinates the fleet's breakers with each
+  # hash-space position, no floor, no election, and now a circuit
+  # breaker (packages/consumer/src/Breaker.ts) whose open state is a token in
+  # RabbitMQ's delay chain, and that is entirely this replica's own — nothing here coordinates the fleet's breakers with each
   # other. Prometheus tells replicas apart by the IP DNS hands back for the
   # service name (see infra/monitoring/prometheus.yml).
   rmq-consumer:
@@ -108,12 +108,13 @@ services:
       EGRESS_ADDR: http://flaky-upstream:8080
       API_PATH: /payments
       MAX_IN_FLIGHT: "20"
-      # Trips after 5 calls fail in a row; the half-open probe starts 1s
-      # after that and doubles (cockatiel's own exponential-backoff-with-
-      # jitter default) up to 30s if the probe keeps failing.
+      # Trips after 5 calls fail in a row and stops consuming; a token sent
+      # through the broker's delay chain brings the replica back for its
+      # half-open probe after ~1s, and doubles per failed probe up to a day
+      # (86400s; the chain counts to 131071s) if the third party stays down.
       BREAKER_THRESHOLD: "5"
-      BREAKER_INITIAL_DELAY_MS: "1000"
-      BREAKER_MAX_DELAY_MS: "30000"
+      BREAKER_INITIAL_DELAY_SECONDS: "1"
+      BREAKER_MAX_DELAY_SECONDS: "86400"
     deploy:
       replicas: 5
       <<: *limits-daemon

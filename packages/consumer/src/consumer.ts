@@ -1,5 +1,4 @@
-import { Data, Effect, Match, Metric, Option as O } from "effect";
-import { setTimeout as sleep } from "node:timers/promises";
+import { Effect, Metric, Option as O, Queue } from "effect";
 import type { HttpClient } from "effect/unstable/http";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
@@ -10,20 +9,19 @@ import {
   workQueueFor,
   workQueueOptions,
 } from "@egress/rmq/ControlPlane.ts";
+import * as Delay from "@egress/rmq/DelayedDelivery.ts";
 import * as Breaker from "./Breaker.ts";
 import * as Telemetry from "./Telemetry.ts";
 import * as Upstream from "./Upstream.ts";
-import type { CircuitState } from "cockatiel";
 import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
 
 /**
- * One competing-consumer daemon, now with an in-process circuit breaker
- * (see Breaker.ts) — and still nothing else. It knows nothing about the
- * other daemons in its own fleet: its breaker's state is private to this
- * process, formed from only the calls this process itself has made. Five
- * replicas means five independent breakers that will open and close at
- * different times, for the same incident. That absence — no shared verdict
- * — is what the next branch in this series adds.
+ * One competing-consumer daemon behind a circuit breaker that lives in the
+ * broker (see Breaker.ts): tripping cancels this replica's consumer, and a
+ * message sent through the delay chain is what brings it back. It still knows
+ * nothing about the other daemons — five replicas are five breakers, each with
+ * its own token — but none of them holds a timer, a state machine's clock, or
+ * an open breaker's rejected messages: an open replica is simply not consuming.
  */
 
 export type ConsumerConfig = {
@@ -33,39 +31,37 @@ export type ConsumerConfig = {
   readonly apiPath: string;
   /** Concurrent third-party calls, applied as the work consumer's prefetch. */
   readonly maxInFlight: number;
+  /** Names this replica's wake queue, so the token finds only this process. */
+  readonly replicaId: string;
   readonly breaker: Breaker.BreakerConfig;
 };
 
-/** A failed call is thrown, not returned — cockatiel's `handleAll` policy classifies by thrown errors. */
-class UpstreamCallFailed extends Data.TaggedError("UpstreamCallFailed")<{}> {}
-
 /**
  * Whether a call outcome should be accepted or handed back to the broker.
- * Pulled out as a total function of the one thing that matters — pure,
- * exhaustively testable, no broker, breaker, or fetch involved.
+ * Pulled out as a total function of what matters — pure, exhaustively
+ * testable, no broker, breaker, or fetch involved.
  *
- * `"open"` and `"failed"` both requeue: the difference between them is
- * whether a call was actually attempted, which is a telemetry fact, not a
- * settlement fact. What differs operationally is upstream of this function
- * — see `OPEN_REQUEUE_DELAY_*` in `attempt` below.
+ * A failure is charged to the message (`requeue` counts toward the queue's
+ * delivery budget) only when it stands alone. One that follows another failure
+ * on the same replica — `streak` above 1 — or that is a probe is evidence about
+ * the third party, not about the message, and is `release`d: handed back with
+ * no strike. The breaker needs `consecutiveFailures` calls to open and its
+ * consumer takes a round trip to stop, and in that window the same few messages
+ * are redelivered to it again and again: charged, a message dead-letters with
+ * nothing wrong with it, which the chaos run found at 2–3 messages per outage
+ * under a 1,000/s spike. A message that fails between successes — a poison
+ * message on a healthy third party — is still charged, and still parked.
  */
-export type CallOutcome = Upstream.CallOutcome | "open";
-export const decide = (outcome: CallOutcome): Settlement =>
-  outcome === "ok" ? "accept" : "requeue";
+export type Role = "work" | "probe";
+export const decide = (outcome: Upstream.CallOutcome, role: Role = "work", streak = 1): Settlement =>
+  outcome === "ok" ? "accept" : role === "probe" || streak > 1 ? "release" : "requeue";
 
 /**
- * Held before releasing a breaker-open rejection back to the broker. Without
- * this, a message rejected instantly by an open local breaker (no call made,
- * no wait) goes straight back onto the queue and straight back to this same
- * consumer, which can spin against its own in-memory breaker at whatever
- * rate the broker will redeliver — hammering the *broker* even though the
- * third party is no longer being hammered. Same constants, same reasoning as
- * the shed-`429` hold the article series' predecessor daemon used before it
- * was removed: jittered so a fleet whose breakers open together doesn't
- * requeue in lockstep either.
+ * Longer than the client's own connection-recovery budget (about five
+ * minutes), so a wake queue survives a reconnect and is collected only once
+ * its replica is really gone. The queue only expires while it has no consumer.
  */
-const OPEN_REQUEUE_DELAY_MIN_MS = 100;
-const OPEN_REQUEUE_DELAY_SPREAD_MS = 300;
+const WAKE_QUEUE_EXPIRES_MS = 600_000;
 
 export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   const rmq = yield* Rmq;
@@ -82,51 +78,40 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   const services = yield* Effect.context<HttpClient.HttpClient>();
   const runInContext = Effect.runPromiseWith(services);
 
-  // One breaker for the process's whole life, shared across every message —
-  // see Breaker.ts for why that sharing is load-bearing, not incidental.
-  const breaker = Breaker.make(cfg.breaker);
-
-  breaker.onStateChange((state: CircuitState) =>
-    runInContext(Metric.update(Telemetry.breakerState, Breaker.STATE_CODE[state])),
+  // The breaker's open state is a message in the delay chain addressed to this
+  // replica, so the queue it comes back on belongs to this replica: named by
+  // it, and collected by the broker when the replica is gone for good.
+  const wakeQueue = `${cfg.apiId}.breaker.wake.${cfg.replicaId}`;
+  yield* Delay.declare();
+  yield* rmq.declareQueue(wakeQueue, { args: { "x-expires": WAKE_QUEUE_EXPIRES_MS } });
+  yield* Delay.receive(wakeQueue);
+  const wakes = yield* Queue.unbounded<number>();
+  yield* rmq.consume(
+    wakeQueue,
+    (_body, delivery) => {
+      Queue.offerUnsafe(wakes, Number(delivery.properties.attempt));
+      return "accept";
+    },
+    { prefetch: 1 },
   );
-  breaker.onBreak(() => {
-    runInContext(Metric.update(Telemetry.breakerTrips, 1));
-    runInContext(Effect.log(`${cfg.apiId}/consumer: breaker opened`));
-  });
-  breaker.onReset(() => runInContext(Effect.log(`${cfg.apiId}/consumer: breaker closed`)));
 
   let inFlight = 0;
   const setInFlight = (delta: 1 | -1) =>
     Effect.suspend(() => Metric.update(Telemetry.inFlight, (inFlight += delta)));
 
-  const callUpstream = (key: string): Promise<void> =>
+  const callUpstream = (key: string): Promise<Upstream.CallOutcome> =>
     runInContext(
       setInFlight(1).pipe(
         Effect.andThen(Upstream.call(`${cfg.egressAddr}${cfg.apiPath}`, key)),
         Effect.ensuring(setInFlight(-1)),
-        Effect.filterOrFail(
-          (outcome) => outcome === "ok",
-          () => new UpstreamCallFailed(),
-        ),
-        Effect.asVoid,
       ),
     );
 
-  const attempt = async (key: string): Promise<Settlement> => {
-    const outcome: CallOutcome = await breaker.execute(() => callUpstream(key)).then(
-      (): CallOutcome => "ok",
-      // Breaker.isBrokenCircuitError: rejected locally, no call attempted —
-      // this replica's own breaker is open. Anything else is a real call
-      // that failed (timeout, connection refused, a non-2xx).
-      (err): CallOutcome => (Breaker.isBrokenCircuitError(err) ? "open" : "failed"),
-    );
-
+  const attempt = async (key: string, role: Role, report: Breaker.Report): Promise<Settlement> => {
+    const outcome = await callUpstream(key);
+    const streak = report(outcome === "ok");
     runInContext(Metric.update(Metric.withAttributes(Telemetry.calls, { outcome }), 1));
-    await Match.value(outcome).pipe(
-      Match.when("open", () => sleep(OPEN_REQUEUE_DELAY_MIN_MS + Math.random() * OPEN_REQUEUE_DELAY_SPREAD_MS)),
-      Match.orElse(() => Promise.resolve()),
-    );
-    return decide(outcome);
+    return decide(outcome, role, streak);
   };
 
   // A body that declares a content type, encoding or message type this daemon
@@ -159,7 +144,12 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
     return Promise.resolve<Settlement>("discard");
   };
 
-  const call = (body: string, delivery: DeliveryInfo): Promise<Settlement> =>
+  const call = (
+    body: string,
+    delivery: DeliveryInfo,
+    role: Role,
+    report: Breaker.Report,
+  ): Promise<Settlement> =>
     readsWorkFormat(delivery)
       ? O.match(decodeWorkMessage(body), {
           onNone: () => discard("malformed", delivery),
@@ -168,20 +158,39 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
           onSome: () =>
             O.match(delivery.messageId, {
               onNone: () => discard("keyless", delivery),
-              onSome: attempt,
+              onSome: (key) => attempt(key, role, report),
             }),
         })
       : discard("format", delivery);
 
-  yield* rmq.consume(workQueue, (body, delivery) => call(body, delivery), {
-    prefetch: cfg.maxInFlight,
+  const supervisor = Breaker.supervise(cfg.breaker, {
+    // A probe is one message: prefetch 1 is the whole mechanism.
+    subscribe: (role, report) =>
+      rmq.consume(workQueue, (body, delivery) => call(body, delivery, role, report), {
+        prefetch: role === "probe" ? 1 : cfg.maxInFlight,
+      }),
+    retire: rmq.drainConsumer,
+    hold: (seconds, attempt) =>
+      Delay.sendDelayed(wakeQueue, seconds, "wake", { headers: { attempt: String(attempt) } }).pipe(
+        Effect.provideService(Rmq, rmq),
+        Effect.andThen(Effect.log(`${cfg.apiId}/consumer: breaker open for ${seconds}s (attempt ${attempt})`)),
+        Effect.andThen(Queue.take(wakes)),
+      ),
+    onPhase: (phase) =>
+      Metric.update(Telemetry.breakerState, Breaker.PHASE_CODE[phase]).pipe(
+        Effect.andThen(
+          phase === "open" ? Metric.update(Telemetry.breakerTrips, 1) : Effect.void,
+        ),
+        Effect.andThen(Effect.log(`${cfg.apiId}/consumer: breaker ${phase}`)),
+      ),
   });
-
-  // Set at startup so the series exists before the first state change.
-  yield* Metric.update(Telemetry.breakerState, Breaker.INITIAL_STATE_CODE);
 
   yield* Effect.log(
     `${cfg.apiId}/consumer: up — maxInFlight=${cfg.maxInFlight} egress=${cfg.egressAddr}${cfg.apiPath} work=${workQueue} ` +
-      `breaker=${cfg.breaker.consecutiveFailures}consecutive/${cfg.breaker.initialDelayMs}-${cfg.breaker.maxDelayMs}ms`,
+      `wake=${wakeQueue} breaker=${cfg.breaker.consecutiveFailures}consecutive/${cfg.breaker.initialDelaySeconds}-${cfg.breaker.maxDelaySeconds}s`,
   );
+
+  // Runs for the process's life: the phases repeat, and it ends only if the
+  // broker fails an operation the breaker cannot do without.
+  yield* supervisor;
 });

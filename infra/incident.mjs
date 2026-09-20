@@ -57,7 +57,7 @@ const breakerTrips = async () => {
   return value === undefined ? undefined : Number(value);
 };
 
-/** Attempts by outcome so far, fleet-wide: `failed` reached the third party, `open` was turned away by the replica's own breaker. */
+/** Attempts by outcome so far, fleet-wide: `failed` reached the third party — an open breaker consumes nothing, so there is no third outcome. */
 const callsByOutcome = async () => {
   const res = await fetch(`${PROMETHEUS}/api/v1/query?query=sum by (outcome)(egress_consumer_calls_total)`).catch(
     () => undefined,
@@ -183,13 +183,14 @@ const main = async () => {
       `  audit: processed=${stats.processed ?? "?"} duplicates=${stats.duplicates ?? "?"}`,
     );
   }
-  if (tripsBefore !== undefined && tripsAfter !== undefined) {
-    console.log(`  breaker openings across the fleet: ${tripsAfter - tripsBefore}`);
+  if (tripsAfter !== undefined) {
+    // A counter has no series until its first increment, so no reading before means none yet.
+    console.log(`  breaker openings across the fleet: ${tripsAfter - (tripsBefore ?? 0)}`);
   }
   if (callsBefore && callsAfter) {
     const delta = (outcome) => (callsAfter[outcome] ?? 0) - (callsBefore[outcome] ?? 0);
     console.log(
-      `  attempts during the incident: ${delta("ok")} ok, ${delta("failed")} reached the third party and failed, ${delta("open")} turned away by an open breaker`,
+      `  attempts during the incident: ${delta("ok")} ok, ${delta("failed")} reached the third party and failed`,
     );
   }
   if (states) {

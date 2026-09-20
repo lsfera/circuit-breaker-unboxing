@@ -6,6 +6,7 @@
   "exports": {
     "./Client.ts": "./src/Client.ts",
     "./ControlPlane.ts": "./src/ControlPlane.ts",
+    "./DelayedDelivery.ts": "./src/DelayedDelivery.ts",
     "./Trace.ts": "./src/Trace.ts"
   },
   "scripts": {

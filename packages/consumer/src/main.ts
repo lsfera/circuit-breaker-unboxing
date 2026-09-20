@@ -1,9 +1,11 @@
-import { Config, Data, Deferred, Effect, Layer } from "effect";
+import { Config, Data, Deferred, Effect, Layer, Schema } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient, HttpRouter } from "effect/unstable/http";
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { launchWithRmq, Rmq } from "@egress/rmq/Client.ts";
+import { MAX_DELAY_SECONDS } from "@egress/rmq/DelayedDelivery.ts";
 import { brokerFlag, metricsPortFlag, PositiveInt, VERSION } from "@egress/config/Settings.ts";
 import { MetricsRoute } from "@egress/tracing/Metrics.ts";
 import { TracingLive } from "@egress/tracing/Tracing.ts";
@@ -16,9 +18,10 @@ import { runConsumer } from "./consumer.ts";
  *
  * One address, no replica names — a client of whatever the third party
  * exposes, exactly like `producer.ts` is a client of the broker. Each
- * process gets its own in-process circuit breaker (Breaker.ts); there is
- * still no control queue, no policy, no elections, because there is nothing
- * yet to make five replicas' breakers agree with each other.
+ * process gets its own circuit breaker (Breaker.ts) whose open state is a
+ * message in the broker's delay chain; there is still no control queue, no
+ * policy, no elections, because there is nothing yet to make five replicas'
+ * breakers agree with each other.
  */
 
 const flags = {
@@ -50,17 +53,24 @@ const flags = {
     Flag.withDefault(5),
     Flag.withDescription("Consecutive failures before this replica's breaker opens"),
   ),
-  breakerInitialDelayMs: Flag.Int("breaker-initial-delay-ms").pipe(
+  breakerInitialDelaySeconds: Flag.Int("breaker-initial-delay-seconds").pipe(
     Flag.withSchema(PositiveInt),
-    Flag.withFallbackConfig(Config.schema(PositiveInt, "BREAKER_INITIAL_DELAY_MS")),
-    Flag.withDefault(1000),
-    Flag.withDescription("First half-open probe after the breaker opens"),
+    Flag.withFallbackConfig(Config.schema(PositiveInt, "BREAKER_INITIAL_DELAY_SECONDS")),
+    Flag.withDefault(1),
+    Flag.withDescription("First hold after the breaker opens, before its half-open probe"),
   ),
-  breakerMaxDelayMs: Flag.Int("breaker-max-delay-ms").pipe(
-    Flag.withSchema(PositiveInt),
-    Flag.withFallbackConfig(Config.schema(PositiveInt, "BREAKER_MAX_DELAY_MS")),
-    Flag.withDefault(30_000),
-    Flag.withDescription("Ceiling the half-open backoff grows to"),
+  breakerMaxDelaySeconds: Flag.Int("breaker-max-delay-seconds").pipe(
+    Flag.withSchema(PositiveInt.check(Schema.isLessThanOrEqualTo(MAX_DELAY_SECONDS))),
+    Flag.withFallbackConfig(
+      Config.schema(PositiveInt.check(Schema.isLessThanOrEqualTo(MAX_DELAY_SECONDS)), "BREAKER_MAX_DELAY_SECONDS"),
+    ),
+    Flag.withDefault(86_400),
+    Flag.withDescription(`Ceiling the hold grows to; the delay chain counts to ${MAX_DELAY_SECONDS}`),
+  ),
+  replicaId: Flag.String("replica-id").pipe(
+    Flag.withFallbackConfig(Config.NonEmptyString("REPLICA_ID")),
+    Flag.withDefault(randomUUID()),
+    Flag.withDescription("Names this replica's wake queue; unique per process start by default, so a token sent by a process that has since died reaches a queue nobody reads instead of waking its successor"),
   ),
   metricsPort: metricsPortFlag,
 };
@@ -81,10 +91,11 @@ const consumer = Command.make("consumer", flags, (settings) => {
     egressAddr: settings.egressAddr,
     apiPath: settings.apiPath,
     maxInFlight: settings.maxInFlight,
+    replicaId: settings.replicaId,
     breaker: {
       consecutiveFailures: settings.breakerThreshold,
-      initialDelayMs: settings.breakerInitialDelayMs,
-      maxDelayMs: settings.breakerMaxDelayMs,
+      initialDelaySeconds: settings.breakerInitialDelaySeconds,
+      maxDelaySeconds: settings.breakerMaxDelaySeconds,
     },
   };
 

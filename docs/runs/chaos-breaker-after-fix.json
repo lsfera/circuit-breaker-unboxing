@@ -1,0 +1,3012 @@
+{
+  "at": "2026-09-20T22:50:10.361Z",
+  "results": [
+    {
+      "scenario": "outage",
+      "run": "outagemuaei6rg",
+      "startedAt": "2026-09-20T22:41:45.148Z",
+      "correctness": {
+        "sent": 45345,
+        "confirmed": 45345,
+        "processed": 45345,
+        "duplicates": 0,
+        "unprocessed": 0,
+        "lost": 0,
+        "deadLettered": 0,
+        "drained": true
+      },
+      "breaker": {
+        "recoveredAllClosed": true,
+        "secondsFromRestoreToAllClosed": 17,
+        "openings": 30,
+        "peakReplicasOpen": 5,
+        "peakTokensInChain": 5,
+        "peakBacklog": 41411,
+        "longestHoldSeconds": 29,
+        "highestAttempt": 5,
+        "illegalTransitions": [],
+        "consumerCountMatchedNotOpen": "47/56"
+      },
+      "series": [
+        {
+          "t": 0,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 1,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 2,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 3,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 4,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 5,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 6,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 7,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 9,
+          "work": 44,
+          "consumers": 1,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 10,
+          "work": 1097,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 4,
+          "open": 1,
+          "halfOpen": 0
+        },
+        {
+          "t": 11,
+          "work": 2161,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 12,
+          "work": 3222,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 4,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 13,
+          "work": 4282,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 14,
+          "work": 5334,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 15,
+          "work": 6392,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 1
+        },
+        {
+          "t": 16,
+          "work": 7450,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 1
+        },
+        {
+          "t": 17,
+          "work": 8511,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 18,
+          "work": 9566,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 19,
+          "work": 10620,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 20,
+          "work": 11685,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 21,
+          "work": 12752,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 22,
+          "work": 13819,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 1
+        },
+        {
+          "t": 23,
+          "work": 14885,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 1
+        },
+        {
+          "t": 24,
+          "work": 15936,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 25,
+          "work": 17005,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 27,
+          "work": 18066,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 28,
+          "work": 19123,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 29,
+          "work": 20178,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 30,
+          "work": 21231,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 31,
+          "work": 22280,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 32,
+          "work": 23325,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 33,
+          "work": 24381,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 34,
+          "work": 25423,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 35,
+          "work": 26486,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 36,
+          "work": 27540,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 37,
+          "work": 28590,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 38,
+          "work": 29643,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 39,
+          "work": 30703,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 40,
+          "work": 31756,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 41,
+          "work": 32804,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 42,
+          "work": 33856,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 43,
+          "work": 34916,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 44,
+          "work": 35969,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 45,
+          "work": 37036,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 47,
+          "work": 38087,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 48,
+          "work": 39151,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 49,
+          "work": 40174,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 51,
+          "work": 40587,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 53,
+          "work": 41001,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 55,
+          "work": 41411,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 57,
+          "work": 34293,
+          "consumers": 1,
+          "dead": 4506,
+          "tokens": 4,
+          "closed": 1,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 59,
+          "work": 12502,
+          "consumers": 2,
+          "dead": 4506,
+          "tokens": 3,
+          "closed": 1,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 61,
+          "work": 0,
+          "consumers": 3,
+          "dead": 4506,
+          "tokens": 2,
+          "closed": 2,
+          "open": 3,
+          "halfOpen": 0
+        },
+        {
+          "t": 63,
+          "work": 0,
+          "consumers": 3,
+          "dead": 4506,
+          "tokens": 2,
+          "closed": 3,
+          "open": 2,
+          "halfOpen": 0
+        },
+        {
+          "t": 65,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 4,
+          "open": 1,
+          "halfOpen": 0
+        },
+        {
+          "t": 66,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        }
+      ],
+      "pass": true
+    },
+    {
+      "scenario": "outage-hang",
+      "run": "outagemuaek9hp",
+      "startedAt": "2026-09-20T22:43:21.997Z",
+      "correctness": {
+        "sent": 47363,
+        "confirmed": 47363,
+        "processed": 47363,
+        "duplicates": 0,
+        "unprocessed": 0,
+        "lost": 0,
+        "deadLettered": 0,
+        "drained": true
+      },
+      "breaker": {
+        "recoveredAllClosed": true,
+        "secondsFromRestoreToAllClosed": 27,
+        "openings": 28,
+        "peakReplicasOpen": 5,
+        "peakTokensInChain": 5,
+        "peakBacklog": 40148,
+        "longestHoldSeconds": 26,
+        "highestAttempt": 5,
+        "illegalTransitions": [],
+        "consumerCountMatchedNotOpen": "37/61"
+      },
+      "series": [
+        {
+          "t": 0,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 1,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 2,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 3,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 4,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 5,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 6,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 7,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 8,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 10,
+          "work": 989,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 11,
+          "work": 2132,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 12,
+          "work": 3177,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 13,
+          "work": 4256,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 14,
+          "work": 5311,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 4,
+          "open": 1,
+          "halfOpen": 0
+        },
+        {
+          "t": 15,
+          "work": 6359,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 0,
+          "open": 1,
+          "halfOpen": 4
+        },
+        {
+          "t": 16,
+          "work": 7432,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 0,
+          "halfOpen": 5
+        },
+        {
+          "t": 17,
+          "work": 8486,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 1
+        },
+        {
+          "t": 18,
+          "work": 9536,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 19,
+          "work": 10605,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 0,
+          "open": 0,
+          "halfOpen": 5
+        },
+        {
+          "t": 20,
+          "work": 11673,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 0,
+          "halfOpen": 5
+        },
+        {
+          "t": 21,
+          "work": 12729,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 22,
+          "work": 13789,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 23,
+          "work": 14845,
+          "consumers": 1,
+          "dead": 4506,
+          "tokens": 4,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 24,
+          "work": 15905,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 0,
+          "open": 1,
+          "halfOpen": 4
+        },
+        {
+          "t": 25,
+          "work": 16964,
+          "consumers": 4,
+          "dead": 4506,
+          "tokens": 1,
+          "closed": 0,
+          "open": 0,
+          "halfOpen": 5
+        },
+        {
+          "t": 26,
+          "work": 18032,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 1
+        },
+        {
+          "t": 28,
+          "work": 19086,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 29,
+          "work": 20134,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 30,
+          "work": 21196,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 31,
+          "work": 22250,
+          "consumers": 1,
+          "dead": 4506,
+          "tokens": 4,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 32,
+          "work": 23309,
+          "consumers": 4,
+          "dead": 4506,
+          "tokens": 1,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 33,
+          "work": 24368,
+          "consumers": 2,
+          "dead": 4506,
+          "tokens": 2,
+          "closed": 0,
+          "open": 1,
+          "halfOpen": 4
+        },
+        {
+          "t": 34,
+          "work": 25419,
+          "consumers": 1,
+          "dead": 4506,
+          "tokens": 4,
+          "closed": 0,
+          "open": 1,
+          "halfOpen": 4
+        },
+        {
+          "t": 35,
+          "work": 26473,
+          "consumers": 1,
+          "dead": 4506,
+          "tokens": 4,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 36,
+          "work": 27521,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 1
+        },
+        {
+          "t": 37,
+          "work": 28578,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 38,
+          "work": 29631,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 39,
+          "work": 30681,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 40,
+          "work": 31733,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 41,
+          "work": 32794,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 42,
+          "work": 33852,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 43,
+          "work": 34901,
+          "consumers": 1,
+          "dead": 4506,
+          "tokens": 4,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 44,
+          "work": 35946,
+          "consumers": 1,
+          "dead": 4506,
+          "tokens": 4,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 1
+        },
+        {
+          "t": 45,
+          "work": 37016,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 1
+        },
+        {
+          "t": 47,
+          "work": 38069,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 48,
+          "work": 39130,
+          "consumers": 1,
+          "dead": 4506,
+          "tokens": 4,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 49,
+          "work": 40148,
+          "consumers": 2,
+          "dead": 4506,
+          "tokens": 2,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 1
+        },
+        {
+          "t": 51,
+          "work": 24613,
+          "consumers": 1,
+          "dead": 4506,
+          "tokens": 4,
+          "closed": 1,
+          "open": 3,
+          "halfOpen": 1
+        },
+        {
+          "t": 53,
+          "work": 0,
+          "consumers": 2,
+          "dead": 4506,
+          "tokens": 3,
+          "closed": 1,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 55,
+          "work": 0,
+          "consumers": 2,
+          "dead": 4506,
+          "tokens": 3,
+          "closed": 2,
+          "open": 3,
+          "halfOpen": 0
+        },
+        {
+          "t": 57,
+          "work": 0,
+          "consumers": 2,
+          "dead": 4506,
+          "tokens": 3,
+          "closed": 2,
+          "open": 3,
+          "halfOpen": 0
+        },
+        {
+          "t": 59,
+          "work": 0,
+          "consumers": 2,
+          "dead": 4506,
+          "tokens": 3,
+          "closed": 2,
+          "open": 3,
+          "halfOpen": 0
+        },
+        {
+          "t": 61,
+          "work": 0,
+          "consumers": 2,
+          "dead": 4506,
+          "tokens": 3,
+          "closed": 2,
+          "open": 3,
+          "halfOpen": 0
+        },
+        {
+          "t": 63,
+          "work": 0,
+          "consumers": 2,
+          "dead": 4506,
+          "tokens": 3,
+          "closed": 2,
+          "open": 3,
+          "halfOpen": 0
+        },
+        {
+          "t": 65,
+          "work": 0,
+          "consumers": 2,
+          "dead": 4506,
+          "tokens": 3,
+          "closed": 2,
+          "open": 3,
+          "halfOpen": 0
+        },
+        {
+          "t": 67,
+          "work": 0,
+          "consumers": 3,
+          "dead": 4506,
+          "tokens": 2,
+          "closed": 3,
+          "open": 2,
+          "halfOpen": 0
+        },
+        {
+          "t": 69,
+          "work": 0,
+          "consumers": 3,
+          "dead": 4506,
+          "tokens": 2,
+          "closed": 3,
+          "open": 2,
+          "halfOpen": 0
+        },
+        {
+          "t": 71,
+          "work": 0,
+          "consumers": 3,
+          "dead": 4506,
+          "tokens": 2,
+          "closed": 3,
+          "open": 2,
+          "halfOpen": 0
+        },
+        {
+          "t": 73,
+          "work": 0,
+          "consumers": 3,
+          "dead": 4506,
+          "tokens": 2,
+          "closed": 3,
+          "open": 2,
+          "halfOpen": 0
+        },
+        {
+          "t": 75,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 4,
+          "open": 1,
+          "halfOpen": 0
+        },
+        {
+          "t": 76,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        }
+      ],
+      "pass": true
+    },
+    {
+      "scenario": "kill-open-replica",
+      "run": "killopmuaem278",
+      "startedAt": "2026-09-20T22:44:45.860Z",
+      "correctness": {
+        "sent": 46585,
+        "confirmed": 46585,
+        "processed": 46585,
+        "duplicates": 0,
+        "unprocessed": 0,
+        "lost": 0,
+        "deadLettered": 0,
+        "drained": true
+      },
+      "breaker": {
+        "recoveredAllClosed": true,
+        "secondsFromRestoreToAllClosed": 23,
+        "openings": 31,
+        "peakReplicasOpen": 5,
+        "peakTokensInChain": 5,
+        "peakBacklog": 41015,
+        "longestHoldSeconds": 32,
+        "highestAttempt": 5,
+        "illegalTransitions": [],
+        "consumerCountMatchedNotOpen": "42/48"
+      },
+      "series": [
+        {
+          "t": 0,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 1,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 2,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 3,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 4,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 5,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 6,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 7,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 8,
+          "work": 46,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 10,
+          "work": 1095,
+          "consumers": 2,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 4,
+          "open": 1,
+          "halfOpen": 0
+        },
+        {
+          "t": 11,
+          "work": 2154,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 4,
+          "closed": 1,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 12,
+          "work": 3213,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 3,
+          "closed": 1,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 13,
+          "work": 4266,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 14,
+          "work": 5320,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 15,
+          "work": 6368,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 16,
+          "work": 7435,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 17,
+          "work": 8493,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 18,
+          "work": 9560,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 19,
+          "work": 10617,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 20,
+          "work": 11671,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 21,
+          "work": 12727,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 22,
+          "work": 13795,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 23,
+          "work": 14859,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 24,
+          "work": 15908,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 25,
+          "work": 16979,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 26,
+          "work": 18044,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 28,
+          "work": 19105,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 29,
+          "work": 20157,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 30,
+          "work": 21220,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 31,
+          "work": 22276,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 32,
+          "work": 23339,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 33,
+          "work": 24403,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 34,
+          "work": 25455,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 35,
+          "work": 26515,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 36,
+          "work": 27576,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 37,
+          "work": 28636,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 38,
+          "work": 29681,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 39,
+          "work": 30741,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 40,
+          "work": 31793,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 41,
+          "work": 32849,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 42,
+          "work": 33907,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 43,
+          "work": 34960,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 44,
+          "work": 36008,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 45,
+          "work": 37067,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 47,
+          "work": 38124,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 48,
+          "work": 39181,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 49,
+          "work": 40191,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 51,
+          "work": 40602,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 53,
+          "work": 41015,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 55,
+          "work": 33162,
+          "consumers": 2,
+          "dead": 4506,
+          "tokens": 3,
+          "closed": 1,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 57,
+          "work": 2791,
+          "consumers": 2,
+          "dead": 4506,
+          "tokens": 3,
+          "closed": 2,
+          "open": 3,
+          "halfOpen": 0
+        },
+        {
+          "t": 59,
+          "work": 0,
+          "consumers": 3,
+          "dead": 4506,
+          "tokens": 2,
+          "closed": 3,
+          "open": 2,
+          "halfOpen": 0
+        },
+        {
+          "t": 61,
+          "work": 0,
+          "consumers": 4,
+          "dead": 4506,
+          "tokens": 1,
+          "closed": 3,
+          "open": 2,
+          "halfOpen": 0
+        },
+        {
+          "t": 63,
+          "work": 0,
+          "consumers": 4,
+          "dead": 4506,
+          "tokens": 1,
+          "closed": 4,
+          "open": 1,
+          "halfOpen": 0
+        },
+        {
+          "t": 65,
+          "work": 0,
+          "consumers": 4,
+          "dead": 4506,
+          "tokens": 1,
+          "closed": 4,
+          "open": 1,
+          "halfOpen": 0
+        },
+        {
+          "t": 67,
+          "work": 0,
+          "consumers": 4,
+          "dead": 4506,
+          "tokens": 1,
+          "closed": 4,
+          "open": 1,
+          "halfOpen": 0
+        },
+        {
+          "t": 69,
+          "work": 0,
+          "consumers": 4,
+          "dead": 4506,
+          "tokens": 1,
+          "closed": 4,
+          "open": 1,
+          "halfOpen": 0
+        },
+        {
+          "t": 71,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 72,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        }
+      ],
+      "pass": true
+    },
+    {
+      "scenario": "kill-broker-while-open",
+      "run": "killbrmuaenrs4",
+      "startedAt": "2026-09-20T22:46:05.668Z",
+      "correctness": {
+        "sent": 41742,
+        "confirmed": 41742,
+        "processed": 41742,
+        "duplicates": 0,
+        "unprocessed": 0,
+        "lost": 0,
+        "deadLettered": 0,
+        "drained": true
+      },
+      "breaker": {
+        "recoveredAllClosed": true,
+        "secondsFromRestoreToAllClosed": 16,
+        "openings": 30,
+        "peakReplicasOpen": 5,
+        "peakTokensInChain": 5,
+        "peakBacklog": 36992,
+        "longestHoldSeconds": 24,
+        "highestAttempt": 5,
+        "illegalTransitions": [],
+        "consumerCountMatchedNotOpen": "48/52"
+      },
+      "series": [
+        {
+          "t": 0,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 1,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 2,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 3,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 4,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 5,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 6,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 7,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 8,
+          "work": 38,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 10,
+          "work": 1086,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 3,
+          "open": 2,
+          "halfOpen": 0
+        },
+        {
+          "t": 11,
+          "work": 2152,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 12,
+          "work": 3192,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 4,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 1
+        },
+        {
+          "t": 13,
+          "work": null,
+          "consumers": null,
+          "dead": null,
+          "tokens": null,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 1
+        },
+        {
+          "t": 14,
+          "work": null,
+          "consumers": null,
+          "dead": null,
+          "tokens": null,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 15,
+          "work": null,
+          "consumers": null,
+          "dead": null,
+          "tokens": null,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 16,
+          "work": 4198,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 3,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 17,
+          "work": 5251,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 1,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 18,
+          "work": 6303,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 4,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 19,
+          "work": 7361,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 20,
+          "work": 8424,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 21,
+          "work": 9484,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 22,
+          "work": 10549,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 23,
+          "work": 11606,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 24,
+          "work": 12677,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 25,
+          "work": 13737,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 26,
+          "work": 14792,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 27,
+          "work": 15848,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 28,
+          "work": 16910,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 29,
+          "work": 17974,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 31,
+          "work": 19037,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 32,
+          "work": 20096,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 33,
+          "work": 21146,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 34,
+          "work": 22208,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 35,
+          "work": 23261,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 36,
+          "work": 24318,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 37,
+          "work": 25380,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 38,
+          "work": 26438,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 39,
+          "work": 27502,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 40,
+          "work": 28561,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 41,
+          "work": 29620,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 42,
+          "work": 30670,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 43,
+          "work": 31726,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 44,
+          "work": 32793,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 45,
+          "work": 33838,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 46,
+          "work": 34904,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 47,
+          "work": 35968,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 49,
+          "work": 36992,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 51,
+          "work": 27957,
+          "consumers": 1,
+          "dead": 4506,
+          "tokens": 4,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 1
+        },
+        {
+          "t": 53,
+          "work": 4894,
+          "consumers": 1,
+          "dead": 4506,
+          "tokens": 4,
+          "closed": 1,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 55,
+          "work": 0,
+          "consumers": 2,
+          "dead": 4506,
+          "tokens": 3,
+          "closed": 2,
+          "open": 3,
+          "halfOpen": 0
+        },
+        {
+          "t": 57,
+          "work": 0,
+          "consumers": 3,
+          "dead": 4506,
+          "tokens": 2,
+          "closed": 3,
+          "open": 2,
+          "halfOpen": 0
+        },
+        {
+          "t": 59,
+          "work": 0,
+          "consumers": 3,
+          "dead": 4506,
+          "tokens": 2,
+          "closed": 3,
+          "open": 2,
+          "halfOpen": 0
+        },
+        {
+          "t": 61,
+          "work": 0,
+          "consumers": 4,
+          "dead": 4506,
+          "tokens": 1,
+          "closed": 3,
+          "open": 2,
+          "halfOpen": 0
+        },
+        {
+          "t": 63,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 64,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        }
+      ],
+      "pass": true
+    },
+    {
+      "scenario": "partial",
+      "run": "partiamuaepay0",
+      "startedAt": "2026-09-20T22:47:17.160Z",
+      "correctness": {
+        "sent": 44505,
+        "confirmed": 44505,
+        "processed": 44494,
+        "duplicates": 0,
+        "unprocessed": 11,
+        "lost": 0,
+        "deadLettered": 11,
+        "drained": true
+      },
+      "breaker": {
+        "recoveredAllClosed": true,
+        "secondsFromRestoreToAllClosed": 13,
+        "openings": 83,
+        "peakReplicasOpen": 5,
+        "peakTokensInChain": 5,
+        "peakBacklog": 39575,
+        "longestHoldSeconds": 15,
+        "highestAttempt": 4,
+        "illegalTransitions": [],
+        "consumerCountMatchedNotOpen": "40/54"
+      },
+      "series": [
+        {
+          "t": 0,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 1,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 2,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 3,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 4,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 5,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 6,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 7,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 8,
+          "work": 0,
+          "consumers": 4,
+          "dead": 4506,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        },
+        {
+          "t": 10,
+          "work": 1036,
+          "consumers": 0,
+          "dead": 4506,
+          "tokens": 3,
+          "closed": 2,
+          "open": 3,
+          "halfOpen": 0
+        },
+        {
+          "t": 11,
+          "work": 2065,
+          "consumers": 0,
+          "dead": 4508,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 12,
+          "work": 3039,
+          "consumers": 2,
+          "dead": 4508,
+          "tokens": 3,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 13,
+          "work": 4086,
+          "consumers": 0,
+          "dead": 4508,
+          "tokens": 2,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 14,
+          "work": 5129,
+          "consumers": 0,
+          "dead": 4508,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 15,
+          "work": 6147,
+          "consumers": 1,
+          "dead": 4508,
+          "tokens": 4,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 1
+        },
+        {
+          "t": 16,
+          "work": 7204,
+          "consumers": 0,
+          "dead": 4508,
+          "tokens": 3,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 1
+        },
+        {
+          "t": 17,
+          "work": 8196,
+          "consumers": 0,
+          "dead": 4510,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 18,
+          "work": 9237,
+          "consumers": 0,
+          "dead": 4510,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 1
+        },
+        {
+          "t": 19,
+          "work": 10297,
+          "consumers": 0,
+          "dead": 4510,
+          "tokens": 3,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 20,
+          "work": 11363,
+          "consumers": 0,
+          "dead": 4510,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 21,
+          "work": 12421,
+          "consumers": 0,
+          "dead": 4510,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 22,
+          "work": 13462,
+          "consumers": 0,
+          "dead": 4510,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 23,
+          "work": 14496,
+          "consumers": 0,
+          "dead": 4510,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 1
+        },
+        {
+          "t": 24,
+          "work": 15550,
+          "consumers": 0,
+          "dead": 4510,
+          "tokens": 5,
+          "closed": 0,
+          "open": 4,
+          "halfOpen": 1
+        },
+        {
+          "t": 25,
+          "work": 16601,
+          "consumers": 0,
+          "dead": 4510,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 26,
+          "work": 17654,
+          "consumers": 0,
+          "dead": 4510,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 27,
+          "work": 18686,
+          "consumers": 0,
+          "dead": 4511,
+          "tokens": 5,
+          "closed": 1,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 29,
+          "work": 19711,
+          "consumers": 0,
+          "dead": 4511,
+          "tokens": 5,
+          "closed": 1,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 30,
+          "work": 20772,
+          "consumers": 0,
+          "dead": 4511,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 31,
+          "work": 21833,
+          "consumers": 0,
+          "dead": 4511,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 32,
+          "work": 22875,
+          "consumers": 0,
+          "dead": 4511,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 33,
+          "work": 23931,
+          "consumers": 0,
+          "dead": 4511,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 34,
+          "work": 24997,
+          "consumers": 0,
+          "dead": 4511,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 35,
+          "work": 26036,
+          "consumers": 0,
+          "dead": 4511,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 36,
+          "work": 27050,
+          "consumers": 0,
+          "dead": 4513,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 37,
+          "work": 28097,
+          "consumers": 0,
+          "dead": 4513,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 38,
+          "work": 29163,
+          "consumers": 0,
+          "dead": 4513,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 39,
+          "work": 30225,
+          "consumers": 0,
+          "dead": 4513,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 40,
+          "work": 31269,
+          "consumers": 0,
+          "dead": 4513,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 41,
+          "work": 32296,
+          "consumers": 0,
+          "dead": 4514,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 42,
+          "work": 33333,
+          "consumers": 0,
+          "dead": 4515,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 43,
+          "work": 34393,
+          "consumers": 0,
+          "dead": 4515,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 44,
+          "work": 35394,
+          "consumers": 1,
+          "dead": 4515,
+          "tokens": 4,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 45,
+          "work": 36447,
+          "consumers": 0,
+          "dead": 4517,
+          "tokens": 4,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 47,
+          "work": 37510,
+          "consumers": 0,
+          "dead": 4517,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 48,
+          "work": 38552,
+          "consumers": 0,
+          "dead": 4517,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 49,
+          "work": 39575,
+          "consumers": 0,
+          "dead": 4517,
+          "tokens": 5,
+          "closed": 0,
+          "open": 5,
+          "halfOpen": 0
+        },
+        {
+          "t": 51,
+          "work": 17162,
+          "consumers": 2,
+          "dead": 4517,
+          "tokens": 3,
+          "closed": 1,
+          "open": 4,
+          "halfOpen": 0
+        },
+        {
+          "t": 53,
+          "work": 0,
+          "consumers": 3,
+          "dead": 4517,
+          "tokens": 2,
+          "closed": 2,
+          "open": 3,
+          "halfOpen": 0
+        },
+        {
+          "t": 55,
+          "work": 0,
+          "consumers": 3,
+          "dead": 4517,
+          "tokens": 2,
+          "closed": 3,
+          "open": 2,
+          "halfOpen": 0
+        },
+        {
+          "t": 57,
+          "work": 0,
+          "consumers": 4,
+          "dead": 4517,
+          "tokens": 1,
+          "closed": 3,
+          "open": 2,
+          "halfOpen": 0
+        },
+        {
+          "t": 59,
+          "work": 0,
+          "consumers": 4,
+          "dead": 4517,
+          "tokens": 1,
+          "closed": 4,
+          "open": 1,
+          "halfOpen": 0
+        },
+        {
+          "t": 61,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4517,
+          "tokens": 0,
+          "closed": 4,
+          "open": 1,
+          "halfOpen": 0
+        },
+        {
+          "t": 62,
+          "work": 0,
+          "consumers": 5,
+          "dead": 4517,
+          "tokens": 0,
+          "closed": 5,
+          "open": 0,
+          "halfOpen": 0
+        }
+      ],
+      "pass": false
+    },
+    {
+      "scenario": "delay-survives-broker-restart",
+      "requestedSeconds": 100,
+      "arrivedMs": 100492,
+      "extraCopies": 0,
+      "pass": true
+    }
+  ]
+}

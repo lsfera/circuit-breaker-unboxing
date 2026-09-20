@@ -194,6 +194,12 @@ export interface RmqService {
     source: RmqExchange,
     destination: RmqQueue,
   ) => Effect.Effect<void, RmqError>;
+  /** An exchange-to-exchange binding: what a delay chain is made of. */
+  readonly bindExchange: (
+    routingKey: string,
+    source: RmqExchange,
+    destination: RmqExchange,
+  ) => Effect.Effect<void, RmqError>;
   /**
    * Settled only once `onMessage` settles, which is the flow-control lever: a
    * handler that awaits its own work holds the delivery unacked, and `prefetch`
@@ -234,6 +240,13 @@ export interface RmqService {
    * queue, which is how a daemon abandons work wholesale when the circuit moves.
    */
   readonly closeConsumer: (c: Consumer) => Effect.Effect<void>;
+  /**
+   * Stop delivery, let what the consumer holds settle, then retire it and its
+   * channel. The graceful `closeConsumer`: nothing goes back to the queue, so a
+   * consumer that is stopped because a circuit opened does not repeat the calls
+   * it had already finished.
+   */
+  readonly drainConsumer: (c: Consumer) => Effect.Effect<void>;
   /**
    * Never completes while the connection is usable; fails once recovery has
    * given up on it.
@@ -440,6 +453,12 @@ export const makeRmq = Effect.fnUntraced(function* (
       readonly routingKey: string;
       readonly source: string;
       readonly destination: string;
+    }
+    | {
+      readonly kind: "exchangeBind";
+      readonly routingKey: string;
+      readonly source: string;
+      readonly destination: string;
     };
   // Keyed, first declaration wins, and a `Map` keeps insertion order, which is
   // the order the replay needs.
@@ -454,6 +473,10 @@ export const makeRmq = Effect.fnUntraced(function* (
     readonly queue: string;
     readonly onMessage: OnMessage;
     readonly prefetch: number;
+    /** Deliveries handed to `onMessage` and not yet settled on the broker. */
+    outstanding: number;
+    /** Resolved when `outstanding` next reaches zero. */
+    readonly idle: Array<() => void>;
   };
   const live = new Set<Live>();
 
@@ -544,7 +567,17 @@ export const makeRmq = Effect.fnUntraced(function* (
     settle(ch, message, "discard");
   };
 
+  /** One delivery settled: the last one out wakes whoever is draining this consumer. */
+  const released = (entry: Live): void => {
+    entry.outstanding -= 1;
+    O.map(
+      O.liftPredicate(entry, (e: Live) => e.outstanding === 0),
+      (e) => e.idle.splice(0).forEach((resolve) => resolve()),
+    );
+  };
+
   const handle = (ch: Channel, entry: Live, message: ConsumeMessage): void => {
+    entry.outstanding += 1;
     // A handler that throws synchronously would escape into amqplib's
     // delivery callback. Every handler in this repo is careful, which is
     // exactly the kind of thing that stops being true later.
@@ -552,18 +585,25 @@ export const makeRmq = Effect.fnUntraced(function* (
     try {
       done = entry.onMessage(message.content.toString("utf8"), describe(message));
     } catch (error) {
-      return failed(ch, entry, message, error);
+      failed(ch, entry, message, error);
+      return released(entry);
     }
     Match.value(done).pipe(
       // A synchronous outcome is a string, not a thenable.
-      Match.when(Predicate.isString, (outcome) => settle(ch, message, outcome)),
+      Match.when(Predicate.isString, (outcome) => {
+        settle(ch, message, outcome);
+        released(entry);
+      }),
       Match.when(isPending, (later) =>
         void later.then(
           (outcome) => settle(ch, message, outcome ?? "accept"),
           (error) => failed(ch, entry, message, error),
-        ),
+        ).then(() => released(entry)),
       ),
-      Match.orElse(() => settle(ch, message, "accept")),
+      Match.orElse(() => {
+        settle(ch, message, "accept");
+        released(entry);
+      }),
     );
   };
 
@@ -646,6 +686,7 @@ export const makeRmq = Effect.fnUntraced(function* (
               ch.assertQueue(q.name, { durable: q.durable, exclusive: false, arguments: q.args }),
             exchange: (x) => ch.assertExchange(x.name, "topic", { durable: x.durable }),
             bind: (b) => ch.bindQueue(b.destination, b.source, b.routingKey),
+            exchangeBind: (b) => ch.bindExchange(b.destination, b.source, b.routingKey),
           }),
         ),
       );
@@ -978,6 +1019,8 @@ export const makeRmq = Effect.fnUntraced(function* (
           queue,
           onMessage,
           prefetch: options.prefetch ?? DEFAULT_PREFETCH,
+          outstanding: 0,
+          idle: [],
         };
         // In `live` before `attach`, not after: `attach` registers the
         // channel's 'close' handler before it finishes, and a channel that
@@ -995,6 +1038,17 @@ export const makeRmq = Effect.fnUntraced(function* (
         }
         return handle;
       }),
+    bindExchange: (routingKey, source, destination) => {
+      record(`e:${String(source)}:${routingKey}:${String(destination)}`, {
+        kind: "exchangeBind",
+        routingKey,
+        source: source as string,
+        destination: destination as string,
+      });
+      return onFreshChannel("bindExchange", async (ch) => {
+        await ch.bindExchange(destination as string, source as string, routingKey);
+      }).pipe(Effect.asVoid);
+    },
     publisherToExchange: (exchange, routingKey, format) =>
       Effect.succeed({
         exchange,
@@ -1049,6 +1103,21 @@ export const makeRmq = Effect.fnUntraced(function* (
       Effect.promise(() => {
         forget(c);
         return c.channel.cancel(c.consumerTag).then(() => { }, () => { });
+      }),
+    drainConsumer: (c) =>
+      Effect.promise(async () => {
+        const entry = Arr.findFirst(live, (e) => e.handle === c);
+        forget(c);
+        await c.channel.cancel(c.consumerTag).then(() => { }, () => { });
+        // What it still holds is settled on this channel, so the channel stays
+        // open until the last of it is — closing first would hand each back
+        // unacked, and a call that already succeeded would run again.
+        await O.match(entry, {
+          onNone: () => Promise.resolve(),
+          onSome: (e) =>
+            e.outstanding === 0 ? Promise.resolve() : new Promise<void>((resolve) => e.idle.push(resolve)),
+        });
+        await c.channel.close().then(() => { }, () => { });
       }),
     closeConsumer: (c) =>
       Effect.promise(() => {
