@@ -1,7 +1,7 @@
-import { Context, Data, Deferred, Effect, Layer, Option as O, Predicate, Scope, Tracer } from "effect";
+import { randomUUID } from "node:crypto";
+import { Array as Arr, Context, Data, Deferred, Effect, Layer, Match, Option as O, Predicate, Scope, Tracer } from "effect";
 import * as amqp from "amqplib";
 import { parentFrom, TRACEPARENT, traceparent } from "./Trace.ts";
-import { IDEMPOTENCY_KEY_HEADER } from "./ControlPlane.ts";
 import type { ChannelModel, ConfirmChannel, ConsumeMessage, Channel } from "amqplib";
 
 /**
@@ -24,7 +24,59 @@ export type Consumer = { channel: Channel; consumerTag: string };
  * exchange and routing key per call, so there is nothing to open, nothing to
  * fail halfway, and nothing to race.
  */
-export type Publisher = { readonly exchange: string; readonly routingKey: string };
+export type Publisher = {
+  readonly exchange: string;
+  readonly routingKey: string;
+  /**
+   * What this publisher says its bodies are, sent as the AMQP `content_type`
+   * and `content_encoding` properties on every message (`application/json`;
+   * `gzip` if compressed, several separated by commas). RabbitMQ neither
+   * validates nor uses them: they are for the applications on either side, so
+   * a publisher declares its format once and a reader can decline what it does
+   * not understand instead of guessing. See
+   * https://www.rabbitmq.com/docs/consumers#content-type-and-encoding.
+   */
+  readonly contentType: O.Option<string>;
+  readonly contentEncoding: O.Option<string>;
+  /** The AMQP `type` property: what kind of message this is, dot-separated by convention (`egress.work`). */
+  readonly type: O.Option<string>;
+  /**
+   * Whether the broker must hand back a message it cannot route, which `send`
+   * then fails with `Unroutable`. On for a queue, where "no such queue" is a bug
+   * and the default exchange would otherwise drop the message without a word;
+   * off for an exchange, where a topic with no bindings yet is an ordinary state.
+   */
+  readonly mandatory: boolean;
+};
+
+/** What a publisher may declare about its bodies; all optional, and a publisher that declares nothing says nothing. */
+export type Format = {
+  readonly contentType?: string;
+  readonly contentEncoding?: string;
+  readonly type?: string;
+};
+
+/**
+ * What a single publish may carry beyond its body. `headers` become message
+ * headers. `messageId` is the message's identity, the AMQP `message_id`: the
+ * publisher assigns it when the message has an identity that must outlive one
+ * publish (a retry key), and a republish carries it forward explicitly. Left out,
+ * `send` invents one, which is all the broker-side bookkeeping needs.
+ */
+export type SendOptions = {
+  readonly headers?: Record<string, string>;
+  readonly messageId?: string;
+};
+
+/**
+ * The broker returned a message it could not route to any queue (a mandatory
+ * publish to a queue that does not exist). Its own class, like `PublishNacked`
+ * would be: the message was not taken, and that is knowable.
+ */
+export class Unroutable extends Error {}
+
+/** True when this failure is the broker handing a mandatory message back as unroutable. */
+export const isUnroutable = (error: RmqError): boolean => error.cause instanceof Unroutable;
 
 /**
  * Effect wrapper over amqplib (AMQP 0-9-1). Why this protocol and not 1.0:
@@ -94,12 +146,17 @@ export type DeliveryInfo = {
    */
   readonly properties: Readonly<Record<string, string>>;
   /**
-   * The payments idempotency key, read directly off the one header rather than
-   * through `properties`. The work and probe consumers read this on every
-   * delivery — thousands a second — and materializing every header into
-   * strings for one value would be waste.
+   * The AMQP `content_type` and `content_encoding` the publisher declared,
+   * `None` from a publisher that declared nothing. Read directly, like
+   * `messageId`, since a daemon decides on them before it looks at the body.
    */
-  readonly idempotencyKey: O.Option<string>;
+  readonly contentType: O.Option<string>;
+  readonly contentEncoding: O.Option<string>;
+  /** The AMQP `type`, `message_id` and `timestamp` the publisher stamped (`send` stamps the last two on every message). */
+  readonly type: O.Option<string>;
+  readonly messageId: O.Option<string>;
+  /** When it was published, epoch milliseconds: AMQP carries seconds, so this is only as fine as a second. */
+  readonly publishedAt: O.Option<number>;
   /**
    * The publishing span, when there was one. `None` for most messages, since
    * tracing is sampled at the root. Handed to the caller rather than applied here.
@@ -158,18 +215,15 @@ export interface RmqService {
   readonly publisherToExchange: (
     exchange: string,
     routingKey: string,
+    format?: Format,
   ) => Effect.Effect<Publisher, RmqError>;
-  readonly publisherToQueue: (queue: string) => Effect.Effect<Publisher, RmqError>;
+  readonly publisherToQueue: (queue: string, format?: Format) => Effect.Effect<Publisher, RmqError>;
   /**
    * `properties` become message headers. Everything is published persistent, with
    * no flag: on a transient queue the broker ignores it, and on a durable one it is
    * the difference between keeping a message across a restart and appearing to.
    */
-  readonly send: (
-    pub: Publisher,
-    body: string,
-    properties?: Record<string, string>,
-  ) => Effect.Effect<void, RmqError>;
+  readonly send: (pub: Publisher, body: string, options?: SendOptions) => Effect.Effect<void, RmqError>;
   /**
    * Stop delivery, leaving the channel able to settle what it still holds — what
    * the probe needs, since closing instead would hand its message back to the queue.
@@ -258,10 +312,13 @@ const wrap = <A>(operation: string, promise: () => Promise<A>) =>
  */
 const settle = (channel: Channel, message: ConsumeMessage, outcome: Settlement) => {
   try {
-    if (outcome === "discard") channel.reject(message, false);
-    else if (outcome === "requeue") channel.reject(message, true);
-    else if (outcome === "release") channel.nack(message, false, true);
-    else channel.ack(message);
+    Match.value(outcome).pipe(
+      Match.when("discard", () => channel.reject(message, false)),
+      Match.when("requeue", () => channel.reject(message, true)),
+      Match.when("release", () => channel.nack(message, false, true)),
+      Match.when("accept", () => channel.ack(message)),
+      Match.exhaustive,
+    );
   } catch {
     // channel already gone; the broker has the delivery back
   }
@@ -274,46 +331,67 @@ type RmqConnectOptions = {
   readonly password?: string;
 };
 
+/**
+ * Computed on the first read and kept. The high-rate handlers never read most
+ * of what a delivery can describe, so nothing is worked out until asked. The
+ * memo is an `Option` because a computed value is not the same thing as one
+ * that is itself absent.
+ */
+const lazily = <A>(compute: () => A): (() => A) => {
+  let memo = O.none<A>();
+  return () =>
+    O.getOrElse(memo, () => {
+      const value = compute();
+      memo = O.some(value);
+      return value;
+    });
+};
+
+/** When `condition` holds, run `effect`: a guard that is only a side effect, without a statement for it. */
+const when = (condition: boolean, effect: () => void): void => {
+  void (condition && effect());
+};
+
+/** Runs `run` for each item one after the other, stopping at the first rejection — the order matters and so does not overlap. */
+const inSequence = <A>(items: Iterable<A>, run: (item: A) => Promise<unknown>): Promise<unknown> =>
+  Array.from(items).reduce<Promise<unknown>>((done, item) => done.then(() => run(item)), Promise.resolve());
+
 const describe = (delivery: ConsumeMessage): DeliveryInfo => {
   const headers = delivery.properties.headers ?? {};
-  let deadLetter: DeliveryInfo["deadLetter"] | undefined;
-  let properties: Readonly<Record<string, string>> | undefined;
-  let idempotencyKey: DeliveryInfo["idempotencyKey"] | undefined;
-  let parent: DeliveryInfo["parent"] | undefined;
+  const header = (name: string) => O.liftPredicate(headers[name], Predicate.isString);
+  const deadLetter = lazily(() =>
+    O.map(header("x-first-death-queue"), (queue) => ({
+      queue,
+      reason: O.getOrElse(header("x-first-death-reason"), () => "unknown"),
+    })),
+  );
+  const properties = lazily(() =>
+    Object.fromEntries(Object.entries(headers).map(([k, v]) => [k, String(v)])),
+  );
+  const contentType = O.liftPredicate(delivery.properties.contentType, Predicate.isString);
+  const contentEncoding = O.liftPredicate(delivery.properties.contentEncoding, Predicate.isString);
+  const type = O.liftPredicate(delivery.properties.type, Predicate.isString);
+  const messageId = O.liftPredicate(delivery.properties.messageId, Predicate.isString);
+  const publishedAt = O.map(
+    O.liftPredicate(delivery.properties.timestamp, Predicate.isNumber),
+    (seconds) => seconds * 1000,
+  );
+  const parent = lazily(() => O.flatMap(header(TRACEPARENT), parentFrom));
   return {
     deliveryCount: Number(headers["x-delivery-count"] ?? 0),
+    contentType,
+    contentEncoding,
+    type,
+    messageId,
+    publishedAt,
     get deadLetter() {
-      if (deadLetter === undefined) {
-        const queue = headers["x-first-death-queue"];
-        const reason = headers["x-first-death-reason"];
-        deadLetter =
-          Predicate.isString(queue)
-            ? O.some({ queue, reason: Predicate.isString(reason) ? reason : "unknown" })
-            : O.none();
-      }
-      return deadLetter;
+      return deadLetter();
     },
     get properties() {
-      if (properties === undefined) {
-        properties = Object.fromEntries(
-          Object.entries(headers).map(([k, v]) => [k, String(v)]),
-        );
-      }
-      return properties;
-    },
-    get idempotencyKey() {
-      if (idempotencyKey === undefined) {
-        const header = headers[IDEMPOTENCY_KEY_HEADER];
-        idempotencyKey = Predicate.isString(header) ? O.some(header) : O.none();
-      }
-      return idempotencyKey;
+      return properties();
     },
     get parent() {
-      if (parent === undefined) {
-        const header = headers[TRACEPARENT];
-        parent = parentFrom(Predicate.isString(header) ? header : undefined);
-      }
-      return parent;
+      return parent();
     },
   };
 };
@@ -358,17 +436,16 @@ export const makeRmq = Effect.fnUntraced(function* (
     | { readonly kind: "queue"; readonly name: string; readonly durable: boolean; readonly args: QueueArgs }
     | { readonly kind: "exchange"; readonly name: string; readonly durable: boolean }
     | {
-        readonly kind: "bind";
-        readonly routingKey: string;
-        readonly source: string;
-        readonly destination: string;
-      };
-  const topology: Topology[] = [];
-  const recorded = new Set<string>();
+      readonly kind: "bind";
+      readonly routingKey: string;
+      readonly source: string;
+      readonly destination: string;
+    };
+  // Keyed, first declaration wins, and a `Map` keeps insertion order, which is
+  // the order the replay needs.
+  const topology = new Map<string, Topology>();
   const record = (key: string, entry: Topology) => {
-    if (recorded.has(key)) return;
-    recorded.add(key);
-    topology.push(entry);
+    topology.set(key, topology.get(key) ?? entry);
   };
 
   /** A live consumer, and enough about it to build it again. */
@@ -391,6 +468,8 @@ export const makeRmq = Effect.fnUntraced(function* (
    * and `setup` is about to put everything back".
    */
   let connected = true;
+  /** The same for the publishing connection, which fails and recovers on its own. */
+  let publishing = true;
 
   /**
    * `out`/`opening` are `null` rather than `Option`: private mutable interop
@@ -401,6 +480,8 @@ export const makeRmq = Effect.fnUntraced(function* (
   let opening: Promise<ConfirmChannel> | null = null;
   /** Publishes awaiting a confirm on `out`, so its 'close' listener can fail all of them at once. */
   const pending = new Set<(error: Error) => void>();
+  /** `message_id`s the broker has handed back as unroutable and whose confirm has not yet arrived. */
+  const unroutable = new Set<string>();
 
   /**
    * The current live model, captured from `setup` (which amqplib runs on
@@ -415,15 +496,20 @@ export const makeRmq = Effect.fnUntraced(function* (
    * wrapped socket as `.stream` — see `resetConnection`.
    */
   let currentModel: ChannelModel | null = null;
+  /** The publishing connection's model, kept for the same reason: `resetConnection` reaches both sockets. */
+  let currentPublishModel: ChannelModel | null = null;
 
   const watchPublishChannel = (ch: ConfirmChannel) => {
     ch.on("error", (error) => {
       warn(`publish channel error: ${error.message}`);
     });
+    ch.on("return", (message) => {
+      unroutable.add(String(message.properties.messageId));
+    });
     ch.on("close", () => {
-      if (out === ch) out = null;
+      out = out === ch ? null : out;
       const closed = new Error("publish channel closed before the broker confirmed");
-      for (const fail of [...pending]) fail(closed);
+      [...pending].forEach((fail) => fail(closed));
     });
     return ch;
   };
@@ -431,33 +517,55 @@ export const makeRmq = Effect.fnUntraced(function* (
   /** The delivery callback, shared by the first registration and every rebuild. */
   const deliver =
     (ch: Channel, entry: Live) =>
-    (message: ConsumeMessage | null): void => {
-      // The broker cancelled this consumer — its queue was deleted underneath
-      // it. There is no delivery to settle and nothing to rebuild: the
-      // consumer is simply not receiving any more, which is worth saying,
-      // because the channel stays open and looks healthy.
-      if (message === null) {
-        warn(`broker cancelled the consumer on ${entry.queue} — it receives nothing now`);
-        return;
-      }
-      const onMessage = entry.onMessage;
-      // A handler that throws synchronously would escape into amqplib's
-      // delivery callback. Every handler in this repo is careful, which is
-      // exactly the kind of thing that stops being true later.
-      let done: void | Settlement | Promise<void | Settlement>;
-      try {
-        done = onMessage(message.content.toString("utf8"), describe(message));
-      } catch {
-        return settle(ch, message, "accept");
-      }
-      if (done === undefined) return settle(ch, message, "accept");
+      (message: ConsumeMessage | null): void =>
+        O.match(O.fromNullOr(message), {
+          // The broker cancelled this consumer — its queue was deleted underneath
+          // it. There is no delivery to settle and nothing to rebuild: the
+          // consumer is simply not receiving any more, which is worth saying,
+          // because the channel stays open and looks healthy.
+          onNone: () => void warn(`broker cancelled the consumer on ${entry.queue} — it receives nothing now`),
+          onSome: (delivery) => handle(ch, entry, delivery),
+        });
+
+  const isPending = (
+    done: void | Settlement | PromiseLike<void | Settlement>,
+  ): done is PromiseLike<void | Settlement> => Predicate.isPromiseLike(done);
+
+  /**
+   * A handler that threw, or whose promise rejected, did not finish its work, so
+   * acknowledging the delivery would say it had. It is dead-lettered instead
+   * (`discard` is `reject` without requeue): kept where the queue has somewhere
+   * to put it, and never a tight requeue loop on a queue with no delivery limit.
+   * Logged, because a handler that fails without a trace is how a queue quietly
+   * empties into a dead-letter queue nobody reads.
+   */
+  const failed = (ch: Channel, entry: Live, message: ConsumeMessage, error: unknown): void => {
+    void warn(`handler for ${entry.queue} failed, dead-lettering the delivery: ${String(error)}`);
+    settle(ch, message, "discard");
+  };
+
+  const handle = (ch: Channel, entry: Live, message: ConsumeMessage): void => {
+    // A handler that throws synchronously would escape into amqplib's
+    // delivery callback. Every handler in this repo is careful, which is
+    // exactly the kind of thing that stops being true later.
+    let done: void | Settlement | PromiseLike<void | Settlement>;
+    try {
+      done = entry.onMessage(message.content.toString("utf8"), describe(message));
+    } catch (error) {
+      return failed(ch, entry, message, error);
+    }
+    Match.value(done).pipe(
       // A synchronous outcome is a string, not a thenable.
-      if (Predicate.isString(done)) return settle(ch, message, done);
-      void done.then(
-        (outcome) => settle(ch, message, outcome ?? "accept"),
-        () => settle(ch, message, "accept"),
-      );
-    };
+      Match.when(Predicate.isString, (outcome) => settle(ch, message, outcome)),
+      Match.when(isPending, (later) =>
+        void later.then(
+          (outcome) => settle(ch, message, outcome ?? "accept"),
+          (error) => failed(ch, entry, message, error),
+        ),
+      ),
+      Match.orElse(() => settle(ch, message, "accept")),
+    );
+  };
 
   /**
    * Put a consumer back after its channel closed under it.
@@ -481,17 +589,19 @@ export const makeRmq = Effect.fnUntraced(function* (
     // Retired deliberately. Both teardown paths forget their consumer, and
     // closing the connection forgets all of them, so this covers a deliberate
     // shutdown as well as a deliberate close.
-    if (!live.has(entry)) return;
-    attach(() => connection.createChannel(), entry).then(
-      () => warn(`consumer channel on ${entry.queue} closed — rebuilt`),
-      (error) => {
-        // `connected` is false by now if the connection is what went, and
-        // `setup` re-attaches everything when it returns. Saying so here would
-        // report a failure that is already being handled.
-        if (connected) {
-          warn(`consumer on ${entry.queue} closed and could not be rebuilt: ${String(error)}`);
-        }
-      },
+    O.liftPredicate(entry, (e: Live) => live.has(e)).pipe(
+      O.map((current) =>
+        attach(() => connection.createChannel(), current).then(
+          () => warn(`consumer channel on ${current.queue} closed — rebuilt`),
+          (error) =>
+            // `connected` is false by now if the connection is what went, and
+            // `setup` re-attaches everything when it returns. Saying so here would
+            // report a failure that is already being handled.
+            when(connected, () =>
+              warn(`consumer on ${current.queue} closed and could not be rebuilt: ${String(error)}`),
+            ),
+        ),
+      ),
     );
   };
 
@@ -519,121 +629,144 @@ export const makeRmq = Effect.fnUntraced(function* (
     // un-acked close is exactly how a stale consumer outlives the channel
     // that should have taken it down, and why the broker's consumer count
     // climbs while this process only ever sees five.
-    if (previous !== undefined && previous !== ch) {
-      previous.close().catch(() => {});
-    }
+    O.liftPredicate(previous, (stale: Channel) => stale !== ch).pipe(
+      O.map((stale) => stale.close().catch(() => { })),
+    );
   };
 
   /** Replay every declare and binding, in the order they were first made. */
-  const applyTopology = async (open: () => Promise<Channel>) => {
-    if (topology.length === 0) return;
+  const replay = async (open: () => Promise<Channel>) => {
     const ch = await open();
-    ch.on("error", () => {});
+    ch.on("error", () => { });
     try {
-      for (const t of topology) {
-        if (t.kind === "queue") {
-          await ch.assertQueue(t.name, {
-            durable: t.durable,
-            exclusive: false,
-            arguments: t.args,
-          });
-        } else if (t.kind === "exchange") {
-          await ch.assertExchange(t.name, "topic", { durable: t.durable });
-        } else {
-          await ch.bindQueue(t.destination, t.source, t.routingKey);
-        }
-      }
+      await inSequence(topology.values(), (t) =>
+        Match.value(t).pipe(
+          Match.discriminatorsExhaustive("kind")({
+            queue: (q) =>
+              ch.assertQueue(q.name, { durable: q.durable, exclusive: false, arguments: q.args }),
+            exchange: (x) => ch.assertExchange(x.name, "topic", { durable: x.durable }),
+            bind: (b) => ch.bindQueue(b.destination, b.source, b.routingKey),
+          }),
+        ),
+      );
     } finally {
-      await ch.close().catch(() => {});
+      await ch.close().catch(() => { });
     }
   };
+  const applyTopology = (open: () => Promise<Channel>) =>
+    topology.size === 0 ? Promise.resolve() : replay(open);
 
   /**
-   * Runs after every successful connect, before the connection is handed out.
-   * Uses the model it is given rather than the recovering wrapper, which is not
-   * serving connections yet and would deadlock waiting for this one.
+   * Runs after every successful connect of the consuming connection, before it
+   * is handed out. Uses the model it is given rather than the recovering
+   * wrapper, which is not serving connections yet and would deadlock waiting
+   * for this one.
+   *
+   * Nothing here publishes, on purpose. A broker alarm blocks a connection by
+   * ceasing to read from it, and RabbitMQ's own advice is "to only use
+   * individual connections for either producing or consuming"
+   * (https://www.rabbitmq.com/docs/alarms): measured on this client, a consumer
+   * on a connection that had published held its prefetch window unacknowledged
+   * for as long as the alarm lasted, because its acks were never read.
    */
   const setup = async (model: ChannelModel) => {
     currentModel = model;
     await applyTopology(() => model.createChannel());
-    // Always reopened, same as it always has been — most processes never
-    // publish at all before their first real event, but the ones that do (a
-    // leader on its very first tick) should not pay for opening it there.
-    out = watchPublishChannel(await model.createConfirmChannel());
-    for (const entry of live) await attach(() => model.createChannel(), entry);
+    await inSequence(live, (entry) => attach(() => model.createChannel(), entry));
     connected = true;
   };
 
-  const connection = yield* Effect.acquireRelease(
-    wrap("connect", () =>
-      amqp.connect(
-        {
-          protocol: "amqp",
-          hostname: opts.host,
-          port: opts.port,
-          username: opts.username ?? "guest",
-          password: opts.password ?? "guest",
-          // Unset, this negotiates RabbitMQ's own 60s default — far too slow
-          // to matter for Coordination.ts's 5000ms lease TTL. amqplib already
-          // independently tracks broker activity on both sides of the
-          // connection and closes it (emitting the same 'disconnect' any
-          // other failure does, which `connected` below already turns into
-          // `isConnected`) after ~2-3 missed intervals, with zero application
-          // code — so a short interval here does for a silent one-sided
-          // partition what an application-level heartbeat would otherwise
-          // have to be built to do. Measured live against
-          // `net-control-partition+outage`, a one-directional packet drop:
-          // the broker's own side of the heartbeat timed out first, closed
-          // the connection, and that reached this side as `ECONNRESET` at
-          // 2.76s — `AmqpControlPlaneSink.ts`'s per-attempt `isConnected`
-          // check (see its own comment) turned that into a step-down at
-          // 3.46s, matching what a bespoke message-level heartbeat had taken
-          // a whole ADR's worth of machinery to achieve no faster. See
-          // docs/decisions/017's second amendment.
-          heartbeat: 1,
-        },
-        {
-          // Bounds every socket connect — initial and every reconnect alike,
-          // since amqplib reuses these options on each attempt — to a fixed
-          // wall-clock time rather than the OS's own SYN-retry timeout.
-          // Without this, a one-sided network partition (outbound packets to
-          // the broker silently dropped rather than refused or reset) leaves
-          // `net.connect` retrying at the kernel level: measured against a
-          // real one, three consecutive reconnect attempts each took ~135s to
-          // fail — Linux's default `tcp_syn_retries` — before amqplib's own
-          // `setTimeout` backoff even got a turn. A `maxRetries: 60` budget
-          // meant to take "about five minutes" (see `recovery` below and
-          // docs/decisions/005-connection-recovery.md) would have taken over
-          // two hours instead, indistinguishable from hung to anything
-          // watching less than that. 5s comfortably covers a real connect on
-          // this network and is the same order of magnitude as `maxDelay`
-          // below, so a partition now fails each attempt fast enough that the
-          // documented five-minute budget is the actual bound again.
-          timeout: 5000,
-          recovery: {
-            initialDelay: 200,
-            maxDelay: 5000,
-            // About five minutes of trying before the process gives up.
-            maxRetries: 60,
-            setup,
+  /**
+   * The same, for the publishing connection: it owns the confirm channel and
+   * nothing else. It is the one a broker alarm blocks, so it is also the one that
+   * says so; a blocked publisher otherwise just waits on its confirm with
+   * nothing to say why.
+   */
+  const publishingSetup = async (model: ChannelModel) => {
+    currentPublishModel = model;
+    model.on("blocked", (reason: string) => void warn(`publishing connection blocked by the broker: ${reason}`));
+    model.on("unblocked", () => void warn("publishing connection unblocked"));
+    // Always reopened, same as it always has been: most processes never publish
+    // before their first real event, but the ones that do should not pay for
+    // opening it there.
+    out = watchPublishChannel(await model.createConfirmChannel());
+    publishing = true;
+  };
+
+  const open = (setup: (model: ChannelModel) => Promise<void>, onClose: () => void) =>
+    Effect.acquireRelease(
+      wrap("connect", () =>
+        amqp.connect(
+          {
+            protocol: "amqp",
+            hostname: opts.host,
+            port: opts.port,
+            username: opts.username ?? "guest",
+            password: opts.password ?? "guest",
+            // Unset, this negotiates RabbitMQ's own 60s default — far too slow
+            // to matter for Coordination.ts's 5000ms lease TTL. amqplib already
+            // independently tracks broker activity on both sides of the
+            // connection and closes it (emitting the same 'disconnect' any
+            // other failure does, which `connected` below already turns into
+            // `isConnected`) after ~2-3 missed intervals, with zero application
+            // code — so a short interval here does for a silent one-sided
+            // partition what an application-level heartbeat would otherwise
+            // have to be built to do. Measured live against
+            // `net-control-partition+outage`, a one-directional packet drop:
+            // the broker's own side of the heartbeat timed out first, closed
+            // the connection, and that reached this side as `ECONNRESET` at
+            // 2.76s — `AmqpControlPlaneSink.ts`'s per-attempt `isConnected`
+            // check (see its own comment) turned that into a step-down at
+            // 3.46s, matching what a bespoke message-level heartbeat had taken
+            // a whole ADR's worth of machinery to achieve no faster. See
+            // docs/decisions/017's second amendment.
+            heartbeat: 1,
           },
-        },
+          {
+            // Bounds every socket connect — initial and every reconnect alike,
+            // since amqplib reuses these options on each attempt — to a fixed
+            // wall-clock time rather than the OS's own SYN-retry timeout.
+            // Without this, a one-sided network partition (outbound packets to
+            // the broker silently dropped rather than refused or reset) leaves
+            // `net.connect` retrying at the kernel level: measured against a
+            // real one, three consecutive reconnect attempts each took ~135s to
+            // fail — Linux's default `tcp_syn_retries` — before amqplib's own
+            // `setTimeout` backoff even got a turn. A `maxRetries: 60` budget
+            // meant to take "about five minutes" (see `recovery` below and
+            // docs/decisions/005-connection-recovery.md) would have taken over
+            // two hours instead, indistinguishable from hung to anything
+            // watching less than that. 5s comfortably covers a real connect on
+            // this network and is the same order of magnitude as `maxDelay`
+            // below, so a partition now fails each attempt fast enough that the
+            // documented five-minute budget is the actual bound again.
+            timeout: 5000,
+            recovery: {
+              initialDelay: 200,
+              maxDelay: 5000,
+              // About five minutes of trying before the process gives up.
+              maxRetries: 60,
+              setup,
+            },
+          },
+        ),
       ),
-    ),
-    // Swallowed deliberately: this runs on every scope close, and the daemon
-    // closes connections constantly. A broker that has already gone makes
-    // `close` reject, and a rejection here would fail the teardown rather
-    // than complete it. Closing also stops recovery, which is what a
-    // deliberate teardown should do. Forgetting every consumer first is what
-    // stops the channel closes this causes from being read as consumers to
-    // repair — the same bookkeeping `closeConsumer` uses, for all of them at
-    // once.
-    (conn) =>
-      Effect.promise(() => {
-        live.clear();
-        return conn.close().then(() => {}, () => {});
-      }),
-  );
+      // Swallowed deliberately: this runs on every scope close, and the daemon
+      // closes connections constantly. A broker that has already gone makes
+      // `close` reject, and a rejection here would fail the teardown rather
+      // than complete it. Closing also stops recovery, which is what a
+      // deliberate teardown should do. Forgetting every consumer first is what
+      // stops the channel closes this causes from being read as consumers to
+      // repair — the same bookkeeping `closeConsumer` uses, for all of them at
+      // once.
+      (conn) =>
+        Effect.promise(() => {
+          onClose();
+          return conn.close().then(() => { }, () => { });
+        }),
+    );
+
+  const connection = yield* open(setup, () => live.clear());
+  const publisher = yield* open(publishingSetup, () => {});
 
   /**
    * A numeric `.code` on an amqplib error is an AMQP reply code — the broker
@@ -646,96 +779,104 @@ export const makeRmq = Effect.fnUntraced(function* (
    * never got far enough to reject anything. That split is what tells "the
    * broker is actively saying no" from "the broker is not there right now".
    */
-  const amqpReplyCode = (error: Error): number | undefined => {
-    const code = (error as { readonly code?: unknown }).code;
-    return Predicate.isNumber(code) ? code : undefined;
-  };
+  const amqpReplyCode = (error: Error): O.Option<number> =>
+    O.liftPredicate((error as { readonly code?: unknown }).code, Predicate.isNumber);
 
-  connection.on("error", (error) => {
-    warn(`connection error: ${error.message}`);
-  });
-  connection.on("disconnect", (error) => {
-    connected = false;
-    warn(`disconnected (${error?.message ?? "no reason given"}) — recovering`);
-  });
   /**
-   * Fires on every failed reconnect attempt, not just the last —
-   * recovery.js's `_connect()` emits it from its `catch` before scheduling
-   * the next try. Nothing listened here before: a deterministic failure (the
-   * broker closing `setup`'s topology replay with the same
-   * `PRECONDITION_FAILED` on every attempt, e.g. a queue redeclared with
-   * different arguments — see docs/decisions/016's churn on `x-delivery-limit`)
-   * retried silently for up to five minutes before `reconnect-failed` said
-   * anything at all, which is indistinguishable from hung to anyone watching
-   * for less than five minutes. Measured against a real broker: 21 attempts
-   * and 84 seconds of exactly this silence before this handler existed.
-   *
-   * An AMQP reply code here (see `amqpReplyCode`) can only mean the broker
-   * itself rejected a frame during `setup` — retrying the identical topology
-   * against it cannot succeed without a human fixing the mismatch, so this
-   * abandons the retry budget immediately (failing `lost`, same as
-   * `reconnect-failed` below) rather than burning the full five minutes on a
-   * setup that is doomed on attempt 1 as surely as on attempt 60. A
-   * transient failure — broker unreachable, connection refused — has no such
-   * code and keeps its full budget; `RecoveringCore` schedules its next
-   * attempt right after this handler returns, unless `lost` failing has
-   * already torn the connection down.
+   * Wires one connection's events to the shared bookkeeping. Both connections
+   * report through the same handlers: either one failing for good fails `lost`,
+   * since a process with half its broker access is no use either.
    */
-  connection.on("connect-failed", (error) => {
-    const code = amqpReplyCode(error);
-    warn(
-      `connect attempt failed${code !== undefined ? ` (AMQP ${code})` : ""}: ${error.message}`,
-    );
-    if (code !== undefined) {
+  const watch = (conn: typeof connection, role: string, up: (state: boolean) => void, restored: () => string) => {
+    conn.on("error", (error) => {
+      warn(`${role} connection error: ${error.message}`);
+    });
+    conn.on("disconnect", (error) => {
+      up(false);
+      warn(`${role} connection disconnected (${error?.message ?? "no reason given"}) — recovering`);
+    });
+    /**
+     * Fires on every failed reconnect attempt, not just the last —
+     * recovery.js's `_connect()` emits it from its `catch` before scheduling
+     * the next try. Nothing listened here before: a deterministic failure (the
+     * broker closing `setup`'s topology replay with the same
+     * `PRECONDITION_FAILED` on every attempt, e.g. a queue redeclared with
+     * different arguments — see docs/decisions/016's churn on `x-delivery-limit`)
+     * retried silently for up to five minutes before `reconnect-failed` said
+     * anything at all, which is indistinguishable from hung to anyone watching
+     * for less than five minutes. Measured against a real broker: 21 attempts
+     * and 84 seconds of exactly this silence before this handler existed.
+     *
+     * An AMQP reply code here (see `amqpReplyCode`) can only mean the broker
+     * itself rejected a frame during `setup` — retrying the identical topology
+     * against it cannot succeed without a human fixing the mismatch, so this
+     * abandons the retry budget immediately (failing `lost`, same as
+     * `reconnect-failed` below) rather than burning the full five minutes on a
+     * setup that is doomed on attempt 1 as surely as on attempt 60. A
+     * transient failure — broker unreachable, connection refused — has no such
+     * code and keeps its full budget; `RecoveringCore` schedules its next
+     * attempt right after this handler returns, unless `lost` failing has
+     * already torn the connection down.
+     */
+    conn.on("connect-failed", (error) => {
+      const code = amqpReplyCode(error);
+      warn(
+        `${role} connect attempt failed${O.match(code, { onNone: () => "", onSome: (c) => ` (AMQP ${c})` })}: ${error.message}`,
+      );
+      O.map(code, () =>
+        Deferred.doneUnsafe(
+          lost,
+          Effect.fail(
+            new RmqError({
+              operation: "connection",
+              cause: `${role} connection: broker rejected setup deterministically, abandoning retry budget: ${error.message}`,
+            }),
+          ),
+        ),
+      );
+    });
+    conn.on("reconnect-scheduled", ({ attempt, delay, error }) => {
+      warn(`${role} reconnect attempt ${attempt} in ${delay}ms (${error.message})`);
+    });
+    conn.on("connect", () => {
+      warn(`${role} connection reconnected — ${restored()}`);
+    });
+    // Recovery has given up. The stance is unchanged — a process that cannot
+    // reach its broker is no use, and the restart policy is what gets it looked
+    // at — but it is now a failure that travels, not an exit taken here.
+    conn.on("reconnect-failed", (error) => {
       Deferred.doneUnsafe(
         lost,
         Effect.fail(
-          new RmqError({
-            operation: "connection",
-            cause: `broker rejected setup deterministically, abandoning retry budget: ${error.message}`,
-          }),
+          new RmqError({ operation: "connection", cause: `${role} connection recovery gave up: ${error.message}` }),
         ),
       );
-    }
-  });
-  connection.on("reconnect-scheduled", ({ attempt, delay, error }) => {
-    warn(`reconnect attempt ${attempt} in ${delay}ms (${error.message})`);
-  });
-  connection.on("connect", () => {
-    warn(
-      `reconnected — ${topology.length} topology entries and ${live.size} consumer(s) restored`,
-    );
-  });
-  // Recovery has given up. The stance is unchanged — a process that cannot
-  // reach its broker is no use, and the restart policy is what gets it looked
-  // at — but it is now a failure that travels, not an exit taken here.
-  connection.on("reconnect-failed", (error) => {
-    Deferred.doneUnsafe(
-      lost,
-      Effect.fail(
-        new RmqError({ operation: "connection", cause: `recovery gave up: ${error.message}` }),
-      ),
-    );
-  });
+    });
+  };
+  watch(connection, "consuming", (state) => void (connected = state), () =>
+    `${topology.size} topology entries and ${live.size} consumer(s) restored`,
+  );
+  watch(publisher, "publishing", (state) => void (publishing = state), () => "publish channel reopened");
 
   /** The live publish channel, opening one if the last was closed under us. */
-  const publishChannel = (): Promise<ConfirmChannel> => {
-    if (out !== null) return Promise.resolve(out);
-    // One reopen at a time. Several sends racing here must not each open a
-    // channel and leave all but one orphaned on the broker.
-    opening ??= connection.createConfirmChannel().then(
-      (ch) => {
-        out = watchPublishChannel(ch);
-        opening = null;
-        return ch;
-      },
-      (error) => {
-        opening = null;
-        throw error;
-      },
-    );
-    return opening;
-  };
+  const publishChannel = (): Promise<ConfirmChannel> =>
+    O.match(O.fromNullOr(out), {
+      onSome: (open) => Promise.resolve(open),
+      // One reopen at a time. Several sends racing here must not each open a
+      // channel and leave all but one orphaned on the broker.
+      onNone: () =>
+      (opening ??= publisher.createConfirmChannel().then(
+        (ch) => {
+          out = watchPublishChannel(ch);
+          opening = null;
+          return ch;
+        },
+        (error) => {
+          opening = null;
+          throw error;
+        },
+      )),
+    });
 
   /**
    * Declares run on a throwaway channel each. They happen at startup, so the
@@ -749,14 +890,14 @@ export const makeRmq = Effect.fnUntraced(function* (
         connection.createChannel().then((ch) => {
           // A declare that fails closes its channel, and an unhandled 'error'
           // on it would reach the process. The failure is the rejection below.
-          ch.on("error", () => {});
+          ch.on("error", () => { });
           return ch;
         }),
       ),
       (ch) => wrap(operation, () => use(ch)),
       // Closing is best effort by definition: the channel this runs on may be
       // the one the broker just closed under us.
-      (ch) => Effect.promise(() => ch.close().then(() => {}, () => {})),
+      (ch) => Effect.promise(() => ch.close().then(() => { }, () => { })),
     );
 
   /**
@@ -775,22 +916,25 @@ export const makeRmq = Effect.fnUntraced(function* (
             reject(error);
           };
           pending.add(fail);
-          ch.publish(pub.exchange, pub.routingKey, content, options, (error) => {
-            if (!pending.delete(fail)) return; // already failed by a close
-            if (error) reject(error instanceof Error ? error : new Error(String(error)));
-            else resolve();
-          });
+          ch.publish(pub.exchange, pub.routingKey, content, options, (error) =>
+            // Skipped when a close already failed it.
+            when(pending.delete(fail), () => {
+              // A `basic.return` arrives before the confirm for the same message,
+              // so by now the id is here if the broker could not route it.
+              const returned = unroutable.delete(String(options.messageId));
+              return returned
+                ? reject(new Unroutable(`no queue for ${pub.exchange || "(default)"}/${pub.routingKey}`))
+                : error
+                  ? reject(error instanceof Error ? error : new Error(String(error)))
+                  : resolve();
+            }),
+          );
         }),
     );
 
   /** Forget a consumer, so a recovery does not bring back one we retired. */
   const forget = (c: Consumer) => {
-    for (const entry of live) {
-      if (entry.handle === c) {
-        live.delete(entry);
-        return;
-      }
-    }
+    O.map(Arr.findFirst(live, (entry) => entry.handle === c), (entry) => live.delete(entry));
   };
 
   return Rmq.of({
@@ -824,7 +968,11 @@ export const makeRmq = Effect.fnUntraced(function* (
     },
     consume: (queue, onMessage, options = {}) =>
       wrap("consume", async () => {
-        const handle = { channel: undefined, consumerTag: "" } as unknown as Consumer;
+        // The handle exists before its first consumer does, so it starts on the
+        // channel that consumer will use: `attach` then finds nothing stale to
+        // close, and there is no half-built handle to point at nothing.
+        const first = await connection.createChannel();
+        const handle: Consumer = { channel: first, consumerTag: "" };
         const entry: Live = {
           handle,
           queue,
@@ -840,62 +988,97 @@ export const makeRmq = Effect.fnUntraced(function* (
         // succeeded doesn't leave a dead entry for `setup` to trip over.
         live.add(entry);
         try {
-          await attach(() => connection.createChannel(), entry);
+          await attach(() => Promise.resolve(first), entry);
         } catch (error) {
           live.delete(entry);
           throw error;
         }
         return handle;
       }),
-    publisherToExchange: (exchange, routingKey) => Effect.succeed({ exchange, routingKey }),
-    publisherToQueue: (queue) =>
+    publisherToExchange: (exchange, routingKey, format) =>
+      Effect.succeed({
+        exchange,
+        routingKey,
+        contentType: O.fromNullishOr(format?.contentType),
+        contentEncoding: O.fromNullishOr(format?.contentEncoding),
+        type: O.fromNullishOr(format?.type),
+        mandatory: false,
+      }),
+    publisherToQueue: (queue, format) =>
       // The default exchange routes by queue name, which is the same path
       // `deadLetterArgs` uses for dead-lettering.
-      Effect.succeed({ exchange: "", routingKey: queue }),
+      Effect.succeed({
+        exchange: "",
+        routingKey: queue,
+        contentType: O.fromNullishOr(format?.contentType),
+        contentEncoding: O.fromNullishOr(format?.contentEncoding),
+        type: O.fromNullishOr(format?.type),
+        mandatory: true,
+      }),
     // The `traceparent` goes on as an ordinary header, from whatever span the
-    // caller is inside. Outside a span it resolves to undefined and nothing
-    // is added, so an untraced publish carries exactly the bytes it did
-    // before — see Trace.ts.
-    send: (pub, body, properties) =>
+    // caller is inside. Outside a span there is none and nothing is added, so
+    // an untraced publish carries exactly the bytes it did before — see Trace.ts.
+    send: (pub, body, options) =>
       Effect.flatMap(traceparent, (tp) => {
+        const properties = options?.headers;
         const headers = O.match(tp, {
-          onNone: () => properties,
-          onSome: (value) => ({ ...(properties ?? {}), [TRACEPARENT]: value }),
+          onNone: () => O.fromNullishOr(properties),
+          onSome: (value) => O.some({ ...(properties ?? {}), [TRACEPARENT]: value }),
         });
         return wrap("send", () =>
           publish(
             pub,
             Buffer.from(body, "utf8"),
-            headers === undefined
-              ? { persistent: true }
-              : { persistent: true, headers },
+            {
+              persistent: true,
+              mandatory: pub.mandatory,
+              // The id is what ties a broker's `basic.return` to this publish, and
+              // the timestamp is the AMQP-standard "when", both stamped here so no
+              // caller has to remember.
+              messageId: O.getOrElse(O.fromNullishOr(options?.messageId), () => randomUUID()),
+              timestamp: Math.floor(Date.now() / 1000),
+              ...O.match(headers, { onNone: () => ({}), onSome: (h) => ({ headers: h }) }),
+              ...O.match(pub.contentType, { onNone: () => ({}), onSome: (c) => ({ contentType: c }) }),
+              ...O.match(pub.contentEncoding, { onNone: () => ({}), onSome: (c) => ({ contentEncoding: c }) }),
+              ...O.match(pub.type, { onNone: () => ({}), onSome: (t) => ({ type: t }) }),
+            },
           ),
         );
       }),
     cancelConsumer: (c) =>
       Effect.promise(() => {
         forget(c);
-        return c.channel.cancel(c.consumerTag).then(() => {}, () => {});
+        return c.channel.cancel(c.consumerTag).then(() => { }, () => { });
       }),
     closeConsumer: (c) =>
       Effect.promise(() => {
         forget(c);
-        return c.channel.close().then(() => {}, () => {});
+        return c.channel.close().then(() => { }, () => { });
       }),
     lost: Deferred.await(lost),
-    isConnected: Effect.sync(() => connected),
+    isConnected: Effect.sync(() => connected && publishing),
     // `destroy(error)`, not `destroy()`: amqplib only wires `onSocketError`
     // to the stream's 'error' and 'end' events, and a plain destroy with no
     // argument emits neither — Node's Duplex emits bare 'close' for that, which
     // nothing here listens for. Without the error this would be a silent
     // no-op: the socket dies, but amqplib's Connection never notices, never
     // closes its channels, and never tells RecoveringCore to reconnect.
-    resetConnection: Effect.sync(() => {
-      const raw = currentModel?.connection as
-        | { readonly stream?: { destroy: (err?: Error) => void } }
-        | undefined;
-      raw?.stream?.destroy(new Error("connection reset: fencing a demoted leader's buffered publishes"));
-    }),
+    resetConnection: Effect.sync(() =>
+      // Both sockets: what this fences is the publishes buffered on one, and a
+      // process that resets should come back whole rather than half connected.
+      [currentModel, currentPublishModel].forEach((model) =>
+        O.fromNullishOr(model).pipe(
+          O.flatMap((m) =>
+            O.fromNullishOr(
+              (m.connection as { readonly stream?: { destroy: (err?: Error) => void } }).stream,
+            ),
+          ),
+          O.map((stream) =>
+            stream.destroy(new Error("connection reset: fencing a demoted leader's buffered publishes")),
+          ),
+        ),
+      ),
+    ),
   });
 });
 

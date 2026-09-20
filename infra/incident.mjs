@@ -95,7 +95,7 @@ const main = async () => {
   const drained = work.total === 0;
 
   const dead = await queueDepth(deadQueue);
-  const stats = await audit(API_ID);
+  const stats = await audit("*"); // every producer run: a message id is `<run>:<n>`
 
   console.log(`\n== Summary ==`);
   console.log(`  peak backlog (work queue): ${peakBacklog}`);

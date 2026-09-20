@@ -13,7 +13,6 @@ import { Rmq } from "../../src/Client.ts";
 import {
   deadLetterQueueFor,
   deadLetterQueueOptions,
-  IDEMPOTENCY_KEY_HEADER,
   WORK_DELIVERY_LIMIT,
   workQueueFor,
   workQueueOptions,
@@ -193,8 +192,10 @@ test("application properties survive a republish, so provenance can outlive the 
       yield* rmq.consume(queue, (_body, delivery) => void got.push({ ...delivery.properties }));
       const pub = yield* rmq.publisherToQueue(queue);
       yield* rmq.send(pub, "stamped", {
-        "x-egress-origin-queue": "some.control.queue",
-        "x-egress-origin-reason": "rejected",
+        headers: {
+          "x-egress-origin-queue": "some.control.queue",
+          "x-egress-origin-reason": "rejected",
+        },
       });
       yield* rmq.send(pub, "unstamped");
       yield* waitFor(() => got.length >= 2);
@@ -318,9 +319,9 @@ test("a traceparent survives dead-lettering, and only a republish that carries i
         deadSeen.set(body, n);
         if (n > 1) return "accept" as const;
         onDead.push(O.isSome(delivery.parent));
-        const props =
-          body === "alone" ? undefined : { [TRACEPARENT]: delivery.properties[TRACEPARENT]! };
-        return Effect.runPromise(rmq.send(into, body, props)).then(() => "accept" as const);
+        const options =
+          body === "alone" ? {} : { headers: { [TRACEPARENT]: delivery.properties[TRACEPARENT]! } };
+        return Effect.runPromise(rmq.send(into, body, options)).then(() => "accept" as const);
       });
 
       const workSeen = new Map<string, number>();
@@ -331,8 +332,8 @@ test("a traceparent survives dead-lettering, and only a republish that carries i
         return "discard" as const;
       });
 
-      yield* rmq.send(into, "alone", { [TRACEPARENT]: carried });
-      yield* rmq.send(into, "carrying", { [TRACEPARENT]: carried });
+      yield* rmq.send(into, "alone", { headers: { [TRACEPARENT]: carried } });
+      yield* rmq.send(into, "carrying", { headers: { [TRACEPARENT]: carried } });
       yield* waitFor(() => replayed.length >= 2);
       return { onDead, replayed };
     }),
@@ -354,19 +355,19 @@ test("a traceparent survives dead-lettering, and only a republish that carries i
 
 /**
  * The idempotency key a payments call needs to be safe under at-least-once
- * delivery, carried the same way the traceparent above is: the header
- * survives being dead-lettered, and only a republish that explicitly carries
- * it keeps it on the replay. This is the property `Redrive.ts`'s move back
- * onto the work queue depends on — a message with no key must still redrive
- * with none, not inherit one from elsewhere.
+ * delivery is the message's AMQP `message_id`: kept when the message is
+ * dead-lettered, and, like the traceparent above, kept on a replay only if the
+ * republish carries it explicitly. A republish that does not is a new message
+ * with a new id, which for a payment is a second charge. This is the property
+ * `Redrive.ts`'s move back onto the work queue depends on.
  */
-test("an idempotency key survives dead-lettering, and only a redrive republish that carries it keeps it", async (t) => {
+test("a message id survives dead-lettering, and only a redrive republish that carries it keeps it", async (t) => {
   if (skipIfNoDocker(t)) return;
 
   const apiId = `idem-${Date.now()}`;
   const work = workQueueFor(apiId);
   const dead = deadLetterQueueFor(apiId);
-  const key = "11111111-1111-1111-1111-111111111111";
+  const id = "run1:41";
 
   const { onDead, replayed } = await run(
     Effect.gen(function* () {
@@ -376,52 +377,39 @@ test("an idempotency key survives dead-lettering, and only a redrive republish t
       const into = yield* rmq.publisherToQueue(work);
 
       const onDead: Array<O.Option<string>> = [];
-      const replayed: Array<{ how: string; key: O.Option<string> }> = [];
+      const replayed: Array<{ how: string; id: O.Option<string> }> = [];
 
-      // "keyed" carries x-idempotency-key the way the producer stamps it;
-      // "keyless" never had one — both must redrive true to what they arrived
-      // with, exactly as the traceparent test pins for the trace header.
+      // Two messages, each dead-lettered once and replayed once — "carrying" the
+      // way the redrive does, "dropping" the way a careless republish would.
       const deadSeen = new Map<string, number>();
       yield* rmq.consume(dead, (body, delivery) => {
         const n = (deadSeen.get(body) ?? 0) + 1;
         deadSeen.set(body, n);
         if (n > 1) return "accept" as const;
-        onDead.push(delivery.idempotencyKey);
-        const props = O.match(delivery.idempotencyKey, {
-          onNone: () => undefined,
-          onSome: (v) => ({ [IDEMPOTENCY_KEY_HEADER]: v }),
-        });
-        return Effect.runPromise(rmq.send(into, body, props)).then(() => "accept" as const);
+        onDead.push(delivery.messageId);
+        const options = body === "carrying" ? { messageId: O.getOrThrow(delivery.messageId) } : {};
+        return Effect.runPromise(rmq.send(into, body, options)).then(() => "accept" as const);
       });
 
       const workSeen = new Map<string, number>();
       yield* rmq.consume(work, (body, delivery) => {
         const n = (workSeen.get(body) ?? 0) + 1;
         workSeen.set(body, n);
-        if (n === 2) replayed.push({ how: body, key: delivery.idempotencyKey });
+        if (n === 2) replayed.push({ how: body, id: delivery.messageId });
         return "discard" as const;
       });
 
-      yield* rmq.send(into, "keyless");
-      yield* rmq.send(into, "keyed", { [IDEMPOTENCY_KEY_HEADER]: key });
+      yield* rmq.send(into, "carrying", { messageId: id });
+      yield* rmq.send(into, "dropping", { messageId: id });
       yield* waitFor(() => replayed.length >= 2);
       return { onDead, replayed };
     }),
   );
 
-  assert.deepEqual(
-    onDead.map(O.isSome),
-    [false, true],
-    "the idempotency key must still be readable once the message is dead-lettered, and absence must stay absence",
-  );
-  assert.deepEqual(
-    [...replayed].sort((a, b) => a.how.localeCompare(b.how)).map((r) => ({ how: r.how, key: O.getOrUndefined(r.key) })),
-    [
-      { how: "keyed", key },
-      { how: "keyless", key: undefined },
-    ],
-    "a redrive republish must carry the original key when there was one, and add none when there wasn't",
-  );
+  assert.deepEqual(onDead, [O.some(id), O.some(id)], "the id must still be readable once the message is dead-lettered");
+  const byHow = Object.fromEntries(replayed.map((r) => [r.how, r.id]));
+  assert.deepEqual(byHow["carrying"], O.some(id), "a republish that carries the id keeps the key");
+  assert.equal(O.isSome(byHow["dropping"]!) && byHow["dropping"]!.value !== id, true, "a republish that drops it is a different message");
 });
 
 test("the work queue parks a message at the delivery limit, and a redrive republish grants a fresh budget", async (t) => {

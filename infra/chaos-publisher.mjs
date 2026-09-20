@@ -3,8 +3,8 @@
  * onto the work queue at a rate the parent changes over IPC, and remembers
  * exactly which messages the broker confirmed.
  *
- * Every message carries `x-idempotency-key: <run>:<n>`. On `stop` it waits for
- * outstanding confirms, then sends back a bitmap with bit n set for every
+ * Every message carries `message_id: <run>:<n>`, which the daemons use as the
+ * idempotency key. On `stop` it waits for outstanding confirms, then sends back a bitmap with bit n set for every
  * message confirmed and not returned unroutable — the set the harness checks
  * against what the upstream actually processed.
  *
@@ -21,7 +21,6 @@ const RUN = process.env.RUN_ID;
 const QUEUE = process.env.QUEUE;
 const API = process.env.API_ID;
 const URL_ = process.env.AMQP_URL ?? "amqp://guest:guest@rabbitmq:5672";
-const KEY = "x-idempotency-key";
 
 let bits = new Uint8Array(1 << 18);
 const mark = (i) => {
@@ -55,7 +54,7 @@ const connect = async () => {
       // Unroutable with mandatory set: the broker returns it before it confirms it.
       ch.on("return", (msg) => {
         returned++;
-        unroutable.add(String(msg.properties.headers?.[KEY] ?? ""));
+        unroutable.add(String(msg.properties.messageId ?? ""));
       });
       const lost = () => {
         if (channel === ch) channel = null;
@@ -88,7 +87,7 @@ const publishLoop = async () => {
       const ok = ch.sendToQueue(
         QUEUE,
         Buffer.from(JSON.stringify({ apiId: API, n: i })),
-        { persistent: true, mandatory: true, headers: { [KEY]: key } },
+        { persistent: true, mandatory: true, messageId: key, contentType: "application/json", type: "egress.work" },
         (err) => {
           if (err) nacked++;
           else if (unroutable.has(key)) unroutable.delete(key);

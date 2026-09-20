@@ -39,13 +39,12 @@ export const traceparent: Effect.Effect<O.Option<string>> = Effect.map(
  * Turn a `traceparent` back into a parent span, so work on the far side of the
  * broker joins the trace that caused it rather than starting its own.
  *
+ * A header that is absent never gets here: the caller holds it as an `Option`.
  * `None` for anything unparseable, deliberately and quietly: a malformed
  * header is a reason to lose a trace, never a reason to lose a message.
  */
-export const parentFrom = (header: string | undefined): O.Option<Tracer.ExternalSpan> => {
-  if (header === undefined) return O.none();
-  const match = TRACEPARENT_RE.exec(header);
-  if (match === null) return O.none();
-  return O.some(Tracer.externalSpan({ traceId: match[1]!, spanId: match[2]! }));
-};
+export const parentFrom = (header: string): O.Option<Tracer.ExternalSpan> =>
+  O.fromNullOr(TRACEPARENT_RE.exec(header)).pipe(
+    O.map(([, traceId, spanId]) => Tracer.externalSpan({ traceId: traceId!, spanId: spanId! })),
+  );
 

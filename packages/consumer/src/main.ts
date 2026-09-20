@@ -1,6 +1,6 @@
 import { Config, Data, Deferred, Effect, Layer } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
-import { HttpRouter } from "effect/unstable/http";
+import { FetchHttpClient, HttpRouter } from "effect/unstable/http";
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
 import { createServer } from "node:http";
 import { launchWithRmq, Rmq } from "@egress/rmq/Client.ts";
@@ -67,7 +67,7 @@ const consumer = Command.make("consumer", flags, (settings) => {
         ),
       ),
     ),
-  );
+  ).pipe(Layer.provide(FetchHttpClient.layer));
 
   return launchWithRmq(
     HttpRouter.serve(Layer.provideMerge(Consumer, MetricsRoute)).pipe(

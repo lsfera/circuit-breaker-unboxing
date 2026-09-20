@@ -1,13 +1,17 @@
-import { Effect, Metric } from "effect";
+import { Effect, Metric, Option as O } from "effect";
+import type { HttpClient } from "effect/unstable/http";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
   deadLetterQueueFor,
   deadLetterQueueOptions,
-  IDEMPOTENCY_KEY_HEADER,
+  decodeWorkMessage,
+  readsWorkFormat,
   workQueueFor,
   workQueueOptions,
 } from "@egress/rmq/ControlPlane.ts";
 import * as Telemetry from "./Telemetry.ts";
+import * as Upstream from "./Upstream.ts";
+import type { CallOutcome } from "./Upstream.ts";
 import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
 
 /**
@@ -30,33 +34,11 @@ export type ConsumerConfig = {
   readonly maxInFlight: number;
 };
 
-/** Body shape the producer publishes: `{ apiId, n }`. `n` is what makes the idempotency key stable across a broker redelivery of the same message. */
-type WorkMessage = { readonly apiId: string; readonly n: number };
-
-const parse = (body: string): WorkMessage | undefined => {
-  try {
-    const value: unknown = JSON.parse(body);
-    if (
-      typeof value === "object" &&
-      value !== null &&
-      "apiId" in value &&
-      "n" in value &&
-      typeof (value as { n: unknown }).n === "number"
-    ) {
-      return value as WorkMessage;
-    }
-    return undefined;
-  } catch {
-    return undefined;
-  }
-};
-
 /**
  * Whether a call outcome should be accepted or handed back to the broker.
  * Pulled out as a total function of the one thing that matters — pure,
  * exhaustively testable, no broker or fetch involved.
  */
-export type CallOutcome = "ok" | "failed";
 export const decide = (outcome: CallOutcome): Settlement =>
   outcome === "ok" ? "accept" : "requeue";
 
@@ -72,42 +54,66 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   // Effect fiber) can still update metrics through this process's services —
   // see rmq-consumer/src/daemon.ts's identical comment on why the bare
   // `Effect.run*` entry points are wrong here.
-  const services = yield* Effect.context<never>();
+  const services = yield* Effect.context<HttpClient.HttpClient>();
   const runInContext = Effect.runPromiseWith(services);
 
   let inFlight = 0;
-  const track = (outcome: CallOutcome) =>
-    runInContext(Metric.update(Metric.withAttributes(Telemetry.calls, { outcome }), 1));
+  const setInFlight = (delta: 1 | -1) =>
+    Effect.suspend(() => Metric.update(Telemetry.inFlight, (inFlight += delta)));
 
-  const call = async (body: string, _delivery: DeliveryInfo): Promise<Settlement> => {
-    const message = parse(body);
-    if (message === undefined) return "discard";
+  const attempt = (key: string): Promise<Settlement> =>
+    runInContext(
+      setInFlight(1).pipe(
+        Effect.andThen(Upstream.call(`${cfg.egressAddr}${cfg.apiPath}`, key)),
+        Effect.ensuring(setInFlight(-1)),
+        Effect.tap((outcome) => Metric.update(Metric.withAttributes(Telemetry.calls, { outcome }), 1)),
+        Effect.map(decide),
+      ),
+    );
 
-    inFlight++;
-    runInContext(Metric.update(Telemetry.inFlight, inFlight));
-    let outcome: CallOutcome;
-    try {
-      const res = await fetch(`${cfg.egressAddr}${cfg.apiPath}`, {
-        signal: AbortSignal.timeout(2000),
-        headers: { [IDEMPOTENCY_KEY_HEADER]: `${cfg.apiId}:${message.n}` },
-      });
-      // Drain the body even though nothing wants it: an unconsumed response
-      // holds its connection out of the pool.
-      await res.text().catch(() => {});
-      outcome = res.ok ? "ok" : "failed";
-    } catch {
-      // Timeout or connection refused — the ordinary shape of a third party
-      // that is down. Nothing here distinguishes it from any other failure:
-      // that distinction is exactly what a breaker exists to make.
-      outcome = "failed";
-    } finally {
-      inFlight--;
-      runInContext(Metric.update(Telemetry.inFlight, inFlight));
-    }
-
-    track(outcome);
-    return decide(outcome);
+  // A body that declares a content type, encoding or message type this daemon
+  // cannot read, does not decode, or carries no `message_id` to use as its
+  // idempotency key, was never published by this fleet: discard
+  // it rather than spend the delivery budget on something no retry can fix.
+  //
+  // Said out loud, because RabbitMQ's own guidance for a consumer handed a
+  // delivery it cannot handle is to log it, and a publisher that starts sending
+  // `gzip` by mistake would otherwise empty the queue into the dead-letter queue
+  // without a trace. The counter carries the volume; the log carries what was
+  // declared, at most once a second so a flood does not become the incident.
+  let lastLoggedAt = 0;
+  const discard = (reason: "format" | "malformed" | "keyless", delivery: DeliveryInfo): Promise<Settlement> => {
+    runInContext(Metric.update(Metric.withAttributes(Telemetry.discarded, { reason }), 1));
+    O.map(
+      O.liftPredicate(Date.now(), (now) => now - lastLoggedAt >= 1000),
+      (now) => {
+        lastLoggedAt = now;
+        const declared = (o: O.Option<string>) => O.getOrElse(o, () => "none");
+        return runInContext(
+          Effect.logWarning(
+            `${cfg.apiId}/consumer: discarding a ${reason} delivery — message_id ${declared(delivery.messageId)}, ` +
+              `type ${declared(delivery.type)}, content-type ${declared(delivery.contentType)}, ` +
+              `content-encoding ${declared(delivery.contentEncoding)}`,
+          ),
+        );
+      },
+    );
+    return Promise.resolve<Settlement>("discard");
   };
+
+  const call = (body: string, delivery: DeliveryInfo): Promise<Settlement> =>
+    readsWorkFormat(delivery)
+      ? O.match(decodeWorkMessage(body), {
+          onNone: () => discard("malformed", delivery),
+          // The key is the message's own `message_id`, assigned once by the
+          // producer: no id means no safe retry, so no call.
+          onSome: () =>
+            O.match(delivery.messageId, {
+              onNone: () => discard("keyless", delivery),
+              onSome: attempt,
+            }),
+        })
+      : discard("format", delivery);
 
   yield* rmq.consume(workQueue, (body, delivery) => call(body, delivery), {
     prefetch: cfg.maxInFlight,

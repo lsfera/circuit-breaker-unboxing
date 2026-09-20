@@ -32,6 +32,7 @@ const CLUSTERS = {
  * can prove per message that nothing was lost and count exact duplicates:
  *
  *   curl 'localhost:8080/__audit?run=abc'            # bitmap of n, plus counts
+ *   curl 'localhost:8080/__audit?run=*'              # totals across every run, no bitmap
  *   curl -X DELETE 'localhost:8080/__audit?run=abc'
  *
  * Keys in any other shape are counted and otherwise ignored.
@@ -95,6 +96,19 @@ for (const [cluster, ports] of Object.entries(CLUSTERS)) {
       }
       if (req.url.startsWith("/__audit")) {
         const run = new URL(req.url, "http://x").searchParams.get("run") ?? "";
+        if (run === "*") {
+          const all = [...audits.values()];
+          res.writeHead(200, { "content-type": "application/json" });
+          return res.end(
+            JSON.stringify({
+              run,
+              runs: all.length,
+              processed: all.reduce((sum, a) => sum + a.processed, 0),
+              duplicates: all.reduce((sum, a) => sum + a.duplicates, 0),
+              foreignKeys,
+            }),
+          );
+        }
         if (req.method === "DELETE") audits.delete(run);
         const a = audits.get(run);
         res.writeHead(200, { "content-type": "application/json" });

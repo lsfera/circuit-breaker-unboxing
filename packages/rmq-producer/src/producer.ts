@@ -1,8 +1,13 @@
+import { randomUUID } from "node:crypto";
 import { Duration, Effect, Schedule } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
   deadLetterQueueFor,
   deadLetterQueueOptions,
+  encodeWorkMessage,
+  WORK_CONTENT_TYPE,
+  WORK_MESSAGE_TYPE,
+  workMessageId,
   workQueueFor,
   workQueueOptions,
 } from "@egress/rmq/ControlPlane.ts";
@@ -28,13 +33,16 @@ export const runProducer = Effect.fnUntraced(function* (cfg: ProducerConfig) {
   // a hard error, not a merge.
   yield* rmq.declareQueue(deadLetterQueueFor(cfg.apiId), deadLetterQueueOptions());
   yield* rmq.declareQueue(queue, workQueueOptions(cfg.apiId));
-  const publisher = yield* rmq.publisherToQueue(queue);
+  const publisher = yield* rmq.publisherToQueue(queue, { contentType: WORK_CONTENT_TYPE, type: WORK_MESSAGE_TYPE });
 
   // One batch per 100ms rather than one timer per message: at a few hundred
   // messages a second the scheduling overhead of the latter dominates, and
   // nothing downstream can tell the difference.
   const perTick = Math.max(1, Math.round(cfg.ratePerSecond / 10));
   const TICK = Duration.millis(100);
+  // Names this run's messages. `sent` restarts at zero with the process, so on its
+  // own it would reissue the idempotency key of different work after a restart.
+  const run = randomUUID().slice(0, 8);
   let sent = 0;
 
   yield* Effect.log(`${cfg.apiId}/producer: up — ${cfg.ratePerSecond}/s onto ${queue}`);
@@ -50,15 +58,18 @@ export const runProducer = Effect.fnUntraced(function* (cfg: ProducerConfig) {
     // makes one, downstream — a broker requeue redelivers this exact body, so
     // whoever calls the third party can derive a stable key straight from it
     // without minting or carrying one forward. See packages/consumer/src/consumer.ts.
-    const batch = Array.from({ length: perTick }, () => JSON.stringify({ apiId: cfg.apiId, n: sent++ }));
+    const batch = Array.from({ length: perTick }, () => {
+      const n = sent++;
+      return { body: encodeWorkMessage({ apiId: cfg.apiId, n }), messageId: workMessageId(run, n) };
+    });
     yield* Effect.forEach(
       batch,
-      (body) =>
+      ({ body, messageId }) =>
         // The root of every trace in this repo. The sampler decides here and
         // nowhere else — `@egress/rmq` stamps a traceparent only when a span
         // is active, and every span downstream is ParentBased, so a message
         // is either followed the whole way or not at all.
-        rmq.send(publisher, body).pipe(
+        rmq.send(publisher, body, { messageId }).pipe(
           Effect.withSpan("work.publish", {
             attributes: {
               "messaging.system": "rabbitmq",

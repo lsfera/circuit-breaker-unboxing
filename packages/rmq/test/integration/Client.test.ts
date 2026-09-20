@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { Effect, Exit, Scope } from "effect";
+import { Effect, Exit, Option as O, Scope } from "effect";
 import {
   broker,
   brokerExec,
@@ -9,7 +9,7 @@ import {
   stopBroker,
   waitFor,
 } from "./harness.ts";
-import { makeRmq, Rmq } from "../../src/Client.ts";
+import { isUnroutable, makeRmq, Rmq, RmqError } from "../../src/Client.ts";
 import type { Consumer } from "../../src/Client.ts";
 
 /**
@@ -97,6 +97,158 @@ test("concurrent consumer creation binds each consumer to its own queue", async 
   for (const q of queues) {
     assert.deepEqual(received[q], [`msg-${q}`], `${q} should receive exactly its own message`);
   }
+});
+
+test("a publisher's declared content type and encoding reach the consumer, and an undeclared publisher's arrive as none", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const queue = `content-type.${Date.now()}`;
+  const seen: Array<{ body: string; contentType: O.Option<string>; contentEncoding: O.Option<string> }> = [];
+
+  await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(queue);
+      yield* rmq.consume(queue, (body, d) => void seen.push({ body, contentType: d.contentType, contentEncoding: d.contentEncoding }));
+      const declares = yield* rmq.publisherToQueue(queue, { contentType: "application/json", contentEncoding: "gzip" });
+      yield* rmq.send(declares, "declared");
+      yield* rmq.send(yield* rmq.publisherToQueue(queue), "undeclared");
+      yield* Effect.promise(() => new Promise((r) => setTimeout(r, 1000)));
+    }),
+  );
+
+  const byBody = Object.fromEntries(seen.map((m) => [m.body, m]));
+  assert.deepEqual(byBody["declared"]?.contentType, O.some("application/json"));
+  assert.deepEqual(byBody["declared"]?.contentEncoding, O.some("gzip"));
+  assert.deepEqual(byBody["undeclared"]?.contentType, O.none());
+  assert.deepEqual(byBody["undeclared"]?.contentEncoding, O.none());
+});
+
+test("send stamps a message id and timestamp, and a declared type reaches the consumer", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const queue = `stamps.${Date.now()}`;
+  const before = Date.now() - 1000;
+  const seen: Array<{ type: O.Option<string>; messageId: O.Option<string>; publishedAt: O.Option<number> }> = [];
+
+  await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(queue);
+      yield* rmq.consume(queue, (_body, d) => void seen.push({ type: d.type, messageId: d.messageId, publishedAt: d.publishedAt }));
+      yield* rmq.send(yield* rmq.publisherToQueue(queue, { type: "egress.work" }), "one");
+      yield* Effect.promise(() => new Promise((r) => setTimeout(r, 800)));
+    }),
+  );
+
+  assert.equal(seen.length, 1);
+  assert.deepEqual(seen[0]!.type, O.some("egress.work"));
+  assert.equal(O.isSome(seen[0]!.messageId), true);
+  assert.equal(O.isSome(seen[0]!.publishedAt) && seen[0]!.publishedAt.value >= before, true);
+});
+
+test("a publish to a queue that does not exist fails as unroutable instead of vanishing", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const exit = await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      return yield* Effect.exit(rmq.send(yield* rmq.publisherToQueue(`nobody.home.${Date.now()}`), "lost?"));
+    }),
+  );
+
+  assert.equal(Exit.isFailure(exit), true);
+  assert.equal(Exit.isFailure(exit) && exit.cause.reasons.some((r) => r._tag === "Fail" && r.error instanceof RmqError && isUnroutable(r.error)), true);
+});
+
+test("a publish to an existing queue, and to a topic with no bindings, still succeeds", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      const queue = `routable.${Date.now()}`;
+      yield* rmq.declareQueue(queue);
+      yield* rmq.send(yield* rmq.publisherToQueue(queue), "ok");
+      // An exchange with nothing bound is an ordinary state for a topic, so its
+      // publishers are not mandatory: the message is routed nowhere, by design.
+      const exchange = `unbound.${Date.now()}`;
+      yield* rmq.declareTopicExchange(exchange);
+      yield* rmq.send(yield* rmq.publisherToExchange(exchange, "anything"), "also ok");
+    }),
+  );
+});
+
+test("a handler that throws dead-letters the delivery instead of acknowledging it", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const stamp = Date.now();
+  const work = `throws.${stamp}`;
+  const dead = `throws.${stamp}.dead`;
+  const deadLettered: string[] = [];
+
+  await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(dead);
+      yield* rmq.declareQueue(work, {
+        args: { "x-dead-letter-exchange": "", "x-dead-letter-routing-key": dead },
+      });
+      yield* rmq.consume(dead, (body) => void deadLettered.push(body));
+      yield* rmq.consume(work, () => {
+        throw new Error("boom");
+      });
+      yield* rmq.send(yield* rmq.publisherToQueue(work), "poison");
+      yield* Effect.promise(() => new Promise((r) => setTimeout(r, 1000)));
+    }),
+  );
+
+  assert.deepEqual(deadLettered, ["poison"]);
+});
+
+/**
+ * RabbitMQ's alarms block a connection that publishes by ceasing to read from
+ * it, and advise separate connections for producing and consuming. A consumer
+ * sharing a connection with a publisher would then never have its
+ * acknowledgements read, and stall once its prefetch window filled. Two
+ * prefetch of 2 against 12 waiting messages is that window: with the old shape
+ * exactly two arrive and stop.
+ */
+test("a consumer keeps acknowledging while the client's publishing connection is blocked", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const stamp = Date.now();
+  const inbox = `alarm.in.${stamp}`;
+  const outbox = `alarm.out.${stamp}`;
+  const received: string[] = [];
+  const settled = { publish: false };
+
+  await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(inbox);
+      yield* rmq.declareQueue(outbox);
+      const toInbox = yield* rmq.publisherToQueue(inbox);
+      for (let i = 0; i < 12; i++) yield* rmq.send(toInbox, `m${i}`);
+
+      yield* Effect.promise(() => brokerExec(["rabbitmqctl", "set_vm_memory_high_watermark", "absolute", "1MiB"]));
+      try {
+        yield* Effect.promise(() => new Promise((r) => setTimeout(r, 2000)));
+        // A publish issued under the alarm is what gets the publishing connection blocked.
+        yield* Effect.forkChild(
+          rmq.send(yield* rmq.publisherToQueue(outbox), "blocked").pipe(Effect.tap(() => Effect.sync(() => void (settled.publish = true)))),
+        );
+        yield* Effect.promise(() => new Promise((r) => setTimeout(r, 2000)));
+
+        yield* rmq.consume(inbox, (body) => void received.push(body), { prefetch: 2 });
+        yield* Effect.promise(() => new Promise((r) => setTimeout(r, 3000)));
+        assert.equal(settled.publish, false, "the alarm should be holding the publish");
+        assert.equal(received.length, 12, "every message should be delivered and acknowledged despite the alarm");
+      } finally {
+        yield* Effect.promise(() => brokerExec(["rabbitmqctl", "set_vm_memory_high_watermark", "absolute", "1GiB"]));
+      }
+    }),
+  );
 });
 
 /**
