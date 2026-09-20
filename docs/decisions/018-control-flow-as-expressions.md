@@ -143,6 +143,35 @@ for single-token peeks at low rates where its throughput concern does not apply;
 and one publish channel shared by concurrent `send`s, which the publisher guide
 warns about for threaded clients and amqplib's single event loop does not have.
 
+## Amendment — 2026-09-20: the guides read for themselves
+
+The comparison above leaned on summaries of the publisher, consumer and
+reliability guides. The pages the rest of the series' claims rest on (max-length,
+dead-lettering, quorum queues, confirms, alarms) were then read directly, and
+each claim this pass and article 11 make was checked against them.
+
+**Confirmed:** `x-max-length` counts ready messages only; `reject-publish`
+answers a confirming publisher with `basic.nack`; a mandatory unroutable message
+is returned before it is acknowledged (which `send`'s `Unroutable` relies on);
+`reject` with `requeue=false` dead-letters and a requeue does not; a quorum
+queue's delivery limit defaults to 20 and a requeue "may not increment" it; a
+dead-letter target that does not exist drops silently; an alarm blocks publishing
+connections and not connections that only consume.
+
+**Corrected** (in the article 11 README): `drop-head` is supported on quorum
+queues, and what is true is that at-least-once dead-lettering "falls back to
+`at-most-once`" under it; the 2,060-against-2,000 overshoot is documented
+behaviour; and the quorum-queue memory figure (32 bytes a message, ~1 MB per
+30,000) explains the flat memory measured.
+
+**New, and not fixed:** the guides advise separate connections for producing and
+consuming, and this client uses one per process. Measured on the compose broker
+with a memory alarm raised: a consumer (prefetch 5) on a connection that had
+published, with 12 messages pushed in over the HTTP API, held 5 unacknowledged
+and 7 ready, its acknowledgements unread until the alarm cleared. The daemons on
+the later branches publish and consume on one connection. The fix is a second
+connection for publishing; it is not made.
+
 ## What this does not settle
 
 - **`when` is an `if` under another name.** It removes the statement, not the
