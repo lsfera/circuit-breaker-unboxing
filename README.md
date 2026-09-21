@@ -118,9 +118,9 @@ not grown) and then on the breaker: an outage, a hanging third party, a
 `docker kill` of a replica while it is open, a broker restart with five tokens
 in the chain, and a 100 s delay across a broker restart. All five graded
 scenarios pass after the `release` fix, about 45,000 messages each; the write-up,
-with the run that found the fix and screenshots of the incident, is
+with screenshots of the incident, is
 [docs/rabbitmq-held-breaker.md](docs/rabbitmq-held-breaker.md). Runs are saved
-under `history/runs/` (git-ignored; the two the article cites are kept in
+under `history/runs/` (git-ignored; the runs behind the article are kept in
 `docs/runs/`). `infra/capture-incident.mjs` records the dashboard
 through an incident (it needs `playwright-core`, which this repo does not
 depend on).

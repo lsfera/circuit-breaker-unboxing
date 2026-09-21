@@ -135,6 +135,9 @@ services:
   grafana:
     image: grafana/grafana:13.2.1@sha256:f772d434e8fab0049deb2b1b30abd43342bcfca1537614aa8d36080232cf4283
     environment:
+      # Grafana refuses a refresh under 5s unless told otherwise; the
+      # dashboard asks for 1s so an incident is drawn as it happens.
+      GF_DASHBOARDS_MIN_REFRESH_INTERVAL: "1s"
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
       GF_AUTH_DISABLE_LOGIN_FORM: "true"

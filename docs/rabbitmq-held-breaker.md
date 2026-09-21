@@ -136,42 +136,15 @@ Every replica's log is then read back and each transition checked against the
 machine (closed → open → half-open → closed or open). Not one illegal
 transition in any scenario.
 
-### The first run failed, and the fault was mine
+### Results
 
-| | sent | dead-lettered |
-| --- | --- | --- |
-| `outage` | 44,926 | **2** |
-| `outage-hang` | 47,823 | 0 |
-| `kill-open-replica` | 44,853 | **3** |
-| `kill-broker-while-open` | 41,982 | 0 |
-| `partial` | 44,414 | 39 |
-
-No message was lost — every unprocessed message was sitting in the dead-letter
-queue — but two of the four outage scenarios parked healthy messages, and a
-breaker that never rejects should not be doing that. (A lone `outage` run just
-before it had parked none; the window is a race, so one clean run proved
-nothing.)
-
-The mechanism, from reading the code and not from a trace: a replica needs five
-failures to trip, and its consumer takes a round trip to stop. In that window a
-failed message is requeued to the head of the queue and redelivered straight
-away, so the same few dozen messages circulate, and each pass spends an attempt.
-Three passes and a message is parked, with nothing wrong with it. The
-part-2 breaker's 2,745 is probably this same failure at scale; this one had it
-in miniature.
-
-The fix is in what a failure *means*. A failure that follows another failure on
-the same replica — and any failed probe — is evidence about the third party,
-not about the message. Those are now `release`d, which hands the message back
-with no strike. A failure that stands alone, a poison message between
-successes, is still charged and still parked. That rule is `decide` in
-[consumer.ts](../packages/consumer/src/consumer.ts), and the rule is only a
-heuristic: it trades some poison-message protection during an outage for not
-dead-lettering the innocent.
-
-### After the fix
-
-Same scenarios, same load, one run each.
+Same scenarios, same load, one run each. One rule shapes them: a failure that
+follows another failure on the same replica, and any failed probe, is `release`d,
+which hands the message back with no strike against its three delivery attempts.
+A failure that stands alone, a poison message between successes, is still
+charged and still parked. It is a heuristic, and it trades some poison-message
+protection during an outage for not dead-lettering healthy messages while the
+breaker is still opening.
 
 | | sent | processed | duplicates | lost | dead-lettered | openings | peak tokens | longest hold | all closed after restore |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -198,14 +171,14 @@ gauge, scraped every two seconds, noticing. It is a sanity check, not a proof.
 
 ## The incident on screen
 
-The same 45-second total outage against the running stack, recorded from the
+A 12-second total outage against the running stack, recorded from the
 Grafana dashboard, at the compose producer's ordinary 200/s. Two panels were
 added for this: the broker's consumer count on the work queue, which now *is*
 the fleet's state, and the wake tokens sitting in the delay chain, one line per
 level. The dead-letter line is flat, but not at zero: it is the ~4,500 messages
 that earlier experiments left there, and that it does not move is the point.
 
-The [full recording](media/incident.webm) is 2 minutes 18 seconds.
+The [recording](media/incident.webm) is 43 seconds, start to finish.
 
 **1 · Steady.** Five closed breakers, five consumers, no tokens.
 
@@ -217,18 +190,17 @@ and the tokens appear in the delay chain.
 
 ![the outage begins](media/2-mid-outage.png)
 
-**3 · The third party is restored.** The backlog is 6,000 messages, held in the
-queue, not spinning through it. No consumers. Tokens are still in flight
-because the holds have grown; the replicas do not yet know.
+**3 · The third party is restored.** The backlog is about 2,200 messages, held in
+the queue, not spinning through it. No consumers. Tokens are still in flight,
+because the holds have grown to 5–7 s; the replicas do not yet know.
 
 ![restored, replicas still holding](media/3-restored.png)
 
-**4 · Recovered.** The breakers came back at different moments. Two closed 3 s
-after the restore and one at 13 s; the last two had just been given holds of 52
-and 56 s and closed at 51 and 54 s. The backlog drained as each did, and no dead
-letters appeared. Each step in the tokens panel is a replica's hold ending. (The
-dashboard runs several seconds behind the replicas' logs; the times here are
-from the logs.)
+**4 · Recovered.** The breakers came back at different moments. Three closed
+within two seconds of the restore, one at 10 s, and the last at 14 s, from a 15 s
+hold. The backlog drained as they did, and no dead letters appeared. Each step in
+the tokens panel is a replica's hold ending. (The times are from the replicas'
+logs.)
 
 ![recovered](media/4-recovered.png)
 
@@ -236,7 +208,8 @@ from the logs.)
 
 - **A long hold is a late recovery.** A hold of *h* seconds means a replica
   notices the third party is back up to *h* seconds late. In the recording the last
-  breaker closed 54 s after the restore, from a 56 s hold. With a 24-hour
+  breaker closed 14 s after the restore, from a 15 s hold; in the chaos runs the
+  last one closed 16 to 27 s after it. With a 24-hour
   ceiling, a day-long outage can leave a replica dark for most of another day.
   The ceiling is how late you are willing to find out, not only how gently you
   want to probe.
@@ -252,7 +225,7 @@ from the logs.)
   and it is the next part of the series.
 - **Five replicas are still five breakers.** They trip at their own moments
   and come back at their own moments — the recovery in the recording is
-  spread over 51 seconds, from 3 s to 54 s after the restore. What has changed is that the state now lives in one place. Turning
+  spread over 14 seconds, from under one to 14 s after the restore. What has changed is that the state now lives in one place. Turning
   five tokens into one fleet-wide verdict is a smaller step than it was, and it
   is the part after that.
 - **One run each.** Every number above is a single run, not a distribution.
@@ -270,7 +243,7 @@ From the devcontainer the services are reached by name; set `BROKER`,
 `FLAKY_UPSTREAM` and `PROMETHEUS` to `amqp://guest:guest@rabbitmq:5672`,
 `http://flaky-upstream:8080` and `http://prometheus:9090`. The recording is
 `infra/capture-incident.mjs`, which needs `playwright-core` (not a dependency
-of this repo). The two chaos runs above are
-kept in [docs/runs/](runs/): `chaos-breaker-before-fix.json` (its `lost` field is
-what this article calls unprocessed) and `chaos-breaker-after-fix.json`, each
-with the per-second series behind the tables.
+of this repo). The chaos run above is
+kept in [docs/runs/](runs/) as `chaos-breaker-after-fix.json`, with the
+per-second series behind the table; `chaos-breaker-before-fix.json` is an
+earlier run, from before failures were settled by the rule above.

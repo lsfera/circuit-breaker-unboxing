@@ -4,7 +4,7 @@
  "schemaVersion": 39,
  "version": 1,
  "editable": true,
- "refresh": "2s",
+ "refresh": "1s",
  "time": {
   "from": "now-10m",
   "to": "now"
@@ -160,7 +160,7 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "sum by (outcome) (rate(egress_consumer_calls_total[1m]))",
+     "expr": "sum by (outcome) (rate(egress_consumer_calls_total[10s]))",
      "legendFormat": "{{outcome}}",
      "refId": "A"
     }
@@ -187,7 +187,7 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "sum(rate(egress_consumer_breaker_trips_total[1m]))",
+     "expr": "sum(rate(egress_consumer_breaker_trips_total[10s]))",
      "legendFormat": "trips/s",
      "refId": "A"
     }
@@ -247,5 +247,14 @@
     }
    ]
   }
- ]
+ ],
+ "timepicker": {
+  "refresh_intervals": [
+   "1s",
+   "2s",
+   "5s",
+   "10s",
+   "30s"
+  ]
+ }
 }

@@ -7,3 +7,8 @@ datasources:
     url: http://prometheus:9090
     isDefault: true
     editable: true
+    jsonData:
+      # Prometheus scrapes every 2s (see prometheus.yml); left at Grafana's 15s
+      # default, a query steps every 15s and an outage shorter than that draws
+      # as one point.
+      timeInterval: 2s
