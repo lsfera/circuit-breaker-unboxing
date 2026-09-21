@@ -1,13 +1,10 @@
-// Drives one incident against the base scenario and reports what actually
-// happened — no aggregator, no circuit state, so there is nothing to assert
-// about a breaker. What there is to measure: how big the backlog gets with
-// nothing slowing arrivals down, how much gets dead-lettered, and how long a
-// full recovery takes once the third party comes back on its own. These are
-// the numbers the next article's "what a breaker buys you" comparison cites.
+// Drives one incident against the base scenario and reports what happened: how big the backlog gets with nothing
+// slowing arrivals down, how much gets dead-lettered, and how long a full recovery takes once the third party comes
+// back on its own.
 //
 //   node infra/incident.mjs
 //   WINDOW_MS=30000 RATE=0.6 node infra/incident.mjs   # a partial failure instead
-//   MODE=hang node infra/incident.mjs                  # this is the one that grows the work queue
+//   MODE=hang node infra/incident.mjs                  # the one that grows the work queue
 //
 // Assumes `docker compose up -d` is already running.
 import { createRequire } from "node:module";
@@ -16,14 +13,10 @@ const BROKER = process.env.BROKER ?? "amqp://guest:guest@localhost:5672";
 const FLAKY_UPSTREAM = process.env.FLAKY_UPSTREAM ?? "http://localhost:8080";
 const API_ID = process.env.API_ID ?? "payments-provider";
 const RATE = Number(process.env.RATE ?? "1.0");
-// Measured, not assumed: with the default "error" mode a failed call answers
-// almost instantly, so five daemons at maxInFlight=20 clear a 200/s arrival
-// rate as fast as it fails — the work queue never visibly backs up, and the
-// only symptom is the dead-letter queue climbing. "hang" holds every call
-// for the full 2s client timeout instead, which pins all 100 in-flight slots
-// and starves the queue's actual drain rate below the arrival rate — that is
-// what makes the backlog itself grow. Same lack of a breaker either way; two
-// different, both real, symptoms.
+// With the default "error" mode a failed call answers almost instantly, so five daemons at maxInFlight=20 clear a
+// 200/s arrival rate as fast as it fails and only the dead-letter queue climbs. "hang" holds every call for the
+// full 2s client timeout, which pins all 100 in-flight slots and starves the drain below the arrival rate, so the
+// backlog itself grows.
 const MODE = process.env.MODE; // unset = "error" (flaky-upstream's default)
 const WINDOW_MS = Number(process.env.WINDOW_MS ?? "20000");
 const DRAIN_TIMEOUT_MS = Number(process.env.DRAIN_TIMEOUT_MS ?? "60000");
@@ -32,13 +25,10 @@ const DRAIN_POLL_MS = 200;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Depth comes from the broker itself, over AMQP, not from the management API:
-// the management API's queue figures are refreshed every 5s, so a read taken
-// at the moment the outage ends can be seconds stale — an incident that
-// dead-lettered 4,000 messages read as 2,200, and every drain read as 0.0s.
-// A passive declare answers from the queue's own state. It counts ready
-// messages only; the unacked few (at most a prefetch window) finish within a
-// round trip of the third party coming back.
+// Depth comes from the broker itself, over AMQP, not from the management API: its queue figures refresh only every
+// 5s, so a read at the moment the outage ends can be seconds stale. A passive declare answers from the queue's own
+// state; it counts ready messages only, and the unacked few (at most a prefetch window) finish within a round trip
+// of the third party coming back.
 const amqp = createRequire(new URL("../packages/rmq/package.json", import.meta.url))("amqplib");
 const connection = await amqp.connect(BROKER);
 const channel = await connection.createChannel();

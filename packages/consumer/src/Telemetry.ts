@@ -1,11 +1,8 @@
 import { Metric } from "effect";
 
 /**
- * Everything this fleet exposes to Prometheus. Deliberately two metrics, not
- * the dozen `@egress/rmq-consumer` grew once a control plane existed to react
- * to: there is no circuit state to publish, no target fraction, no floor —
- * only whether a call to the third party succeeded, and how many are in
- * flight right now.
+ * Everything this fleet exposes to Prometheus: whether a call to the third party succeeded, and how many are
+ * in flight right now.
  */
 
 export const calls = Metric.counter("egress_consumer_calls_total", {

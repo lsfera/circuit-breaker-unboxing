@@ -14,10 +14,8 @@ import { runConsumer } from "./consumer.ts";
  *
  *   node src/main.ts
  *
- * One address, no replica names — a client of whatever the third party
- * exposes, exactly like `producer.ts` is a client of the broker. There is no
- * control queue, no policy, no elections, because there is nothing yet to
- * coordinate the fleet's reaction: see consumer.ts for why that's the point.
+ * A client of the third party at one address, with no replica names, as `producer.ts` is a client of the broker.
+ * There is no control queue and no policy, because nothing yet coordinates the fleet's reaction.
  */
 
 const flags = {

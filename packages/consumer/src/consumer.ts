@@ -15,14 +15,9 @@ import type { CallOutcome } from "./Upstream.ts";
 import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
 
 /**
- * The base scenario: one competing-consumer daemon, no circuit awareness at
- * all. It knows nothing about the other daemons in its own fleet and nothing
- * about whether the third party is degrading — only whether *its own* last
- * call succeeded. A failed call is handed back to the broker with `requeue`,
- * and the broker's own `x-delivery-limit` (see `workQueueOptions`) is what
- * eventually dead-letters it. Nothing here backs off, coordinates, or stops.
- * That absence is the point: it is what the rest of this article series is
- * about adding, one piece at a time.
+ * The base scenario: one competing-consumer daemon with no circuit awareness. It knows nothing about the other
+ * daemons or whether the third party is degrading, only whether its own last call succeeded. A failed call is
+ * handed back with `requeue`, and the broker's `x-delivery-limit` (see `workQueueOptions`) eventually dead-letters it.
  */
 
 export type ConsumerConfig = {
@@ -35,9 +30,8 @@ export type ConsumerConfig = {
 };
 
 /**
- * Whether a call outcome should be accepted or handed back to the broker.
- * Pulled out as a total function of the one thing that matters — pure,
- * exhaustively testable, no broker or fetch involved.
+ * Whether a call outcome is accepted or handed back to the broker: a total function of the one thing that
+ * matters, so it is testable without a broker or fetch.
  */
 export const decide = (outcome: CallOutcome): Settlement =>
   outcome === "ok" ? "accept" : "requeue";
@@ -50,10 +44,8 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   yield* rmq.declareQueue(deadQueue, deadLetterQueueOptions());
   yield* rmq.declareQueue(workQueue, workQueueOptions(cfg.apiId));
 
-  // Captured so the plain-async handler below (amqplib's own callback, not an
-  // Effect fiber) can still update metrics through this process's services —
-  // see rmq-consumer/src/daemon.ts's identical comment on why the bare
-  // `Effect.run*` entry points are wrong here.
+  // Captured so the plain-async handler below (amqplib's callback, not an Effect fiber) can still update
+  // metrics through this process's services.
   const services = yield* Effect.context<HttpClient.HttpClient>();
   const runInContext = Effect.runPromiseWith(services);
 
@@ -71,16 +63,11 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
       ),
     );
 
-  // A body that declares a content type, encoding or message type this daemon
-  // cannot read, does not decode, or carries no `message_id` to use as its
-  // idempotency key, was never published by this fleet: discard
-  // it rather than spend the delivery budget on something no retry can fix.
-  //
-  // Said out loud, because RabbitMQ's own guidance for a consumer handed a
-  // delivery it cannot handle is to log it, and a publisher that starts sending
-  // `gzip` by mistake would otherwise empty the queue into the dead-letter queue
-  // without a trace. The counter carries the volume; the log carries what was
-  // declared, at most once a second so a flood does not become the incident.
+  // A body that declares a content type, encoding or message type this daemon cannot read, does not decode, or
+  // carries no `message_id` to use as its idempotency key was never published by this fleet: discard it rather
+  // than spend the delivery budget on something no retry can fix. It is logged, at most once a second, because
+  // a publisher that starts sending `gzip` by mistake would otherwise empty the queue into the dead-letter queue
+  // without a trace; the counter carries the volume.
   let lastLoggedAt = 0;
   const discard = (reason: "format" | "malformed" | "keyless", delivery: DeliveryInfo): Promise<Settlement> => {
     runInContext(Metric.update(Metric.withAttributes(Telemetry.discarded, { reason }), 1));

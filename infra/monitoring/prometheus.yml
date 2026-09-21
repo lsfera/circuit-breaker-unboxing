@@ -2,13 +2,9 @@ global:
   scrape_interval: 2s # fast enough that an incident shows up within a tick or two
 
 scrape_configs:
-  # RabbitMQ's own exporter. `rabbitmq_prometheus` ships enabled in the
-  # management image on 15692, so this costs one line and no new container.
-  #
-  # Two jobs rather than one because the plain endpoint is aggregated: every
-  # queue metric on it is a cluster-wide sum with no `queue` label, which is
-  # exactly useless for watching one queue's depth climb through an outage.
-  # Per-queue series live behind /metrics/detailed, opted into by family.
+  # RabbitMQ's own exporter (`rabbitmq_prometheus`, enabled in the management image on 15692). Two jobs, because
+  # the plain endpoint aggregates every queue metric into a cluster-wide sum with no `queue` label; per-queue
+  # series live behind /metrics/detailed, opted into by family.
   - job_name: rabbitmq
     static_configs:
       - targets: ["rabbitmq:15692"]
@@ -16,11 +12,8 @@ scrape_configs:
   - job_name: rabbitmq-queues
     metrics_path: /metrics/detailed
     params:
-      # Depth, consumers and the flow through each queue: published, acked,
-      # redelivered. This is where payments-provider.work's backlog and
-      # payments-provider.work.dead's growth become visible — the broker's to
-      # report, because an application counter dies with its process and
-      # never sees a redelivery or a restart.
+      # Depth, consumers and flow (published, acked, redelivered) per queue: the broker's to report, because an
+      # application counter dies with its process and never sees a redelivery or a restart.
       family: [queue_coarse_metrics, queue_consumer_count, queue_metrics, queue_delivery_metrics, queue_exchange_metrics]
     static_configs:
       - targets: ["rabbitmq:15692"]
@@ -29,14 +22,11 @@ scrape_configs:
     static_configs:
       - targets: ["rmq-producer:9464"]
 
-  # The consumer fleet — one compose service scaled to N, so there are no
-  # container names to enumerate here and `--scale rmq-consumer=N` must not
-  # need an edit. Docker's DNS returns an A record per replica.
+  # The consumer fleet: one compose service scaled to N, so there are no container names to enumerate. Docker's
+  # DNS returns an A record per replica.
   - job_name: rmq-consumer-fleet
     dns_sd_configs:
       - names: ["rmq-consumer"]
         type: A
         port: 9464
-    # Matching the scrape interval: a replica that has just been scaled away
-    # should stop being scraped about as fast as it stopped existing.
-    # Prometheus re-resolves on this schedule.
+    # Matching the scrape interval, so a replica scaled away stops being scraped about as fast as it stopped existing.

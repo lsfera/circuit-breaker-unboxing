@@ -3,13 +3,8 @@ import { HttpMiddleware, HttpRouter, HttpServerResponse } from "effect/unstable/
 import { PrometheusMetrics } from "effect/unstable/observability";
 
 /**
- * The `/metrics` every process here serves, from the same in-process `effect`
- * registry, in one place rather than three.
- *
- * The logger is disabled for it and that matters more than it looks: Prometheus
- * scrapes every 2s, and a daemon's log is what you actually read when one
- * misbehaves — an access log line per scrape buries the heartbeat that exists
- * precisely so a deaf daemon is visible.
+ * The `/metrics` every process here serves, from the in-process `effect` registry. Its logger is disabled:
+ * Prometheus scrapes every 2s, and an access-log line per scrape would bury the log a misbehaving daemon is read from.
  */
 export const metricsResponse = PrometheusMetrics.format().pipe(
   Effect.map((body) =>
