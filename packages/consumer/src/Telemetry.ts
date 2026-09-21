@@ -1,10 +1,8 @@
 import { Metric } from "effect";
 
 /**
- * Everything this fleet exposes to Prometheus. `breakerState` is a gauge per
- * replica — Prometheus's own `instance` label (from the DNS-SD scrape) is
- * what turns this into "one line per breaker" on the dashboard, which is the
- * whole point: nothing here aggregates the five replicas into one verdict.
+ * Everything this fleet exposes to Prometheus. `breakerState` is a gauge per replica; the scrape's `instance`
+ * label makes it one line per breaker on the dashboard.
  */
 
 export const calls = Metric.counter("egress_consumer_calls_total", {

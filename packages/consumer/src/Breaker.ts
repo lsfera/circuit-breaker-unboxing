@@ -9,23 +9,13 @@ import {
 import type { CircuitBreakerPolicy } from "cockatiel";
 
 /**
- * One breaker per process, shared across every message it handles — never
- * recreated per call, per cockatiel's own warning that a breaker only works
- * when the same instance sees every execution. Five `docker compose`
- * replicas means five of these, each with entirely private state: this
- * module has no way to know what any other replica thinks, and doesn't try
- * to. That absence is deliberate — see README.md.
+ * One breaker per process, shared across every message: a breaker only works when the same instance sees
+ * every execution, and a fresh one per call would never accumulate a failure count. Five replicas means five
+ * of these with private state; nothing here knows what another replica thinks.
  *
- * `ConsecutiveBreaker` trips after N calls fail in a row, which is the direct
- * realization of the definition this article series opened with: "a
- * threshold on recent failures, never a single failure." A percentage/window
- * breaker (cockatiel's `SamplingBreaker`) is closer to what a fleet-wide
- * verdict needs once there is a fleet-wide verdict to compute — not yet.
- *
- * `ExponentialBackoff` is what gives `halfOpenAfter` its growth: cockatiel's
- * own defaults (128ms initial, exponent 2, 30s max, decorrelated-jitter
- * generator) already are "exponential backoff and jitter" — this only
- * overrides the two bounds to values sized for this scenario.
+ * `ConsecutiveBreaker` trips after N calls fail in a row ("a threshold on recent failures, never a single
+ * failure"). `ExponentialBackoff` grows `halfOpenAfter`; cockatiel's defaults (128ms initial, exponent 2,
+ * decorrelated jitter) already are exponential backoff with jitter, so only the two bounds are overridden.
  */
 
 export type BreakerConfig = {

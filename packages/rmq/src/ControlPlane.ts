@@ -1,77 +1,44 @@
 /**
- * Naming conventions for the work-queue shape shared by the producer and any
- * competing-consumer fleet that drains it. This used to also carry the
- * `circuit.control` exchange (SAC queues, election triggers, the published
- * circuit event) for the breaker's control plane — removed on this branch
- * along with the packages that used it (`@egress/aggregator`,
- * `@egress/domain`, the circuit-aware `@egress/rmq-consumer`). What's left is
- * the generic part: a durable work queue with a dead-letter destination, the
- * broker's own delivery-limit budget, and the idempotency-key convention a
- * caller and a fake third party can agree on.
+ * Naming conventions for the work-queue shape shared by the producer and the competing-consumer fleet that
+ * drains it: a durable work queue with a dead-letter destination, the broker's own delivery-limit budget, and
+ * the idempotency-key convention a caller and a third party agree on.
  */
 
 import { Option as O, Schema } from "effect";
 
 /**
- * The payments idempotency key, as the third party receives it: an HTTP header
- * on the call it authorizes. A retry that reuses the same key protects the
- * third party from being charged twice for one logical attempt.
- *
- * On the broker it is the AMQP `message_id`, not a header of our own: the
- * standard property for "which message is this", visible to RabbitMQ's own
- * tooling and kept when a message is dead-lettered. The publisher assigns it
- * once (`workMessageId`) and a republish must carry it explicitly, or the
- * replay is a new message with a new key.
+ * The payments idempotency key as the third party receives it: an HTTP header. A retry that reuses the key
+ * keeps the third party from charging twice. On the broker it is the AMQP `message_id`: assigned once
+ * (`workMessageId`), and a republish must carry it explicitly or the replay is a new message with a new key.
  */
 export const IDEMPOTENCY_KEY_HTTP_HEADER = "x-idempotency-key";
 
 /**
- * A work message's identity: unique to the producer run that made it, and
- * stable for the life of the message. `n` alone restarts at zero with every
- * process, so a restarted producer would reuse the key of different work and a
- * third party would drop it as a duplicate. The last `:` splits run from
- * sequence, which is what the fake third party's audit reads.
+ * A work message's identity: unique to the producer run, stable for the life of the message. `n` alone restarts
+ * at zero with each process, so a restarted producer would reuse the key of different work and a third party
+ * would drop it as a duplicate. The last `:` splits run from sequence (the fake third party's audit reads it).
  */
 export const workMessageId = (run: string, n: number): string => `${run}:${n}`;
 
 /**
- * What a work message says, declared once so the producer's encoder and the
- * daemons' decoder cannot drift apart. `n` is what makes the idempotency key
- * stable across a broker redelivery of the same message, so it has to be an
- * integer: anything else is not a message this fleet published.
- *
- * The wire form is JSON text, decoded to an `Option` rather than thrown: a body
- * that is not a work message is an answer ("discard it"), not an exception.
- * Fields beyond these are ignored, so a newer producer can add one without
- * breaking an older daemon.
+ * What a work message says, declared once so the producer's encoder and the daemons' decoder cannot drift.
+ * `n` must be an integer: it keeps the idempotency key stable across a redelivery. Decoded to an `Option`,
+ * not thrown: a body that is not a work message is an answer ("discard it"). Unknown fields are ignored, so a
+ * newer producer can add one without breaking an older daemon.
  */
 export const WorkMessage = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
 export type WorkMessage = typeof WorkMessage.Type;
 
 /**
- * What a publisher of work messages declares as its AMQP `content_type`, and
- * so what a daemon negotiates on before it decodes.
- *
- * RabbitMQ neither validates nor uses `content_type` and `content_encoding`
- * (https://www.rabbitmq.com/docs/consumers#content-type-and-encoding): the
- * publisher sets them, the consumer is expected to respect them, and nothing
- * between them checks. AMQP has no `Accept`, so negotiation here is the
- * reader's: a daemon reads `application/json` (parameters such as `charset`
- * ignored), unencoded (no `content_encoding`, or `identity`), and a message that
- * declares nothing at all, because publishers that predate the declaration, and
- * anything publishing raw, say nothing. A message that declares *something
- * else* (another type, or `gzip` that nothing here inflates) is one this fleet
- * did not publish and cannot read, and is discarded to the dead-letter queue
- * unread rather than guessed at.
+ * The AMQP `content_type` a work publisher declares and a daemon negotiates on before decoding. RabbitMQ
+ * neither validates nor uses it and AMQP has no `Accept`, so negotiation is the reader's: a daemon reads
+ * `application/json` (parameters ignored), unencoded, and a message that declares nothing (older or raw
+ * publishers). A message declaring *something else* is one this fleet did not publish and is discarded to the
+ * dead-letter queue unread, not guessed at.
  */
 export const WORK_CONTENT_TYPE = "application/json";
 
-/**
- * The AMQP `type` of a work message: what kind of message it is, dot-separated
- * by RabbitMQ's own convention. A daemon that receives another type has been
- * sent something it does not handle, which the publisher-side guidance says to
- * log; here it is also declined.
- */
+/** The AMQP `type` of a work message, dot-separated by RabbitMQ's convention. A daemon declines any other type. */
 export const WORK_MESSAGE_TYPE = "egress.work";
 
 const mediaType = (contentType: string): string => contentType.split(";")[0]!.trim().toLowerCase();
@@ -100,11 +67,9 @@ export const workQueueFor = (apiId: string): string => `${apiId}.work`;
 export const deadLetterQueueFor = (apiId: string): string => `${apiId}.work.dead`;
 
 /**
- * One dead-letter destination for *every* queue this fleet declares, so anything
- * unhandleable lands somewhere you can count and replay from.
- *
- * Must be declared identically by every process that touches a queue: RabbitMQ
- * rejects a redeclare whose arguments differ, and container startup is unordered.
+ * One dead-letter destination for every queue this fleet declares, so anything unhandleable lands somewhere
+ * you can count and replay from. Must be declared identically by every process that touches a queue:
+ * RabbitMQ rejects a redeclare whose arguments differ, and container startup is unordered.
  */
 const deadLetterArgs = (apiId: string): Record<string, unknown> => ({
   "x-dead-letter-exchange": "",
@@ -115,36 +80,24 @@ const deadLetterArgs = (apiId: string): Record<string, unknown> => ({
 const workQueueArgs = deadLetterArgs;
 
 /**
- * Attempts before the broker parks a message. The budget belongs to the queue,
- * not the daemon: an in-process counter is lost the moment the message moves to
- * another consumer, which is what an outage causes.
- *
- * Low because RabbitMQ redelivers with no backoff, so every extra attempt is
- * load on a failing upstream. A redrive republishes the body, so a replayed
- * message starts a fresh budget — three attempts per outage, not three ever.
+ * Attempts before the broker parks a message. The budget belongs to the queue, not the daemon: an in-process
+ * counter is lost when the message moves to another consumer, which is what an outage causes. Low because
+ * RabbitMQ redelivers with no backoff, so every extra attempt is load on a failing upstream.
  */
 export const WORK_DELIVERY_LIMIT = 3;
 
 /**
- * Durability, decided here so producer and daemons cannot disagree — a mismatch
- * is a redeclare conflict (`409 inequivalent arg 'durable'`), so changing a flag
- * on a broker that already holds the queue means deleting it first.
- *
- * Every queue is durable. RabbitMQ 4.3 refuses a transient queue that is not
- * exclusive, and refuses it by closing the whole connection (541), so one such
- * declare takes the daemon down. The control and floor queues cannot be
- * exclusive — the floor is shared by the fleet — so they are durable classic
- * queues whose `x-expires` does the cleanup transience used to. Everything else
- * is a quorum queue, which could never be transient anyway.
+ * Durability is decided here so producer and daemons cannot disagree: a mismatch is a redeclare conflict
+ * (`409 inequivalent arg 'durable'`), so changing a flag means deleting the queue first. Always durable:
+ * RabbitMQ 4.3 refuses a transient queue that is not exclusive by closing the whole connection (541).
  */
 export const workQueueOptions = (apiId: string) => ({
   args: {
     ...workQueueArgs(apiId),
     "x-queue-type": "quorum",
     "x-delivery-limit": WORK_DELIVERY_LIMIT,
-    // At-least-once: the default (at-most-once) drops a dead letter the target
-    // queue does not take. Not what lost the 1,570 — see deadLetterQueueOptions.
-    // Quorum queues require reject-publish for it.
+    // At-least-once: the default (at-most-once) drops a dead letter the target queue does not take. Quorum
+    // queues require reject-publish for it.
     "x-dead-letter-strategy": "at-least-once",
     "x-overflow": "reject-publish",
   },
@@ -152,14 +105,8 @@ export const workQueueOptions = (apiId: string) => ({
 });
 
 /**
- * The end of the line, so nothing may ever leave it except by being moved.
- *
- * `x-delivery-limit: -1`, because a quorum queue left alone has a limit of 20, and
- * a queue with no dead-letter target at its limit *drops* the message
- * (`dead_letter_strategy="disabled"`). Every redrive pass hands back what it did not
- * move — its channel closing counts — so the old default quietly lost dead letters:
- * 1,570 in one chaos run, and 0 of 50 survived 22 channel closes on this broker
- * where -1 kept all 50 through 25.
+ * The end of the line, so nothing may leave it except by being moved. `x-delivery-limit: -1`: a quorum queue
+ * left alone has a limit of 20, and a queue with no dead-letter target at its limit *drops* the message.
  */
 export const deadLetterQueueOptions = () => ({
   args: { "x-queue-type": "quorum", "x-delivery-limit": -1 },

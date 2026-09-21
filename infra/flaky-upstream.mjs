@@ -1,26 +1,11 @@
-// The upstreams Envoy's clusters point at — several per API, not one.
-//
-// One host per cluster is the shape this repo cannot demonstrate anything
-// with: a replica's report is then either 0/1 or 1/1, so `healthy < total` is
-// unreachable, no replica can ever vote DEGRADED from partial ejection, and
-// `failure_percentage_*` (which needs failure_percentage_minimum_hosts) never
-// evaluates at all. The endpoint counts below match the simulated fleet's in
-// packages/aggregator/src/main.ts on purpose, so the two FleetSource layers
-// tell the same story rather than merely producing the same record shape.
-//
-//   curl -X POST localhost:8080/__fail -d '{"rate":1.0}'                  # 503s
-//   curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"hang"}'    # never answers
-//   curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"reset"}'   # drops the connection
-//   curl -X POST localhost:8080/__fail -d '{"delayMs":1500}'              # slow, still correct
-//   for p in $(seq 8080 8085); do ... ; done                              # the whole cluster
-//
-// Every field is optional and a POST replaces the whole behaviour, so `{}`
-// restores a healthy endpoint.
+// The fake third party: one server per port, several ports per API (only payments-provider is used in this
+// scenario). Failure injection is documented in the README ("Injecting a failure"): every field of a POST to
+// `/__fail` is optional and a POST replaces the whole behaviour, so `{}` restores a healthy endpoint.
 import { createServer } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
 
-// 8086-8089 is deliberately skipped: the aggregator pair publishes 8088 and
-// 8089, and a contiguous range through them collides on `docker compose up`.
+// 8086-8089 is deliberately skipped: other services in the wider system publish 8088 and 8089, and a
+// contiguous range through them collides on `docker compose up`.
 const CLUSTERS = {
   "payments-provider": [8080, 8081, 8082, 8083, 8084, 8085],
   "shipping-rates": [8090, 8091, 8092, 8093],
@@ -125,15 +110,8 @@ for (const [cluster, ports] of Object.entries(CLUSTERS)) {
       }
       const b = behaviour.get(port);
 
-      // Active health checking samples the same failing service real traffic
-      // does, so it fails at the same rate rather than being a separate
-      // truth. That matters at partial failure rates: a deterministic health
-      // endpoint would mark every host down at once and collapse DEGRADED
-      // into OPEN, which is exactly the state this demo needs to be able to
-      // reach. It also makes successful_active_health_check_uneject_host
-      // real — a recovered upstream passes its next check and Envoy
-      // un-ejects immediately, instead of waiting out base_ejection_time ×
-      // ejection_count.
+      // Active health checking samples the same failing service real traffic does, so it fails at the same rate: a
+      // deterministic health endpoint would mark every host down at once at a partial failure rate.
       if (req.url === "/__health") {
         return misbehave(
           b,

@@ -1,22 +1,16 @@
-# One producer, one broker, a fleet of competing-consumer daemons — each with
-# its own in-process circuit breaker (cockatiel), private to that replica.
-# No coordination between them anywhere in this file — that is the point of
-# this branch. See README.md.
+# One producer, one broker, a fleet of competing-consumer daemons, each with its own in-process circuit breaker
+# (cockatiel), private to that replica. See README.md.
 #
-# Every service also joins the host devcontainer's own external network so it
-# can be reached directly by service name from outside this compose project.
-# `default` remains how services in this project reach each other.
+# Every service also joins the host devcontainer's external network, so it can be reached by service name from
+# outside this project; `default` is how services in this project reach each other.
 networks:
   devcontainer:
     name: devcontainer
     external: true
 
-# Resource limits, same rationale as the full system this branch was pruned
-# from: a container with no ceiling is sized by whatever the host had spare,
-# which makes any number this stack publishes a property of the laptop it ran
-# on rather than of the scenario. These are starting points, not measured
-# peaks — nothing in this branch has been profiled the way the full system's
-# `docs/measurements.md` was.
+# Resource limits: a container with no ceiling is sized by whatever the host had spare, which makes any number
+# this stack publishes a property of the laptop it ran on rather than of the scenario. Starting points, not
+# measured peaks.
 x-limits-small: &limits-small { resources: { limits: { cpus: "0.50", memory: 256m } } }
 x-limits-node: &limits-node { resources: { limits: { cpus: "1.00", memory: 512m } } }
 x-limits-daemon: &limits-daemon { resources: { limits: { cpus: "2.00", memory: 512m } } }
@@ -26,27 +20,22 @@ x-limits-broker: &limits-broker { resources: { limits: { cpus: "2.00", memory: 2
 x-limits-producer: &limits-producer { resources: { limits: { cpus: "${PRODUCER_CPUS:-1.00}", memory: 512m } } }
 
 services:
-  # A fake third party: configurable failure rate, hang, connection reset or
-  # delay via POST /__fail, and a per-message audit trail via /__audit. Not
-  # part of the product, so it stays a bind-mounted file on the stock Node
-  # image with no dependencies to install.
+  # A fake third party: configurable failure rate, hang, connection reset or delay via POST /__fail, and a
+  # per-message audit trail via /__audit. Not part of the product, so it stays a bind-mounted file on the stock
+  # Node image with no dependencies to install.
   flaky-upstream:
     image: &node-image node:26-alpine@sha256:ef24c5053d50fdc3e4e56eb4e7ddb7861874ab0fdc797046ba897581deb8e868
     working_dir: /app
     volumes: ["$HOST_WORKSPACE_FOLDER/infra/flaky-upstream.mjs:/app/flaky-upstream.mjs:ro"]
     command: node flaky-upstream.mjs
-    # Only payments-provider's range: this scenario is one API, one address —
-    # there is no proxy here to spread load across the other five hosts the
-    # full system's Envoy config ejects individually.
+    # Only payments-provider's range: this scenario is one API, one address.
     ports: ["8080-8085:8080-8085"]
     restart: unless-stopped
     networks: [default, devcontainer]
     deploy: *limits-driver
 
-  # The control plane and the work queue both live here, over AMQP 0-9-1.
-  # Management UI on http://localhost:15672 (guest/guest) is how you watch
-  # payments-provider.work's depth climb during an outage — the single most
-  # legible view of what this fleet does, or rather does not do, about it.
+  # The work queue lives here, over AMQP 0-9-1. The management UI on http://localhost:15672 (guest/guest) is how
+  # you watch payments-provider.work's depth climb during an outage.
   rabbitmq:
     image: rabbitmq:4.3-management-alpine@sha256:b3b8b7f95f5382a19f9ea33540e604f30aad081d37ad9aba72255135765373a1
     # The broker's data lives under its node name, rabbit@<hostname>, and a
@@ -70,9 +59,8 @@ services:
     networks: [default, devcontainer]
     deploy: *limits-broker
 
-  # The load: a steady stream onto payments-provider.work, never backing off,
-  # never reading anything about whether the third party is healthy — because
-  # there is nothing yet to read. See packages/rmq-producer/src/producer.ts.
+  # The load: a steady stream onto payments-provider.work that never backs off and never reads whether the third
+  # party is healthy. See packages/rmq-producer/src/producer.ts.
   rmq-producer: &rmq-node
     image: &app-image egress-breaker:dev
     build: &app-build
@@ -90,27 +78,21 @@ services:
     networks: [default, devcontainer]
     deploy: *limits-producer
 
-  # One service, scaled — `docker compose up -d --scale rmq-consumer=N` is
-  # the whole of resizing the fleet. Every replica is anonymous: there is no
-  # hash-space position, no floor, no election, and now an in-process circuit
-  # breaker (packages/consumer/src/Breaker.ts) that is entirely this
-  # replica's own — nothing here coordinates the fleet's breakers with each
-  # other. Prometheus tells replicas apart by the IP DNS hands back for the
-  # service name (see infra/monitoring/prometheus.yml).
+  # One service, scaled: `docker compose up -d --scale rmq-consumer=N` is the whole of resizing the fleet. Every
+  # replica is anonymous and runs its own in-process circuit breaker (packages/consumer/src/Breaker.ts); nothing
+  # coordinates them. Prometheus tells replicas apart by the IP DNS hands back for the service name (see
+  # infra/monitoring/prometheus.yml).
   rmq-consumer:
     <<: *rmq-node
     command: node packages/consumer/src/main.ts
     environment:
       <<: *rmq-node-env
-      # One address, the fake third party directly — no proxy, no LB we
-      # control. This is the address a real client of a real third party
-      # would be given: everything behind it is opaque.
+      # One address, the fake third party directly: the address a real client of a real third party would be given.
       EGRESS_ADDR: http://flaky-upstream:8080
       API_PATH: /payments
       MAX_IN_FLIGHT: "20"
-      # Trips after 5 calls fail in a row; the half-open probe starts 1s
-      # after that and doubles (cockatiel's own exponential-backoff-with-
-      # jitter default) up to 30s if the probe keeps failing.
+      # Trips after 5 calls fail in a row; the half-open probe starts 1s later and doubles, with jitter, up to 30s
+      # while it keeps failing.
       BREAKER_THRESHOLD: "5"
       BREAKER_INITIAL_DELAY_MS: "1000"
       BREAKER_MAX_DELAY_MS: "30000"
@@ -137,10 +119,8 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
-      # Without this, :3000 lands on Grafana's own "Welcome" screen — not this
-      # dashboard — and the first thing anyone sees looks like nothing was
-      # provisioned at all. Path is inside the container, off the same
-      # read-only mount the dashboard provisioner already uses.
+      # The home dashboard for a signed-in user. The anonymous Viewer role cannot be granted access to it, so an
+      # anonymous visit to :3000 still lands on Welcome: use the direct link in the README.
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/in-process-breaker.json
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro

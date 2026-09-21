@@ -17,13 +17,8 @@ import type { CircuitState } from "cockatiel";
 import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
 
 /**
- * One competing-consumer daemon, now with an in-process circuit breaker
- * (see Breaker.ts) — and still nothing else. It knows nothing about the
- * other daemons in its own fleet: its breaker's state is private to this
- * process, formed from only the calls this process itself has made. Five
- * replicas means five independent breakers that will open and close at
- * different times, for the same incident. That absence — no shared verdict
- * — is what the next branch in this series adds.
+ * One competing-consumer daemon with its own in-process circuit breaker (Breaker.ts). Nothing coordinates the
+ * daemons: each breaker's state is private to this process and formed only from its own calls.
  */
 
 export type ConsumerConfig = {
@@ -40,29 +35,19 @@ export type ConsumerConfig = {
 class UpstreamCallFailed extends Data.TaggedError("UpstreamCallFailed")<{}> {}
 
 /**
- * Whether a call outcome should be accepted or handed back to the broker.
- * Pulled out as a total function of the one thing that matters — pure,
- * exhaustively testable, no broker, breaker, or fetch involved.
- *
- * `"open"` and `"failed"` both requeue: the difference between them is
- * whether a call was actually attempted, which is a telemetry fact, not a
- * settlement fact. What differs operationally is upstream of this function
- * — see `OPEN_REQUEUE_DELAY_*` in `attempt` below.
+ * Whether a call outcome is accepted or handed back to the broker: a total function of the one thing that
+ * matters, so it is testable without a broker, breaker or fetch. `"open"` and `"failed"` both requeue; they
+ * differ in whether a call was attempted, which is telemetry, not settlement.
  */
 export type CallOutcome = Upstream.CallOutcome | "open";
 export const decide = (outcome: CallOutcome): Settlement =>
   outcome === "ok" ? "accept" : "requeue";
 
 /**
- * Held before releasing a breaker-open rejection back to the broker. Without
- * this, a message rejected instantly by an open local breaker (no call made,
- * no wait) goes straight back onto the queue and straight back to this same
- * consumer, which can spin against its own in-memory breaker at whatever
- * rate the broker will redeliver — hammering the *broker* even though the
- * third party is no longer being hammered. Same constants, same reasoning as
- * the shed-`429` hold the article series' predecessor daemon used before it
- * was removed: jittered so a fleet whose breakers open together doesn't
- * requeue in lockstep either.
+ * Held before handing a breaker-open rejection back to the broker. Without it a message rejected instantly by
+ * an open breaker goes straight back to the queue and to this same consumer, spinning against its own
+ * in-memory breaker at whatever rate the broker redelivers and hammering the broker instead of the third
+ * party. Jittered so breakers that open together do not requeue in lockstep.
  */
 const OPEN_REQUEUE_DELAY_MIN_MS = 100;
 const OPEN_REQUEUE_DELAY_SPREAD_MS = 300;
@@ -75,15 +60,12 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   yield* rmq.declareQueue(deadQueue, deadLetterQueueOptions());
   yield* rmq.declareQueue(workQueue, workQueueOptions(cfg.apiId));
 
-  // Captured so the plain-async handler below (amqplib's own callback, not an
-  // Effect fiber) can still update metrics through this process's services —
-  // see rmq-consumer/src/daemon.ts's identical comment on why the bare
-  // `Effect.run*` entry points are wrong here.
+  // Captured so the plain-async handler below (amqplib's callback, not an Effect fiber) can still update
+  // metrics through this process's services.
   const services = yield* Effect.context<HttpClient.HttpClient>();
   const runInContext = Effect.runPromiseWith(services);
 
-  // One breaker for the process's whole life, shared across every message —
-  // see Breaker.ts for why that sharing is load-bearing, not incidental.
+  // One breaker per process, shared across every message: a fresh one per call would never accumulate a failure count.
   const breaker = Breaker.make(cfg.breaker);
 
   breaker.onStateChange((state: CircuitState) =>
@@ -129,16 +111,11 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
     return decide(outcome);
   };
 
-  // A body that declares a content type, encoding or message type this daemon
-  // cannot read, does not decode, or carries no `message_id` to use as its
-  // idempotency key, was never published by this fleet: discard
-  // it rather than spend the delivery budget on something no retry can fix.
-  //
-  // Said out loud, because RabbitMQ's own guidance for a consumer handed a
-  // delivery it cannot handle is to log it, and a publisher that starts sending
-  // `gzip` by mistake would otherwise empty the queue into the dead-letter queue
-  // without a trace. The counter carries the volume; the log carries what was
-  // declared, at most once a second so a flood does not become the incident.
+  // A body that declares a content type, encoding or message type this daemon cannot read, does not decode, or
+  // carries no `message_id` to use as its idempotency key was never published by this fleet: discard it rather
+  // than spend the delivery budget on something no retry can fix. It is logged, at most once a second, because
+  // a publisher that starts sending `gzip` by mistake would otherwise empty the queue into the dead-letter queue
+  // without a trace; the counter carries the volume.
   let lastLoggedAt = 0;
   const discard = (reason: "format" | "malformed" | "keyless", delivery: DeliveryInfo): Promise<Settlement> => {
     runInContext(Metric.update(Metric.withAttributes(Telemetry.discarded, { reason }), 1));

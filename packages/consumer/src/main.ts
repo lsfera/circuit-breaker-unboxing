@@ -10,15 +10,12 @@ import { TracingLive } from "@egress/tracing/Tracing.ts";
 import { runConsumer } from "./consumer.ts";
 
 /**
- * The consumer daemon, its own component like `rmq-producer`:
+ * The consumer daemon:
  *
  *   node src/main.ts
  *
- * One address, no replica names — a client of whatever the third party
- * exposes, exactly like `producer.ts` is a client of the broker. Each
- * process gets its own in-process circuit breaker (Breaker.ts); there is
- * still no control queue, no policy, no elections, because there is nothing
- * yet to make five replicas' breakers agree with each other.
+ * A client of the third party at one address, with no replica names, as `producer.ts` is a client of the
+ * broker. Each process has its own in-process circuit breaker (Breaker.ts).
  */
 
 const flags = {

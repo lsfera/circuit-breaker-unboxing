@@ -4,11 +4,8 @@ import { Config, ConfigProvider, Effect, Result, Schema } from "effect";
 import { brokerAddress, PositiveInt } from "../src/Settings.ts";
 
 /**
- * The rules a process's settings are read by, with no process.
- *
- * Every assertion here is a value that used to be accepted and turned into
- * `NaN`, a silent `false`, or a host of `""` — see the module doc for what
- * each one then did to a running fleet.
+ * The rules a process's settings are read by, with no process. Each assertion is a value that used to be
+ * accepted and turned into `NaN`, a silent `false`, or a host of `""`.
  */
 
 const settings = Config.all({
@@ -37,11 +34,7 @@ test("an unset variable takes its default", () => {
   });
 });
 
-/**
- * The finding, in one assertion. `Number("five")` was `NaN`, and `NaN` reached
- * `activeIndices`, where `Array.from({ length: NaN })` is empty — so the whole
- * fleet idled and nothing said why.
- */
+/** The finding, in one assertion: `Number("five")` was `NaN`, which silently stalls anything sized by it. */
 test("a count that is not a number is rejected, and the message names the variable", () => {
   const message = read({ FLEET_SIZE: "five" });
   assert.equal(typeof message, "string");

@@ -11,10 +11,7 @@ import * as Breaker from "../src/Breaker.ts";
  */
 
 test("stays closed and rethrows the real error until the threshold is reached", async () => {
-  // cockatiel's ConsecutiveBreaker trips on the Nth failure itself
-  // (`++count >= threshold`), not after an (N+1)th — confirmed by reading
-  // ConsecutiveBreaker.js rather than assuming "more than N" from its doc
-  // comment, which describes the effect loosely.
+  // ConsecutiveBreaker trips on the Nth failure itself (`++count >= threshold`), not on an (N+1)th.
   const breaker = Breaker.make({ consecutiveFailures: 3, initialDelayMs: 20, maxDelayMs: 50 });
   const boom = () => Promise.reject(new Error("boom"));
 
