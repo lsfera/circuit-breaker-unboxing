@@ -583,7 +583,7 @@ infra/
 docker-compose.yml     the whole stack
 ```
 
-Built on **Effect 4 (4.0.0-rc.115)**, same as the full system this branch was
+Built on **Effect 4 (4.0.0-rc.116)**, same as the full system this branch was
 pruned from — see `AGENTS.md` for why that version matters when writing
 Effect code here. No build step: every package runs straight off its
 `src/*.ts` through Node's built-in type stripping.
