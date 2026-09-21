@@ -16,7 +16,7 @@ import {
   WORK_DELIVERY_LIMIT,
   workQueueFor,
   workQueueOptions,
-} from "../../src/ControlPlane.ts";
+} from "../../src/WorkQueue.ts";
 import { TRACEPARENT } from "../../src/Trace.ts";
 
 /**

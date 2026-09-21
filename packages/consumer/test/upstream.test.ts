@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { Effect } from "effect";
 import { FetchHttpClient } from "effect/unstable/http";
-import { IDEMPOTENCY_KEY_HTTP_HEADER } from "@egress/rmq/ControlPlane.ts";
+import { IDEMPOTENCY_KEY_HTTP_HEADER } from "@egress/rmq/WorkQueue.ts";
 import * as Upstream from "../src/Upstream.ts";
 
 const run = (url: string, key = "run:1") =>

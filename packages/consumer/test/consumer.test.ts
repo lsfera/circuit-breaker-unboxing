@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Option as O } from "effect";
-import { decodeWorkMessage, encodeWorkMessage, readsWorkFormat } from "@egress/rmq/ControlPlane.ts";
+import { decodeWorkMessage, encodeWorkMessage, readsWorkFormat } from "@egress/rmq/WorkQueue.ts";
 import { decide } from "../src/consumer.ts";
 
 test("an ok call is accepted", () => {

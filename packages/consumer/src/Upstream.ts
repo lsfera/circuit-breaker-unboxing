@@ -1,6 +1,6 @@
 import { Duration, Effect } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
-import { IDEMPOTENCY_KEY_HTTP_HEADER } from "@egress/rmq/ControlPlane.ts";
+import { IDEMPOTENCY_KEY_HTTP_HEADER } from "@egress/rmq/WorkQueue.ts";
 
 /**
  * The one third-party call this daemon makes, reduced to whether it worked.

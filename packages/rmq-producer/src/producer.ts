@@ -10,7 +10,7 @@ import {
   workMessageId,
   workQueueFor,
   workQueueOptions,
-} from "@egress/rmq/ControlPlane.ts";
+} from "@egress/rmq/WorkQueue.ts";
 
 /**
  * The load half of the scenario: a steady stream onto `<apiId>.work`.

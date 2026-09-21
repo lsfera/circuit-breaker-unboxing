@@ -1,13 +1,8 @@
 /**
- * Naming conventions for the work-queue shape shared by the producer and any
- * competing-consumer fleet that drains it. This used to also carry the
- * `circuit.control` exchange (SAC queues, election triggers, the published
- * circuit event) for the breaker's control plane — removed on this branch
- * along with the packages that used it (`@egress/aggregator`,
- * `@egress/domain`, the circuit-aware `@egress/rmq-consumer`). What's left is
- * the generic part: a durable work queue with a dead-letter destination, the
- * broker's own delivery-limit budget, and the idempotency-key convention a
- * caller and a fake third party can agree on.
+ * The work-queue shape a producer and a competing-consumer fleet share: a
+ * durable work queue with a dead-letter destination, the broker's own
+ * delivery-limit budget, and the idempotency-key convention a caller and a
+ * fake third party can agree on.
  */
 
 import { Option as O, Schema } from "effect";

@@ -5,7 +5,7 @@
   "description": "Effect wrapper over amqplib (AMQP 0-9-1) plus the generic work-queue naming/options a producer and a competing-consumer fleet share.",
   "exports": {
     "./Client.ts": "./src/Client.ts",
-    "./ControlPlane.ts": "./src/ControlPlane.ts",
+    "./WorkQueue.ts": "./src/WorkQueue.ts",
     "./DelayedDelivery.ts": "./src/DelayedDelivery.ts",
     "./Trace.ts": "./src/Trace.ts"
   },

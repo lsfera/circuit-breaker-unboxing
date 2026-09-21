@@ -8,7 +8,7 @@ import {
   readsWorkFormat,
   workQueueFor,
   workQueueOptions,
-} from "@egress/rmq/ControlPlane.ts";
+} from "@egress/rmq/WorkQueue.ts";
 import * as Delay from "@egress/rmq/DelayedDelivery.ts";
 import * as Breaker from "./Breaker.ts";
 import * as Telemetry from "./Telemetry.ts";
