@@ -1,7 +1,5 @@
-// The submodule, not the package root. The root re-exports WebSdk, which
-// imports @opentelemetry/sdk-trace-web — a browser package that has no place
-// in a Node image, and whose absence is a crash at import time rather than a
-// missing feature.
+// The submodule, not the package root: the root re-exports WebSdk, which imports a browser-only package and
+// crashes a Node image at import time.
 import { Config, Effect, Layer, Option as O, Schema } from "effect";
 import * as NodeSdk from "@effect/opentelemetry/NodeSdk";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
@@ -12,23 +10,12 @@ import {
 } from "@opentelemetry/sdk-trace-base";
 
 /**
- * Tracing for every process here — see docs/decisions/003-tracing.md.
- *
- * Opt-in, on `OTEL_EXPORTER_OTLP_ENDPOINT`. Without it no tracer is installed,
- * Effect's no-op one stays, and `Effect.withSpan` costs nothing; a stack running
- * without a collector must not degrade.
- *
- * Sampling is decided at the *tail*, in infra/otel-collector.yaml: this exports
- * everything, so the traces that turned out to be slow or failed can be the ones
- * kept. `OTEL_TRACES_SAMPLER_ARG` stays for deployments with no collector, where
- * dropping at the source is the only option.
+ * Tracing for every process here. Opt-in on `OTEL_EXPORTER_OTLP_ENDPOINT`: without it no tracer is installed,
+ * Effect's no-op one stays, and `Effect.withSpan` costs nothing. Sampling is left to a collector at the tail, so
+ * this exports everything; `OTEL_TRACES_SAMPLER_ARG` is for deployments with no collector.
  */
 
-/**
- * Empty counts as unset. docker-compose interpolates an unset host variable to
- * the empty string rather than omitting it, so a present-but-empty endpoint
- * would install an exporter pointed at nowhere.
- */
+/** Empty counts as unset: docker-compose interpolates an unset host variable to the empty string, so a present-but-empty endpoint would install an exporter pointed at nowhere. */
 const endpoint = Config.String("OTEL_EXPORTER_OTLP_ENDPOINT").pipe(
   Config.map((raw) => raw.trim()),
   Config.option,
@@ -36,9 +23,8 @@ const endpoint = Config.String("OTEL_EXPORTER_OTLP_ENDPOINT").pipe(
 );
 
 /**
- * Head sampling ratio, defaulting to 1 — export everything and let the tail
- * decide. Lower it only where there is no collector to decide at the tail,
- * because anything dropped here can never be reconsidered.
+ * Head sampling ratio, default 1 (export everything, let the tail decide). Anything dropped here can never be
+ * reconsidered, so lower it only where there is no collector.
  */
 const ratio = Config.schema(
   Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
@@ -46,21 +32,15 @@ const ratio = Config.schema(
 ).pipe(Config.withDefault(1));
 
 /**
- * Install tracing for one service, or nothing at all.
- *
- * `serviceName` is what separates the processes in a trace view — the five
- * daemons deliberately share one, because "which daemon" is an attribute of a
- * span rather than a different service, and a fleet that renames itself per
- * replica is unreadable at ten.
+ * Install tracing for one service, or nothing at all. `serviceName` separates processes in a trace view; the
+ * five daemons share one, because "which daemon" is a span attribute, not a different service.
  */
 export const TracingLive = (serviceName: string) =>
   Layer.unwrap(
     Effect.map(Effect.all([endpoint, ratio]), ([url, sampleRatio]) =>
       O.match(url, {
-        // `layerEmpty` provides the resource and installs no tracer, so Effect's
-        // default no-op one stays and `Effect.withSpan` costs nothing. Both
-        // branches have the same type on purpose — a caller should not have to
-        // know which one it got.
+        // `layerEmpty` provides the resource and installs no tracer, so Effect's no-op one stays. Both branches have the
+        // same type on purpose: a caller should not have to know which one it got.
         onNone: () => NodeSdk.layerEmpty,
         onSome: (url) =>
           NodeSdk.layer(() => ({

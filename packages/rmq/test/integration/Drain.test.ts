@@ -13,10 +13,8 @@ const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   );
 
 /**
- * What a breaker opening does to a consumer that is mid-call. `closeConsumer`
- * hands its unacked deliveries back, so the calls that had already finished
- * would run again; `drainConsumer` lets them settle first and then leaves —
- * and after it, the queue's messages stay in the queue.
+ * What a breaker opening does to a consumer that is mid-call: `closeConsumer` hands its unacked deliveries back,
+ * so calls that had already finished would run again; `drainConsumer` lets them settle first and then leaves.
  */
 test("draining a consumer settles what it holds, redelivers none of it, and takes nothing more", async (t) => {
   if (skipIfNoDocker(t)) return;

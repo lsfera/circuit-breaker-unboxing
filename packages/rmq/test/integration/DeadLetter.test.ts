@@ -20,20 +20,10 @@ import {
 import { TRACEPARENT } from "../../src/Trace.ts";
 
 /**
- * Dead-lettering: what a rejection does, what it carries, and what survives a
- * republish.
- *
- * A separate file from Client.test.ts, and separate on purpose — node runs
- * each test file in its own process, so this gets its own broker. Sharing one
- * with the stranding test is not viable: that test deliberately induces the
- * client bug where closing consumers with deliveries in flight stalls a
- * connection, and afterwards the *broker* stops reliably dead-lettering.
- * Observed repeatedly, on a fresh connection, with a fresh queue: one queue's
- * rejections routed to the dead-letter queue and another identically declared
- * queue's did not, with no error from `discard()` and nothing in any log.
- * That is a real hazard and it is written up in docs/rmq-control-plane.md; it
- * is not pinned by a test here because it reproduces about half the time,
- * and a test that fails half the time teaches nobody anything.
+ * Dead-lettering: what a rejection does, what it carries, and what survives a republish. A separate file from
+ * Client.test.ts on purpose: node runs each test file in its own process, so this gets its own broker, and
+ * sharing one with the stranding test is not viable (its stranded consumers leave the broker unreliable at
+ * dead-lettering).
  */
 
 before(startBroker);
@@ -45,21 +35,10 @@ const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   );
 
 /**
- * Why the work queue is a quorum queue, stated as a property rather than a
- * preference.
- *
- * Rejecting without requeue routes the message to the queue's
- * `x-dead-letter-exchange` — that is what turns a failed third-party call from
- * a silently dropped message into one you can count and replay, and it works
- * on any queue type.
- *
- * Counting the attempts does not. This queue is deliberately *classic*, and on
- * a classic queue there is no `x-delivery-count` at all: a requeued message
- * comes back indistinguishable from a new one, forever, so nothing here could
- * enforce a budget and an unbounded requeue against a dead upstream would be a
- * hot loop with no counter to stop it. The budget lives on the work queue
- * instead, as `x-delivery-limit` on a quorum queue — see the delivery-limit
- * test at the bottom of this file for the other half.
+ * Why the work queue is a quorum queue, stated as a property. Rejecting without requeue routes the message to
+ * the queue's `x-dead-letter-exchange` on any queue type. Counting attempts does not: a classic queue has no
+ * `x-delivery-count`, so an unbounded requeue against a dead upstream would be a hot loop with no counter to
+ * stop it. The budget lives on the queue as `x-delivery-limit` on a quorum queue (see the delivery-limit test below).
  */
 test("a rejected delivery dead-letters, and a classic queue counts no attempts", async (t) => {
   if (skipIfNoDocker(t)) return;
@@ -78,10 +57,8 @@ test("a rejected delivery dead-letters, and a classic queue counts no attempts",
       const deadLettered: string[] = [];
       yield* rmq.consume(dead, (body) => void deadLettered.push(body));
 
-      // Released a fixed number of times, then rejected. `seen` is an
-      // in-process counter precisely because the broker-side one is what is
-      // under test — and it is also the only thing stopping this from
-      // looping forever if delivery_count never moves, which is the finding.
+      // Released a fixed number of times, then rejected. `seen` is an in-process counter because the broker-side one
+      // is what is under test, and it stops this looping forever if delivery_count never moves.
       const counts: number[] = [];
       let seen = 0;
       yield* rmq.consume(work, (_body, delivery) => {
@@ -113,14 +90,9 @@ test("a rejected delivery dead-letters, and a classic queue counts no attempts",
 });
 
 /**
- * One canonical dead-letter queue for every queue in a fleet only works if
- * whatever drains it can tell the messages apart — replaying a control event
- * that failed to decode onto the *work* queue would be nonsense.
- *
- * RabbitMQ 4 records the origin as AMQP 1.0 message annotations, and this
- * pins the two fields @egress/rmq-consumer's redrive filters on. If a broker
- * upgrade stops sending them, `delivery.deadLetter` goes null, the redrive
- * silently stops recognising anything as work, and only this test says so.
+ * One canonical dead-letter queue for every queue in a fleet only works if whatever drains it can tell the
+ * messages apart. RabbitMQ 4 records the origin as message annotations; this pins the two fields a drain
+ * filters on (`delivery.deadLetter`), so a broker upgrade that stops sending them fails here.
  */
 test("a dead-lettered message says which queue it came from", async (t) => {
   if (skipIfNoDocker(t)) return;
@@ -174,11 +146,8 @@ test("a dead-lettered message says which queue it came from", async (t) => {
 });
 
 /**
- * The other half of that: a republish drops the broker's death annotations,
- * so anything that moves messages around inside a dead-letter queue has to
- * carry the provenance itself. @egress/rmq-consumer's redrive stamps the
- * origin as an application property when it parks a non-work message, and
- * uses the presence of that stamp to know it has come full circle.
+ * The other half: a republish drops the broker's death annotations, so anything that moves messages around
+ * inside a dead-letter queue has to carry the provenance itself, as an application property.
  */
 test("application properties survive a republish, so provenance can outlive the annotations", async (t) => {
   if (skipIfNoDocker(t)) return;
@@ -215,17 +184,9 @@ test("application properties survive a republish, so provenance can outlive the 
 });
 
 /**
- * The property the dead-letter queue exists for, and the one it did not have.
- *
- * Rejecting a failed message preserves it only if the queue holding it
- * outlives the broker. Measured on the running stack before this changed: a
- * dead-letter queue holding 24 messages held 0 after `docker compose restart
- * rabbitmq` — the queue was recreated by the next daemon to connect, empty,
- * so nothing even looked wrong.
- *
- * There used to be a transient queue beside it, emptied by the same restart, as
- * the contrast. RabbitMQ 4.3 refuses to declare one that is not exclusive — it
- * closes the connection — so every queue here is durable now.
+ * The property the dead-letter queue exists for: rejecting a failed message preserves it only if the queue holding
+ * it outlives the broker. Every queue here is durable (RabbitMQ 4.3 refuses a non-exclusive transient one), so the
+ * test restarts the broker and expects the messages back.
  */
 test("a durable queue keeps its messages across a broker restart", async (t) => {
   if (skipIfNoDocker(t)) return;
@@ -251,9 +212,8 @@ test("a durable queue keeps its messages across a broker restart", async (t) => 
   const kept = await run(
     Effect.gen(function* () {
       const rmq = yield* Rmq;
-      // Redeclared with the same arguments, exactly as a reconnecting daemon
-      // does — which is why an empty durable queue would look identical to a
-      // healthy one from the outside.
+      // Redeclared with the same arguments, as a reconnecting daemon does: an empty durable queue would look
+      // identical to a healthy one from the outside.
       yield* rmq.declareQueue(durable, { durable: true });
 
       const kept: string[] = [];
@@ -268,30 +228,14 @@ test("a durable queue keeps its messages across a broker restart", async (t) => 
 });
 
 /**
- * The redelivery budget this repo spent two documents saying it could not
- * have.
- *
- * The client cannot mark a delivery failed, and RabbitMQ will not count one
- * that is not — both still true, and neither matters, because the budget is a
- * property of the queue. The work queue is a quorum queue carrying
- * `x-delivery-limit`, so the broker counts the attempts and parks the message
- * itself once they are spent.
- *
- * Two things are asserted together because each is only half the behaviour.
- * The budget is spent by *requeue*, the outcome that was supposed to be
- * useless. And a redrive resets it: `Redrive.ts` replays work by publishing
- * the body again, so a replayed message is a new message with a full budget —
- * three attempts per outage, not three ever. The handler here stands in for
- * that republish, deliberately, because that interaction is the part someone
- * reading `WORK_DELIVERY_LIMIT` would get wrong.
+ * The redelivery budget belongs to the queue: a quorum queue carrying `x-delivery-limit` has the broker count the
+ * attempts and park the message itself once they are spent. Two things are asserted together: the budget is spent
+ * by *requeue*, and a republish resets it (a replayed message is a new message with a full budget, so three
+ * attempts per outage, not three ever), which is the part someone reading `WORK_DELIVERY_LIMIT` would get wrong.
  */
 /**
- * A redrive replays the work that failed — which is the work most worth
- * following, and was the only work that arrived untraceable.
- *
- * The trace context survives being dead-lettered, because RabbitMQ keeps
- * application headers. Republishing the body alone therefore does not lose a
- * trace that was unavailable; it throws away one that was right there.
+ * A replay of failed work should keep its trace: the trace context survives dead-lettering because RabbitMQ keeps
+ * application headers, so a republish of the body alone throws away a trace that was right there.
  */
 test("a traceparent survives dead-lettering, and only a republish that carries it keeps it", async (t) => {
   if (skipIfNoDocker(t)) return;
@@ -311,8 +255,7 @@ test("a traceparent survives dead-lettering, and only a republish that carries i
       const onDead: boolean[] = [];
       const replayed: Array<{ how: string; parent: boolean }> = [];
 
-      // Two independent messages, each dead-lettered once and replayed once —
-      // "alone" the way the redrive used to, "carrying" the way it does now.
+      // Two independent messages, each dead-lettered once and replayed once: one alone, one carrying the header.
       const deadSeen = new Map<string, number>();
       yield* rmq.consume(dead, (body, delivery) => {
         const n = (deadSeen.get(body) ?? 0) + 1;
@@ -354,12 +297,9 @@ test("a traceparent survives dead-lettering, and only a republish that carries i
 });
 
 /**
- * The idempotency key a payments call needs to be safe under at-least-once
- * delivery is the message's AMQP `message_id`: kept when the message is
- * dead-lettered, and, like the traceparent above, kept on a replay only if the
- * republish carries it explicitly. A republish that does not is a new message
- * with a new id, which for a payment is a second charge. This is the property
- * `Redrive.ts`'s move back onto the work queue depends on.
+ * The idempotency key a payments call needs under at-least-once delivery is the message's AMQP `message_id`: kept
+ * when the message is dead-lettered, and, like the traceparent, kept on a replay only if the republish carries it
+ * explicitly. A republish that does not is a new message with a new id, which for a payment is a second charge.
  */
 test("a message id survives dead-lettering, and only a redrive republish that carries it keeps it", async (t) => {
   if (skipIfNoDocker(t)) return;
@@ -379,8 +319,7 @@ test("a message id survives dead-lettering, and only a redrive republish that ca
       const onDead: Array<O.Option<string>> = [];
       const replayed: Array<{ how: string; id: O.Option<string> }> = [];
 
-      // Two messages, each dead-lettered once and replayed once — "carrying" the
-      // way the redrive does, "dropping" the way a careless republish would.
+      // Two messages, each dead-lettered once and replayed once: one carrying the id, one dropping it (a careless republish).
       const deadSeen = new Map<string, number>();
       yield* rmq.consume(dead, (body, delivery) => {
         const n = (deadSeen.get(body) ?? 0) + 1;
@@ -432,8 +371,7 @@ test("the work queue parks a message at the delivery limit, and a redrive republ
         parked.push(O.getOrUndefined(delivery.deadLetter)?.reason ?? "unknown");
         if (replayed) return "accept" as const;
         replayed = true;
-        // What Redrive.ts does on the transition back to CLOSED: publish the
-        // body onto the work queue, which is a new message to the broker.
+        // A republish of the body onto the work queue is a new message to the broker.
         return Effect.runPromise(rmq.send(into, body)).then(() => "accept" as const);
       });
 
@@ -459,11 +397,8 @@ test("the work queue parks a message at the delivery limit, and a redrive republ
     (WORK_DELIVERY_LIMIT + 1) * 2,
     `one delivery plus ${WORK_DELIVERY_LIMIT} redeliveries, twice — the redrive resets the budget`,
   );
-  // The 1.0 client reported 0 on every delivery, so this used to assert
-  // blindness — the counting was the broker's and the daemon could not see it.
-  // The counting is still the broker's, which is what makes it survive a
-  // message moving between daemons; what changed is that the header is now
-  // readable, so the reset is visible rather than inferred from the parkings.
+  // The count is the broker's, which is what makes it survive a message moving between daemons; the header is
+  // readable, so a reset is visible rather than inferred from the parkings.
   assert.deepEqual(
     attempts,
     [0, 1, 2, 3, 0, 1, 2, 3],
@@ -472,13 +407,9 @@ test("the work queue parks a message at the delivery limit, and a redrive republ
 });
 
 /**
- * A dead-letter queue must never lose a message to its own delivery limit.
- *
- * A quorum queue with no dead-letter target drops a message once its delivery
- * limit (20 by default) is reached, and every redrive pass hands back what it did
- * not move by closing its channel — which counts. Measured in a chaos run as 1,570
- * messages gone. Twenty-five consumer channels that take the message and close
- * without settling it is more returns than the old default allowed.
+ * A dead-letter queue must never lose a message to its own delivery limit: a quorum queue with no dead-letter
+ * target drops a message once its limit (20 by default) is reached, and a consumer channel that takes the message
+ * and closes without settling it counts as a return. Twenty-five such closes is more than the default allowed.
  */
 test("the dead-letter queue keeps a message through more returns than a default delivery limit", async (t) => {
   if (skipIfNoDocker(t)) return;

@@ -14,8 +14,7 @@ import { runProducer } from "./producer.ts";
  *
  *   node src/main.ts
  *
- * It shares nothing with the fleet — no control queue, no policy, no elections —
- * and never reads the circuit state, which is the point of the scenario.
+ * It shares nothing with the fleet and never reads breaker state, which is the point of the scenario.
  */
 
 /** Every setting this process takes, declared once — flags with the environment behind them. */
@@ -26,10 +25,7 @@ const flags = {
     Flag.withDefault("payments-provider"),
     Flag.withDescription("Whose work queue to fill"),
   ),
-  /**
-   * Fixed, and deliberately never lowered in reaction to the circuit — the
-   * backlog this builds during an outage is the thing the fleet has to survive.
-   */
+  /** Fixed, and deliberately never lowered in reaction to the third party: the backlog an outage builds is what the fleet has to survive. */
   ratePerSecond: Flag.Int("rate").pipe(
     Flag.withSchema(PositiveInt),
     Flag.withFallbackConfig(Config.schema(PositiveInt, "RATE_PER_SECOND")),
@@ -47,15 +43,10 @@ class Fatal extends Data.TaggedError("Fatal")<{ readonly reason: string }> {
 }
 
 /**
- * Scoped fiber for the lifetime of the server, the same shape the aggregator's
- * tick loop and the daemon use. Failing setup — a broker that never comes up, a
- * queue redeclared with different arguments — is a defect rather than something
- * to recover from, hence `orDie` and the restart policy on the container.
- *
- * See the daemon's main for why its `catchDefect` fails `fatal` instead of
- * leaving the fork bare: an unobserved defect in a `forkScoped` fiber cannot
- * end `Layer.launch`, and `launchWithRmq` races `fatal` against the broker
- * connection to close that gap here too.
+ * A scoped fiber for the lifetime of the server. Failing setup (a broker that never comes up, a queue redeclared
+ * with different arguments) is a defect, not something to recover from: `orDie`, and the container's restart
+ * policy. `catchDefect` fails `fatal` rather than leaving the fork bare, because an unobserved defect in a
+ * `forkScoped` fiber cannot end `Layer.launch`; `launchWithRmq` races `fatal` against the broker connection.
  */
 const producer = Command.make("rmq-producer", flags, (settings) => {
   const fatal = Deferred.makeUnsafe<never, Fatal>();
@@ -73,12 +64,10 @@ const producer = Command.make("rmq-producer", flags, (settings) => {
     ),
   );
 
-  // See the daemon's main for why this is not `Layer.launch`.
   return launchWithRmq(
     HttpRouter.serve(Layer.provideMerge(Producer, MetricsRoute)).pipe(
       Layer.provide(NodeHttpServer.layer(createServer, { port: settings.metricsPort })),
-      // Every trace in this repo starts in this process. Without an OTLP
-      // endpoint this installs no tracer at all — see @egress/tracing.
+      // Every trace starts in this process; without an OTLP endpoint no tracer is installed.
       Layer.provide(TracingLive("rmq-producer")),
       Layer.provideMerge(Rmq.layer(settings.broker)),
     ),

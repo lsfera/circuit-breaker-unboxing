@@ -13,9 +13,8 @@ test("a failed call is handed back to the broker, not retried here", () => {
 });
 
 /**
- * The work message's encoder and decoder are one declaration shared by the
- * producer and every daemon, so the properties that matter are the two ends
- * agreeing and a bad body being an answer rather than a crash.
+ * The work message's encoder and decoder are one declaration shared by the producer and every daemon, so what
+ * matters is the two ends agreeing and a bad body being an answer rather than a crash.
  */
 test("what the producer encodes, a daemon decodes", () => {
   const body = encodeWorkMessage({ apiId: "payments-provider", n: 7 });

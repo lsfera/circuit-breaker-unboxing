@@ -16,12 +16,10 @@ import * as Upstream from "./Upstream.ts";
 import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
 
 /**
- * One competing-consumer daemon behind a circuit breaker that lives in the
- * broker (see Breaker.ts): tripping cancels this replica's consumer, and a
- * message sent through the delay chain is what brings it back. It still knows
- * nothing about the other daemons — five replicas are five breakers, each with
- * its own token — but none of them holds a timer, a state machine's clock, or
- * an open breaker's rejected messages: an open replica is simply not consuming.
+ * One competing-consumer daemon behind a circuit breaker that lives in the broker (see Breaker.ts): tripping
+ * cancels this replica's consumer and a message through the delay chain brings it back. It still knows nothing
+ * about the other daemons: five replicas are five breakers, each with its own token; an open replica is simply
+ * not consuming.
  */
 
 export type ConsumerConfig = {
@@ -37,29 +35,23 @@ export type ConsumerConfig = {
 };
 
 /**
- * Whether a call outcome should be accepted or handed back to the broker.
- * Pulled out as a total function of what matters — pure, exhaustively
- * testable, no broker, breaker, or fetch involved.
+ * Whether a call outcome is accepted or handed back to the broker: a total function of what matters, so it is
+ * testable without a broker, breaker or fetch.
  *
- * A failure is charged to the message (`requeue` counts toward the queue's
- * delivery budget) only when it stands alone. One that follows another failure
- * on the same replica — `streak` above 1 — or that is a probe is evidence about
- * the third party, not about the message, and is `release`d: handed back with
- * no strike. The breaker needs `consecutiveFailures` calls to open and its
- * consumer takes a round trip to stop, and in that window the same few messages
- * are redelivered to it again and again: charged, a message dead-letters with
- * nothing wrong with it, which the chaos run found at 2–3 messages per outage
- * under a 1,000/s spike. A message that fails between successes — a poison
- * message on a healthy third party — is still charged, and still parked.
+ * A failure is charged to the message (`requeue` counts toward the queue's delivery budget) only when it stands
+ * alone. One that follows another failure on the same replica (`streak` above 1) or is a probe is evidence about
+ * the third party, not the message, and is `release`d with no strike: the breaker needs `consecutiveFailures`
+ * calls to open and its consumer takes a round trip to stop, and in that window the same few messages are
+ * redelivered again and again, so charging them would dead-letter healthy messages. A message that fails between
+ * successes (a poison message on a healthy third party) is still charged, and still parked.
  */
 export type Role = "work" | "probe";
 export const decide = (outcome: Upstream.CallOutcome, role: Role = "work", streak = 1): Settlement =>
   outcome === "ok" ? "accept" : role === "probe" || streak > 1 ? "release" : "requeue";
 
 /**
- * Longer than the client's own connection-recovery budget (about five
- * minutes), so a wake queue survives a reconnect and is collected only once
- * its replica is really gone. The queue only expires while it has no consumer.
+ * Longer than the client's connection-recovery budget (about five minutes), so a wake queue survives a reconnect
+ * and is collected only once its replica is really gone. The queue only expires while it has no consumer.
  */
 const WAKE_QUEUE_EXPIRES_MS = 600_000;
 
@@ -71,16 +63,13 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   yield* rmq.declareQueue(deadQueue, deadLetterQueueOptions());
   yield* rmq.declareQueue(workQueue, workQueueOptions(cfg.apiId));
 
-  // Captured so the plain-async handler below (amqplib's own callback, not an
-  // Effect fiber) can still update metrics through this process's services —
-  // see rmq-consumer/src/daemon.ts's identical comment on why the bare
-  // `Effect.run*` entry points are wrong here.
+  // Captured so the plain-async handler below (amqplib's callback, not an Effect fiber) can still update
+  // metrics through this process's services.
   const services = yield* Effect.context<HttpClient.HttpClient>();
   const runInContext = Effect.runPromiseWith(services);
 
-  // The breaker's open state is a message in the delay chain addressed to this
-  // replica, so the queue it comes back on belongs to this replica: named by
-  // it, and collected by the broker when the replica is gone for good.
+  // The open state is a message addressed to this replica, so the queue it comes back on belongs to it: named
+  // by it, and collected by the broker when the replica is gone for good.
   const wakeQueue = `${cfg.apiId}.breaker.wake.${cfg.replicaId}`;
   yield* Delay.declare();
   yield* rmq.declareQueue(wakeQueue, { args: { "x-expires": WAKE_QUEUE_EXPIRES_MS } });
@@ -114,16 +103,11 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
     return decide(outcome, role, streak);
   };
 
-  // A body that declares a content type, encoding or message type this daemon
-  // cannot read, does not decode, or carries no `message_id` to use as its
-  // idempotency key, was never published by this fleet: discard
-  // it rather than spend the delivery budget on something no retry can fix.
-  //
-  // Said out loud, because RabbitMQ's own guidance for a consumer handed a
-  // delivery it cannot handle is to log it, and a publisher that starts sending
-  // `gzip` by mistake would otherwise empty the queue into the dead-letter queue
-  // without a trace. The counter carries the volume; the log carries what was
-  // declared, at most once a second so a flood does not become the incident.
+  // A body that declares a content type, encoding or message type this daemon cannot read, does not decode, or
+  // carries no `message_id` to use as its idempotency key was never published by this fleet: discard it rather
+  // than spend the delivery budget on something no retry can fix. It is logged, at most once a second, because
+  // a publisher that starts sending `gzip` by mistake would otherwise empty the queue into the dead-letter queue
+  // without a trace; the counter carries the volume.
   let lastLoggedAt = 0;
   const discard = (reason: "format" | "malformed" | "keyless", delivery: DeliveryInfo): Promise<Settlement> => {
     runInContext(Metric.update(Metric.withAttributes(Telemetry.discarded, { reason }), 1));

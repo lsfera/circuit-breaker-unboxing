@@ -3,24 +3,19 @@ import { Rmq } from "./Client.ts";
 import type { Publisher, RmqError, SendOptions } from "./Client.ts";
 
 /**
- * Delivery held in the broker for up to about 36 hours, with nothing but
- * RabbitMQ doing the holding. The same binary-counter chain NServiceBus's
- * RabbitMQ transport uses for delayed delivery
- * (https://docs.particular.net/transports/rabbitmq/delayed-delivery), at
- * one-second resolution and `LEVELS` levels instead of 28.
+ * Delivery held in the broker for up to about 36 hours, with nothing but RabbitMQ doing the holding: the
+ * binary-counter chain of NServiceBus's RabbitMQ transport
+ * (https://docs.particular.net/transports/rabbitmq/delayed-delivery), at one-second resolution and `LEVELS`
+ * levels instead of 28.
  *
- * Level `n` is a queue whose messages all expire after exactly 2^n seconds and
- * dead-letter into level `n-1`'s exchange; level 0 dead-letters into the
- * delivery exchange. A delay of `d` seconds is `d` written in binary, one word
- * per level, and every level's exchange asks one question of the routing key:
- * is my bit set? Set, the message waits in this level's queue for 2^n seconds;
- * clear, it is passed straight down. Because a queue's messages all share one
- * TTL, the one that expires next is always the head — the case RabbitMQ's
- * per-queue TTL handles exactly, which a single queue of mixed TTLs would not.
+ * Level `n` is a queue whose messages all expire after exactly 2^n seconds and dead-letter into level `n-1`'s
+ * exchange; level 0 dead-letters into the delivery exchange. A delay of `d` seconds is `d` written in binary,
+ * one word per level, and every level's exchange asks whether its bit is set: set, the message waits in this
+ * level's queue; clear, it is passed straight down. Every message in a queue shares one TTL, so the next to
+ * expire is always the head, which per-queue TTL handles exactly and a queue of mixed TTLs would not.
  *
- * The routing key is `<LEVELS bits, high first>.<destination>`, and the
- * destination is whatever `#.<destination>` a queue bound on the delivery
- * exchange. Nothing here knows what a breaker is.
+ * The routing key is `<LEVELS bits, high first>.<destination>`, and the destination is whatever `#.<destination>`
+ * a queue bound on the delivery exchange. Nothing here knows what a breaker is.
  */
 
 /** 2^17 - 1 seconds is 36.4 hours, the first power of two past a day. */
@@ -50,10 +45,9 @@ export const entryLevel = (seconds: number): number => LEVELS - 1 - bits(seconds
 export const bindingKey = (destination: string): string => `#.${destination}`;
 
 /**
- * The chain, idempotent and safe to declare from every process. Durable and
- * quorum, since a message in it is a promise that outlives a broker restart —
- * and `at-least-once` dead-lettering, so a hop between levels is never the place
- * one is lost.
+ * The chain, idempotent and safe to declare from every process. Durable and quorum, since a message in it is a
+ * promise that outlives a broker restart, with `at-least-once` dead-lettering so a hop between levels is never
+ * where one is lost.
  */
 export const declare = Effect.fnUntraced(function* () {
   const rmq = yield* Rmq;
@@ -86,10 +80,8 @@ export const receive = Effect.fnUntraced(function* (queue: string) {
 });
 
 /**
- * Deliver `body` to `destination` in `seconds`, give or take the chain's own
- * latency, which is one TTL check per level the message waits in. Confirmed by
- * the broker once it is in the first queue, which is the moment the delay is a
- * promise rather than a hope.
+ * Deliver `body` to `destination` in `seconds`, give or take the chain's own latency (one TTL check per level
+ * the message waits in). Confirmed once it is in the first queue, which is when the delay is a promise.
  */
 export const sendDelayed = Effect.fnUntraced(function* (
   destination: string,

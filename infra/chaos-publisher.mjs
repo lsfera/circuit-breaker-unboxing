@@ -1,15 +1,10 @@
 /**
- * The chaos harness's load generator, forked by infra/chaos-load.mjs: publishes
- * onto the work queue at a rate the parent changes over IPC, and remembers
- * exactly which messages the broker confirmed.
- *
- * Every message carries `message_id: <run>:<n>`, which the daemons use as the
- * idempotency key. On `stop` it waits for outstanding confirms, then sends back a bitmap with bit n set for every
- * message confirmed and not returned unroutable — the set the harness checks
- * against what the upstream actually processed.
- *
- * It reconnects when the broker goes away; what was in flight at that moment
- * is simply never confirmed, which is the honest answer.
+ * The chaos harness's load generator, forked by infra/chaos-breaker.mjs: publishes onto the work queue at a rate
+ * the parent changes over IPC, and remembers exactly which messages the broker confirmed. Every message carries
+ * `message_id: <run>:<n>`, which the daemons use as the idempotency key. On `stop` it waits for outstanding
+ * confirms, then sends back a bitmap with bit n set for every message confirmed and not returned unroutable: the
+ * set the harness checks against what the upstream processed. It reconnects when the broker goes away; what was
+ * in flight at that moment is never confirmed, which is the honest answer.
  */
 
 import { createRequire } from "node:module";

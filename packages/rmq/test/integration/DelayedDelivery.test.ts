@@ -6,8 +6,7 @@ import { Rmq } from "../../src/Client.ts";
 import * as Delay from "../../src/DelayedDelivery.ts";
 
 /**
- * The delay chain against a real broker: what arrives, where, and how late.
- * Real time — the chain's whole job is wall-clock waiting, and a broker's TTL
+ * The delay chain against a real broker: what arrives, where, and how late. Real time, because a broker's TTL
  * check is not something a fake clock can stand in for.
  */
 

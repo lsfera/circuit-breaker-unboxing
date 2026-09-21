@@ -3,11 +3,8 @@ import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstab
 import { IDEMPOTENCY_KEY_HTTP_HEADER } from "@egress/rmq/WorkQueue.ts";
 
 /**
- * The one third-party call this daemon makes, reduced to whether it worked.
- *
- * Nothing here distinguishes a timeout, a refused connection or a 5xx from
- * one another — that distinction is exactly what a breaker exists to make.
- * The idempotency key rides along as the third party's own HTTP header, so a
+ * The one third-party call this daemon makes, reduced to whether it worked: a timeout, a refused connection
+ * and a 5xx are not told apart. The idempotency key rides along as the third party's own HTTP header, so a
  * redelivered message repeats the same request rather than a new one.
  */
 

@@ -1,32 +1,25 @@
 /**
- * Chaos for the RabbitMQ-held breaker: real faults, injected under a traffic
- * spike, each judged first on correctness and then on what the breaker did.
+ * Chaos for the RabbitMQ-held breaker: real faults, injected under a traffic spike, each judged first on
+ * correctness and then on what the breaker did.
  *
  *   node infra/chaos-breaker.mjs                      # every scenario
  *   node infra/chaos-breaker.mjs --scenarios=outage,kill-broker-while-open
  *   node infra/chaos-breaker.mjs --list
  *
- * Correctness is the bar, and it is judged per message rather than from broker
- * counters: every message carries `message_id: <run>:<n>`, the publisher reports
- * exactly which n the broker confirmed, the flaky upstream reports which n it
- * answered 200, and after the fleet has drained
+ * Correctness is judged per message, not from broker counters: every message carries `message_id: <run>:<n>`,
+ * the publisher reports which n the broker confirmed, the flaky upstream reports which n it answered 200, and
+ * after the fleet drains `unprocessed = confirmed ∧ ¬processed` is either parked in the dead-letter queue or
+ * lost. The bar is that nothing is lost and the dead-letter queue has not grown; the upstream's audit counts
+ * exact duplicates too.
  *
- *   unprocessed = confirmed ∧ ¬processed
+ * Then the breaker: every replica's log is read back and each transition checked against the machine (closed →
+ * open → half-open → closed | open), and the broker's own consumer count on the work queue is compared with the
+ * number of replicas that are not open, which is the claim the design rests on.
  *
- * is either parked in the dead-letter queue or lost; the run's bar is that
- * nothing is lost and the dead-letter queue has not grown, so both must be
- * empty. The upstream's audit counts exact duplicate calls too.
- *
- * Then the breaker: every replica's log is read back and each transition is
- * checked against the machine (closed → open → half-open → closed | open), and
- * — the claim this design is built on — the broker's own consumer count on the
- * work queue is compared with the number of replicas that are not open.
- *
- * Assumes `docker compose up -d`, a shell that reaches the services by name and
- * can run `docker`. It kills real containers and restarts the broker, so it is
- * not something to point at anything you care about. The compose producer is
- * stopped for a run (all traffic comes from one forked publisher) and started
- * again at the end, along with anything a scenario killed.
+ * Assumes `docker compose up -d`, a shell that reaches the services by name and can run `docker`. It kills real
+ * containers and restarts the broker, so do not point it at anything you care about. The compose producer is
+ * stopped for a run (all traffic comes from one forked publisher) and started again at the end, along with
+ * anything a scenario killed.
  */
 import { execFile, fork } from "node:child_process";
 import { createRequire } from "node:module";

@@ -1,8 +1,6 @@
-# The build context is the workspace, and the two things that must never enter
-# it are the ones that are largest and most misleading. node_modules is a pnpm
-# store of absolute symlinks pointing at paths that do not exist in the image —
-# copying it in produces a container that fails at import time for reasons that
-# look nothing like "you copied the wrong node_modules". .git is simply large.
+# The build context is the workspace. node_modules is a pnpm store of absolute symlinks to paths that do not exist
+# in the image (a container that fails at import time for reasons that look nothing like "wrong node_modules");
+# .git is simply large.
 node_modules
 **/node_modules
 .git
@@ -17,10 +15,8 @@ skills-lock.json
 AGENTS.md
 CLAUDE.md
 
-# Reference material for reading, never for running. repos/effect is 53 MB and
-# 3,976 files of Effect's own source and tests, which the image gets from
-# node_modules like any other dependency; sending it as build context would
-# only make every build slower.
+# Reference material, never for running: repos/effect is 53 MB of Effect's own source, which the image gets from
+# node_modules like any other dependency.
 repos
 agent-patterns
 

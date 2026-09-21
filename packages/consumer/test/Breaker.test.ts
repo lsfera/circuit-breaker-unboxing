@@ -5,10 +5,8 @@ import * as Breaker from "../src/Breaker.ts";
 import type { Consumer } from "@egress/rmq/Client.ts";
 
 /**
- * The state machine against a fake world: no broker, no third party, no
- * timers. What the fake records is exactly what would reach RabbitMQ — which
- * consumers exist, which tokens are in flight — because in this breaker those
- * *are* the state.
+ * The state machine against a fake world: no broker, no third party, no timers. What the fake records is what
+ * would reach RabbitMQ (which consumers exist, which tokens are in flight), because in this breaker those are the state.
  */
 
 const cfg: Breaker.BreakerConfig = { consecutiveFailures: 3, initialDelaySeconds: 2, maxDelaySeconds: 60 };
