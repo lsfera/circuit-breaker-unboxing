@@ -1,11 +1,8 @@
 # In-process breaker — five, not one
 
 One producer, one broker, a fleet of competing-consumer daemons — each one
-now wrapping its calls to the third party in its own [cockatiel](https://github.com/connor4312/cockatiel)
-circuit breaker. This is the second step in a circuit-breaker article series,
-built on the `article/01-base-scenario` branch (no breaker at all). It's
-still deliberately incomplete: five replicas mean five breakers, and nothing
-here makes them agree with each other.
+wrapping its calls to the third party in its own
+[cockatiel](https://github.com/connor4312/cockatiel) circuit breaker.
 
 ```mermaid
 flowchart LR
@@ -32,47 +29,34 @@ subgraphs are the point: nothing here draws a line *between* them.
 
 ## The breaker
 
-`packages/consumer/src/Breaker.ts` wraps every third-party call in a
-cockatiel `CircuitBreakerPolicy`, one instance per process, created once and
-reused for the process's whole life (cockatiel's own docs are explicit that
-a breaker only works if the same instance sees every execution — a fresh one
-per call would never accumulate a failure count).
+`packages/consumer/src/Breaker.ts` wraps every third-party call in a cockatiel
+`CircuitBreakerPolicy`, one instance per process, created once and reused for
+the process's whole life (a breaker only works if the same instance sees every
+execution; a fresh one per call would never accumulate a failure count).
 
 - **Trip condition**: `ConsecutiveBreaker(BREAKER_THRESHOLD)` — opens after
-  `BREAKER_THRESHOLD` (default 5) calls fail in a row. This is the direct
-  in-code version of "a threshold on recent failures, never a single
-  failure" from Part 1 of the article series.
+  `BREAKER_THRESHOLD` (default 5) calls fail in a row.
 - **Re-open timing**: `ExponentialBackoff` from `BREAKER_INITIAL_DELAY_MS`
-  (default 1000ms) up to `BREAKER_MAX_DELAY_MS` (default 30000ms), doubling
-  each time a half-open probe still fails. cockatiel's default backoff
-  generator is already decorrelated-jitter — "exponential backoff and
-  jitter" is what `new ExponentialBackoff()` gives you without extra
-  configuration, not something layered on top.
-- **Three outcomes now, not two**: `"ok"` (accept), `"failed"` (a real call
-  was attempted and failed, requeue — same as article 1), and `"open"` (the
-  breaker rejected the call itself; **no call reached the third party**,
-  requeue after a short jittered hold).
+  (default 1000ms) up to `BREAKER_MAX_DELAY_MS` (default 30000ms), doubling each
+  time a half-open probe still fails. cockatiel's default generator already
+  includes decorrelated jitter.
+- **Three outcomes**: `"ok"` (accept), `"failed"` (a real call was attempted and
+  failed; requeue), and `"open"` (the breaker rejected the call itself, so
+  **no call reached the third party**; requeue after a short jittered hold).
 
-That hold (100–400ms, `OPEN_REQUEUE_DELAY_MIN_MS`/`SPREAD_MS` in
-`consumer.ts`) exists because an open breaker rejects instantly — with no
-hold, a rejected message goes straight back onto the queue and straight back
-to the same consumer, which can spin against its own in-memory breaker at
-whatever rate the broker will redeliver. The third party stops being
-hammered; without the hold, the *broker* takes its place. Same shape as the
-100–400ms jittered hold the pre-breaker daemon this series later removed
-used for a shed `429`.
-
-## What this still doesn't fix
-
-Five consumers means five breakers, each formed only from the calls that one
-process happened to make. They will trip at different moments, recover at
-different moments, and briefly disagree about whether the same third party
-is up — watch the "Breaker state per replica" panel on the dashboard during
-an incident, or read `infra/incident.mjs`'s own `breaker agreement` line at
-the end of a run. Coordinating that into one fleet-wide verdict is a
-different, harder problem — the next branch in this series, not this one.
+That hold (`OPEN_REQUEUE_DELAY_MIN_MS` 100 plus up to `OPEN_REQUEUE_DELAY_SPREAD_MS`
+300, in `consumer.ts`) exists because an open breaker rejects instantly. With no
+hold, a rejected message goes straight back onto the queue and to the same
+consumer, which can spin against its own in-memory breaker at whatever rate the
+broker will redeliver: the third party stops being hammered, and the *broker*
+takes its place.
 
 ## Running it
+
+The compose file bind-mounts config from the repo through
+`HOST_WORKSPACE_FOLDER`. It defaults to `.`, so on Linux and Windows there is
+nothing to set. On macOS, where Docker runs in a VM, set it to this repo's path
+*on the Mac* (inside a devcontainer, that is not the path you see).
 
 ```bash
 pnpm install
@@ -81,21 +65,12 @@ docker compose up -d --scale rmq-consumer=12   # resize the fleet, no restart ne
 ```
 
 - RabbitMQ management UI: <http://localhost:15672> (guest/guest) — watch
-  `payments-provider.work`'s depth and `payments-provider.work.dead`'s
-  growth.
-- Grafana: <http://localhost:3000/d/in-process-breaker/in-process-breaker-e28094-five-not-one>
-  — anonymous viewer access, no login needed. (Plain `:3000` lands on
-  Grafana's own "Welcome" screen, not this dashboard — Grafana 13's
-  anonymous Viewer role can't be granted the permission a *default home
-  dashboard* needs, so there's no way to make `:3000` redirect here without
-  requiring login. Use the direct link, or `Dashboards` in the left nav.)
-  Panels: breaker state per replica, work-queue depth, dead-letter-queue
-  depth, calls by outcome, breaker trips, active consumers.
-- Grafana's own nav bar fires two calls (`/api/user/teams`,
-  `/api/user/stars`) that need a real signed-in user and 401 for an
-  anonymous session — a known rough edge in Grafana's anonymous-auth mode,
-  not something this compose file controls. It shows as a stray toast on
-  first load; the dashboard and its data are unaffected.
+  `payments-provider.work`'s depth and `payments-provider.work.dead`'s growth.
+- Grafana: <http://localhost:3000/d/in-process-breaker>
+  Panels: breaker state per replica, work-queue depth, dead-letter-queue depth,
+  calls by outcome, breaker trips, active consumers. Plain `:3000` lands on
+  Grafana's Welcome screen, not this dashboard — use the direct link, or
+  `Dashboards` in the left nav.
 - Prometheus: <http://localhost:9090>.
 
 ## Injecting a failure
@@ -111,6 +86,10 @@ curl -X POST localhost:8080/__fail -d '{"delayMs":1500}'            # slow, stil
 curl -X POST localhost:8080/__fail -d '{}'                          # healthy again
 ```
 
+Every call answered 200 is recorded by its idempotency key (`<run>:<n>`), so you
+can check what got through: `curl 'localhost:8080/__audit?run=*'` for totals, or
+`?run=<id>` for one run's processed and duplicate counts.
+
 ## The incident script
 
 ```bash
@@ -118,16 +97,86 @@ pnpm run incident
 MODE=hang node infra/incident.mjs
 ```
 
-Injects a full failure, watches the work queue and dead-letter queue for a
-fixed window, restores the third party, and reports peak backlog, total
-dead-lettered, time to drain, and a processed/duplicate count from
-`flaky-upstream`'s own audit trail — same as article 1's version, plus one
-thing this branch actually has to measure: at every poll tick it also reads
-each replica's `egress_consumer_breaker_state` from Prometheus
-(`PROMETHEUS`, default `http://localhost:9090`) and reports what fraction of
-ticks saw every replica in the *same* state, and the peak number open at
-once. That's the concrete, measured version of "five independent breakers
-disagree" — produced by this branch's own run, not asserted.
+Injects a full failure, watches the work and dead-letter queues (over AMQP,
+straight from the broker), restores the third party, and reports peak backlog,
+total dead-lettered, time to drain, and a processed/duplicate count from
+`flaky-upstream`'s audit trail. It keeps watching until every breaker has closed
+again, and reports what this branch has to measure: how many times the fleet's
+breakers opened (`egress_consumer_breaker_trips_total`), the fraction of poll
+ticks in which every replica was in the *same* state, the peak number open at
+once, and how long after restore the last one closed. Replica states are read
+from Prometheus (`PROMETHEUS`, default `http://localhost:9090`).
+
+### What it measured
+
+A 15s error-mode outage at 200 msg/s, five consumers, five breakers, recorded
+2026-09-20 (2.4× real time, also as [video](docs/media/incident-in-process-breaker.webm)):
+four breakers trip within seconds of each other, a fifth later (in the recording
+one never trips), the work queue peaks and the dead-letter queue climbs, and
+after restore the replicas close out of step, the last one 28s later.
+
+![Grafana during a 15s outage with five in-process breakers](docs/media/incident-in-process-breaker.gif)
+
+| Thirteen recorded runs | Range |
+| --- | ---: |
+| Breaker openings across the fleet | 26 – 28 (median 27) |
+| Ticks with all five replicas in one state | 32 – 78% (median 56%) |
+| All replicas closed, after restore | 10.5 – 29.4s (median 22s) |
+| Peak ready in the work queue | 1,458 – 1,496 |
+| Dead-lettered | 1,577 – 2,246 |
+| Calls that reached the third party and failed | 52 – 59 |
+| Attempts turned away by an open breaker | 7,600 – 10,500 |
+
+A later re-run on a rebuilt stack gave 25 openings, 79% agreement, all closed
+8.9s after restore, 1,472 peak ready, 1,703 dead-lettered, 52 failed calls and
+7,518 turned away. Peak ready, dead-lettered and failed calls are inside the
+ranges; openings, agreement, closing time and turned-away attempts sit just
+outside them, so read the ranges as a spread, not as bounds.
+
+The breaker does its one job: each replica stops calling the dead third party
+after five consecutive failures, and a failed probe costs one more call before
+it opens again — about 11 failed calls per replica across the whole incident.
+Five of five were open at the same instant in every run. What it cannot do is
+make the five agree: they trip and recover on their own clocks, and one outage
+costs about 27 openings, not one.
+
+### What this branch cannot overcome
+
+Each limit below follows from having five independent breakers; none is a bug
+in `Breaker.ts`.
+
+1. **No coordination between breakers.** Each `CircuitBreakerPolicy` is private
+   to its process and formed only from the calls that process happened to make.
+   They open within seconds of each other but not together, and recovery is
+   looser still: the fleet took 9–29s to be fully closed again.
+2. **A message is dead-lettered without ever reaching the third party.**
+   `WORK_DELIVERY_LIMIT` is 3 (`packages/rmq/src/ControlPlane.ts`), and
+   `decide()` maps both `"failed"` and `"open"` to the same counted `"requeue"`.
+   1,577–2,246 messages were dead-lettered per incident, while only 52–59 calls
+   failed at the third party. A dead-lettered message needs three deliveries, so
+   at most 59 of them had seen a real failure: **at least 96%** were killed by
+   their own replica's breaker, and look exactly like three genuine failures in
+   the dead-letter queue.
+3. **Recovery is as uncoordinated as tripping.** Each replica's half-open probe
+   fires on its own `ExponentialBackoff` clock, so one replica can be closed
+   while another is still open for the same third party. A probe that lands in a
+   still-flaky moment resets one replica's backoff without telling the other four.
+4. **A successful probe can start a thundering herd** *(from cockatiel's source,
+   not measured)*. `Breaker.ts` never sets `halfOpenSampling`, so cockatiel lets
+   exactly one trial call through. But with `maxInFlight` 20, up to 19 other
+   messages are already in flight through that breaker, and cockatiel makes them
+   wait for the trial's outcome rather than rejecting them. If the probe
+   succeeds they all fire in the same batch; across the fleet the worst case
+   approaches `maxInFlight × replica count`.
+5. **Turned-away volume scales with fleet size, not health.** Each breaker keeps
+   taking its share of the queue and rejecting it after a 100–400ms hold, rather
+   than the fleet stepping back together: 7,518 · 7,637 · 8,123 · 8,519 · 9,637 ·
+   10,457 attempts turned away in six measured incidents.
+6. **Dead-lettered work has no way back.** Nothing redrives
+   `payments-provider.work.dead` once the third party recovers.
+7. **Nothing announces the outage.** Breaker state is on Prometheus and Grafana
+   and nowhere else — no alert, no webhook — and `onBreak` fires once per replica
+   per opening, so paging on it would ring about 27 times for one outage.
 
 ## Load
 
@@ -149,27 +198,25 @@ packages/
                work-queue naming/options a producer and a consumer fleet share
   rmq-producer/  the load: a steady stream onto <apiId>.work, never backing off
   consumer/    the competing-consumer fleet, each with its own in-process
-               breaker (src/Breaker.ts) — see src/consumer.ts for what that
-               still doesn't coordinate
+               breaker (src/Breaker.ts)
   tracing/     the /metrics HTTP route every process serves; OpenTelemetry
                tracing is wired but off unless OTEL_EXPORTER_OTLP_ENDPOINT is set
 infra/
   flaky-upstream.mjs   the fake third party: configurable failures, an audit trail
   rabbitmq.conf        the broker's flow-control watermark
   incident.mjs         drives one incident, reports what happened including
-                        whether the fleet's breakers agreed with each other
+                       whether the fleet's breakers agreed with each other
   monitoring/          Prometheus scrape config and the Grafana dashboard
 docker-compose.yml     the whole stack
 ```
 
-Built on **Effect 4 (4.0.0-rc.115)**, same as the full system this branch was
-pruned from — see `AGENTS.md` for why that version matters when writing
-Effect code here. No build step: every package runs straight off its
-`src/*.ts` through Node's built-in type stripping.
+Built on **Effect 4 (4.0.0-rc.115)** — see `AGENTS.md` for why that version
+matters when writing Effect code here. No build step: every package runs
+straight off its `src/*.ts` through Node's built-in type stripping.
 
 ## Verification
 
 ```bash
-pnpm run check       # typecheck + unit tests, including Breaker.test.ts against the real library
+pnpm run check       # vendored-version check, typecheck, unit tests (Breaker.test.ts runs against the real library)
 pnpm run test:rmq    # optional — needs Docker: AMQP behaviour against a real broker
 ```
