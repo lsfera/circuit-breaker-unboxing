@@ -1,6 +1,6 @@
 # Effect 3 idioms, and what they are in Effect 4
 
-This repository runs `effect@4.0.0-rc.115`. Most Effect material in
+This repository runs `effect@4.0.0-rc.116`. Most Effect material in
 circulation — blog posts, model memory, and some of this repository's own
 agent skills — is Effect 3, and Effect 4 renamed or removed a good deal of it.
 The code usually fails to compile, which is the good outcome. The bad one is

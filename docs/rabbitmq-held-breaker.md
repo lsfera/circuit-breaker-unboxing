@@ -155,6 +155,26 @@ breaker is still opening.
 | `delay-survives-broker-restart` | 1 | 1 | 0 | 0 | 0 | — | — | 100 s | — |
 | `partial` (informational) | 44,505 | 44,494 | 0 | 0 | 11 | 83 | 5 | 15 s | 13 s |
 
+The same scenarios again on 2026-09-21, after the dependencies moved to the latest
+(Effect rc.116), one run each; every graded scenario passes again
+([the run](runs/chaos-breaker-rc116.json)):
+
+| | sent | processed | duplicates | lost | dead-lettered | openings | peak tokens | longest hold | all closed after restore |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `outage` | 47,035 | 47,035 | 0 | 0 | **0** | 30 | 5 | 32 s | 25 s |
+| `outage-hang` | 48,617 | 48,617 | 0 | 0 | **0** | 29 | 5 | 32 s | 34 s |
+| `kill-open-replica` | 44,989 | 44,989 | 0 | 0 | **0** | 31 | 5 | 28 s | 15 s |
+| `kill-broker-while-open` | 42,857 | 42,855 | 0 | 0 | **0** | 30 | 5 | 32 s | 25 s |
+| `delay-survives-broker-restart` | 1 | 1 | 0 | 0 | 0 | — | — | 100.8 s | — |
+| `partial` (informational) | 45,721 | 45,709 | 0 | 0 | 12 | 67 | 5 | 32 s | 19 s |
+
+In `kill-broker-while-open` the publisher sent 42,857 messages and the broker
+confirmed 42,845. The 12 it never confirmed were in flight when the broker
+restarted; 10 of them reached the queue anyway and were processed, and 2 did not.
+Nothing confirmed was lost, which is the bar, but a publisher that restarts the
+broker under itself cannot say more than that about its last few messages. The
+first table's run had none in flight.
+
 A killed replica comes back closed and starts over, and the token addressed to
 its dead predecessor goes to a queue nobody reads. That is deliberate: each
 process names its wake queue with a fresh random id rather than the container's

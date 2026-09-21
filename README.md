@@ -119,7 +119,8 @@ not grown) and then on the breaker: an outage, a hanging third party, a
 `docker kill` of a replica while it is open, a broker restart with five tokens
 in the chain, and a 100 s delay across a broker restart. All five graded
 scenarios pass after the `release` fix, about 45,000 messages each: 0 lost, 0
-duplicates, 0 dead-lettered. Runs are saved under `history/runs/` (git-ignored;
+duplicates, 0 dead-lettered. They passed again on the latest dependencies
+(Effect rc.116), 2026-09-21. Runs are saved under `history/runs/` (git-ignored;
 the runs behind the article are kept in `docs/runs/`).
 `infra/capture-incident.mjs` records the dashboard through an incident (it needs
 `playwright-core`, which this repo does not depend on).
@@ -239,7 +240,7 @@ docs/                  the write-up, its screenshots and recording, saved chaos 
 docker-compose.yml     the whole stack
 ```
 
-Built on **Effect 4 (4.0.0-rc.115)** — see `AGENTS.md` for why that version
+Built on **Effect 4 (4.0.0-rc.116)** — see `AGENTS.md` for why that version
 matters when writing Effect code here. No build step: every package runs
 straight off its `src/*.ts` through Node's built-in type stripping.
 
