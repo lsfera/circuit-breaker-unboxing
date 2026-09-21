@@ -16,8 +16,8 @@
     "incident": "node infra/incident.mjs"
   },
   "devDependencies": {
-    "@types/node": "^26.5.1",
-    "jsdom": "^30.0.1",
+    "@types/node": "^26.6.2",
+    "jsdom": "^30.1.0",
     "mermaid": "12.0.0",
     "typescript": "^7.0.2"
   }
