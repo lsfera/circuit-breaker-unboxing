@@ -1,5 +1,5 @@
 {
- "title": "In-process breaker — five, not one",
+ "title": "In-process breaker, held by RabbitMQ",
  "uid": "in-process-breaker",
  "schemaVersion": 39,
  "version": 1,

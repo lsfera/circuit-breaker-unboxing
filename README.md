@@ -1,14 +1,12 @@
 # In-process breaker, held by RabbitMQ — five, not one
 
 One producer, one broker, a fleet of competing-consumer daemons — each one
-wrapping its calls to the third party in its own circuit breaker. This is the
-RabbitMQ-only variant of the second step in a circuit-breaker article series,
-built on the `article/01-base-scenario` branch (no breaker at all). Where
+wrapping its calls to the third party in its own circuit breaker. Where
 `article/02-in-process-breaker` keeps the breaker in memory with
 [cockatiel](https://github.com/connor4312/cockatiel), here **no breaker state is
 in the process**: "open" is a consumer that isn't consuming, and the timer that
-ends it is a message the broker holds. Still deliberately incomplete: five
-replicas mean five breakers, and nothing here makes them agree with each other.
+ends it is a message the broker holds. The full write-up is
+[docs/rabbitmq-held-breaker.md](docs/rabbitmq-held-breaker.md).
 
 ```mermaid
 flowchart LR
@@ -99,7 +97,10 @@ dead-lettered a message. That is the mechanism the numbers point to; I did not
 instrument the old build to count rejections per message. A 70-second outage on the new build: 67 calls
 reached the third party across five replicas, nothing dead-lettered, holds grew
 1 → 2 → 4 → 8 → … → 62 s, and the last breaker closed 55.9 s after restore. Both
-tables are one run each — a single incident, not a distribution.
+tables are one run each — a single incident, not a distribution. A later re-run
+of the 20-second outage on a rebuilt stack gave the same shape: nothing
+dead-lettered, 55 calls reached the third party, 25 breaker openings, peak
+backlog 4,040, and every breaker closed 12.0 s after restore (9.0 s above).
 
 ### The price of a long hold
 
@@ -117,13 +118,19 @@ and judges each on correctness (per message: nothing lost, dead-letter queue
 not grown) and then on the breaker: an outage, a hanging third party, a
 `docker kill` of a replica while it is open, a broker restart with five tokens
 in the chain, and a 100 s delay across a broker restart. All five graded
-scenarios pass after the `release` fix, about 45,000 messages each; the write-up,
-with screenshots of the incident, is
-[docs/rabbitmq-held-breaker.md](docs/rabbitmq-held-breaker.md). Runs are saved
-under `history/runs/` (git-ignored; the runs behind the article are kept in
-`docs/runs/`). `infra/capture-incident.mjs` records the dashboard
-through an incident (it needs `playwright-core`, which this repo does not
-depend on).
+scenarios pass after the `release` fix, about 45,000 messages each: 0 lost, 0
+duplicates, 0 dead-lettered. Runs are saved under `history/runs/` (git-ignored;
+the runs behind the article are kept in `docs/runs/`).
+`infra/capture-incident.mjs` records the dashboard through an incident (it needs
+`playwright-core`, which this repo does not depend on).
+
+![Grafana mid-outage: five breakers open, wake tokens in the delay chain, work queue filling, dead-letter queue flat](docs/media/2-mid-outage.png)
+
+The dashboard 12 seconds into a total outage
+([recording](docs/media/incident.webm)): the consumer count on the work queue
+is the fleet's state, and the wake tokens in the delay chain are the open
+breakers. The dead-letter line is flat, but not at zero: it is what earlier
+experiments left there, and that it does not move is the point.
 
 ## What this still doesn't fix
 
@@ -134,9 +141,14 @@ is up — watch the "Breaker state per replica" panel on the dashboard during
 an incident, or read `infra/incident.mjs`'s own `breaker agreement` line at
 the end of a run. Now that the state lives in the broker, coordinating it into
 one fleet-wide verdict is a smaller step — one token instead of five — but it is
-a different problem, and the next branch in this series, not this one.
+a different problem.
 
 ## Running it
+
+The compose file bind-mounts config from the repo through
+`HOST_WORKSPACE_FOLDER`. It defaults to `.`, so on Linux and Windows there is
+nothing to set. On macOS, where Docker runs in a VM, set it to this repo's path
+*on the Mac* (inside a devcontainer, that is not the path you see).
 
 ```bash
 pnpm install
@@ -147,19 +159,12 @@ docker compose up -d --scale rmq-consumer=12   # resize the fleet, no restart ne
 - RabbitMQ management UI: <http://localhost:15672> (guest/guest) — watch
   `payments-provider.work`'s depth and `payments-provider.work.dead`'s
   growth.
-- Grafana: <http://localhost:3000/d/in-process-breaker/in-process-breaker-e28094-five-not-one>
-  — anonymous viewer access, no login needed. (Plain `:3000` lands on
-  Grafana's own "Welcome" screen, not this dashboard — Grafana 13's
-  anonymous Viewer role can't be granted the permission a *default home
-  dashboard* needs, so there's no way to make `:3000` redirect here without
-  requiring login. Use the direct link, or `Dashboards` in the left nav.)
-  Panels: breaker state per replica, work-queue depth, dead-letter-queue
-  depth, calls by outcome, breaker trips, active consumers.
-- Grafana's own nav bar fires two calls (`/api/user/teams`,
-  `/api/user/stars`) that need a real signed-in user and 401 for an
-  anonymous session — a known rough edge in Grafana's anonymous-auth mode,
-  not something this compose file controls. It shows as a stray toast on
-  first load; the dashboard and its data are unaffected.
+- Grafana: <http://localhost:3000/d/in-process-breaker>
+  Panels: breaker state per replica, work-queue depth, dead-letter-queue depth,
+  calls by outcome, breaker trips, active consumers on the work queue, and the
+  wake tokens RabbitMQ holds (the open breakers). Plain `:3000` lands on
+  Grafana's Welcome screen, not this dashboard — use the direct link, or
+  `Dashboards` in the left nav.
 - Prometheus: <http://localhost:9090>.
 
 ## Injecting a failure
@@ -175,6 +180,10 @@ curl -X POST localhost:8080/__fail -d '{"delayMs":1500}'            # slow, stil
 curl -X POST localhost:8080/__fail -d '{}'                          # healthy again
 ```
 
+Every call answered 200 is recorded by its idempotency key (`<run>:<n>`), so you
+can check what got through: `curl 'localhost:8080/__audit?run=*'` for totals, or
+`?run=<id>` for one run's processed and duplicate counts.
+
 ## The incident script
 
 ```bash
@@ -182,16 +191,15 @@ pnpm run incident
 MODE=hang node infra/incident.mjs
 ```
 
-Injects a full failure, watches the work queue and dead-letter queue for a
-fixed window, restores the third party, and reports peak backlog, total
-dead-lettered, time to drain, and a processed/duplicate count from
-`flaky-upstream`'s own audit trail — same as article 1's version, plus one
-thing this branch actually has to measure: at every poll tick it also reads
-each replica's `egress_consumer_breaker_state` from Prometheus
-(`PROMETHEUS`, default `http://localhost:9090`) and reports what fraction of
-ticks saw every replica in the *same* state, and the peak number open at
-once. That's the concrete, measured version of "five independent breakers
-disagree" — produced by this branch's own run, not asserted.
+Injects a full failure, watches the work and dead-letter queues (over AMQP,
+straight from the broker), restores the third party, and reports peak backlog,
+total dead-lettered, time to drain, and a processed/duplicate count from
+`flaky-upstream`'s audit trail. It keeps watching until every breaker has closed
+again, and reports what this branch has to measure: how many times the fleet's
+breakers opened, the fraction of poll ticks in which every replica was in the
+*same* state, the peak number open at once, and how long after restore the last
+one closed. Replica states are read from Prometheus (`PROMETHEUS`, default
+`http://localhost:9090`).
 
 ## Load
 
@@ -222,20 +230,23 @@ infra/
   flaky-upstream.mjs   the fake third party: configurable failures, an audit trail
   rabbitmq.conf        the broker's flow-control watermark
   incident.mjs         drives one incident, reports what happened including
-                        whether the fleet's breakers agreed with each other
+                       whether the fleet's breakers agreed with each other
+  chaos-breaker.mjs    real faults under a load spike, graded per message
+  chaos-publisher.mjs  its load generator: remembers which messages were confirmed
+  capture-incident.mjs records the dashboard through an incident
   monitoring/          Prometheus scrape config and the Grafana dashboard
+docs/                  the write-up, its screenshots and recording, saved chaos runs
 docker-compose.yml     the whole stack
 ```
 
-Built on **Effect 4 (4.0.0-rc.115)**, same as the full system this branch was
-pruned from — see `AGENTS.md` for why that version matters when writing
-Effect code here. No build step: every package runs straight off its
-`src/*.ts` through Node's built-in type stripping.
+Built on **Effect 4 (4.0.0-rc.115)** — see `AGENTS.md` for why that version
+matters when writing Effect code here. No build step: every package runs
+straight off its `src/*.ts` through Node's built-in type stripping.
 
 ## Verification
 
 ```bash
-pnpm run check       # typecheck + unit tests, including Breaker.test.ts against a fake world
+pnpm run check       # vendored-version check, typecheck, unit tests (Breaker.test.ts runs against a fake world)
 pnpm run test:rmq    # optional — needs Docker: AMQP behaviour against a real broker,
                      # including the delay chain's timing and graceful consumer drain
 ```
