@@ -95,7 +95,7 @@
    "id": 3,
    "type": "timeseries",
    "title": "Calls to the third party, by outcome",
-   "description": "egress_consumer_calls_total. \"open\" is new since article 1: a call this replica's own breaker rejected without ever reaching the third party.",
+   "description": "egress_consumer_calls_total. \"open\" is new since article 1: a call this replica's own breaker rejected without ever reaching the third party. \"client_error\" is a 4xx the third party refused the request with: dead-lettered at once, not a breaker failure.",
    "gridPos": { "x": 0, "y": 15, "w": 12, "h": 8 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
@@ -124,11 +124,27 @@
    ]
   },
   {
+   "id": 7,
+   "type": "timeseries",
+   "title": "Failed and refused calls, by HTTP status",
+   "description": "egress_consumer_calls_total for outcome failed or client_error, by status: the HTTP status the third party answered with, or timeout / network when it never did. A 4xx other than 408 and 429 is a client_error: dead-lettered at once and not counted by the breaker. Everything else here counts.",
+   "gridPos": { "x": 0, "y": 23, "w": 24, "h": 8 },
+   "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+   "targets": [
+    {
+     "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+     "expr": "sum by (status) (rate(egress_consumer_calls_total{outcome=~\"failed|client_error\"}[1m]))",
+     "legendFormat": "{{status}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
    "id": 4,
    "type": "timeseries",
    "title": "Active consumers on the work queue",
    "description": "The broker's own count — should track --scale rmq-consumer=N. A gap between this and the replica count means a daemon has stopped consuming.",
-   "gridPos": { "x": 0, "y": 23, "w": 24, "h": 7 },
+   "gridPos": { "x": 0, "y": 31, "w": 24, "h": 7 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
     {

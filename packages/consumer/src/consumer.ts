@@ -1,4 +1,4 @@
-import { Data, Effect, Match, Metric, Option as O } from "effect";
+import { Effect, Match, Metric, Option as O } from "effect";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { HttpClient } from "effect/unstable/http";
 import { Rmq } from "@egress/rmq/Client.ts";
@@ -31,17 +31,24 @@ export type ConsumerConfig = {
   readonly breaker: Breaker.BreakerConfig;
 };
 
-/** A failed call is thrown, not returned — cockatiel's `handleAll` policy classifies by thrown errors. */
-class UpstreamCallFailed extends Data.TaggedError("UpstreamCallFailed")<{}> {}
-
 /**
- * Whether a call outcome is accepted or handed back to the broker: a total function of the one thing that
- * matters, so it is testable without a broker, breaker or fetch. `"open"` and `"failed"` both requeue; they
- * differ in whether a call was attempted, which is telemetry, not settlement.
+ * Whether a call outcome is accepted, handed back to the broker or dead-lettered: a total function of the one
+ * thing that matters, so it is testable without a broker, breaker or fetch. `"open"` and `"failed"` both
+ * requeue; they differ in whether a call was attempted, which is telemetry, not settlement. `"client_error"`
+ * skips the delivery budget and goes straight to the dead-letter queue: a retry gets the same answer.
  */
-export type CallOutcome = Upstream.CallOutcome | "open";
+export type CallOutcome = Breaker.CallOutcome | "open";
 export const decide = (outcome: CallOutcome): Settlement =>
-  outcome === "ok" ? "accept" : "requeue";
+  Match.value(outcome).pipe(
+    Match.when("ok", (): Settlement => "accept"),
+    Match.when("client_error", (): Settlement => "discard"),
+    Match.whenOr("failed", "open", (): Settlement => "requeue"),
+    Match.exhaustive,
+  );
+
+/** What one attempt came to. `status` is `none` when the breaker turned the call away and none was made. */
+type Attempt = { readonly outcome: CallOutcome; readonly status: string };
+const TURNED_AWAY: Attempt = { outcome: "open", status: "none" };
 
 /**
  * Held before handing a breaker-open rejection back to the broker. Without it a message rejected instantly by
@@ -81,31 +88,43 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   const setInFlight = (delta: 1 | -1) =>
     Effect.suspend(() => Metric.update(Telemetry.inFlight, (inFlight += delta)));
 
-  const callUpstream = (key: string): Promise<void> =>
+  const callUpstream = (key: string): Promise<Upstream.CallStatus> =>
     runInContext(
       setInFlight(1).pipe(
         Effect.andThen(Upstream.call(`${cfg.egressAddr}${cfg.apiPath}`, key)),
         Effect.ensuring(setInFlight(-1)),
-        Effect.filterOrFail(
-          (outcome) => outcome === "ok",
-          () => new UpstreamCallFailed(),
-        ),
-        Effect.asVoid,
       ),
     );
 
+  // Logged at most once a second: a publisher that starts sending `gzip` by mistake, or a third party that
+  // starts refusing every request, would otherwise empty the queue into the dead-letter queue without a trace.
+  // The counters carry the volume.
+  let lastLoggedAt = 0;
+  const warnAtMostOncePerSecond = (message: () => string): void => {
+    O.map(
+      O.liftPredicate(Date.now(), (now) => now - lastLoggedAt >= 1000),
+      (now) => {
+        lastLoggedAt = now;
+        return runInContext(Effect.logWarning(message()));
+      },
+    );
+  };
+
   const attempt = async (key: string): Promise<Settlement> => {
-    const outcome: CallOutcome = await breaker.execute(() => callUpstream(key)).then(
-      (): CallOutcome => "ok",
+    const { outcome, status } = await breaker.execute(() => callUpstream(key)).then(
+      (answer): Attempt => ({ outcome: Breaker.classify(answer), status: String(answer) }),
       // Breaker.isBrokenCircuitError: rejected locally, no call attempted —
-      // this replica's own breaker is open. Anything else is a real call
-      // that failed (timeout, connection refused, a non-2xx).
-      (err): CallOutcome => (Breaker.isBrokenCircuitError(err) ? "open" : "failed"),
+      // this replica's own breaker is open. Anything else threw, which the
+      // breaker counts as a failure and so does this.
+      (err): Attempt => (Breaker.isBrokenCircuitError(err) ? TURNED_AWAY : { outcome: "failed", status: "error" }),
     );
 
-    runInContext(Metric.update(Metric.withAttributes(Telemetry.calls, { outcome }), 1));
+    runInContext(Metric.update(Metric.withAttributes(Telemetry.calls, { outcome, status }), 1));
     await Match.value(outcome).pipe(
       Match.when("open", () => sleep(OPEN_REQUEUE_DELAY_MIN_MS + Math.random() * OPEN_REQUEUE_DELAY_SPREAD_MS)),
+      Match.when("client_error", () =>
+        warnAtMostOncePerSecond(() => `${cfg.apiId}/consumer: third party refused message_id ${key} with ${status}, dead-lettering it`),
+      ),
       Match.orElse(() => Promise.resolve()),
     );
     return decide(outcome);
@@ -113,26 +132,17 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
 
   // A body that declares a content type, encoding or message type this daemon cannot read, does not decode, or
   // carries no `message_id` to use as its idempotency key was never published by this fleet: discard it rather
-  // than spend the delivery budget on something no retry can fix. It is logged, at most once a second, because
-  // a publisher that starts sending `gzip` by mistake would otherwise empty the queue into the dead-letter queue
-  // without a trace; the counter carries the volume.
-  let lastLoggedAt = 0;
+  // than spend the delivery budget on something no retry can fix.
   const discard = (reason: "format" | "malformed" | "keyless", delivery: DeliveryInfo): Promise<Settlement> => {
     runInContext(Metric.update(Metric.withAttributes(Telemetry.discarded, { reason }), 1));
-    O.map(
-      O.liftPredicate(Date.now(), (now) => now - lastLoggedAt >= 1000),
-      (now) => {
-        lastLoggedAt = now;
-        const declared = (o: O.Option<string>) => O.getOrElse(o, () => "none");
-        return runInContext(
-          Effect.logWarning(
-            `${cfg.apiId}/consumer: discarding a ${reason} delivery — message_id ${declared(delivery.messageId)}, ` +
-              `type ${declared(delivery.type)}, content-type ${declared(delivery.contentType)}, ` +
-              `content-encoding ${declared(delivery.contentEncoding)}`,
-          ),
-        );
-      },
-    );
+    warnAtMostOncePerSecond(() => {
+      const declared = (o: O.Option<string>) => O.getOrElse(o, () => "none");
+      return (
+        `${cfg.apiId}/consumer: discarding a ${reason} delivery — message_id ${declared(delivery.messageId)}, ` +
+        `type ${declared(delivery.type)}, content-type ${declared(delivery.contentType)}, ` +
+        `content-encoding ${declared(delivery.contentEncoding)}`
+      );
+    });
     return Promise.resolve<Settlement>("discard");
   };
 

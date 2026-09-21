@@ -6,7 +6,7 @@ import { Metric } from "effect";
  */
 
 export const calls = Metric.counter("egress_consumer_calls_total", {
-  description: "Calls made toward the third party, by outcome (ok, failed, or open — rejected locally by this replica's own breaker, no call made).",
+  description: "Calls made toward the third party, by outcome — ok; failed (counts against the breaker); client_error (a 4xx other than 408 and 429: the third party is up and refused the request, so it is dead-lettered and does not count); or open (rejected locally by this replica's own breaker, no call made) — and by status: the HTTP status, or timeout / network when none came, or none for open.",
 });
 
 export const discarded = Metric.counter("egress_consumer_discarded_total", {

@@ -40,9 +40,17 @@ execution; a fresh one per call would never accumulate a failure count).
   (default 1000ms) up to `BREAKER_MAX_DELAY_MS` (default 30000ms), doubling each
   time a half-open probe still fails. cockatiel's default generator already
   includes decorrelated jitter.
-- **Three outcomes**: `"ok"` (accept), `"failed"` (a real call was attempted and
-  failed; requeue), and `"open"` (the breaker rejected the call itself, so
-  **no call reached the third party**; requeue after a short jittered hold).
+- **What counts as a failure**: a call that throws or comes back `failed`. A
+  `client_error` counts as a success: the third party answered.
+- **Four outcomes**, decided by the HTTP status. `Upstream.ts` only reports the
+  status; `classify` in `Breaker.ts` is the policy's verdict on it:
+
+  | Outcome | When | Breaker | Message |
+  | --- | --- | --- | --- |
+  | `ok` | 2xx | success | accepted |
+  | `client_error` | a 4xx other than 408 and 429 | success | dead-lettered at once |
+  | `failed` | 5xx, 408, 429, or a 1xx/3xx nobody expects; no answer in 2s (`timeout`); a connection that failed or dropped (`network`) | failure | requeued |
+  | `open` | the breaker turned the call away, so **no call reached the third party** | none | requeued after a short jittered hold |
 
 That hold (`OPEN_REQUEUE_DELAY_MIN_MS` 100 plus up to `OPEN_REQUEUE_DELAY_SPREAD_MS`
 300, in `consumer.ts`) exists because an open breaker rejects instantly. With no
@@ -50,6 +58,19 @@ hold, a rejected message goes straight back onto the queue and to the same
 consumer, which can spin against its own in-memory breaker at whatever rate the
 broker will redeliver: the third party stops being hammered, and the *broker*
 takes its place.
+
+A `client_error` is dead-lettered on its first call, not after the delivery
+budget, because repeating a refused request gets the same answer; and it does
+not count against the breaker, because a third party that says no to one request
+is not down. The catch: a 4xx that is really ours to fix, expired credentials
+(401, 403) or a wrong path (404), is refused for every message, and every message
+is dead-lettered on its first call. Nothing here stops that; `status` shows it.
+
+`egress_consumer_calls_total` carries the HTTP status as `status` (`timeout`,
+`network` and `none` where there is none), so the split by code is one query,
+and a panel on the dashboard: `sum by (status) (rate(egress_consumer_calls_total{outcome=~"failed|client_error"}[1m]))`.
+A refused message is also logged, at most once a second, with its status and
+`message_id`.
 
 ## Running it
 
@@ -68,9 +89,9 @@ docker compose up -d --scale rmq-consumer=12   # resize the fleet, no restart ne
   `payments-provider.work`'s depth and `payments-provider.work.dead`'s growth.
 - Grafana: <http://localhost:3000/d/in-process-breaker>
   Panels: breaker state per replica, work-queue depth, dead-letter-queue depth,
-  calls by outcome, breaker trips, active consumers. Plain `:3000` lands on
-  Grafana's Welcome screen, not this dashboard — use the direct link, or
-  `Dashboards` in the left nav.
+  calls by outcome, failed and refused calls by status, breaker trips, active
+  consumers. Plain `:3000` lands on Grafana's Welcome screen, not this
+  dashboard — use the direct link, or `Dashboards` in the left nav.
 - Prometheus: <http://localhost:9090>.
 
 ## Injecting a failure
@@ -80,6 +101,7 @@ POST replaces the whole behaviour, so `{}` restores health:
 
 ```bash
 curl -X POST localhost:8080/__fail -d '{"rate":1.0}'                # 503s
+curl -X POST localhost:8080/__fail -d '{"rate":1.0,"status":422}'   # 422s: refused, not down
 curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"hang"}'  # never answers
 curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"reset"}' # drops the connection
 curl -X POST localhost:8080/__fail -d '{"delayMs":1500}'            # slow, still correct
