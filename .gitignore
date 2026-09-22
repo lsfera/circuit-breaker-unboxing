@@ -2,6 +2,13 @@ node_modules/
 .pnpm-store/
 .DS_Store
 *.log
+
+# Personal overrides for infra/incident.mjs's service URLs — e.g. the
+# service-hostname (http://rabbitmq:15672, ...) a devcontainer sibling
+# container needs instead of the localhost defaults that work from a real
+# host machine. Never committed: the right value depends on where you run
+# the script from, not on this repo.
+.env.local
 _site/
 docs/_site/
 docs/.bundle/

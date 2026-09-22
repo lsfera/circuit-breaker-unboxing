@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit",
     "check:vendored": "node scripts/check-vendored.mjs",
     "check": "pnpm run check:vendored && pnpm run typecheck && pnpm run test",
-    "incident": "node infra/incident.mjs"
+    "incident": "node --env-file-if-exists=.env.local infra/incident.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.2",
