@@ -1,35 +1,56 @@
 /**
- * Naming conventions for the work-queue shape shared by the producer and any
- * competing-consumer fleet that drains it, plus (as of article 4) the
- * `circuit.control` exchange every replica's breaker transitions go out on.
- * Article 1 removed this exchange's full master-branch shape — SAC election
- * queues, the domain package, an HA aggregator — along with the packages
- * that used it. Article 4 restores only the naming convention below, for a
- * single-instance, notification-only aggregator (`@egress/aggregator`); the
- * rest stays out of scope. See that package and this branch's README for why.
+ * Naming conventions for the work-queue shape shared by the producer and the competing-consumer fleet that
+ * drains it, plus the `circuit.control` exchange every replica's breaker transitions go out on and, as of
+ * article 5, the redrive-trigger and parked-queue naming `Redrive.ts` and `consumer.ts` use to recover
+ * `<api>.work.dead`.
  */
 
-/**
- * The payments idempotency key: an AMQP header inbound, an HTTP header on the
- * call it authorizes. A retry that reuses the same key protects the third
- * party from being charged twice for one logical attempt.
- */
-export const IDEMPOTENCY_KEY_HEADER = "x-idempotency-key";
+import { Option as O, Schema } from "effect";
+
+/** The payments idempotency key, as the third party receives it. On the broker it's the AMQP `message_id`. */
+export const IDEMPOTENCY_KEY_HTTP_HEADER = "x-idempotency-key";
+
+/** A work message's identity, stable for its life. `n` alone would collide across producer restarts. */
+export const workMessageId = (run: string, n: number): string => `${run}:${n}`;
 
 /**
- * Every replica's breaker transitions go out here, and `@egress/aggregator`
- * is the only subscriber. A topic exchange (not fanout) because the routing
- * key already carries the `apiId` a binding might one day want to filter
- * on — this deployment only ever runs one, but the exchange type shouldn't
- * have to change the day a second one shows up. Every declarer must pass
- * `{ durable: true }` — `declareTopicExchange`'s own default is `false`,
- * and a redeclare that disagrees with what's on the broker is a connection-
- * closing `406 PRECONDITION-FAILED`, not a warning.
+ * Every replica's breaker transitions go out here, `@egress/aggregator` the only subscriber. Topic, not
+ * fanout, so a binding can one day filter by the `apiId` the routing key carries. Every declarer must pass
+ * `{ durable: true }` — a redeclare that disagrees with the broker is a connection-closing `406`, not a warning.
  */
 export const CONTROL_EXCHANGE = "circuit.control";
 
 /** One routing key per API — `circuit.*` binds every one a deployment runs. */
 export const routingKeyFor = (apiId: string): string => `circuit.${apiId}`;
+
+/** What a work message says, declared once so encoder and decoder can't drift. Unknown fields are ignored. */
+export const WorkMessage = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
+export type WorkMessage = typeof WorkMessage.Type;
+
+/** The AMQP `content_type` a work publisher declares. AMQP has no `Accept`, so negotiation is the reader's. */
+export const WORK_CONTENT_TYPE = "application/json";
+
+/** The AMQP `type` of a work message, dot-separated by RabbitMQ's convention. A daemon declines any other type. */
+export const WORK_MESSAGE_TYPE = "egress.work";
+
+const mediaType = (contentType: string): string => contentType.split(";")[0]!.trim().toLowerCase();
+
+/** `content_encoding` may list several, comma-separated; only "nothing applied" is readable. */
+const unencoded = (contentEncoding: string): boolean =>
+  contentEncoding.split(",").every((encoding) => ["", "identity"].includes(encoding.trim().toLowerCase()));
+
+export const readsWorkFormat = (declared: {
+  readonly contentType: O.Option<string>;
+  readonly contentEncoding: O.Option<string>;
+  readonly type: O.Option<string>;
+}): boolean =>
+  O.match(declared.contentType, { onNone: () => true, onSome: (t) => mediaType(t) === WORK_CONTENT_TYPE }) &&
+  O.match(declared.contentEncoding, { onNone: () => true, onSome: unencoded }) &&
+  O.match(declared.type, { onNone: () => true, onSome: (t) => t === WORK_MESSAGE_TYPE });
+
+const WorkMessageJson = Schema.fromJsonString(WorkMessage);
+export const encodeWorkMessage = Schema.encodeSync(WorkMessageJson);
+export const decodeWorkMessage = Schema.decodeUnknownOption(WorkMessageJson);
 
 /** The primary competing-consumer work queue daemons drain. */
 export const workQueueFor = (apiId: string): string => `${apiId}.work`;
@@ -37,13 +58,7 @@ export const workQueueFor = (apiId: string): string => `${apiId}.work`;
 /** Where work that could not be completed ends up. */
 export const deadLetterQueueFor = (apiId: string): string => `${apiId}.work.dead`;
 
-/**
- * One dead-letter destination for *every* queue this fleet declares, so anything
- * unhandleable lands somewhere you can count and replay from.
- *
- * Must be declared identically by every process that touches a queue: RabbitMQ
- * rejects a redeclare whose arguments differ, and container startup is unordered.
- */
+/** Must be declared identically by every process: RabbitMQ rejects a redeclare whose arguments differ. */
 const deadLetterArgs = (apiId: string): Record<string, unknown> => ({
   "x-dead-letter-exchange": "",
   "x-dead-letter-routing-key": deadLetterQueueFor(apiId),
@@ -53,14 +68,9 @@ const deadLetterArgs = (apiId: string): Record<string, unknown> => ({
 const workQueueArgs = deadLetterArgs;
 
 /**
- * Article 5's redrive election. A durable quorum queue whose only job is
- * picking exactly one replica: `x-single-active-consumer` means the broker
- * delivers to one bound consumer and holds the rest as backups, promoting
- * automatically if the active one disconnects. Nothing is ever published
- * here but the trigger itself (see `consumer.ts`), so unlike master's
- * version of this queue there is no malformed-payload case to dead-letter
- * defensively against — the only thing that can ever land on it is a
- * trigger this same codebase minted.
+ * Article 5's redrive election. `x-single-active-consumer` means the broker delivers to one bound consumer
+ * and holds the rest as backups, promoting automatically if the active one disconnects — no leader-election
+ * code of this project's own. Nothing is ever published here but the trigger itself (see `consumer.ts`).
  */
 export const redriveTriggerQueueFor = (apiId: string): string => `${apiId}.redrive-trigger`;
 
@@ -70,11 +80,8 @@ export const redriveTriggerQueueOptions = () => ({
 });
 
 /**
- * Where a message goes once it has been redriven `MAX_REDRIVES` times
- * without succeeding — treated as poison rather than unlucky, so the
- * elected redriver's periodic passes stop replaying it forever. Terminal
- * like the dead-letter queue, and for the same reason never allowed to drop
- * at a delivery limit.
+ * Where a message goes once it has been redriven `MAX_REDRIVES` times without succeeding — treated as poison
+ * rather than unlucky. Terminal like the dead-letter queue, and for the same reason never delivery-limited.
  */
 export const parkedQueueFor = (apiId: string): string => `${apiId}.work.parked`;
 
@@ -84,71 +91,39 @@ export const parkedQueueOptions = () => ({
 });
 
 /**
- * Stamped on a redriven message so the next pass can tell a message caught
- * in its second outage from one that has failed every single time. Absent
- * means zero — a message dead-lettered by the broker directly, never yet
- * redriven.
+ * Stamped on a redriven message so the next pass can tell a message caught in its second outage from one
+ * that has failed every time. Absent means zero — dead-lettered by the broker directly, never yet redriven.
  */
 export const REDRIVE_COUNT_HEADER = "x-egress-redrive-count";
 
 /**
- * Redrives before a message is treated as poison rather than unlucky. Each
- * redrive republishes onto the work queue, which grants a fresh
- * `WORK_DELIVERY_LIMIT`-attempt budget — so this bounds outages survived,
- * not attempts: five outages' worth of the third party rejecting the same
- * message is enough evidence it will never be accepted.
+ * Redrives before a message is treated as poison rather than unlucky. Each redrive republishes onto the work
+ * queue, granting a fresh `WORK_DELIVERY_LIMIT`-attempt budget — so this bounds outages survived, not attempts.
  */
 export const MAX_REDRIVES = 5;
 
 /**
- * Attempts before the broker parks a message. The budget belongs to the queue,
- * not the daemon: an in-process counter is lost the moment the message moves to
- * another consumer, which is what an outage causes.
- *
- * Low because RabbitMQ redelivers with no backoff, so every extra attempt is
- * load on a failing upstream. A redrive republishes the body, so a replayed
- * message starts a fresh budget — three attempts per outage, not three ever.
+ * Attempts before the broker parks a message. Belongs to the queue, not the daemon — an in-process counter is
+ * lost the moment a message moves to another consumer, which is what an outage causes.
  */
 export const WORK_DELIVERY_LIMIT = 3;
 
-/**
- * Durability, decided here so producer and daemons cannot disagree — a mismatch
- * is a redeclare conflict (`409 inequivalent arg 'durable'`), so changing a flag
- * on a broker that already holds the queue means deleting it first.
- *
- * Every queue is durable. RabbitMQ 4.3 refuses a transient queue that is not
- * exclusive, and refuses it by closing the whole connection (541), so one such
- * declare takes the daemon down. The control and floor queues cannot be
- * exclusive — the floor is shared by the fleet — so they are durable classic
- * queues whose `x-expires` does the cleanup transience used to. Everything else
- * is a quorum queue, which could never be transient anyway.
- */
+/** Always durable: RabbitMQ 4.3 closes the whole connection (541) on a transient queue that isn't exclusive. */
 export const workQueueOptions = (apiId: string) => ({
   args: {
     ...workQueueArgs(apiId),
     "x-queue-type": "quorum",
     "x-delivery-limit": WORK_DELIVERY_LIMIT,
-    // At-least-once: the default (at-most-once) drops a dead letter the target
-    // queue does not take. Not what lost the 1,570 — see deadLetterQueueOptions.
-    // Quorum queues require reject-publish for it.
+    // At-least-once: the default (at-most-once) drops a dead letter the target queue does not take. Quorum
+    // queues require reject-publish for it.
     "x-dead-letter-strategy": "at-least-once",
     "x-overflow": "reject-publish",
   },
   durable: true,
 });
 
-/**
- * The end of the line, so nothing may ever leave it except by being moved.
- *
- * `x-delivery-limit: -1`, because a quorum queue left alone has a limit of 20, and
- * a queue with no dead-letter target at its limit *drops* the message
- * (`dead_letter_strategy="disabled"`). Every redrive pass hands back what it did not
- * move — its channel closing counts — so the old default quietly lost dead letters:
- * 1,570 in one chaos run, and 0 of 50 survived 22 channel closes on this broker
- * where -1 kept all 50 through 25.
- */
+/** `x-delivery-limit: -1`: a quorum queue's default limit (20) would silently drop a message at its cap. */
 export const deadLetterQueueOptions = () => ({
   args: { "x-queue-type": "quorum", "x-delivery-limit": -1 },
   durable: true,
 });
-

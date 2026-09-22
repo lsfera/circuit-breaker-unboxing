@@ -79,13 +79,20 @@ export const runPass = Effect.fn(function* (opts: RedriveOptions) {
     const got = yield* rmq.get(deadQueue);
     if (O.isNone(got)) return;
 
+    // Carries the original `message_id` forward on both paths — the idempotency key a redelivery reuses is
+    // assigned once by the producer, so a republish that let `send` invent a new one would give the third
+    // party no way to recognize a redriven message as the same request it may already have answered.
+    const messageId = O.getOrUndefined(got.value.messageId);
     const decision = nextRedrive(got.value.properties[REDRIVE_COUNT_HEADER]);
     if (decision.destination === "work") {
-      yield* rmq.send(workPub, got.value.body, { [REDRIVE_COUNT_HEADER]: String(decision.count) });
+      yield* rmq.send(workPub, got.value.body, {
+        messageId,
+        headers: { [REDRIVE_COUNT_HEADER]: String(decision.count) },
+      });
       yield* got.value.ack;
       opts.onOutcome("moved");
     } else {
-      yield* rmq.send(parkedPub, got.value.body);
+      yield* rmq.send(parkedPub, got.value.body, { messageId });
       yield* got.value.ack;
       opts.onOutcome("parked");
     }

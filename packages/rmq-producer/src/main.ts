@@ -47,15 +47,9 @@ class Fatal extends Data.TaggedError("Fatal")<{ readonly reason: string }> {
 }
 
 /**
- * Scoped fiber for the lifetime of the server, the same shape the aggregator's
- * tick loop and the daemon use. Failing setup — a broker that never comes up, a
- * queue redeclared with different arguments — is a defect rather than something
- * to recover from, hence `orDie` and the restart policy on the container.
- *
- * See the daemon's main for why its `catchDefect` fails `fatal` instead of
- * leaving the fork bare: an unobserved defect in a `forkScoped` fiber cannot
- * end `Layer.launch`, and `launchWithRmq` races `fatal` against the broker
- * connection to close that gap here too.
+ * `orDie`: failing setup (broker never comes up, a mismatched redeclare) is a defect, not something to
+ * recover from — the restart policy on the container is the recovery. `catchDefect` fails `fatal` rather than
+ * leaving the fork bare, since an unobserved defect in a `forkScoped` fiber can't end `Layer.launch` on its own.
  */
 const producer = Command.make("rmq-producer", flags, (settings) => {
   const fatal = Deferred.makeUnsafe<never, Fatal>();

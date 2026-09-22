@@ -11,6 +11,8 @@
 //   node infra/incident.mjs
 //   WINDOW_MS=30000 RATE=0.6 node infra/incident.mjs   # a partial failure instead
 //   MODE=hang node infra/incident.mjs                  # this is the one that grows the work queue
+//   STATUS=422 node infra/incident.mjs                 # a 4xx: Breaker.ts's classify calls it client_error,
+//                                                       # a cockatiel success — no trip, no "open" outcome
 //
 // Assumes `docker compose up -d` is already running.
 
@@ -27,6 +29,7 @@ const RATE = Number(process.env.RATE ?? "1.0");
 // and starves the queue's actual drain rate below the arrival rate — that is
 // what makes the backlog itself grow.
 const MODE = process.env.MODE; // unset = "error" (flaky-upstream's default)
+const STATUS = process.env.STATUS ? Number(process.env.STATUS) : undefined; // unset = 503 (flaky-upstream's default)
 const WINDOW_MS = Number(process.env.WINDOW_MS ?? "20000");
 const DRAIN_TIMEOUT_MS = Number(process.env.DRAIN_TIMEOUT_MS ?? "60000");
 // How long to watch the dead-letter/parked queues after the work queue
@@ -76,7 +79,9 @@ const setFailure = (rate) =>
   fetch(`${FLAKY_UPSTREAM}/__fail`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(rate === 0 ? {} : { rate, ...(MODE ? { mode: MODE } : {}) }),
+    body: JSON.stringify(
+      rate === 0 ? {} : { rate, ...(MODE ? { mode: MODE } : {}), ...(STATUS ? { status: STATUS } : {}) },
+    ),
   });
 
 const audit = async (run) => {
@@ -140,7 +145,9 @@ const main = async () => {
   report(deadQueue, await queueDepth(deadQueue));
   await pollBreakers("t+0s");
 
-  console.log(`\n== Injecting failure: rate=${RATE} mode=${MODE ?? "error"} for ${WINDOW_MS}ms ==`);
+  console.log(
+    `\n== Injecting failure: rate=${RATE} mode=${MODE ?? "error"}${STATUS ? ` status=${STATUS}` : ""} for ${WINDOW_MS}ms ==`,
+  );
   lag.startedAt = Date.now();
   await setFailure(RATE);
 

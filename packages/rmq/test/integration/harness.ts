@@ -3,15 +3,9 @@ import { Effect } from "effect";
 import type { StartedTestContainer } from "testcontainers";
 
 /**
- * One RabbitMQ per test file, and one declaration of what "a RabbitMQ" is.
- *
- * Node runs each test file in its own process, so each gets its own broker —
- * deliberately, since `Client.test.ts` induces a client bug that leaves the
- * broker unreliable afterwards (see that file's header). What is *not*
- * deliberate is declaring the image tag and the wait strategy once per file:
- * bumping one and not the other means two suites silently testing against
- * different brokers.
- *
+ * One RabbitMQ per test file, and one declaration of what "a RabbitMQ" is. Node runs each test file in its own
+ * process, so each gets its own broker (see `DeadLetter.test.ts` for why sharing one is not viable), and the image
+ * tag and wait strategy are declared once so two suites cannot silently test against different brokers.
  * Not named `*.test.ts`, so the runner's glob does not pick it up.
  */
 export const broker = { host: "", port: 0, available: false };
@@ -44,9 +38,8 @@ export const brokerExec = (command: ReadonlyArray<string>): Promise<unknown> =>
   container!.exec([...command]);
 
 /**
- * Restart the broker and re-read where it landed. The mapped port changes, and
- * a test that restarts without re-reading it reconnects to nothing — which is
- * why this is here rather than at the one call site that needs it.
+ * Restart the broker and re-read where it landed: the mapped port changes, and a test that does not re-read it
+ * reconnects to nothing.
  */
 export const restartBroker = async (settleMs = 3000): Promise<void> => {
   await container!.restart();
@@ -62,15 +55,9 @@ export const skipIfNoDocker = (t: { skip: (reason: string) => void }): boolean =
 };
 
 /**
- * Poll until `done()` or the deadline, instead of sleeping a fixed amount and
- * hoping.
- *
- * A fixed sleep is fine for a test that is the only thing touching the broker
- * at that moment. It stops being fine for one running behind the stranding
- * test, which leaves the broker cleaning up thousands of stranded deliveries
- * across a dozen closed links — a budget that is generous in isolation is not
- * generous behind that. Waiting for the condition is what makes those tests
- * describe a property rather than a timing.
+ * Poll until `done()` or the deadline, instead of sleeping a fixed amount and hoping: a fixed sleep stops being
+ * generous when the test runs behind one that leaves the broker cleaning up thousands of stranded deliveries.
+ * Waiting for the condition makes a test describe a property rather than a timing.
  */
 export const waitFor = (done: () => boolean, timeoutMs = 15_000) =>
   Effect.promise(async () => {

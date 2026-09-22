@@ -25,7 +25,7 @@
    "id": 7,
    "type": "state-timeline",
    "title": "Fleet verdict",
-   "description": "egress_fleet_verdict_state, published by @egress/aggregator from every replica's own circuit.control events — one line, computed off the hot path from the same transitions the panel below shows disagreeing. Never read back into any replica's own decision; this is notification only.",
+   "description": "egress_fleet_verdict_state, published by @egress/aggregator from every replica's circuit.control events, computed off the hot path. Never read back into any replica's own decision — notification only.",
    "gridPos": { "x": 0, "y": 0, "w": 24, "h": 5 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
@@ -56,7 +56,7 @@
    "id": 5,
    "type": "state-timeline",
    "title": "Breaker state per replica",
-   "description": "egress_consumer_breaker_state, one line per instance. Each replica's breaker is entirely its own — this panel is where that shows: watch them open and close at different moments for the same incident, not together.",
+   "description": "egress_consumer_breaker_state, one line per instance. Each replica's breaker is independent — watch them open and close at different moments, not together.",
    "gridPos": { "x": 0, "y": 5, "w": 24, "h": 7 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
@@ -88,7 +88,7 @@
    "id": 1,
    "type": "timeseries",
    "title": "Work queue depth — payments-provider.work",
-   "description": "Messages ready plus in flight. Only climbs when the third party fails slowly enough to pin every consumer's in-flight slots (e.g. flaky-upstream's hang mode) — a fast failure dead-letters before a backlog can form. See the dead-letter panel for that case.",
+   "description": "Messages ready plus in flight. Climbs for as long as breakers stay open: a message turned away by an open breaker is released uncounted, so it waits here rather than dead-lettering.",
    "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
@@ -110,7 +110,7 @@
    "id": 2,
    "type": "timeseries",
    "title": "Dead-letter queue depth — payments-provider.work.dead",
-   "description": "Messages that exhausted the broker's own delivery limit (x-delivery-limit, 3 attempts). Since article 5, one SAC-elected replica redrives these back onto the work queue once its own breaker closes — see the Redrives panel and packages/consumer/src/Redrive.ts. Redrive only progresses on a breaker transition, so this can sit unmoved for a while even after the third party recovers, if nothing transitions again.",
+   "description": "Messages that exhausted the broker's delivery limit (x-delivery-limit, 3 attempts). The SAC-elected redriver moves these back onto the work queue once its own breaker closes, on every reset and a 30s sweep — see Redrives and Redrive.ts.",
    "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
@@ -126,7 +126,7 @@
    "id": 3,
    "type": "timeseries",
    "title": "Calls to the third party, by outcome",
-   "description": "egress_consumer_calls_total. \"open\" is new since article 1: a call this replica's own breaker rejected without ever reaching the third party.",
+   "description": "egress_consumer_calls_total. \"open\": rejected by this replica's own breaker, or a half-open probe that lost the permit race — never reached the third party. \"client_error\": a 4xx other than 408/429, the third party's own refusal — dead-lettered at once, not counted by the breaker.",
    "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
@@ -142,7 +142,7 @@
    "id": 6,
    "type": "timeseries",
    "title": "Breaker trips",
-   "description": "sum(rate(egress_consumer_breaker_trips_total)) across all replicas. Each trip is one replica's own breaker opening — this counts events, not the disagreement between them; see the state-timeline panel for that.",
+   "description": "sum(rate(egress_consumer_breaker_trips_total)) across all replicas — each trip is one breaker opening. Counts events, not disagreement; see the state-timeline panel for that.",
    "gridPos": { "x": 12, "y": 20, "w": 12, "h": 8 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
@@ -158,7 +158,7 @@
    "id": 4,
    "type": "timeseries",
    "title": "Active consumers on the work queue",
-   "description": "The broker's own count — should track --scale rmq-consumer=N. A gap between this and the replica count means a daemon has stopped consuming.",
+   "description": "The broker's own count — should track --scale rmq-consumer=N. A gap from the replica count means a daemon stopped consuming.",
    "gridPos": { "x": 0, "y": 28, "w": 24, "h": 7 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
@@ -174,7 +174,7 @@
    "id": 8,
    "type": "timeseries",
    "title": "Parked queue depth — payments-provider.work.parked",
-   "description": "Messages redriven MAX_REDRIVES (5) times without succeeding — true poison, not just caught in an outage. Should stay at 0 for any incident this series injects (transient, not permanent, failures); a nonzero value here means something the third party will never accept.",
+   "description": "Messages redriven MAX_REDRIVES (5) times without succeeding — true poison, not just an outage. Should stay 0 for any incident this series injects; nonzero means something the third party will never accept.",
    "gridPos": { "x": 0, "y": 35, "w": 12, "h": 8 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
@@ -190,7 +190,7 @@
    "id": 9,
    "type": "timeseries",
    "title": "Redrives",
-   "description": "sum(rate(egress_consumer_redrives_total)) by outcome. Only ever nonzero on whichever replica RabbitMQ currently elects active on <api>.redrive-trigger — a single SAC-elected redriver, not the whole fleet at once.",
+   "description": "sum(rate(egress_consumer_redrives_total)) by outcome. Nonzero only on the SAC-elected redriver — one replica, not the whole fleet.",
    "gridPos": { "x": 12, "y": 35, "w": 12, "h": 8 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
@@ -198,6 +198,22 @@
      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
      "expr": "sum(rate(egress_consumer_redrives_total[1m])) by (outcome)",
      "legendFormat": "{{outcome}}/s",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 10,
+   "type": "timeseries",
+   "title": "Failed and refused calls, by HTTP status",
+   "description": "egress_consumer_calls_total for outcome failed or client_error, by status — the HTTP status answered, or timeout/network when none came. See \"Calls to the third party, by outcome\" for what counts as client_error.",
+   "gridPos": { "x": 0, "y": 43, "w": 24, "h": 8 },
+   "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+   "targets": [
+    {
+     "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+     "expr": "sum by (status) (rate(egress_consumer_calls_total{outcome=~\"failed|client_error\"}[1m]))",
+     "legendFormat": "{{status}}",
      "refId": "A"
     }
    ]

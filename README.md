@@ -105,6 +105,8 @@ queue and an uncounted release for as long as the breaker stays open.
   (`REDRIVE_SWEEP_MS`). The sweep was added after measuring `work.dead`
   sit at 1,225 for 20s+ with every breaker closed and nothing left to
   trigger a pass; `master`'s ADR 016 fixes the same stall the same way.
+- **Idempotency.** A redrive republish keeps the original `message_id` —
+  the producer's idempotency key — rather than letting `send` invent one.
 
 Left out of the port: `master`'s origin-queue attribution, which separates
 real work from malformed trigger messages in a shared dead-letter queue.
@@ -156,11 +158,16 @@ One cockatiel `CircuitBreakerPolicy` per process, reused for its whole life
 - **Half-opens** after `ExponentialBackoff` from `BREAKER_INITIAL_DELAY_MS`
   (1s) to `BREAKER_MAX_DELAY_MS` (30s), with cockatiel's default
   decorrelated jitter.
-- **Three outcomes**: `ok` (accept), `failed` (a real call failed:
-  requeue, counted), `open` (no call made — breaker open or permit race
-  lost: release, uncounted, after a 100–400ms jittered hold so a replica
-  doesn't spin against its own open breaker at the broker's redelivery
-  rate).
+- **Four outcomes**, from `classify` in `Breaker.ts`:
+  - `ok` — accept.
+  - `client_error` — a 4xx other than 408/429: the third party is up and
+    refused this request. A breaker success; dead-lettered at once, not
+    retried. A half-open probe answered this way closes the breaker.
+  - `failed` — 5xx, 408, 429, timeout, dropped connection: requeue,
+    counted.
+  - `open` — no call made (breaker open, or lost the permit race): release,
+    uncounted, after a 100–400ms jittered hold so a replica doesn't spin
+    against its own open breaker at the broker's redelivery rate.
 
 ## What this still doesn't fix
 
@@ -219,6 +226,7 @@ whole behaviour, so `{}` restores health:
 
 ```bash
 curl -X POST localhost:8080/__fail -d '{"rate":1.0}'                # 503s
+curl -X POST localhost:8080/__fail -d '{"rate":1.0,"status":422}'   # 422s: refused, not down
 curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"hang"}'  # never answers
 curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"reset"}' # drops the connection
 curl -X POST localhost:8080/__fail -d '{"delayMs":1500}'            # slow, still correct
@@ -230,6 +238,7 @@ curl -X POST localhost:8080/__fail -d '{}'                          # healthy ag
 ```bash
 pnpm run incident
 MODE=hang node infra/incident.mjs
+STATUS=422 node infra/incident.mjs
 ```
 
 Injects a failure for a fixed window, restores the third party, and
@@ -290,11 +299,12 @@ bug:
 ```
 packages/
   config/        settings, declared once and decoded at boot
-  rmq/           Effect wrapper over amqplib (Client.ts); queue names and
-                 options shared by every process (ControlPlane.ts)
-  rmq-producer/  steady load onto <apiId>.work
+  rmq/           Effect wrapper over amqplib (Client.ts); queue names,
+                 options and wire schemas shared by every process
+                 (ControlPlane.ts)
+  rmq-producer/  steady load onto <apiId>.work, message_id as idempotency key
   consumer/      the fleet: Breaker.ts (breaker + permit), Redrive.ts,
-                 consumer.ts (wiring, and decide())
+                 Upstream.ts (the HTTP call), consumer.ts (wiring, and decide())
   aggregator/    one verdict per apiId: Verdict.ts (pure), aggregator.ts (wiring)
   tracing/       /metrics route; OpenTelemetry, off unless OTEL_EXPORTER_OTLP_ENDPOINT is set
 infra/

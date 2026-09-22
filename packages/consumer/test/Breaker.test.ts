@@ -62,6 +62,29 @@ test("STATE_CODE gives every reachable state a stable number, closed is the init
   assert.equal(Breaker.INITIAL_STATE_CODE, Breaker.STATE_CODE[CircuitState.Closed]);
 });
 
+test("classify: a 2xx is ok, a 4xx other than 408 and 429 the request's fault, and anything else the third party's", () => {
+  for (const status of [200, 204, 299]) assert.equal(Breaker.classify(status), "ok", String(status));
+  for (const status of [400, 401, 404, 409, 418, 422, 499]) assert.equal(Breaker.classify(status), "client_error", String(status));
+  for (const status of [100, 199, 300, 304, 399, 408, 429, 500, 502, 503, 504, 599, "timeout", "network"] as const) {
+    assert.equal(Breaker.classify(status), "failed", String(status));
+  }
+});
+
+test("a returned failure counts against the threshold like a throw, and is handed back to the caller", async () => {
+  const breaker = Breaker.make({ consecutiveFailures: 2, initialDelayMs: 20, maxDelayMs: 50 });
+
+  assert.equal(await breaker.execute(() => Promise.resolve(503)), 503);
+  assert.equal(breaker.state, CircuitState.Closed);
+  await breaker.execute(() => Promise.resolve(503));
+  assert.equal(breaker.state, CircuitState.Open);
+});
+
+test("a client_error is a success: it never opens the breaker, however many calls answer it", async () => {
+  const breaker = Breaker.make({ consecutiveFailures: 2, initialDelayMs: 20, maxDelayMs: 50 });
+  for (let i = 0; i < 10; i++) await breaker.execute(() => Promise.resolve(422));
+  assert.equal(breaker.state, CircuitState.Closed);
+});
+
 /**
  * A single in-memory token standing in for the real `<apiId>.probe-permit`
  * queue — no broker, matching this file's own "no network" style for
@@ -92,6 +115,7 @@ const fakePermitRmq = (): RmqService => {
         return O.some({
           body: held,
           properties: {},
+          messageId: O.none(),
           ack: Effect.sync(() => {}),
           nack: Effect.sync(() => {
             token = held;

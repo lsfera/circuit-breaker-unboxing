@@ -47,7 +47,7 @@ test("a header that doesn't parse is treated as zero, not trusted", () => {
  */
 const fakeRedriveRmq = (dead: ReadonlyArray<GotMessage>) => {
   const queue = [...dead];
-  const sent: Record<string, Array<{ body: string; headers: Record<string, string> }>> = {};
+  const sent: Record<string, Array<{ body: string; headers: Record<string, string>; messageId: string | undefined }>> = {};
   const unimplemented =
     (op: string) =>
     (..._args: ReadonlyArray<unknown>) =>
@@ -59,10 +59,18 @@ const fakeRedriveRmq = (dead: ReadonlyArray<GotMessage>) => {
     consume: unimplemented("consume"),
     get: () => Effect.sync(() => (queue.length === 0 ? O.none() : O.some(queue.shift()!))),
     publisherToExchange: unimplemented("publisherToExchange"),
-    publisherToQueue: (queueName) => Effect.succeed({ exchange: "", routingKey: queueName }),
-    send: (pub, body, properties) =>
+    publisherToQueue: (queueName) =>
+      Effect.succeed({
+        exchange: "",
+        routingKey: queueName,
+        contentType: O.none(),
+        contentEncoding: O.none(),
+        type: O.none(),
+        mandatory: true,
+      }),
+    send: (pub, body, options) =>
       Effect.sync(() => {
-        (sent[pub.routingKey] ??= []).push({ body, headers: properties ?? {} });
+        (sent[pub.routingKey] ??= []).push({ body, headers: options?.headers ?? {}, messageId: options?.messageId });
       }),
     cancelConsumer: unimplemented("cancelConsumer"),
     closeConsumer: unimplemented("closeConsumer"),
@@ -73,9 +81,10 @@ const fakeRedriveRmq = (dead: ReadonlyArray<GotMessage>) => {
   return { rmq, sent };
 };
 
-const message = (body: string, redriveCount?: number): GotMessage => ({
+const message = (body: string, redriveCount?: number, messageId?: string): GotMessage => ({
   body,
   properties: redriveCount === undefined ? {} : { [REDRIVE_COUNT_HEADER]: String(redriveCount) },
+  messageId: O.fromNullishOr(messageId),
   ack: Effect.sync(() => {}),
   nack: Effect.sync(() => {}),
 });
@@ -97,10 +106,20 @@ test("a pass drains the dead queue onto work, incrementing the redrive count", a
 
   assert.deepEqual(outcomes, ["moved", "moved"]);
   assert.deepEqual(sent["payments-provider.work"], [
-    { body: "a", headers: { [REDRIVE_COUNT_HEADER]: "1" } },
-    { body: "b", headers: { [REDRIVE_COUNT_HEADER]: "3" } },
+    { body: "a", headers: { [REDRIVE_COUNT_HEADER]: "1" }, messageId: undefined },
+    { body: "b", headers: { [REDRIVE_COUNT_HEADER]: "3" }, messageId: undefined },
   ]);
   assert.equal(sent["payments-provider.work.parked"], undefined);
+});
+
+test("a redriven message carries its original message_id forward, so the third party sees the same idempotency key", async () => {
+  const { rmq, sent } = fakeRedriveRmq([message("a", undefined, "run:7")]);
+  await run(
+    Redrive.runPass({ apiId: "payments-provider", isClosed: Effect.succeed(true), onOutcome: () => {} }),
+    rmq,
+  );
+
+  assert.equal(sent["payments-provider.work"]![0]!.messageId, "run:7");
 });
 
 test("a message already at MAX_REDRIVES is parked instead of moved", async () => {
@@ -117,7 +136,7 @@ test("a message already at MAX_REDRIVES is parked instead of moved", async () =>
 
   assert.deepEqual(outcomes, ["parked"]);
   assert.equal(sent["payments-provider.work"], undefined);
-  assert.deepEqual(sent["payments-provider.work.parked"], [{ body: "poison", headers: {} }]);
+  assert.deepEqual(sent["payments-provider.work.parked"], [{ body: "poison", headers: {}, messageId: undefined }]);
 });
 
 test("a pass stops the instant the gate closes, leaving the rest of the queue untouched", async () => {
@@ -136,5 +155,7 @@ test("a pass stops the instant the gate closes, leaving the rest of the queue un
   );
 
   assert.deepEqual(outcomes, ["moved"], "only the message fetched before the gate closed should move");
-  assert.deepEqual(sent["payments-provider.work"], [{ body: "a", headers: { [REDRIVE_COUNT_HEADER]: "1" } }]);
+  assert.deepEqual(sent["payments-provider.work"], [
+    { body: "a", headers: { [REDRIVE_COUNT_HEADER]: "1" }, messageId: undefined },
+  ]);
 });

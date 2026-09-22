@@ -1,6 +1,6 @@
 import { Config, Data, Deferred, Effect, Layer } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
-import { HttpRouter } from "effect/unstable/http";
+import { FetchHttpClient, HttpRouter } from "effect/unstable/http";
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
 import { createServer } from "node:http";
 import { launchWithRmq, Rmq } from "@egress/rmq/Client.ts";
@@ -14,13 +14,10 @@ import { runConsumer } from "./consumer.ts";
  *
  *   node src/main.ts
  *
- * One address, no replica names — a client of whatever the third party
- * exposes, exactly like `producer.ts` is a client of the broker. Each
- * process gets its own in-process circuit breaker (Breaker.ts) that still
- * decides entirely for itself; it also now publishes every transition to
- * `circuit.control` for `@egress/aggregator` to fold into one verdict — see
- * consumer.ts's own module doc for why that's a second, independent channel
- * rather than a change to how this replica protects itself.
+ * One address, no replica names — a client of whatever the third party exposes. Each process gets its own
+ * in-process circuit breaker (Breaker.ts) that still decides entirely for itself; it also publishes every
+ * transition to `circuit.control` for `@egress/aggregator` to fold into one verdict — see consumer.ts's own
+ * module doc for why that's a second, independent channel.
  */
 
 const flags = {
@@ -100,7 +97,7 @@ const consumer = Command.make("consumer", flags, (settings) => {
         ),
       ),
     ),
-  );
+  ).pipe(Layer.provide(FetchHttpClient.layer));
 
   return launchWithRmq(
     HttpRouter.serve(Layer.provideMerge(Consumer, MetricsRoute)).pipe(

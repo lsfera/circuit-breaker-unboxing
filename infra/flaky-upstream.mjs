@@ -9,6 +9,7 @@
 // tell the same story rather than merely producing the same record shape.
 //
 //   curl -X POST localhost:8080/__fail -d '{"rate":1.0}'                  # 503s
+//   curl -X POST localhost:8080/__fail -d '{"rate":1.0,"status":422}'     # 422s: refused, not down
 //   curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"hang"}'    # never answers
 //   curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"reset"}'   # drops the connection
 //   curl -X POST localhost:8080/__fail -d '{"delayMs":1500}'              # slow, still correct
@@ -16,7 +17,7 @@
 //
 // Every field is optional and a POST replaces the whole behaviour, so `{}`
 // restores a healthy endpoint.
-import { createServer } from "node:http";
+import { createServer, STATUS_CODES } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
 
 // 8086-8089 is deliberately skipped: the aggregator pair publishes 8088 and
@@ -60,7 +61,7 @@ const recordProcessed = (key) => {
 };
 
 const MODES = new Set(["error", "hang", "reset"]);
-const HEALTHY = { rate: 0, mode: "error", delayMs: 0 };
+const HEALTHY = { rate: 0, mode: "error", delayMs: 0, status: 503 };
 const behaviour = new Map();
 
 const parse = (raw) => {
@@ -69,6 +70,7 @@ const parse = (raw) => {
     rate: Math.min(1, Math.max(0, Number(body.rate) || 0)),
     mode: MODES.has(body.mode) ? body.mode : "error",
     delayMs: Math.min(60_000, Math.max(0, Number(body.delayMs) || 0)),
+    status: Number.isInteger(body.status) && body.status >= 400 && body.status <= 599 ? body.status : 503,
   };
 };
 
@@ -139,7 +141,7 @@ for (const [cluster, ports] of Object.entries(CLUSTERS)) {
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({ cluster, port, ok: true }));
         },
-        () => (res.writeHead(503), res.end("upstream unavailable")),
+        () => (res.writeHead(b.status), res.end(STATUS_CODES[b.status])),
       );
     }).listen(port);
   }
