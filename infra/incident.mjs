@@ -11,8 +11,12 @@
 //   node infra/incident.mjs
 //   WINDOW_MS=30000 RATE=0.6 node infra/incident.mjs   # a partial failure instead
 //   MODE=hang node infra/incident.mjs                  # this is the one that grows the work queue
-//   STATUS=422 node infra/incident.mjs                 # a 4xx: Breaker.ts's classify calls it client_error,
-//                                                       # a cockatiel success — no trip, no "open" outcome
+//   STATUS=422 node infra/incident.mjs                 # only a 4xx incident, nothing else appended
+//
+// A default run (STATUS unset) also appends a short client_error (422) phase after the outage and its
+// redrive — otherwise every run only ever shows a 503, and never the fourth classify outcome or the
+// second line on "Failed and refused calls, by HTTP status." Skipped when STATUS is already set: an
+// explicit STATUS run is itself the one incident to show, not something to append a second phase onto.
 //
 // Assumes `docker compose up -d` is already running.
 
@@ -42,6 +46,7 @@ const DRAIN_TIMEOUT_MS = Number(process.env.DRAIN_TIMEOUT_MS ?? "60000");
 // before its own backoff clock lets it probe and close.
 const REDRIVE_WAIT_MS = Number(process.env.REDRIVE_WAIT_MS ?? "40000");
 const REDRIVE_IDLE_MS = 6000;
+const CLIENT_ERROR_MS = Number(process.env.CLIENT_ERROR_MS ?? "10000");
 const POLL_MS = 1000;
 
 const auth = "Basic " + Buffer.from("guest:guest").toString("base64");
@@ -108,6 +113,15 @@ const fleetVerdict = async () => {
   const body = await res.json();
   if (body.status !== "success" || body.data.result.length === 0) return undefined;
   return Number(body.data.result[0].value[1]);
+};
+
+/** A single Prometheus scalar, or `undefined` if unreachable and 0 if the series doesn't exist yet. */
+const scalar = async (query) => {
+  const res = await fetch(`${PROMETHEUS}/api/v1/query?query=${encodeURIComponent(query)}`).catch(() => undefined);
+  if (!res || !res.ok) return undefined;
+  const body = await res.json();
+  if (body.status !== "success") return undefined;
+  return body.data.result.length === 0 ? 0 : Number(body.data.result[0].value[1]);
 };
 
 /**
@@ -203,6 +217,31 @@ const main = async () => {
     duplicates: auditAfter.duplicates - auditBefore.duplicates,
   };
 
+  let clientError;
+  if (STATUS === undefined) {
+    console.log(`\n== Injecting client_error (422): the third party is up, refuses every request ==`);
+    const tripsBefore = (await scalar(`sum(egress_consumer_breaker_trips_total)`)) ?? 0;
+    const callsBefore = (await scalar(`sum(egress_consumer_calls_total{outcome="client_error"})`)) ?? 0;
+    await fetch(`${FLAKY_UPSTREAM}/__fail`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ rate: 1, status: 422 }),
+    });
+    const ceStart = Date.now();
+    while (Date.now() - ceStart < CLIENT_ERROR_MS) {
+      await sleep(POLL_MS);
+      const states = await breakerStates();
+      const summary = states ? states.map((s) => STATE_NAME[s.state] ?? s.state).join(",") : "no data";
+      console.log(`  t+${Math.round((Date.now() - ceStart) / 1000)}s  breakers: [${summary}]`);
+    }
+    await setFailure(0);
+    await sleep(POLL_MS * 2); // let the last couple of calls land and the next scrape catch them
+    const tripsAfter = (await scalar(`sum(egress_consumer_breaker_trips_total)`)) ?? tripsBefore;
+    const callsAfter = (await scalar(`sum(egress_consumer_calls_total{outcome="client_error"})`)) ?? callsBefore;
+    clientError = { calls: callsAfter - callsBefore, trips: tripsAfter - tripsBefore };
+    console.log(`  ${clientError.calls} client_error calls, ${clientError.trips} of them tripped a breaker`);
+  }
+
   console.log(`\n== Summary ==`);
   console.log(`  peak backlog (work queue): ${peakBacklog}`);
   console.log(`  dead-lettered: ${dead.total}`);
@@ -215,6 +254,11 @@ const main = async () => {
     `  redrive: ${deadAtDrainEnd - dead.total} moved back onto the work queue, ` +
       `${parkedAfter - parkedBefore} parked as poison, ${dead.total} still dead-lettered`,
   );
+  if (clientError) {
+    console.log(
+      `  client_error: ${clientError.calls} calls refused (4xx), ${clientError.trips} counted by any breaker`,
+    );
+  }
   if (stats) {
     console.log(
       `  audit, this run: processed=${stats.processed ?? "?"} duplicates=${stats.duplicates ?? "?"}`,
