@@ -27,6 +27,14 @@ test("every phase has its own gauge value, closed first", () => {
   assert.deepEqual(Breaker.PHASE_CODE, { closed: 0, open: 1, "half-open": 2 });
 });
 
+test("classify: a 2xx is ok, a 4xx other than 408 and 429 the request's fault, and anything else the third party's", () => {
+  for (const status of [200, 204, 299]) assert.equal(Breaker.classify(status), "ok", String(status));
+  for (const status of [400, 401, 404, 409, 418, 422, 499]) assert.equal(Breaker.classify(status), "client_error", String(status));
+  for (const status of [100, 199, 300, 304, 399, 408, 429, 500, 502, 503, 504, 599, "timeout", "network"] as const) {
+    assert.equal(Breaker.classify(status), "failed", String(status));
+  }
+});
+
 /** A world the test steers: `wake` releases the token in flight, `report` plays the calls a consumer makes. */
 const world = () => {
   const log: string[] = [];

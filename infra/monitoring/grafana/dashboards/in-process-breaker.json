@@ -143,7 +143,7 @@
    "id": 3,
    "type": "timeseries",
    "title": "Calls to the third party, by outcome",
-   "description": "egress_consumer_calls_total. Only ok and failed: an open breaker has no consumer, so nothing is rejected locally — the queue holds the work instead.",
+   "description": "egress_consumer_calls_total: ok, failed (counts toward tripping) or client_error (a 4xx other than 408/429 — dead-lettered at once, not counted). No 'open': an open breaker has no consumer, so nothing is rejected locally — the queue holds the work instead.",
    "gridPos": {
     "x": 0,
     "y": 15,
@@ -216,6 +216,33 @@
      },
      "expr": "rabbitmq_detailed_queue_consumers{queue=\"payments-provider.work\"}",
      "legendFormat": "consumers",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 8,
+   "type": "timeseries",
+   "title": "Failed and refused calls, by HTTP status",
+   "description": "egress_consumer_calls_total for outcome failed or client_error, by status: the HTTP status the third party answered with, or timeout / network when it never did. A 4xx other than 408 and 429 is a client_error: dead-lettered at once and not counted toward tripping. Everything else here counts.",
+   "gridPos": {
+    "x": 0,
+    "y": 31,
+    "w": 24,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS_PROMETHEUS}"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS_PROMETHEUS}"
+     },
+     "expr": "sum by (status) (rate(egress_consumer_calls_total{outcome=~\"failed|client_error\"}[10s]))",
+     "legendFormat": "{{status}}",
      "refId": "A"
     }
    ]

@@ -35,10 +35,12 @@ export type ConsumerConfig = {
 };
 
 /**
- * Whether a call outcome is accepted or handed back to the broker: a total function of what matters, so it is
- * testable without a broker, breaker or fetch.
+ * Whether a call outcome is accepted, handed back to the broker or dead-lettered: a total function of what
+ * matters, so it is testable without a broker, breaker or fetch. `client_error` skips the delivery budget and
+ * the release/requeue split below entirely: it is discarded at once, on this replica or the next, because a
+ * retry gets the same answer.
  *
- * A failure is charged to the message (`requeue` counts toward the queue's delivery budget) only when it stands
+ * A `failed` is charged to the message (`requeue` counts toward the queue's delivery budget) only when it stands
  * alone. One that follows another failure on the same replica (`streak` above 1) or is a probe is evidence about
  * the third party, not the message, and is `release`d with no strike: the breaker needs `consecutiveFailures`
  * calls to open and its consumer takes a round trip to stop, and in that window the same few messages are
@@ -46,8 +48,14 @@ export type ConsumerConfig = {
  * successes (a poison message on a healthy third party) is still charged, and still parked.
  */
 export type Role = "work" | "probe";
-export const decide = (outcome: Upstream.CallOutcome, role: Role = "work", streak = 1): Settlement =>
-  outcome === "ok" ? "accept" : role === "probe" || streak > 1 ? "release" : "requeue";
+export const decide = (outcome: Breaker.CallOutcome, role: Role = "work", streak = 1): Settlement =>
+  outcome === "ok"
+    ? "accept"
+    : outcome === "client_error"
+      ? "discard"
+      : role === "probe" || streak > 1
+        ? "release"
+        : "requeue";
 
 /**
  * Longer than the client's connection-recovery budget (about five minutes), so a wake queue survives a reconnect
@@ -88,7 +96,7 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   const setInFlight = (delta: 1 | -1) =>
     Effect.suspend(() => Metric.update(Telemetry.inFlight, (inFlight += delta)));
 
-  const callUpstream = (key: string): Promise<Upstream.CallOutcome> =>
+  const callUpstream = (key: string): Promise<Upstream.CallStatus> =>
     runInContext(
       setInFlight(1).pipe(
         Effect.andThen(Upstream.call(`${cfg.egressAddr}${cfg.apiPath}`, key)),
@@ -96,35 +104,46 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
       ),
     );
 
+  // Logged at most once a second: a publisher that starts sending `gzip` by mistake, or a third party that
+  // starts refusing every request, would otherwise empty the queue into the dead-letter queue without a trace.
+  // The counters carry the volume.
+  let lastLoggedAt = 0;
+  const warnAtMostOncePerSecond = (message: () => string): void => {
+    O.map(
+      O.liftPredicate(Date.now(), (now) => now - lastLoggedAt >= 1000),
+      (now) => {
+        lastLoggedAt = now;
+        return runInContext(Effect.logWarning(message()));
+      },
+    );
+  };
+
   const attempt = async (key: string, role: Role, report: Breaker.Report): Promise<Settlement> => {
-    const outcome = await callUpstream(key);
-    const streak = report(outcome === "ok");
-    runInContext(Metric.update(Metric.withAttributes(Telemetry.calls, { outcome }), 1));
+    const status = await callUpstream(key);
+    const outcome = Breaker.classify(status);
+    const streak = report(outcome !== "failed");
+    runInContext(Metric.update(Metric.withAttributes(Telemetry.calls, { outcome, status: String(status) }), 1));
+    if (outcome === "client_error") {
+      warnAtMostOncePerSecond(
+        () => `${cfg.apiId}/consumer: third party refused message_id ${key} with ${status}, dead-lettering it`,
+      );
+    }
     return decide(outcome, role, streak);
   };
 
   // A body that declares a content type, encoding or message type this daemon cannot read, does not decode, or
   // carries no `message_id` to use as its idempotency key was never published by this fleet: discard it rather
-  // than spend the delivery budget on something no retry can fix. It is logged, at most once a second, because
-  // a publisher that starts sending `gzip` by mistake would otherwise empty the queue into the dead-letter queue
-  // without a trace; the counter carries the volume.
-  let lastLoggedAt = 0;
+  // than spend the delivery budget on something no retry can fix.
   const discard = (reason: "format" | "malformed" | "keyless", delivery: DeliveryInfo): Promise<Settlement> => {
     runInContext(Metric.update(Metric.withAttributes(Telemetry.discarded, { reason }), 1));
-    O.map(
-      O.liftPredicate(Date.now(), (now) => now - lastLoggedAt >= 1000),
-      (now) => {
-        lastLoggedAt = now;
-        const declared = (o: O.Option<string>) => O.getOrElse(o, () => "none");
-        return runInContext(
-          Effect.logWarning(
-            `${cfg.apiId}/consumer: discarding a ${reason} delivery — message_id ${declared(delivery.messageId)}, ` +
-              `type ${declared(delivery.type)}, content-type ${declared(delivery.contentType)}, ` +
-              `content-encoding ${declared(delivery.contentEncoding)}`,
-          ),
-        );
-      },
-    );
+    warnAtMostOncePerSecond(() => {
+      const declared = (o: O.Option<string>) => O.getOrElse(o, () => "none");
+      return (
+        `${cfg.apiId}/consumer: discarding a ${reason} delivery — message_id ${declared(delivery.messageId)}, ` +
+        `type ${declared(delivery.type)}, content-type ${declared(delivery.contentType)}, ` +
+        `content-encoding ${declared(delivery.contentEncoding)}`
+      );
+    });
     return Promise.resolve<Settlement>("discard");
   };
 

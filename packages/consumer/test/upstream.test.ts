@@ -17,35 +17,41 @@ const serving = async (handler: Parameters<typeof createServer>[1]) => {
   return { url: `http://127.0.0.1:${port}/payments`, close: () => server.closeAllConnections() ?? server.close() };
 };
 
-test("a 2xx is ok, and the idempotency key travels as the third party's header", async () => {
+test("a 2xx comes back as its status, and the idempotency key travels as the third party's header", async () => {
   const seen: Array<string | string[] | undefined> = [];
   const upstream = await serving((req, res) => {
     seen.push(req.headers[IDEMPOTENCY_KEY_HTTP_HEADER]);
     res.end("fine");
   });
-  assert.equal(await run(upstream.url, "abc:7"), "ok");
+  assert.equal(await run(upstream.url, "abc:7"), 200);
   assert.deepEqual(seen, ["abc:7"]);
   upstream.close();
 });
 
-test("a 5xx and a 429 are both a failed call", async () => {
-  for (const status of [500, 503, 429]) {
-    const upstream = await serving((_, res) => res.writeHead(status).end("no"));
-    assert.equal(await run(upstream.url), "failed");
+test("whatever status the third party answers with comes back as it is, unjudged", async () => {
+  for (const status of [200, 204, 400, 404, 408, 422, 429, 500, 503, 504]) {
+    const upstream = await serving((_, res) => res.writeHead(status).end("body"));
+    assert.equal(await run(upstream.url), status);
     upstream.close();
   }
 });
 
-test("a refused connection is a failed call, not an exception", async () => {
+test("a refused connection is `network`, not an exception", async () => {
   const upstream = await serving((_, res) => res.end());
   upstream.close();
-  assert.equal(await run(upstream.url.replace(/:\d+/, ":1")), "failed");
+  assert.equal(await run(upstream.url.replace(/:\d+/, ":1")), "network");
 });
 
-test("a third party that never answers is a failed call after the timeout", async () => {
+test("a connection dropped mid-request is `network`", async () => {
+  const upstream = await serving((req) => req.socket.destroy());
+  assert.equal(await run(upstream.url), "network");
+  upstream.close();
+});
+
+test("a third party that never answers is `timeout`, after the timeout", async () => {
   const upstream = await serving(() => {});
   const started = Date.now();
-  assert.equal(await run(upstream.url), "failed");
+  assert.equal(await run(upstream.url), "timeout");
   assert.ok(Date.now() - started < 3000);
   upstream.close();
 });

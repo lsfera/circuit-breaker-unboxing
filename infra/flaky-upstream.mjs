@@ -1,7 +1,7 @@
 // The fake third party: one server per port, several ports per API (only payments-provider is used in this
 // scenario). Failure injection is documented in the README ("Injecting a failure"): every field of a POST to
 // `/__fail` is optional and a POST replaces the whole behaviour, so `{}` restores a healthy endpoint.
-import { createServer } from "node:http";
+import { createServer, STATUS_CODES } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
 
 // 8086-8089 is deliberately skipped: other services in the wider system publish 8088 and 8089, and a
@@ -46,7 +46,7 @@ const recordProcessed = (key) => {
 };
 
 const MODES = new Set(["error", "hang", "reset"]);
-const HEALTHY = { rate: 0, mode: "error", delayMs: 0 };
+const HEALTHY = { rate: 0, mode: "error", delayMs: 0, status: 503 };
 const behaviour = new Map();
 
 const parse = (raw) => {
@@ -55,6 +55,7 @@ const parse = (raw) => {
     rate: Math.min(1, Math.max(0, Number(body.rate) || 0)),
     mode: MODES.has(body.mode) ? body.mode : "error",
     delayMs: Math.min(60_000, Math.max(0, Number(body.delayMs) || 0)),
+    status: Number.isInteger(body.status) && body.status >= 400 && body.status <= 599 ? body.status : 503,
   };
 };
 
@@ -131,7 +132,7 @@ for (const [cluster, ports] of Object.entries(CLUSTERS)) {
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({ cluster, port, ok: true }));
         },
-        () => (res.writeHead(503), res.end("upstream unavailable")),
+        () => (res.writeHead(b.status), res.end(STATUS_CODES[b.status])),
       );
     }).listen(port);
   }

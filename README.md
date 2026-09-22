@@ -41,6 +41,21 @@ fact about the broker rather than a variable:
 | **open** | *no* consumer; a wake token is in the delay chain, addressed to this replica | the token comes back after its hold |
 | **half-open** | a consumer with `prefetch: 1` — the first message it gets is the probe | probe succeeds → closed; fails → open again with a longer hold |
 
+- **What counts as a failure.** `classify` in `Breaker.ts` reads the HTTP
+  status (`Upstream.ts` only reports it, unjudged): a 2xx is `ok`; a 4xx other
+  than 408 and 429 is `client_error` — the third party is up and refused this
+  request, so it counts as a breaker success and never trips or reopens
+  anything; everything else (5xx, 408, 429, a timeout, a dropped connection) is
+  `failed`, and is what the phase table above means by "calls fail".
+- **A `client_error` is discarded at once, not released or requeued.**
+  Repeating a refused request gets the same answer, so `decide()`
+  (`consumer.ts`) sends it straight to the dead-letter queue on its first
+  delivery, skipping the release/requeue distinction below entirely. The
+  catch: a 4xx that is really ours to fix — expired credentials (401, 403), a
+  wrong path (404) — refuses every message the same way, and every one is
+  dead-lettered on its first call. Nothing here stops that;
+  `egress_consumer_calls_total`'s `status` label shows it, and a refused
+  message is logged, at most once a second, with its status and `message_id`.
 - **Open is silence, not rejection.** Tripping drains the consumer (in-flight
   calls settle, nothing is handed back to be re-run) and stops. No delivery
   reaches the replica, so no call is made, nothing is requeued, and nothing
@@ -64,9 +79,9 @@ fact about the broker rather than a variable:
   so replicas that tripped together don't come back together. A closed breaker
   forgets: the next outage starts from the first hold.
 - **Failures that are the third party's are `release`d, not `requeue`d.** A
-  failed probe, and any failure that follows another on the same replica, says
-  something about the third party, not about the message that happened to be
-  carrying it. The queue's three-attempt budget is for messages, so charging it
+  `failed` probe, and any `failed` call that follows another on the same
+  replica, says something about the third party, not about the message that
+  happened to be carrying it. The queue's three-attempt budget is for messages, so charging it
   here dead-lettered 2–3 healthy messages per outage in the first chaos run —
   the breaker needs five failures to open and its consumer takes a round trip
   to stop, and in that window the same few messages are redelivered again and
@@ -162,9 +177,10 @@ docker compose up -d --scale rmq-consumer=12   # resize the fleet, no restart ne
   growth.
 - Grafana: <http://localhost:3000/d/in-process-breaker>
   Panels: breaker state per replica, work-queue depth, dead-letter-queue depth,
-  calls by outcome, breaker trips, active consumers on the work queue, and the
-  wake tokens RabbitMQ holds (the open breakers). Plain `:3000` lands on
-  Grafana's Welcome screen, not this dashboard — use the direct link, or
+  calls by outcome, failed and refused calls by status, breaker trips, active
+  consumers on the work queue, and the wake tokens RabbitMQ holds (the open
+  breakers). Plain `:3000` lands on Grafana's Welcome screen, not this
+  dashboard — use the direct link, or
   `Dashboards` in the left nav.
 - Prometheus: <http://localhost:9090>.
 
@@ -175,6 +191,7 @@ POST replaces the whole behaviour, so `{}` restores health:
 
 ```bash
 curl -X POST localhost:8080/__fail -d '{"rate":1.0}'                # 503s
+curl -X POST localhost:8080/__fail -d '{"rate":1.0,"status":422}'   # 422s: refused, not down — no trip, no backlog
 curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"hang"}'  # never answers
 curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"reset"}' # drops the connection
 curl -X POST localhost:8080/__fail -d '{"delayMs":1500}'            # slow, still correct

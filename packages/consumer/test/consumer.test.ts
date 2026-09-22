@@ -12,6 +12,12 @@ test("a failed call is handed back to the broker, not retried here", () => {
   assert.equal(decide("failed"), "requeue");
 });
 
+test("a client error is dead-lettered at once, whatever the role or streak: repeating it gets the same answer", () => {
+  assert.equal(decide("client_error"), "discard");
+  assert.equal(decide("client_error", "probe"), "discard");
+  assert.equal(decide("client_error", "work", 5), "discard");
+});
+
 /**
  * The work message's encoder and decoder are one declaration shared by the producer and every daemon, so what
  * matters is the two ends agreeing and a bad body being an answer rather than a crash.
