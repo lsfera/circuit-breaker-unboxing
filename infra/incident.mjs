@@ -5,6 +5,8 @@
 //   node infra/incident.mjs
 //   WINDOW_MS=30000 RATE=0.6 node infra/incident.mjs   # a partial failure instead
 //   MODE=hang node infra/incident.mjs                  # the one that grows the work queue
+//   STATUS=422 node infra/incident.mjs                 # a 4xx: Breaker.ts's classify calls it client_error,
+//                                                       # not a breaker failure — see the client_error count below
 //
 // Assumes `docker compose up -d` is already running.
 import { createRequire } from "node:module";
@@ -19,6 +21,7 @@ const RATE = Number(process.env.RATE ?? "1.0");
 // full 2s client timeout, which pins all 100 in-flight slots and starves the drain below the arrival rate, so the
 // backlog itself grows.
 const MODE = process.env.MODE; // unset = "error" (flaky-upstream's default)
+const STATUS = process.env.STATUS ? Number(process.env.STATUS) : undefined; // unset = 503 (flaky-upstream's default)
 const WINDOW_MS = Number(process.env.WINDOW_MS ?? "20000");
 const DRAIN_TIMEOUT_MS = Number(process.env.DRAIN_TIMEOUT_MS ?? "60000");
 const RECOVERY_TIMEOUT_MS = Number(process.env.RECOVERY_TIMEOUT_MS ?? "90000");
@@ -76,7 +79,9 @@ const setFailure = (rate) =>
   fetch(`${FLAKY_UPSTREAM}/__fail`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(rate === 0 ? {} : { rate, ...(MODE ? { mode: MODE } : {}) }),
+    body: JSON.stringify(
+      rate === 0 ? {} : { rate, ...(MODE ? { mode: MODE } : {}), ...(STATUS ? { status: STATUS } : {}) },
+    ),
   });
 
 const audit = async (run) => {
@@ -115,7 +120,9 @@ const main = async () => {
 
   const tripsBefore = await breakerTrips();
   const callsBefore = await callsByOutcome();
-  console.log(`\n== Injecting failure: rate=${RATE} mode=${MODE ?? "error"} for ${WINDOW_MS}ms ==`);
+  console.log(
+    `\n== Injecting failure: rate=${RATE} mode=${MODE ?? "error"}${STATUS ? ` status=${STATUS}` : ""} for ${WINDOW_MS}ms ==`,
+  );
   await setFailure(RATE);
 
   let peakBacklog = 0;
@@ -178,7 +185,8 @@ const main = async () => {
   if (callsBefore && callsAfter) {
     const delta = (outcome) => (callsAfter[outcome] ?? 0) - (callsBefore[outcome] ?? 0);
     console.log(
-      `  attempts during the incident: ${delta("ok")} ok, ${delta("failed")} reached the third party and failed, ${delta("open")} turned away by an open breaker`,
+      `  attempts during the incident: ${delta("ok")} ok, ${delta("failed")} reached the third party and failed, ` +
+        `${delta("client_error")} refused (dead-lettered at once, not a breaker failure), ${delta("open")} turned away by an open breaker`,
     );
   }
   if (states) {
