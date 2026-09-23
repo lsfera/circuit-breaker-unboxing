@@ -22,7 +22,11 @@ flowchart LR
   b1 --> api[("Third-party API\n(flaky-upstream)")]
   b2 --> api
   b3 --> api
+  classDef new fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#1c1917
+  class b1,b2,b3 new
 ```
+
+<sub>Amber: new on this branch.</sub>
 
 Each replica's breaker is its own `CircuitBreakerPolicy` instance — the
 subgraphs are the point: nothing here draws a line *between* them.
