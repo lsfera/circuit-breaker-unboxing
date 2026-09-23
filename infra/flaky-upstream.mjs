@@ -34,6 +34,7 @@ const CLUSTERS = {
  *
  *   curl 'localhost:8080/__audit?run=abc'            # bitmap of n, plus counts
  *   curl -X DELETE 'localhost:8080/__audit?run=abc'
+ *   curl 'localhost:8080/__audit'                    # counts summed over every run
  *
  * Keys in any other shape are counted and otherwise ignored.
  */
@@ -96,7 +97,19 @@ for (const [cluster, ports] of Object.entries(CLUSTERS)) {
         return res.end(JSON.stringify({ cluster, port, ...behaviour.get(port) }));
       }
       if (req.url.startsWith("/__audit")) {
-        const run = new URL(req.url, "http://x").searchParams.get("run") ?? "";
+        const run = new URL(req.url, "http://x").searchParams.get("run");
+        if (run === null) {
+          const all = [...audits.values()];
+          res.writeHead(200, { "content-type": "application/json" });
+          return res.end(
+            JSON.stringify({
+              runs: all.length,
+              processed: all.reduce((sum, a) => sum + a.processed, 0),
+              duplicates: all.reduce((sum, a) => sum + a.duplicates, 0),
+              foreignKeys,
+            }),
+          );
+        }
         if (req.method === "DELETE") audits.delete(run);
         const a = audits.get(run);
         res.writeHead(200, { "content-type": "application/json" });

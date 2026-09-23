@@ -84,9 +84,10 @@ const setFailure = (rate) =>
     ),
   });
 
-const audit = async (run) => {
-  const res = await fetch(`${FLAKY_UPSTREAM}/__audit?run=${encodeURIComponent(run)}`);
-  return res.ok ? res.json() : undefined;
+/** Counts over every producer run: each run keys its messages `<run>:<n>` with its own random run id. */
+const audit = async () => {
+  const res = await fetch(`${FLAKY_UPSTREAM}/__audit`).catch(() => undefined);
+  return res?.ok ? res.json() : undefined;
 };
 
 const workQueue = `${API_ID}.work`;
@@ -148,6 +149,7 @@ const main = async () => {
   console.log(
     `\n== Injecting failure: rate=${RATE} mode=${MODE ?? "error"}${STATUS ? ` status=${STATUS}` : ""} for ${WINDOW_MS}ms ==`,
   );
+  const auditBefore = await audit();
   lag.startedAt = Date.now();
   await setFailure(RATE);
 
@@ -195,7 +197,11 @@ const main = async () => {
   }
   const dead = await queueDepth(deadQueue);
   const parkedAfter = (await queueDepth(parkedQueue)).total;
-  const stats = await audit(API_ID);
+  const auditAfter = await audit();
+  const stats = auditBefore && auditAfter && {
+    processed: auditAfter.processed - auditBefore.processed,
+    duplicates: auditAfter.duplicates - auditBefore.duplicates,
+  };
 
   console.log(`\n== Summary ==`);
   console.log(`  peak backlog (work queue): ${peakBacklog}`);
@@ -211,7 +217,7 @@ const main = async () => {
   );
   if (stats) {
     console.log(
-      `  audit: processed=${stats.processed ?? "?"} duplicates=${stats.duplicates ?? "?"}`,
+      `  audit, this run: processed=${stats.processed ?? "?"} duplicates=${stats.duplicates ?? "?"}`,
     );
   }
   if (agreement.ticksWithData > 0) {

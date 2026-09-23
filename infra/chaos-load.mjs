@@ -115,20 +115,12 @@ const setFailure = (rate, mode) =>
     body: JSON.stringify(rate === 0 ? {} : { rate, ...(mode ? { mode } : {}) }),
   });
 
-// consumer.ts mints its own idempotency key as `${apiId}:${n}` on the HTTP
-// call (IDEMPOTENCY_KEY_HEADER header) — it never carries forward whatever
-// key chaos-publisher.mjs stamped on the AMQP message. So flaky-upstream's
-// audit bucket is keyed by API_ID, not by this run's own id, and it's
-// shared with every other source that has ever called through this same
-// apiId (incident.mjs runs, the regular producer, article demos). Cleared
-// before each fault run so a bit set by some unrelated earlier run can't be
-// mistaken for this run's own message having been processed.
-const audit = async () => {
-  const res = await fetch(`${FLAKY_UPSTREAM}/__audit?run=${encodeURIComponent(API_ID)}`);
+// A consumer forwards each message's AMQP message_id, `<runId>:<n>` as chaos-publisher.mjs stamps it, as the
+// idempotency key, so flaky-upstream's audit bucket for a run holds exactly that run's messages.
+const audit = async (runId) => {
+  const res = await fetch(`${FLAKY_UPSTREAM}/__audit?run=${encodeURIComponent(runId)}`);
   return res.ok ? res.json() : undefined;
 };
-const clearAudit = () =>
-  fetch(`${FLAKY_UPSTREAM}/__audit?run=${encodeURIComponent(API_ID)}`, { method: "DELETE" });
 
 // ---- docker -------------------------------------------------------------
 
@@ -248,7 +240,7 @@ const runOneFault = async (name) => {
   const runId = `chaos-${name}-${Date.now()}`;
   console.log(`\n== ${name}: ${fault.description} ==`);
 
-  await Promise.all([purgeQueue(WORK), purgeQueue(DEAD), purgeQueue(PARKED), clearAudit()]);
+  await Promise.all([purgeQueue(WORK), purgeQueue(DEAD), purgeQueue(PARKED)]);
   await setFailure(0); // start from a healthy upstream regardless of the previous fault
 
   const publisherPath = new URL("./chaos-publisher.mjs", import.meta.url);
@@ -310,7 +302,7 @@ const runOneFault = async (name) => {
 
   const dead = await queueDepthReady(DEAD);
   const parked = await queueDepthReady(PARKED);
-  const auditResult = await audit();
+  const auditResult = await audit(runId);
 
   const confirmedBits = finalStats ? Buffer.from(finalStats.bits, "base64") : Buffer.alloc(0);
   const processedBits = auditResult?.bits ? Buffer.from(auditResult.bits, "base64") : Buffer.alloc(0);
