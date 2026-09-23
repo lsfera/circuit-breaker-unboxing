@@ -67,6 +67,15 @@ git subtree pull --prefix=repos/effect https://github.com/Effect-TS/effect.git e
 pnpm run check
 ```
 
+## File names
+
+Effect's own convention (`Effect.ts`, `Schema.ts`): a module is named after
+its subject, in PascalCase — `Breaker.ts`, `Verdict.ts`, `Client.ts`,
+`ControlPlane.ts`. Lowercase is for a process's wiring only: `main.ts`, the
+module named after its package holding the run function `main.ts` launches
+(`consumer.ts`, `producer.ts`, `aggregator.ts`), and test helpers
+(`harness.ts`). A file that other modules import from is PascalCase.
+
 ## Agent patterns
 
 [`agent-patterns/`](agent-patterns/) holds notes derived from the vendored
