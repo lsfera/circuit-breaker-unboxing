@@ -1,16 +1,17 @@
-# Every dead letter earned it
+# Every dead letter earned it, and has a way back
 
 One producer, one broker, a fleet of competing-consumer daemons, each with
 its own [cockatiel](https://github.com/connor4312/cockatiel) circuit
-breaker, a shared probe permit, a single aggregator publishing one
-fleet-wide verdict, and a redrive for dead-lettered work. This is the sixth
-step in a circuit-breaker article series, built on
-`article/05-dead-letter-redrive`.
+breaker, a shared probe permit, and a single aggregator publishing one
+fleet-wide verdict. This is the fifth step in a circuit-breaker article
+series, built on `article/04-fleet-verdict`.
 
-Every article since the first has named the same problem: a message can be
-dead-lettered without the third party ever seeing it. This branch stops
-that. `decide()` in `consumer.ts` had a doc comment defending the old
-behaviour as "a telemetry fact, not a settlement fact"; it was both.
+Every article since the first has named two problems with dead letters. A
+message could be dead-lettered without the third party ever seeing it —
+1,975 in one 15s outage in article 3, 1,777 in article 4 — and once
+dead-lettered it stayed there after the third party recovered. This branch
+fixes both: only real attempts count toward the delivery limit, and one
+elected replica redrives what's left.
 
 ```mermaid
 flowchart LR
@@ -52,7 +53,8 @@ flowchart LR
   dead -->|"redrive pass"| queue
   dead -.->|"MAX_REDRIVES exceeded"| parked
   classDef new fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#1c1917
-  linkStyle 15 stroke:#d97706,stroke-width:3px
+  class dead,parked,rtrigger new
+  linkStyle 15,16,17,18,19,20,21 stroke:#d97706,stroke-width:3px
 ```
 
 <sub>Amber: new or changed on this branch.</sub>
@@ -62,16 +64,25 @@ Each replica's breaker is its own instance; nothing connects the subgraphs.
 replica publishes, but only the aggregator reads the first, and RabbitMQ
 delivers the second to exactly one replica at a time.
 
+`infra/incident.mjs` with every call failing for 30s against 5 replicas,
+recorded 2026-09-19 (4.21× real time, also as
+[video](docs/media/dead-letter-redrive-incident.webm)): the work queue
+climbs the whole outage while the dead-letter queue never leaves zero →
+third party restored → the work queue drains as replicas close.
+
+![Grafana during a 30-second sustained outage: the work-queue depth climbs continuously while the dead-letter queue stays flat at zero, then the work queue drains once the third party recovers.](docs/media/dead-letter-redrive-incident.gif)
+
+In every earlier article's recording the dead-letter panel was the one that
+moved during an outage. Here it's the one that doesn't. The recorded run:
+0 dead-lettered across the 30s outage, a peak backlog of 4,280 — the cost of
+that zero — all five breakers open at peak, and 61% breaker agreement,
+inside the 52–73% range every article has measured.
+
 ## Counted attempts
 
-One line in `decide()`:
-
-```ts
-// before (articles 1–5)
-outcome === "ok" ? "accept" : "requeue"
-// after (this branch)
-outcome === "ok" ? "accept" : outcome === "open" ? "release" : "requeue"
-```
+`decide()` in `consumer.ts` now releases an `open` outcome instead of
+requeuing it. Its old doc comment defended requeuing as "a telemetry fact,
+not a settlement fact"; it was both.
 
 `WORK_DELIVERY_LIMIT` is 3, and `requeue` counts toward it. Before, an
 `open` outcome — the local breaker turned the message away, no call made —
@@ -84,9 +95,9 @@ nack-with-requeue RabbitMQ 4.3 doesn't count toward a quorum queue's
 releases, "failed" counts. `failed` still requeues: a real call was made
 and failed, which is what the budget is for.
 
-**Measured:** a 40s outage (`rate=1.0`) that would have dead-lettered about
-1,785 messages in its first 15s under article 5 kept `work.dead` at **zero
-throughout**. The cost: the work queue grew instead — 6,800 messages at
+**Measured:** the same outage (`rate=1.0`) dead-lettered 1,785 messages in
+15s with only the redrive below in place; with the release, a 40s outage
+kept `work.dead` at **zero throughout**. The cost: the work queue grew instead — 6,800 messages at
 40s and climbing — because a turned-away message now cycles between the
 queue and an uncounted release for as long as the breaker stays open.
 
@@ -106,9 +117,12 @@ queue and an uncounted release for as long as the breaker stays open.
 - **Gate.** The elected replica's own breaker must be closed — `master`'s
   choice. Gating on the aggregator's verdict is an option not taken here.
 - **Triggers.** On `onReset`, once at startup, and every 30s while closed
-  (`REDRIVE_SWEEP_MS`). The sweep was added after measuring `work.dead`
-  sit at 1,225 for 20s+ with every breaker closed and nothing left to
-  trigger a pass; `master`'s ADR 016 fixes the same stall the same way.
+  (`REDRIVE_SWEEP_MS`). The sweep was added after measuring the stall
+  without it: `work.dead` fell from ~1,480 to 1,225 after recovery, then sat
+  at exactly 1,225 for 20s+ with every breaker closed and nothing left to
+  trigger a pass; one recorded run moved 85 of 1,785 before the script
+  stopped watching. A trigger by hand resumed it at once, in the same
+  ~200-message steps. `master`'s ADR 016 fixes the same stall the same way.
 - **Idempotency.** A redrive republish keeps the original `message_id` —
   the producer's idempotency key — rather than letting `send` invent one.
 
@@ -178,7 +192,7 @@ One cockatiel `CircuitBreakerPolicy` per process, reused for its whole life
 **A permanent outage grows the work queue without bound.** This branch's
 own trade: `x-delivery-limit` used to move turned-away messages to
 `work.dead` after three tries, an accidental cap on backlog. Now nothing
-does.
+does — 4,280 backlogged after 30s in the recorded run, still climbing.
 
 **A trigger arriving mid-pass is dropped, not queued.**
 
@@ -217,11 +231,15 @@ docker compose up -d --scale rmq-consumer=12   # resize the fleet, no restart ne
 - Grafana: <http://localhost:3000/d/in-process-breaker/in-process-breaker-e28094-five-not-one>,
   anonymous access. Use this link: `:3000` alone lands on Grafana's welcome
   page. Two 401 toasts on first load (`/api/user/teams`, `/api/user/stars`)
-  are Grafana's anonymous mode, harmless.
+  are Grafana's anonymous mode, harmless. New this branch: "Parked queue
+  depth" (nonzero means real poison) and "Redrives" (moved vs. parked, only
+  on the elected replica).
 - Prometheus: <http://localhost:9090>.
 
 From inside the devcontainer, `localhost` doesn't reach these ports; use
 the service names (`rabbitmq`, `grafana`, `prometheus`, `flaky-upstream`).
+A gitignored `.env.local` with those overrides is picked up by
+`pnpm run incident`.
 
 ## Injecting a failure
 
@@ -255,7 +273,13 @@ reports:
 - verdict lag behind the first replica to trip (a negative lag is a
   polling artifact, not foresight);
 - after the drain, how many dead letters were redriven, parked, or still
-  dead when `REDRIVE_WAIT_MS` (40s) runs out.
+  dead when `REDRIVE_WAIT_MS` (40s) runs out;
+- then, unless `STATUS` is set, a short 422 phase: the third party refuses
+  every request, and the script reports the `client_error` calls and that
+  no breaker tripped.
+
+`infra/capture-incident.mjs` records the dashboard through an incident; it
+needs `playwright-core` (see its header).
 
 ## Load
 
@@ -293,8 +317,8 @@ bug:
 
 - After `flaky-storm`, a breaker can stay open 90s+ past recovery:
   back-to-back failure modes push `ExponentialBackoff` near its 30s cap.
-- The redriver never fired — `work.dead` stayed at 0. With this branch's
-  fix only a message in flight just before a breaker trips can
+- The redriver never fired — `work.dead` stayed at 0. With the counted
+  attempts only a message in flight just before a breaker trips can
   dead-letter; exercising the redriver under chaos needs a fault built for
   that.
 
@@ -314,6 +338,7 @@ packages/
 infra/
   flaky-upstream.mjs   the fake third party, with an audit trail
   incident.mjs         drives one incident and reports on it
+  capture-incident.mjs records the dashboard through one
   chaos-load.mjs       faults under load, judged on per-message correctness
   chaos-publisher.mjs  its load generator
   rabbitmq.conf        the broker's flow-control watermark
