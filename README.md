@@ -44,14 +44,18 @@ flowchart LR
   b3 -.->|"onStateChange"| control
   control --> aggregator
   aggregator -.->|"verdict"| prom[("Prometheus")]
-  queue -.->|"exhausts delivery limit"| dead
+  queue -.->|"exhausts delivery limit\n(real calls only)"| dead
   b1 -.->|"onReset"| rtrigger
   b2 -.->|"onReset"| rtrigger
   b3 -.->|"onReset"| rtrigger
   rtrigger -.->|"elects exactly one"| dead
   dead -->|"redrive pass"| queue
   dead -.->|"MAX_REDRIVES exceeded"| parked
+  classDef new fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#1c1917
+  linkStyle 15 stroke:#d97706,stroke-width:3px
 ```
+
+<sub>Amber: new or changed on this branch.</sub>
 
 Each replica's breaker is its own instance; nothing connects the subgraphs.
 `circuit.control` and `redrive-trigger` are both one-way fan-ins: every
