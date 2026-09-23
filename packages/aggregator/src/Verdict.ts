@@ -5,25 +5,12 @@
  * shape as `packages/consumer/src/consumer.ts`'s `decide`.
  */
 
-export type ReplicaState = "closed" | "open" | "half_open" | "isolated";
+import type { ControlEvent, ReplicaState } from "@egress/rmq/ControlPlane.ts";
 
-const REPLICA_STATES: ReadonlySet<string> = new Set<ReplicaState>([
-  "closed",
-  "open",
-  "half_open",
-  "isolated",
-]);
-
-/** A real membership check against the four states a replica can actually publish — not a bare `typeof`, which lets any string through as if it were a known state. */
-export const isReplicaState = (x: string): x is ReplicaState => REPLICA_STATES.has(x);
+export type { ReplicaState };
 
 /** The `circuit.control` wire shape every replica publishes on its own breaker's `onStateChange`. */
-export type ReplicaEvent = {
-  readonly apiId: string;
-  readonly instance: string;
-  readonly state: ReplicaState;
-  readonly at: number;
-};
+export type ReplicaEvent = ControlEvent;
 
 /** What the aggregator currently believes about one apiId's fleet: one entry per instance heard from. */
 export type ApiRegistry = ReadonlyMap<string, { readonly state: ReplicaState; readonly at: number }>;

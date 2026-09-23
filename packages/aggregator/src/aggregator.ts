@@ -1,6 +1,7 @@
-import { Effect, Metric, Ref } from "effect";
+import { Effect, Metric, Option as O, Ref } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
-import { CONTROL_EXCHANGE } from "@egress/rmq/ControlPlane.ts";
+import { CONTROL_EXCHANGE, decodeControlEvent, readsControlFormat } from "@egress/rmq/ControlPlane.ts";
+import type { DeliveryInfo } from "@egress/rmq/Client.ts";
 import * as Telemetry from "./Telemetry.ts";
 import * as Verdict from "./Verdict.ts";
 
@@ -21,27 +22,6 @@ export type AggregatorConfig = {
 
 /** Every replica binds and publishes on this; a single-instance aggregator needs exactly one queue for all of it. */
 const QUEUE = "circuit.control.aggregator";
-
-/** `undefined` on anything that isn't the wire shape every consumer publishes — dropped, not a fatal parse error. */
-const parseEvent = (body: string): Verdict.ReplicaEvent | undefined => {
-  try {
-    const value: unknown = JSON.parse(body);
-    if (
-      typeof value === "object" &&
-      value !== null &&
-      typeof (value as { apiId?: unknown }).apiId === "string" &&
-      typeof (value as { instance?: unknown }).instance === "string" &&
-      typeof (value as { state?: unknown }).state === "string" &&
-      Verdict.isReplicaState((value as { state: string }).state) &&
-      typeof (value as { at?: unknown }).at === "number"
-    ) {
-      return value as Verdict.ReplicaEvent;
-    }
-    return undefined;
-  } catch {
-    return undefined;
-  }
-};
 
 export const runAggregator = Effect.fnUntraced(function* (cfg: AggregatorConfig) {
   const rmq = yield* Rmq;
@@ -113,12 +93,24 @@ export const runAggregator = Effect.fnUntraced(function* (cfg: AggregatorConfig)
   const services = yield* Effect.context<never>();
   const runInContext = Effect.runPromiseWith(services);
 
+  // Accepted, not dead-lettered: nothing redelivers a transition, and the replica's next one supersedes it.
+  const decline = (reason: "format" | "malformed", delivery: DeliveryInfo) =>
+    runInContext(
+      Effect.logWarning(
+        `aggregator: dropping a ${reason} circuit.control event — type ${O.getOrElse(delivery.type, () => "none")}, ` +
+          `content-type ${O.getOrElse(delivery.contentType, () => "none")}`,
+      ),
+    );
+
   yield* rmq.consume(
     QUEUE,
-    (body) => {
-      const event = parseEvent(body);
-      return event === undefined ? undefined : runInContext(onEvent(event)).then(() => undefined);
-    },
+    (body, delivery) =>
+      readsControlFormat(delivery)
+        ? O.match(decodeControlEvent(body), {
+            onNone: () => decline("malformed", delivery),
+            onSome: (event) => runInContext(onEvent(event)),
+          })
+        : decline("format", delivery),
     { prefetch: 50 },
   );
 

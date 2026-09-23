@@ -39,18 +39,50 @@ const mediaType = (contentType: string): string => contentType.split(";")[0]!.tr
 const unencoded = (contentEncoding: string): boolean =>
   contentEncoding.split(",").every((encoding) => ["", "identity"].includes(encoding.trim().toLowerCase()));
 
-export const readsWorkFormat = (declared: {
+/** What a delivery declared about itself; `None` wherever the publisher said nothing, which is read as a match. */
+type Declared = {
   readonly contentType: O.Option<string>;
   readonly contentEncoding: O.Option<string>;
   readonly type: O.Option<string>;
-}): boolean =>
-  O.match(declared.contentType, { onNone: () => true, onSome: (t) => mediaType(t) === WORK_CONTENT_TYPE }) &&
-  O.match(declared.contentEncoding, { onNone: () => true, onSome: unencoded }) &&
-  O.match(declared.type, { onNone: () => true, onSome: (t) => t === WORK_MESSAGE_TYPE });
+};
+
+const readsFormat =
+  (contentType: string, messageType: string) =>
+  (declared: Declared): boolean =>
+    O.match(declared.contentType, { onNone: () => true, onSome: (t) => mediaType(t) === contentType }) &&
+    O.match(declared.contentEncoding, { onNone: () => true, onSome: unencoded }) &&
+    O.match(declared.type, { onNone: () => true, onSome: (t) => t === messageType });
+
+export const readsWorkFormat = readsFormat(WORK_CONTENT_TYPE, WORK_MESSAGE_TYPE);
 
 const WorkMessageJson = Schema.fromJsonString(WorkMessage);
 export const encodeWorkMessage = Schema.encodeSync(WorkMessageJson);
 export const decodeWorkMessage = Schema.decodeUnknownOption(WorkMessageJson);
+
+/** A replica's breaker state as `circuit.control` carries it — cockatiel's four, in snake case. */
+export const ReplicaState = Schema.Literals(["closed", "open", "half_open", "isolated"]);
+export type ReplicaState = typeof ReplicaState.Type;
+
+/** One breaker transition on `circuit.control`, declared once so encoder and decoder can't drift. Unknown fields are ignored. */
+export const ControlEvent = Schema.Struct({
+  apiId: Schema.String,
+  instance: Schema.String,
+  state: ReplicaState,
+  /** Epoch milliseconds, the replica's own clock. */
+  at: Schema.Int,
+});
+export type ControlEvent = typeof ControlEvent.Type;
+
+export const CONTROL_CONTENT_TYPE = "application/json";
+
+/** The AMQP `type` of a breaker transition. The aggregator declines any other type. */
+export const CONTROL_MESSAGE_TYPE = "egress.circuit.transition";
+
+export const readsControlFormat = readsFormat(CONTROL_CONTENT_TYPE, CONTROL_MESSAGE_TYPE);
+
+const ControlEventJson = Schema.fromJsonString(ControlEvent);
+export const encodeControlEvent = Schema.encodeSync(ControlEventJson);
+export const decodeControlEvent = Schema.decodeUnknownOption(ControlEventJson);
 
 /** The primary competing-consumer work queue daemons drain. */
 export const workQueueFor = (apiId: string): string => `${apiId}.work`;

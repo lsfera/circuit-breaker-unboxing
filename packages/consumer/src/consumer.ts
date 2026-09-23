@@ -4,10 +4,13 @@ import { randomUUID } from "node:crypto";
 import type { HttpClient } from "effect/unstable/http";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
+  CONTROL_CONTENT_TYPE,
   CONTROL_EXCHANGE,
+  CONTROL_MESSAGE_TYPE,
   deadLetterQueueFor,
   deadLetterQueueOptions,
   decodeWorkMessage,
+  encodeControlEvent,
   parkedQueueFor,
   parkedQueueOptions,
   readsWorkFormat,
@@ -103,7 +106,10 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   const instance = randomUUID();
   // Durable: a control-plane exchange should survive a broker restart like every queue here already does.
   yield* rmq.declareTopicExchange(CONTROL_EXCHANGE, { durable: true });
-  const controlPub = yield* rmq.publisherToExchange(CONTROL_EXCHANGE, routingKeyFor(cfg.apiId));
+  const controlPub = yield* rmq.publisherToExchange(CONTROL_EXCHANGE, routingKeyFor(cfg.apiId), {
+    contentType: CONTROL_CONTENT_TYPE,
+    type: CONTROL_MESSAGE_TYPE,
+  });
 
   // Recovering `<api>.work.dead`. `parkedQueue` needs declaring even on the four replicas that will never
   // redrive into it — every process that might touch a queue has to agree on its arguments.
@@ -161,7 +167,7 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
     runInContext(
       rmq.send(
         controlPub,
-        JSON.stringify({
+        encodeControlEvent({
           apiId: cfg.apiId,
           instance,
           state: Breaker.STATE_NAME[state],

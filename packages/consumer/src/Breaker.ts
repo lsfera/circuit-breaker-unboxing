@@ -9,6 +9,7 @@ import {
 import type { CircuitBreakerPolicy } from "cockatiel";
 import { Effect, Match, Option as O, Predicate } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
+import type { ReplicaState } from "@egress/rmq/ControlPlane.ts";
 import { isCallStatus } from "./Upstream.ts";
 import type { CallStatus } from "./Upstream.ts";
 
@@ -78,7 +79,7 @@ export const INITIAL_STATE_CODE: number = STATE_CODE[CircuitState.Closed];
  * The wire form of a state for the `circuit.control` event `onStateChange` publishes — named, not
  * `STATE_CODE`'s number, since JSON with a named state reads without cross-referencing this file.
  */
-export const STATE_NAME: Record<CircuitState, string> = {
+export const STATE_NAME: Record<CircuitState, ReplicaState> = {
   [CircuitState.Closed]: "closed",
   [CircuitState.Open]: "open",
   [CircuitState.HalfOpen]: "half_open",
