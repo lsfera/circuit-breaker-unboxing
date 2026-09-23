@@ -28,7 +28,12 @@ flowchart LR
   b1 --> api[("Third-party API\n(flaky-upstream)")]
   b2 --> api
   b3 --> api
+  classDef new fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#1c1917
+  class b1,b2,b3,chain new
+  linkStyle 4,5 stroke:#d97706,stroke-width:3px
 ```
+
+<sub>Amber: new on this branch.</sub>
 
 ## The breaker
 
