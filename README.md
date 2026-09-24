@@ -73,8 +73,9 @@ processed/duplicate count from `flaky-upstream`'s audit trail.
 ### What it measured
 
 A 20s outage at 200 msg/s with five consumers. In the recording below
-(2.2× real time, also as [video](docs/media/incident-error-mode.webm)) the
-dead-letter queue climbs to 4,000 while the work queue stays empty:
+(recorded 2026-09-24, 3.71× real time, also as
+[video](docs/media/incident-error-mode.webm)) the dead-letter queue climbs to
+4,019 while the work queue stays empty:
 
 ![Grafana during a 20s error-mode outage](docs/media/incident-error-mode.gif)
 
