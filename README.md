@@ -15,7 +15,9 @@ Article 2 left three problems that need the replicas to coordinate:
 
 None of them needs new infrastructure. RabbitMQ already has the pieces: a
 one-message queue for a token, a settlement that doesn't count toward the
-delivery limit, and a single-active-consumer election.
+delivery limit, and a single-active-consumer election. And the fleet's
+view of the third party is a Prometheus rule over the breaker gauges every
+replica already exports.
 
 ```mermaid
 flowchart LR
@@ -49,9 +51,12 @@ flowchart LR
   rtrigger -.->|"elects exactly one"| dead
   dead -->|"redrive pass"| queue
   dead -.->|"MAX_REDRIVES exceeded"| parked
+  b1 -.->|"breaker state"| prom[("Prometheus\n(fleet_open rule)")]
+  b2 -.->|"breaker state"| prom
+  b3 -.->|"breaker state"| prom
   classDef new fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#1c1917
-  class permit,dead,parked,rtrigger new
-  linkStyle 4,5,6,10,11,12,13,14,15,16 stroke:#d97706,stroke-width:3px
+  class permit,dead,parked,rtrigger,prom new
+  linkStyle 4,5,6,10,11,12,13,14,15,16,17,18,19 stroke:#d97706,stroke-width:3px
 ```
 
 <sub>Amber: new or changed on this branch.</sub>
@@ -128,12 +133,29 @@ requeue, `open` release after a 100–400ms hold. A 4xx that is really ours
 (401, 403, 404) dead-letters every message it touches; the `status` label
 on `egress_consumer_calls_total` shows it.
 
+## The fleet view: a Prometheus rule
+
+`infra/monitoring/rules.yml`:
+
+- `egress:fleet_open_fraction` — the share of replicas whose breaker is open
+  or half-open, counting only samples under 10s old;
+- `egress:fleet_open` — 1 at half or more;
+- alert `EgressThirdPartyDown` after 30s of that.
+
+No extra process, no heartbeat: a replica counts while it is scraped.
+Nothing reads it back. The freshness filter is there because a removed
+container's last sample stays visible for Prometheus's 5-minute lookback —
+measured, six series for five replicas after a rebuild, diluting a full
+outage to 5/6. **Measured:** a 100% outage read 1.0 and fired the alert
+after 30s; it read 0 again after restore.
+
 ## What this still doesn't fix
 
 - **The five breakers still don't agree.** The permit stops the recovery
   burst, not independent tripping.
 - **Redrive waits on the elected replica's breaker**, up to 30s after the
-  rest of the fleet has closed. Nothing knows what the fleet thinks.
+  rest of the fleet has closed; the fleet view is for people and alerts,
+  not for the redriver.
 - **A long outage grows the work queue without bound.** The delivery limit
   used to cap it by accident.
 - **Losing the permit race grows backoff** like a failed probe — cockatiel
@@ -153,7 +175,7 @@ docker compose up -d --scale rmq-consumer=12   # resize the fleet, no restart ne
 - RabbitMQ: <http://localhost:15672> (guest/guest).
 - Grafana: <http://localhost:3000/d/in-process-breaker/in-process-breaker-e28094-five-not-one>
   (anonymous; two 401 toasts on first load are harmless). New panels:
-  "Parked queue depth" and "Redrives".
+  "Fleet open", "Parked queue depth" and "Redrives".
 - Prometheus: <http://localhost:9090>.
 
 Inside the devcontainer use service names (`rabbitmq`, `grafana`, …); a
@@ -229,7 +251,7 @@ infra/
   chaos-load.mjs       faults under load, judged on per-message correctness
   chaos-publisher.mjs  its load generator
   rabbitmq.conf        the broker's flow-control watermark
-  monitoring/          Prometheus scrape config, Grafana dashboard
+  monitoring/          Prometheus scrape config and rules, Grafana dashboard
 docker-compose.yml     the whole stack
 ```
 
