@@ -48,7 +48,7 @@ test("entries come back in the order they were appended, per API", async () => {
       for (const seq of [1, 2, 3]) yield* outbox.append(event("payments", seq));
       yield* outbox.append(event("shipping", 9));
 
-      const payments = yield* outbox.peek("payments", 10);
+      const payments = (yield* outbox.peek("payments", 10)).entries;
       const apis = yield* outbox.apis;
       return { payments: payments.map(sequenceOf), apis: [...apis].sort() };
     }),
@@ -66,10 +66,10 @@ test("commit removes only what was delivered, and leaves the rest at the head", 
 
       // Two delivered, the third failed: exactly two may go.
       yield* outbox.commit("payments", 2);
-      const afterCommit = (yield* outbox.peek("payments", 10)).map(sequenceOf);
+      const afterCommit = (yield* outbox.peek("payments", 10)).entries.map(sequenceOf);
       const depth = yield* outbox.depth("payments");
 
-      yield* outbox.commit("payments", 1);
+      yield* outbox.commit("payments", 3);
       return { afterCommit, depth, apisWhenEmpty: yield* outbox.apis };
     }),
   );
@@ -91,7 +91,7 @@ test("the bound drops the oldest entries and says how many", async () => {
       for (let seq = 1; seq <= OUTBOX_MAX_PER_API + 3; seq++) {
         dropped += yield* outbox.append(event("payments", seq));
       }
-      const head = yield* outbox.peek("payments", 1);
+      const head = (yield* outbox.peek("payments", 1)).entries;
       return {
         dropped,
         first: head[0] === undefined ? undefined : sequenceOf(head[0]),
@@ -103,4 +103,30 @@ test("the bound drops the oldest entries and says how many", async () => {
   assert.equal(dropped, 3, "three over the bound means three dropped, counted for the metric");
   assert.equal(depth, OUTBOX_MAX_PER_API, "the outbox never grows past its bound");
   assert.equal(first, 4, "the three oldest went, not the three newest");
+});
+
+/**
+ * A delivery that fails appends while a drain is posting what it peeked. At the
+ * bound, that append drops the oldest entries — the very ones the drain holds —
+ * and a commit by count then trimmed that many again from the new head,
+ * removing entries nobody had delivered. Committing the position got to trims
+ * only what is still there of what was delivered.
+ */
+test("a commit after the bound dropped entries mid-drain removes only what was delivered", async () => {
+  const { remaining } = await Effect.runPromise(
+    Effect.gen(function* () {
+      const outbox = yield* makeInMemoryOutbox;
+      for (let seq = 1; seq <= OUTBOX_MAX_PER_API; seq++) yield* outbox.append(event("payments", seq));
+
+      const { from, entries } = yield* outbox.peek("payments", 50);
+      // While those 50 are being posted, 10 more fail: the 10 oldest are dropped.
+      for (let seq = OUTBOX_MAX_PER_API + 1; seq <= OUTBOX_MAX_PER_API + 10; seq++) {
+        yield* outbox.append(event("payments", seq));
+      }
+      yield* outbox.commit("payments", from + entries.length);
+      return { remaining: (yield* outbox.peek("payments", 1)).entries.map(sequenceOf) };
+    }),
+  );
+
+  assert.deepEqual(remaining, [51], "the first undelivered entry is next, not the 61st");
 });

@@ -344,9 +344,9 @@ export const makeWebhookSink = Effect.fnUntraced(function* (url: string): Effect
     };
 
     const drainApi = Effect.fnUntraced(function* (apiId: string) {
-      const pending = yield* outbox.peek(apiId, OUTBOX_DRAIN_LIMIT);
+      const { from, entries } = yield* outbox.peek(apiId, OUTBOX_DRAIN_LIMIT);
       const { consumed, delivered, unreadable } = yield* Effect.reduce(
-        pending,
+        entries,
         (): Pass => ({ consumed: 0, delivered: 0, unreadable: 0, stopped: false }),
         (acc, entry): Effect.Effect<Pass, CoordinationUnavailable> =>
           acc.stopped
@@ -375,7 +375,7 @@ export const makeWebhookSink = Effect.fnUntraced(function* (url: string): Effect
             `dropped ${unreadable} undeliverable outbox entr(ies) for ${apiId}: no longer decodable`,
           )
         : Effect.void;
-      yield* consumed > 0 ? outbox.commit(apiId, consumed) : Effect.void;
+      yield* consumed > 0 ? outbox.commit(apiId, from + consumed) : Effect.void;
       yield* delivered > 0
         ? Metric.update(Metric.withAttributes(Telemetry.outboxReplayed, { apiId }), delivered)
         : Effect.void;

@@ -40,18 +40,32 @@ export const OUTBOX_DRAIN_LIMIT = 50;
  */
 export type Entry = O.Option<CircuitEvent>;
 
+/**
+ * What `peek` saw, and where. `from` is the absolute position of the first
+ * entry: every entry ever appended for an API has one, and the bound's drops
+ * move the head forward. A drain commits the position it got to, not a count,
+ * because an append can drop the oldest entries while the drain is posting
+ * them, and trimming a count from the new head would remove entries nobody
+ * delivered.
+ */
+export type Peeked = {
+  readonly from: number;
+  readonly entries: ReadonlyArray<Entry>;
+};
+
 export class Outbox extends Context.Service<
   Outbox,
   {
     /** Persist an undelivered event. Returns how many entries were dropped to stay inside the bound. */
     readonly append: (event: CircuitEvent) => Effect.Effect<number, CoordinationUnavailable>;
     /** The oldest `limit` entries for one API, in the order they were appended. */
-    readonly peek: (
-      apiId: string,
-      limit: number,
-    ) => Effect.Effect<ReadonlyArray<Entry>, CoordinationUnavailable>;
-    /** Drop the first `count` entries for one API — called only after they have been delivered, or found undeliverable. */
-    readonly commit: (apiId: string, count: number) => Effect.Effect<void, CoordinationUnavailable>;
+    readonly peek: (apiId: string, limit: number) => Effect.Effect<Peeked, CoordinationUnavailable>;
+    /**
+     * Drop every entry before position `through` — called only once they have
+     * been delivered, or found undeliverable. Entries already dropped by the
+     * bound are not counted twice.
+     */
+    readonly commit: (apiId: string, through: number) => Effect.Effect<void, CoordinationUnavailable>;
     /** Which APIs currently have anything pending. */
     readonly apis: Effect.Effect<ReadonlyArray<string>, CoordinationUnavailable>;
     readonly depth: (apiId: string) => Effect.Effect<number, CoordinationUnavailable>;
@@ -63,33 +77,43 @@ export class Outbox extends Context.Service<
 // ---------------------------------------------------------------------------
 
 export const makeInMemoryOutbox = Effect.gen(function* () {
-  const entries = yield* Ref.make(new Map<string, ReadonlyArray<CircuitEvent>>());
+  /** Per API: the pending events, and the absolute position of the first. */
+  type Queue = { readonly head: number; readonly events: ReadonlyArray<CircuitEvent> };
+  const queues = yield* Ref.make(new Map<string, Queue>());
+  const queueOf = (map: Map<string, Queue>, apiId: string): Queue =>
+    map.get(apiId) ?? { head: 0, events: [] };
 
   const append = (event: CircuitEvent) =>
-    Ref.modify(entries, (map) => {
+    Ref.modify(queues, (map) => {
       const apiId = event.data.apiId;
-      const next = [...(map.get(apiId) ?? []), event];
+      const q = queueOf(map, apiId);
+      const next = [...q.events, event];
       const dropped = Math.max(0, next.length - OUTBOX_MAX_PER_API);
-      return [dropped, new Map(map).set(apiId, next.slice(dropped))];
+      return [dropped, new Map(map).set(apiId, { head: q.head + dropped, events: next.slice(dropped) })];
     });
 
   const peek = (apiId: string, limit: number) =>
-    Ref.get(entries).pipe(
-      Effect.map((map) => (map.get(apiId) ?? []).slice(0, limit).map(O.some)),
+    Ref.get(queues).pipe(
+      Effect.map((map): Peeked => {
+        const q = queueOf(map, apiId);
+        return { from: q.head, entries: q.events.slice(0, limit).map(O.some) };
+      }),
     );
 
-  const commit = (apiId: string, count: number) =>
-    Ref.update(entries, (map) => {
-      const rest = (map.get(apiId) ?? []).slice(count);
-      const next = new Map(map);
-      if (rest.length === 0) next.delete(apiId);
-      else next.set(apiId, rest);
-      return next;
+  // The head is kept when the queue empties, so a commit from an older peek
+  // can never trim entries appended after it.
+  const commit = (apiId: string, through: number) =>
+    Ref.update(queues, (map) => {
+      const q = queueOf(map, apiId);
+      const trim = Math.max(0, through - q.head);
+      return new Map(map).set(apiId, { head: q.head + trim, events: q.events.slice(trim) });
     });
 
-  const apis = Ref.get(entries).pipe(Effect.map((map) => [...map.keys()]));
+  const apis = Ref.get(queues).pipe(
+    Effect.map((map) => [...map].filter(([, q]) => q.events.length > 0).map(([apiId]) => apiId)),
+  );
   const depth = (apiId: string) =>
-    Ref.get(entries).pipe(Effect.map((map) => (map.get(apiId) ?? []).length));
+    Ref.get(queues).pipe(Effect.map((map) => queueOf(map, apiId).events.length));
 
   return { append, peek, commit, apis, depth } as const;
 });
@@ -110,6 +134,9 @@ export const InMemoryOutboxLayer = Layer.effect(Outbox, makeInMemoryOutbox);
  * yields an object where the caller expects an array is the kind of bug that
  * only shows up when the queue is empty, which is most of the time.
  */
+// KEYS[3] throughout is the absolute position of the list's first entry — see
+// `Peeked`. It outlives the list, so a commit from an older peek never trims
+// entries appended after the list last emptied.
 const APPEND_SCRIPT = `
 redis.call("SADD", KEYS[2], ARGV[2])
 redis.call("RPUSH", KEYS[1], ARGV[1])
@@ -118,19 +145,26 @@ local max = tonumber(ARGV[3])
 if len > max then
   local dropped = len - max
   redis.call("LTRIM", KEYS[1], dropped, -1)
+  redis.call("INCRBY", KEYS[3], dropped)
   return dropped
 end
 return 0
 `;
 
 const PEEK_SCRIPT = `
+local head = tonumber(redis.call("GET", KEYS[2]) or "0")
 local items = redis.call("LRANGE", KEYS[1], 0, tonumber(ARGV[1]) - 1)
-if #items == 0 then return "[]" end
-return cjson.encode(items)
+if #items == 0 then return cjson.encode({ from = head, entries = "none" }) end
+return cjson.encode({ from = head, entries = items })
 `;
 
 const COMMIT_SCRIPT = `
-redis.call("LTRIM", KEYS[1], tonumber(ARGV[1]), -1)
+local head = tonumber(redis.call("GET", KEYS[3]) or "0")
+local trim = tonumber(ARGV[1]) - head
+if trim > 0 then
+  redis.call("LTRIM", KEYS[1], trim, -1)
+  redis.call("INCRBY", KEYS[3], trim)
+end
 if redis.call("LLEN", KEYS[1]) == 0 then
   redis.call("DEL", KEYS[1])
   redis.call("SREM", KEYS[2], ARGV[2])
@@ -162,6 +196,14 @@ const evalGuarded = (
  */
 const readStringList = readerFor(Schema.Array(Schema.String));
 
+/** PEEK_SCRIPT's answer. `entries` is the string "none" for an empty list, since cjson encodes `{}` for one. */
+const readPeeked = readerFor(
+  Schema.Struct({
+    from: Schema.Natural,
+    entries: Schema.Union([Schema.Array(Schema.String), Schema.Literal("none")]),
+  }),
+);
+
 const stringList = (result: string | number | null): ReadonlyArray<string> =>
   Predicate.isString(result)
     ? Result.getOrElse(readStringList(result), () => [])
@@ -171,28 +213,45 @@ export const RedisOutboxLayer = (redis: RedisLike, keyPrefix = "egress:aggregato
   Layer.succeed(Outbox, {
     append: (event) =>
       evalGuarded(redis, "outbox.append", APPEND_SCRIPT, {
-        keys: [`${keyPrefix}:outbox:${event.data.apiId}`, `${keyPrefix}:outbox:apis`],
+        keys: [
+          `${keyPrefix}:outbox:${event.data.apiId}`,
+          `${keyPrefix}:outbox:apis`,
+          `${keyPrefix}:outbox:${event.data.apiId}:head`,
+        ],
         args: [JSON.stringify(event), event.data.apiId, String(OUTBOX_MAX_PER_API)],
       }).pipe(Effect.map((dropped) => Number(dropped) || 0)),
 
     peek: (apiId, limit) =>
       evalGuarded(redis, "outbox.peek", PEEK_SCRIPT, {
-        keys: [`${keyPrefix}:outbox:${apiId}`],
+        keys: [`${keyPrefix}:outbox:${apiId}`, `${keyPrefix}:outbox:${apiId}:head`],
         args: [String(limit)],
       }).pipe(
         // A stored entry that cannot be decoded is not replayed: garbage here
         // is a version skew or a corrupt write, and handing it to a subscriber
         // that trusts the schema is worse than losing it. It still comes back
-        // as a `None` in its own position — see `Entry`.
-        Effect.map((result) =>
-          stringList(result).map((raw) => Result.getSuccess(decodeCircuitEvent(raw))),
+        // as a `None` in its own position — see `Entry`. An answer that does
+        // not decode at all reads as nothing pending, with nothing to commit.
+        Effect.map((result): Peeked =>
+          Result.match(readPeeked(Predicate.isString(result) ? result : ""), {
+            onFailure: () => ({ from: 0, entries: [] }),
+            onSuccess: ({ from, entries }) => ({
+              from,
+              entries: (entries === "none" ? [] : entries).map((raw) =>
+                Result.getSuccess(decodeCircuitEvent(raw)),
+              ),
+            }),
+          }),
         ),
       ),
 
-    commit: (apiId, count) =>
+    commit: (apiId, through) =>
       evalGuarded(redis, "outbox.commit", COMMIT_SCRIPT, {
-        keys: [`${keyPrefix}:outbox:${apiId}`, `${keyPrefix}:outbox:apis`],
-        args: [String(count), apiId],
+        keys: [
+          `${keyPrefix}:outbox:${apiId}`,
+          `${keyPrefix}:outbox:apis`,
+          `${keyPrefix}:outbox:${apiId}:head`,
+        ],
+        args: [String(through), apiId],
       }).pipe(Effect.asVoid),
 
     apis: evalGuarded(redis, "outbox.apis", APIS_SCRIPT, {

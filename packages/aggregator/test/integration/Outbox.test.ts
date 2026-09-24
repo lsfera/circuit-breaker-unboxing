@@ -13,7 +13,7 @@ import {
 } from "./harness.ts";
 import type { Server } from "node:http";
 import { makeWebhookSink, SOURCE } from "../../src/Events.ts";
-import { Outbox, RedisOutboxLayer } from "../../src/Outbox.ts";
+import { Outbox, OUTBOX_MAX_PER_API, RedisOutboxLayer } from "../../src/Outbox.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 
 /**
@@ -177,7 +177,7 @@ test("a drain stops at the first event it cannot deliver, rather than skipping a
         const firstPass = yield* sink.drainOutbox;
         clearInterval(stopAfterTwo);
 
-        const stillPending = (yield* outbox.peek("payments", 10)).map((e) =>
+        const stillPending = (yield* outbox.peek("payments", 10)).entries.map((e) =>
           O.match(e, { onNone: () => -1, onSome: (x) => x.data.sequence }),
         );
 
@@ -256,4 +256,30 @@ test("an entry that no longer decodes is dropped and committed past, not stepped
   assert.equal(replayed, 2, "and only the delivered ones are counted as replayed");
   assert.equal(depthAfter, 0, "the entry nobody can read is trimmed rather than retried forever");
   assert.deepEqual(apisAfter, [], "so the API stops being listed instead of wedging the drain");
+});
+
+test("a commit after the bound dropped entries mid-drain removes only what was delivered", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const remaining = await Effect.runPromise(
+    Effect.provide(
+      Effect.gen(function* () {
+        const outbox = yield* Outbox;
+        for (let seq = 1; seq <= OUTBOX_MAX_PER_API; seq++) yield* outbox.append(event("payments", seq));
+
+        const { from, entries } = yield* outbox.peek("payments", 50);
+        // A delivery failing while those 50 are posted: the bound drops the 10 oldest.
+        for (let seq = OUTBOX_MAX_PER_API + 1; seq <= OUTBOX_MAX_PER_API + 10; seq++) {
+          yield* outbox.append(event("payments", seq));
+        }
+        yield* outbox.commit("payments", from + entries.length);
+        return (yield* outbox.peek("payments", 1)).entries.map((e) =>
+          O.match(e, { onNone: () => -1, onSome: (x) => x.data.sequence }),
+        );
+      }),
+      freshOutbox(),
+    ),
+  );
+
+  assert.deepEqual(remaining, [51], "the first undelivered entry is next, not the 61st");
 });
