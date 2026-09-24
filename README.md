@@ -24,6 +24,12 @@ with a `429`. A breaker treats that as an outage. The answer is to classify
 it as backpressure, and to let each replica learn a concurrency limit from
 it (*A 429 is backpressure*, below).
 
+For a fleet of consumers calling a third party, this is where the series
+stops needing new infrastructure. Article 4
+(`article/04-platform-control-plane`) is the design at platform level, for
+when other systems must act on the verdict or many services share one egress
+path.
+
 ```mermaid
 flowchart LR
   producer["Producer"] --> queue[("payments-provider.work")]
