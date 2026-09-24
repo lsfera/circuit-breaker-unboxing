@@ -46,7 +46,7 @@ const recordProcessed = (key) => {
 };
 
 const MODES = new Set(["error", "hang", "reset"]);
-const HEALTHY = { rate: 0, mode: "error", delayMs: 0, status: 503 };
+const HEALTHY = { rate: 0, mode: "error", delayMs: 0, status: 503, capacity: 0 };
 const behaviour = new Map();
 
 const parse = (raw) => {
@@ -56,12 +56,27 @@ const parse = (raw) => {
     mode: MODES.has(body.mode) ? body.mode : "error",
     delayMs: Math.min(60_000, Math.max(0, Number(body.delayMs) || 0)),
     status: Number.isInteger(body.status) && body.status >= 400 && body.status <= 599 ? body.status : 503,
+    // Concurrent requests this endpoint will serve; 0 is unlimited. The one failure here that depends on how hard
+    // it is pushed rather than on a coin.
+    capacity: Math.max(0, Math.floor(Number(body.capacity) || 0)),
   };
 };
 
-/** Answers one request the way this endpoint is currently told to behave. */
+const serving = new Map();
+
+/**
+ * Answers one request the way this endpoint is currently told to behave. A request arriving with `capacity`
+ * already in flight is turned away at once with a 429, as a rate-limited third party does: it costs nothing to
+ * serve and says nothing about the service being broken.
+ */
 const misbehave = async (b, req, res, ok, failure) => {
-  if (b.delayMs > 0) await sleep(b.delayMs);
+  if (b.capacity > 0 && (serving.get(b) ?? 0) >= b.capacity) return (res.writeHead(429), res.end("slow down"));
+  serving.set(b, (serving.get(b) ?? 0) + 1);
+  try {
+    if (b.delayMs > 0) await sleep(b.delayMs);
+  } finally {
+    serving.set(b, serving.get(b) - 1);
+  }
   if (Math.random() >= b.rate) return ok();
   // A hung request holds its socket until the client gives up; nothing is ever written.
   if (b.mode === "hang") return;

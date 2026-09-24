@@ -43,10 +43,10 @@ const allClosed = async () => {
 };
 
 mkdirSync(OUT, { recursive: true });
-// Tall enough for every panel, the fleet view and the permit/redrive row included.
-const size = { width: 1600, height: 2080 };
+// Tall enough for every panel, down to the concurrency limit.
+const size = { width: 1600, height: 2400 };
 const browser = await chromium.launch({ executablePath });
-const context = await browser.newContext({ viewport: size, recordVideo: { dir: OUT, size: { width: 1200, height: 1560 } } });
+const context = await browser.newContext({ viewport: size, recordVideo: { dir: OUT, size: { width: 1200, height: 1800 } } });
 const page = await context.newPage();
 const t0 = Date.now();
 const shot = async (name) => {

@@ -35,6 +35,14 @@ test("classify: a 2xx is ok, a 4xx other than 408 and 429 the request's fault, a
   }
 });
 
+test("classify: while throttling, a 429 is throttled and every other status reads as it did", () => {
+  assert.equal(Breaker.classify(429, true), "throttled");
+  assert.equal(Breaker.classify(408, true), "failed");
+  assert.equal(Breaker.classify(503, true), "failed");
+  assert.equal(Breaker.classify(422, true), "client_error");
+  assert.equal(Breaker.classify(200, true), "ok");
+});
+
 /** A world the test steers: `wake` releases the token in flight, `report` plays the calls a consumer makes. */
 const world = () => {
   const log: string[] = [];

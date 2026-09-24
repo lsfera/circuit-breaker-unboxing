@@ -7,6 +7,8 @@
 //   MODE=hang node infra/incident.mjs                  # the one that grows the work queue
 //   STATUS=422 node infra/incident.mjs                 # a 4xx: Breaker.ts's classify calls it client_error,
 //                                                       # discarded at once — no trip, no backlog
+//   CAPACITY=5 DELAY_MS=100 node infra/incident.mjs    # full, not broken: 5 at once (50/s), 429 beyond. Needs
+//                                                       # RATE_PER_SECOND above that ceiling
 //
 // Assumes `docker compose up -d` is already running.
 import { createRequire } from "node:module";
@@ -22,6 +24,9 @@ const RATE = Number(process.env.RATE ?? "1.0");
 // backlog itself grows.
 const MODE = process.env.MODE; // unset = "error" (flaky-upstream's default)
 const STATUS = process.env.STATUS ? Number(process.env.STATUS) : undefined; // unset = 503 (flaky-upstream's default)
+// A third party with a ceiling instead of a failure rate: at most CAPACITY in flight, each taking DELAY_MS.
+const CAPACITY = Number(process.env.CAPACITY ?? "0");
+const DELAY_MS = Number(process.env.DELAY_MS ?? "0");
 const WINDOW_MS = Number(process.env.WINDOW_MS ?? "20000");
 const DRAIN_TIMEOUT_MS = Number(process.env.DRAIN_TIMEOUT_MS ?? "60000");
 const RECOVERY_TIMEOUT_MS = Number(process.env.RECOVERY_TIMEOUT_MS ?? "90000");
@@ -80,9 +85,21 @@ const setFailure = (rate) =>
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(
-      rate === 0 ? {} : { rate, ...(MODE ? { mode: MODE } : {}), ...(STATUS ? { status: STATUS } : {}) },
+      rate === 0
+        ? {}
+        : CAPACITY > 0
+          ? { capacity: CAPACITY, delayMs: DELAY_MS }
+          : { rate, ...(MODE ? { mode: MODE } : {}), ...(STATUS ? { status: STATUS } : {}) },
     ),
   });
+
+/** One Prometheus reading, summed; `undefined` when there is none yet. */
+const scalar = async (query) => {
+  const res = await fetch(`${PROMETHEUS}/api/v1/query?query=${encodeURIComponent(query)}`).catch(() => undefined);
+  const body = res?.ok ? await res.json() : undefined;
+  const value = body?.data?.result?.[0]?.value?.[1];
+  return value === undefined ? undefined : Number(value);
+};
 
 const audit = async (run) => {
   const res = await fetch(`${FLAKY_UPSTREAM}/__audit?run=${encodeURIComponent(run)}`);
@@ -123,12 +140,21 @@ const main = async () => {
   console.log(
     `\n== Injecting failure: rate=${RATE} mode=${MODE ?? "error"}${STATUS ? ` status=${STATUS}` : ""} for ${WINDOW_MS}ms ==`,
   );
+  const auditAtStart = await audit("*");
   await setFailure(RATE);
 
   let peakBacklog = 0;
+  const limits = [];
+  const fleetOpen = { open: 0, total: 0 };
   const started = Date.now();
   while (Date.now() - started < WINDOW_MS) {
     await sleep(POLL_MS);
+    const [limit, open] = await Promise.all([
+      scalar("sum(egress_consumer_concurrency_limit)"),
+      scalar("egress:fleet_open"),
+    ]);
+    if (limit !== undefined) limits.push(limit);
+    if (open !== undefined) (fleetOpen.total++, (fleetOpen.open += open));
     const work = await queueDepth(workQueue);
     const dead = await queueDepth(deadQueue);
     peakBacklog = Math.max(peakBacklog, work.ready);
@@ -137,6 +163,8 @@ const main = async () => {
     await pollBreakers(t);
   }
 
+  const auditAtEnd = await audit("*");
+  const faultMs = Date.now() - started;
   console.log(`\n== Restoring ==`);
   await setFailure(0);
   const restoredAt = Date.now();
@@ -187,9 +215,25 @@ const main = async () => {
     const delta = (outcome) => (callsAfter[outcome] ?? 0) - (callsBefore[outcome] ?? 0);
     console.log(
       `  attempts during the incident: ${delta("ok")} ok, ${delta("failed")} reached the third party and failed, ` +
+        `${delta("throttled")} answered 429 (slow down), ` +
         `${delta("client_error")} refused (dead-lettered at once, not counted toward tripping)`,
     );
   }
+  if (auditAtStart?.processed !== undefined && auditAtEnd?.processed !== undefined) {
+    // The third party's own count of distinct messages it answered 200: exact, where a counter lags a scrape.
+    const ceiling = CAPACITY > 0 && DELAY_MS > 0 ? ` (the third party's ceiling is ${Math.round((CAPACITY * 1000) / DELAY_MS)}/s)` : "";
+    console.log(
+      `  goodput while the fault was on: ${((auditAtEnd.processed - auditAtStart.processed) / (faultMs / 1000)).toFixed(0)} successful calls/s${ceiling}`,
+    );
+  }
+  if (limits.length > 0) {
+    const tail = limits.slice(-Math.max(1, Math.floor(limits.length / 2)));
+    console.log(
+      `  fleet concurrency limit (sum over replicas): ${Math.min(...limits)} at least, ` +
+        `${(tail.reduce((a, b) => a + b, 0) / tail.length).toFixed(1)} on average over the later half of the fault`,
+    );
+  }
+  if (fleetOpen.total > 0) console.log(`  fleet open on ${fleetOpen.open}/${fleetOpen.total} polled ticks`);
   if (states) {
     console.log(
       recovered

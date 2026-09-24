@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: reference
   originSessionId: d23c6dbd-5c0e-471a-a8fc-5ed6afc8c7c7
-  modified: 2026-09-13T23:28:17.256Z
+  modified: 2026-09-19T09:11:46.691Z
 ---
 
 Facts about this environment, each learned by losing time to it (2026-09-12/13):
@@ -58,6 +58,23 @@ Facts about this environment, each learned by losing time to it (2026-09-12/13):
 - **Changing a queue's arguments** needs the queue deleted (`DELETE` without
   `if-empty` — quorum queues reject that with 400); daemons meanwhile hang at
   declare silently rather than crash.
+- **Prometheus does not hot-reload `prometheus.yml`.** Adding a new
+  `static_configs` job (e.g. a new service to scrape) needs
+  `docker restart <prometheus-container>` before it shows up in
+  `/api/v1/targets` at all — no error, the target is just silently absent
+  until restarted. Grafana has the analogous issue for *new panels* added to
+  an already-provisioned dashboard file (distinct from the uid-rename
+  collision this same file doesn't cover): the container needs a restart to
+  pick the change up, confirmed 2026-09-18 adding a panel to
+  `in-process-breaker.json` without changing its uid.
+- **Two processes declaring the same RabbitMQ exchange must agree on
+  `durable`,** or the second one's declare is a connection-closing `406
+  PRECONDITION-FAILED` — and `@egress/rmq`'s `declareTopicExchange` defaults
+  to `durable: false`, so a durable exchange declared once (by hand, by an
+  earlier version of the code, however) stays durable on the broker forever
+  and silently disagrees with every later declare that omits the option.
+  Always pass `{ durable: true }` explicitly for anything meant to survive a
+  restart, everywhere it's declared.
 - **`consumer_capacity` reads 0 for every quorum queue** — useless as a stall signal.
 - **Host suspend shows as clock skew:** `Date.now() - performance.timeOrigin -
   performance.now()` grows only across a sleep; chaos-load.mjs voids such runs.
@@ -76,6 +93,19 @@ Facts about this environment, each learned by losing time to it (2026-09-12/13):
   (confirm with `getent hosts <service>` or `docker inspect <container>
   --format '{{json .NetworkSettings.Networks}}'`). Cost a dead end on
   2026-09-17 chasing a phantom "prometheus is down" before finding this.
+- **`restart: unless-stopped` does not actually fire on `docker kill` in this
+  Docker Desktop devcontainer.** Confirmed live 2026-09-19: killing a
+  container leaves it `exited`, `RestartCount` stuck at 0, for 30+ seconds
+  with nothing happening — not a slow backoff, the restart supervisor
+  simply never attempts it here. `docker events` shows the `kill`/`die`
+  pair and then silence; the container only came back when something
+  explicitly ran `docker start`/`docker compose up`. A chaos-testing fault
+  that kills a container must explicitly restart it afterward rather than
+  trusting the policy — this is an environment quirk, not something to
+  design application code around (a real orchestrator — Kubernetes, ECS,
+  Swarm on a real host — restarts a crashed container reliably; this
+  devcontainer's Docker Desktop just doesn't for a killed compose
+  container).
 - **Never add a trailing `&` when already passing `run_in_background: true`
   to the Bash tool.** The tool's own backgrounding wraps the whole command; an
   extra `&` inside it backgrounds the *real* process a second time and lets

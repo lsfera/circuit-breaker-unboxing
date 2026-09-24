@@ -8,32 +8,40 @@ in the process**: "open" is a consumer that isn't consuming, and the timer that
 ends it is a message the broker holds. The full write-up is
 [docs/rabbitmq-held-breaker.md](docs/rabbitmq-held-breaker.md).
 
-Three things are added on top, the same three
+Four things are added on top, the same four
 `article/03-rabbitmq-coordination` adds on top of cockatiel: one **probe
 permit** for the whole fleet, so recovery is probed one call at a time, a
 **redrive** that brings `work.dead` back, run by one replica RabbitMQ elects,
-and a **fleet view** of the third party, as a Prometheus rule.
+a **fleet view** of the third party, as a Prometheus rule, and a `429`
+treated as **backpressure**, with a concurrency limit each replica learns from
+it.
 
 ```mermaid
 flowchart LR
   producer["Producer"] --> queue[("payments-provider.work")]
   subgraph c1["consumer 1"]
     b1{{"breaker\n(a consumer on/off,\na token in the chain)"}}
+    l1[/"limit\n(learned from 429s)"/]
   end
   subgraph c2["consumer 2"]
     b2{{"breaker"}}
+    l2[/"limit"/]
   end
   subgraph c3["consumer N"]
     b3{{"breaker"}}
+    l3[/"limit"/]
   end
   queue --> c1
   queue --> c2
   queue --> c3
   b1 -. "wake token, after 2^k s" .-> chain[("rmq.delay.level.NN\n(17 queues, TTL 1s … 18h)")]
   chain -. "back to its own wake queue" .-> b1
-  b1 --> api[("Third-party API\n(flaky-upstream)")]
-  b2 --> api
-  b3 --> api
+  b1 --> l1
+  l1 --> api[("Third-party API\n(flaky-upstream)")]
+  b2 --> l2
+  l2 --> api
+  b3 --> l3
+  l3 --> api
   permit[("probe-permit\n(1 token)")]
   dead[("work.dead")]
   parked[("work.parked")]
@@ -44,8 +52,8 @@ flowchart LR
   c3 -. "redrive" .-> dead
   dead -. "back to work,\nor after 5 redrives" .-> parked
   classDef new fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#1c1917
-  class b1,b2,b3,chain,permit,parked,rtrigger new
-  linkStyle 4,5,9,11,12,13 stroke:#d97706,stroke-width:3px
+  class b1,b2,b3,chain,permit,parked,rtrigger,l1,l2,l3 new
+  linkStyle 4,5,6,7,8,9,10,11,12,14,15,16 stroke:#d97706,stroke-width:3px
 ```
 
 <sub>Amber: new on this branch.</sub>
@@ -160,7 +168,12 @@ duplicate in one run (a replica killed with a call in flight; at-least-once
 permits it), 600 of 600 redriven messages processed, 2026-09-24
 (`docs/runs/chaos-breaker-permit-redrive.json` and `…-rerun.json`; the second
 repeats the two new scenarios after a fix to how the harness counts across a
-killed replica). Runs are saved under `history/runs/` (git-ignored;
+killed replica). With the 429 work in, a new `overload` scenario (a third
+party serving 20 at once at 100ms, under the spike) passed with 899 calls
+answered `429`, no breaker trip and nothing dead-lettered. `outage`,
+`partial`, `kill-open-replica`, `restart-during-probe` and `redrive-failover`
+passed again alongside it (`docs/runs/chaos-breaker-429.json`). Runs are saved
+under `history/runs/` (git-ignored;
 the runs behind the article are kept in `docs/runs/`).
 `infra/capture-incident.mjs` records the dashboard through an incident (it needs
 `playwright-core`, which this repo does not depend on).
@@ -273,6 +286,37 @@ top panel is `egress:fleet_open`.
 - The fraction returned to 0 57s after restore. The last replica was still in
   a long hold (see *The price of a long hold*).
 
+## A 429 is backpressure
+
+A third party that is full rather than broken answers `429` to the calls
+beyond what it can serve, and serves the rest. Ported from article 3, where
+the reasoning and the failure-rate experiment are written up:
+
+- **Classify it as `throttled`, not `failed`.** A throttled call never counts
+  toward tripping, so a full third party opens no breaker. The message is
+  released, uncharged, after a 100–400ms hold.
+- **Learn a concurrency limit from it** (`Limiter.ts`, AIMD). A `429`
+  multiplies the replica's limit by 0.7, and each success adds `1/limit`.
+  It starts at `MAX_IN_FLIGHT`, with a floor of `LIMIT_MIN` (1). A `429` keeps
+  its slot through the hold, or the next message spends it on another `429`.
+- `ADAPTIVE_LIMIT=false` turns both off: a `429` is then a plain failure.
+
+**Measured on this design**, 2026-09-24. The third party serves 5 at once at
+100ms each (a 50/s ceiling) and is offered 400/s for 30s, against 5
+replicas, three runs each. Goodput comes from the third party's own audit.
+
+| configuration | goodput | calls answered `429` | breaker openings | fleet open (ticks) | peak backlog |
+| --- | --- | --- | --- | --- | --- |
+| `429` is a failure (`ADAPTIVE_LIMIT=false`) | **13 · 15 · 14 /s** | 1,136 · 1,346 · 1,171, counted as failed | 105 · 112 · 103 | 26 · 27 · 26 of 30 | 11,731 · 11,666 · 11,692 |
+| `429` throttled, limit fixed at 20 (`LIMIT_MIN=20`) | **49 /s** each | 11,340 · 11,402 · 11,382 | 0 | 0 | 10,499 · 10,495 · 10,495 |
+| `429` throttled, adaptive limit (default) | **47 /s** each | **738 · 749 · 743** | 0 | 0 | 10,571 · 10,567 · 10,571 |
+
+The same shape as article 3's cockatiel fleet (11–14, 49 and 47/s; about
+11,500 and 740 `429`s). The classification is most of the win. The limit
+makes the fleet polite, with 94% fewer `429`s for 2/s of goodput, and doesn't
+shrink the backlog. The fleet's summed limit averaged 8.6–10.1 in the later
+half of the fault, against a third party that serves 5.
+
 ## Against article 3, on the same harness
 
 Article 3 has the same three additions on top of cockatiel. Both designs
@@ -332,6 +376,11 @@ Runs: `docs/runs/compare-article3-cockatiel.json` and
 - **A lost permit is a stuck fleet.** If the permit queue is purged, every
   probe loses the race, so every breaker that opens stays open until some
   replica restarts and reseeds.
+- **Only a `429` teaches the limit.** A third party that sheds by slowing
+  down or with `503`s gets no help.
+- **The limit paces the excess; it doesn't remove it.** The backlog is the
+  same with or without it, and it is unbounded. The replicas also learn
+  independently, and their floors can sum above the third party's ceiling.
 
 ## Running it
 
@@ -353,7 +402,8 @@ docker compose up -d --scale rmq-consumer=12   # resize the fleet, no restart ne
   Panels: breaker state per replica, work-queue depth, dead-letter-queue depth,
   calls by outcome, failed and refused calls by status, breaker trips, active
   consumers on the work queue, the wake tokens RabbitMQ holds (the open
-  breakers), parked-queue depth, redrives, and probe-permit races lost, with
+  breakers), parked-queue depth, redrives, probe-permit races lost, and the
+  concurrency limit per replica, with
   "Fleet open" (see *The fleet view*) at the top. Plain `:3000` lands on
   Grafana's Welcome screen, not this dashboard — use the direct link, or
   `Dashboards` in the left nav.
@@ -370,6 +420,7 @@ curl -X POST localhost:8080/__fail -d '{"rate":1.0,"status":422}'   # 422s: refu
 curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"hang"}'  # never answers
 curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"reset"}' # drops the connection
 curl -X POST localhost:8080/__fail -d '{"delayMs":1500}'            # slow, still correct
+curl -X POST localhost:8080/__fail -d '{"delayMs":100,"capacity":5}' # full, not broken: 5 at once (50/s), 429 beyond
 curl -X POST localhost:8080/__fail -d '{}'                          # healthy again
 ```
 
@@ -382,6 +433,7 @@ can check what got through: `curl 'localhost:8080/__audit?run=*'` for totals, or
 ```bash
 pnpm run incident
 MODE=hang node infra/incident.mjs
+RATE_PER_SECOND=400 docker compose up -d rmq-producer && CAPACITY=5 DELAY_MS=100 node infra/incident.mjs
 ```
 
 Injects a full failure, watches the work and dead-letter queues (over AMQP,
@@ -391,7 +443,9 @@ total dead-lettered, time to drain, and a processed/duplicate count from
 again, and reports what this branch has to measure: how many times the fleet's
 breakers opened, the fraction of poll ticks in which every replica was in the
 *same* state, the peak number open at once, and how long after restore the last
-one closed. Replica states are read from Prometheus (`PROMETHEUS`, default
+one closed. With `CAPACITY` set it also reports goodput, the calls answered
+`429`, the fleet's summed limit and how often the fleet read open. Replica
+states are read from Prometheus (`PROMETHEUS`, default
 `http://localhost:9090`).
 
 ## Load
@@ -416,8 +470,9 @@ packages/
   rmq-producer/  the load: a steady stream onto <apiId>.work, never backing off
   consumer/    the competing-consumer fleet, each with its own breaker whose
                state is the broker's (src/Breaker.ts), the fleet's one probe
-               permit (src/Permit.ts) and the dead-letter redrive
-               (src/Redrive.ts), wired together in src/consumer.ts
+               permit (src/Permit.ts), the dead-letter redrive
+               (src/Redrive.ts) and the concurrency limit learned from 429s
+               (src/Limiter.ts), wired together in src/consumer.ts
   tracing/     the /metrics HTTP route every process serves; OpenTelemetry
                tracing is wired but off unless OTEL_EXPORTER_OTLP_ENDPOINT is set
 infra/

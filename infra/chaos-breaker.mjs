@@ -550,6 +550,22 @@ const redriveFailover = {
   },
 };
 
+/**
+ * A third party that is full, not broken: 20 at once at 100ms (200/s) under the 1,000/s spike, answering 429 to
+ * the rest. It is backpressure, so no breaker may open and nothing may be dead-lettered, and the backlog must still
+ * drain once the ceiling lifts.
+ */
+const overload = {
+  inject: () => setFailure({ capacity: 20, delayMs: 100 }),
+  restore: () => setFailure({}),
+  check: async (ctx) => {
+    const window = `${Math.ceil((Date.now() - ctx.t0) / 1000)}s`;
+    const trips = Math.round(await promSum(`sum(increase(egress_consumer_breaker_trips_total[${window}]))`));
+    const throttled = Math.round(await promSum(`sum(increase(egress_consumer_calls_total{outcome="throttled"}[${window}]))`));
+    return { pass: trips === 0, summary: `${throttled} answered 429, ${trips} breaker trips (want 0)`, trips, throttled };
+  },
+};
+
 const SCENARIOS = {
   outage: () => scenario("outage", outage({ rate: 1 })),
   "outage-hang": () => scenario("outage-hang", outage({ rate: 1, mode: "hang" })),
@@ -559,6 +575,7 @@ const SCENARIOS = {
   // Held only: it finds the holder by its logged half-open phase, which cockatiel doesn't log.
   "kill-permit-holder": () => scenario("kill-permit-holder", killPermitHolder),
   "redrive-failover": () => scenario("redrive-failover", redriveFailover),
+  overload: () => scenario("overload", overload),
   // Informational: no correctness claim is made for it. See the article.
   partial: () => scenario("partial", outage({ rate: 0.6 })),
 };

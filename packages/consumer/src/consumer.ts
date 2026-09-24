@@ -1,4 +1,4 @@
-import { Effect, Metric, Option as O, Queue, Ref, Schedule } from "effect";
+import { Effect, Match, Metric, Option as O, Queue, Ref, Schedule, Semaphore } from "effect";
 import type { HttpClient } from "effect/unstable/http";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
@@ -15,6 +15,7 @@ import {
 } from "@egress/rmq/WorkQueue.ts";
 import * as Delay from "@egress/rmq/DelayedDelivery.ts";
 import * as Breaker from "./Breaker.ts";
+import * as Limiter from "./Limiter.ts";
 import * as Permit from "./Permit.ts";
 import * as Redrive from "./Redrive.ts";
 import * as Telemetry from "./Telemetry.ts";
@@ -28,6 +29,9 @@ import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
  * not consuming. Two things are shared through the broker: the one probe permit (Permit.ts), so the fleet
  * probes one call at a time, and the redrive of `<api>.work.dead`, run by whichever replica RabbitMQ elects on
  * the redrive-trigger queue (Redrive.ts).
+ *
+ * Beside the breaker, not in it: a concurrency limit learned from the third party's own `429`s (Limiter.ts),
+ * for a third party that is full rather than broken.
  */
 
 export type ConsumerConfig = {
@@ -40,6 +44,11 @@ export type ConsumerConfig = {
   /** Names this replica's wake queue, so the token finds only this process. */
   readonly replicaId: string;
   readonly breaker: Breaker.BreakerConfig;
+  /**
+   * Adapt the concurrent-call limit to the third party's `429`s. `None`: a `429` is just a failed call like any
+   * other non-2xx, and `maxInFlight` never moves.
+   */
+  readonly limit: O.Option<Limiter.LimiterConfig>;
 };
 
 /**
@@ -54,22 +63,34 @@ export type ConsumerConfig = {
  * calls to open and its consumer takes a round trip to stop, and in that window the same few messages are
  * redelivered again and again, so charging them would dead-letter healthy messages. A message that fails between
  * successes (a poison message on a healthy third party) is still charged, and still parked.
+ *
+ * `throttled` (a 429 while the limit adapts) is `release`d too: the third party answered "not right now", which
+ * says nothing about the message.
  */
 export type Role = "work" | "probe";
 export const decide = (outcome: Breaker.CallOutcome, role: Role = "work", streak = 1): Settlement =>
-  outcome === "ok"
-    ? "accept"
-    : outcome === "client_error"
-      ? "discard"
-      : role === "probe" || streak > 1
-        ? "release"
-        : "requeue";
+  Match.value(outcome).pipe(
+    Match.when("ok", (): Settlement => "accept"),
+    Match.when("client_error", (): Settlement => "discard"),
+    Match.when("throttled", (): Settlement => "release"),
+    Match.when("failed", (): Settlement => (role === "probe" || streak > 1 ? "release" : "requeue")),
+    Match.exhaustive,
+  );
 
 /**
  * Longer than the client's connection-recovery budget (about five minutes), so a wake queue survives a reconnect
  * and is collected only once its replica is really gone. The queue only expires while it has no consumer.
  */
 const WAKE_QUEUE_EXPIRES_MS = 600_000;
+
+/**
+ * How long a 429 keeps its concurrency slot before the message is released: the backoff the third party asked
+ * for. Jittered so replicas don't come back in lockstep.
+ */
+const THROTTLE_HOLD_MIN_MS = 100;
+const THROTTLE_HOLD_MAX_MS = 400;
+const throttleHoldMs = (): number =>
+  THROTTLE_HOLD_MIN_MS + Math.random() * (THROTTLE_HOLD_MAX_MS - THROTTLE_HOLD_MIN_MS);
 
 /** A clock-driven redrive trigger: a message can dead-letter while every breaker stays closed. */
 const REDRIVE_SWEEP = "30 seconds";
@@ -143,15 +164,54 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
     Effect.repeat(Effect.when(triggerRedrive, isClosed), Schedule.spaced(REDRIVE_SWEEP)),
   );
 
+  // With the concurrency limit adapting, a 429 means "full", not "broken": `throttled`, not a breaker failure.
+  const throttling = O.isSome(cfg.limit);
+
+  // How many of the `maxInFlight` prefetched messages may be in a call at once. Without a `limit` config the
+  // semaphore never resizes, so it admits exactly what the consumer's own prefetch already did.
+  const limit = O.map(cfg.limit, (c) => new Limiter.AdaptiveLimit(c));
+  const initialSlots = O.match(limit, { onNone: () => cfg.maxInFlight, onSome: (l) => l.slots });
+  const slots = Semaphore.makeUnsafe(initialSlots);
+  yield* Metric.update(Telemetry.concurrencyLimit, initialSlots);
+  const adapt = (change: (l: Limiter.AdaptiveLimit) => void) =>
+    O.map(limit, (l) => {
+      const before = l.slots;
+      change(l);
+      return l.slots === before
+        ? undefined
+        : runInContext(
+            Semaphore.resize(slots, l.slots).pipe(Effect.andThen(Metric.update(Telemetry.concurrencyLimit, l.slots))),
+          );
+    });
+
   let inFlight = 0;
   const setInFlight = (delta: 1 | -1) =>
     Effect.suspend(() => Metric.update(Telemetry.inFlight, (inFlight += delta)));
 
+  // A `429` keeps its concurrency slot through the hold. Released first, the slot is free again the moment the
+  // 429 comes back and the next waiting message spends it on another 429.
   const callUpstream = (key: string): Promise<Upstream.CallStatus> =>
     runInContext(
-      setInFlight(1).pipe(
-        Effect.andThen(Upstream.call(`${cfg.egressAddr}${cfg.apiPath}`, key)),
-        Effect.ensuring(setInFlight(-1)),
+      Semaphore.withPermit(
+        slots,
+        Effect.suspend(() => {
+          const startedIn = O.match(limit, { onNone: () => 0, onSome: (l) => l.epoch });
+          return setInFlight(1).pipe(
+            Effect.andThen(Upstream.call(`${cfg.egressAddr}${cfg.apiPath}`, key)),
+            Effect.ensuring(setInFlight(-1)),
+            Effect.tap((status) =>
+              Match.value(Breaker.classify(status, throttling)).pipe(
+                Match.when("ok", () => Effect.sync(() => adapt((l) => l.succeeded()))),
+                Match.when("throttled", () =>
+                  Effect.sync(() => adapt((l) => l.throttled(startedIn))).pipe(
+                    Effect.andThen(Effect.sleep(throttleHoldMs())),
+                  ),
+                ),
+                Match.orElse(() => Effect.void),
+              ),
+            ),
+          );
+        }),
       ),
     );
 
@@ -192,7 +252,7 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
 
   const attempt = async (key: string, role: Role, report: Breaker.Report): Promise<Settlement> => {
     const status = await callUpstream(key);
-    const outcome = Breaker.classify(status);
+    const outcome = Breaker.classify(status, throttling);
     const streak = report(outcome !== "failed");
     runInContext(Metric.update(Metric.withAttributes(Telemetry.calls, { outcome, status: String(status) }), 1));
     if (outcome === "client_error") {
@@ -262,7 +322,8 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
 
   yield* Effect.log(
     `${cfg.apiId}/consumer: up — maxInFlight=${cfg.maxInFlight} egress=${cfg.egressAddr}${cfg.apiPath} work=${workQueue} ` +
-      `wake=${wakeQueue} breaker=${cfg.breaker.consecutiveFailures}consecutive/${cfg.breaker.initialDelaySeconds}-${cfg.breaker.maxDelaySeconds}s`,
+      `wake=${wakeQueue} breaker=${cfg.breaker.consecutiveFailures}consecutive/${cfg.breaker.initialDelaySeconds}-${cfg.breaker.maxDelaySeconds}s ` +
+      `limit=${O.match(cfg.limit, { onNone: () => "off", onSome: (l) => `${l.min}-${l.max} x${l.decrease}` })}`,
   );
 
   // Runs for the process's life: the phases repeat, and it ends only if the

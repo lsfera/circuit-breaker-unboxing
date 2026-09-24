@@ -6,7 +6,7 @@ import { Metric } from "effect";
  */
 
 export const calls = Metric.counter("egress_consumer_calls_total", {
-  description: "Calls made toward the third party, by outcome — ok; failed (counts toward tripping the breaker); or client_error (a 4xx other than 408 and 429: the third party is up and refused the request, so it is dead-lettered and does not count) — and by status: the HTTP status, or timeout / network when none came.",
+  description: "Calls made toward the third party, by outcome — ok; failed (counts toward tripping the breaker); throttled (a 429 while the concurrency limit adapts: the third party is full, not broken, so it is released uncounted and does not count toward tripping); or client_error (a 4xx other than 408 and 429: the third party is up and refused the request, so it is dead-lettered and does not count) — and by status: the HTTP status, or timeout / network when none came.",
 });
 
 export const discarded = Metric.counter("egress_consumer_discarded_total", {
@@ -31,4 +31,8 @@ export const permitLost = Metric.counter("egress_consumer_probe_permit_lost_tota
 
 export const redrives = Metric.counter("egress_consumer_redrives_total", {
   description: "Dead-lettered messages this replica's redrive passes moved back onto the work queue (outcome=moved) or gave up on as poison (outcome=parked). Nonzero only on the replica RabbitMQ elects active on the redrive-trigger queue.",
+});
+
+export const concurrencyLimit = Metric.gauge("egress_consumer_concurrency_limit", {
+  description: "How many third-party calls this replica currently lets itself have open at once — the limit learned from the third party's 429s, never above MAX_IN_FLIGHT.",
 });

@@ -12,6 +12,12 @@ test("a failed call is handed back to the broker, not retried here", () => {
   assert.equal(decide("failed"), "requeue");
 });
 
+test("a call the third party answered 429 is released, not requeued, whatever the role or streak", () => {
+  assert.equal(decide("throttled"), "release");
+  assert.equal(decide("throttled", "probe"), "release");
+  assert.equal(decide("throttled", "work", 5), "release");
+});
+
 test("a client error is dead-lettered at once, whatever the role or streak: repeating it gets the same answer", () => {
   assert.equal(decide("client_error"), "discard");
   assert.equal(decide("client_error", "probe"), "discard");
