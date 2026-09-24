@@ -273,6 +273,87 @@
      "refId": "A"
     }
    ]
+  },
+  {
+   "id": 9,
+   "type": "timeseries",
+   "title": "Parked queue depth — payments-provider.work.parked",
+   "description": "Messages redriven MAX_REDRIVES (5) times without succeeding — true poison, not just an outage. Should stay 0 for any incident this series injects; nonzero means something the third party will never accept.",
+   "gridPos": {
+    "x": 0,
+    "y": 39,
+    "w": 8,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS_PROMETHEUS}"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS_PROMETHEUS}"
+     },
+     "expr": "rabbitmq_detailed_queue_messages_ready{queue=\"payments-provider.work.parked\"}",
+     "legendFormat": "parked",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 10,
+   "type": "timeseries",
+   "title": "Redrives",
+   "description": "Dead-lettered messages the redrive moved back onto the work queue (moved) or parked as poison (parked). Nonzero only on the replica RabbitMQ elects active on the redrive-trigger queue.",
+   "gridPos": {
+    "x": 8,
+    "y": 39,
+    "w": 8,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS_PROMETHEUS}"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS_PROMETHEUS}"
+     },
+     "expr": "sum by (outcome) (rate(egress_consumer_redrives_total[10s]))",
+     "legendFormat": "{{outcome}}/s",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 11,
+   "type": "timeseries",
+   "title": "Probe permit — races lost, per second",
+   "description": "Half-open probes that found the one fleet-wide permit held by another replica: no call made, the message released, and the breaker held again at the same attempt.",
+   "gridPos": {
+    "x": 16,
+    "y": 39,
+    "w": 8,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS_PROMETHEUS}"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS_PROMETHEUS}"
+     },
+     "expr": "sum(rate(egress_consumer_probe_permit_lost_total[10s]))",
+     "legendFormat": "lost",
+     "refId": "A"
+    }
+   ]
   }
  ],
  "timepicker": {

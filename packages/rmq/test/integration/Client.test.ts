@@ -600,3 +600,74 @@ test("closing a consumer with deliveries in flight leaves the rest of the connec
     `a connection per probe stalled at cycle ${isolatedWedgedAt}, which is what the daemon relies on not happening`,
   );
 });
+
+test("get is a non-blocking fetch: empty returns None, and an unsettled message blocks a second get", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const queue = "get.permit";
+
+  await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      // The probe permit's shape (packages/consumer/src/Permit.ts): at most one
+      // ready token — `get` doesn't need that to behave, but it is the
+      // real caller.
+      yield* rmq.declareQueue(queue, {
+        args: { "x-max-length": 1, "x-overflow": "reject-publish" },
+      });
+
+      assert.equal(O.isNone(yield* rmq.get(queue)), true, "an empty queue returns None");
+
+      const pub = yield* rmq.publisherToQueue(queue);
+      yield* rmq.send(pub, "token");
+
+      const first = yield* rmq.get(queue);
+      assert.equal(O.isSome(first), true);
+      assert.equal(O.getOrThrow(first).body, "token");
+
+      // Fetched but not yet settled: a second get must not see it too — get
+      // is exclusive access to the one message, not a peek.
+      assert.equal(
+        O.isNone(yield* rmq.get(queue)),
+        true,
+        "an unsettled message must not be handed to a second get",
+      );
+
+      yield* O.getOrThrow(first).nack;
+      const afterNack = yield* rmq.get(queue);
+      assert.equal(O.isSome(afterNack), true, "nack must requeue it for the next get");
+      yield* O.getOrThrow(afterNack).ack;
+
+      assert.equal(O.isNone(yield* rmq.get(queue)), true, "ack must remove it for good");
+    }),
+  );
+});
+
+test("x-max-length counts only ready messages: a token held unacked lets a second in, and a ready one refuses the next", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const queue = "get.permit-dedup";
+
+  await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(queue, { args: { "x-max-length": 1, "x-overflow": "reject-publish" } });
+      const pub = yield* rmq.publisherToQueue(queue);
+      const refused = (body: string) =>
+        rmq.send(pub, body).pipe(Effect.as(false), Effect.catch(() => Effect.succeed(true)));
+
+      assert.equal(yield* refused("first"), false);
+      assert.equal(yield* refused("second"), true, "one ready token refuses another");
+
+      const held = O.getOrThrow(yield* rmq.get(queue));
+      assert.equal(yield* refused("seeded while held"), false, "a held token does not count: this is a duplicate");
+
+      // Permit.ts's return: publish first, then ack. The publish is refused while the duplicate is ready.
+      assert.equal(yield* refused("returned"), true);
+      yield* held.ack;
+      const only = O.getOrThrow(yield* rmq.get(queue));
+      assert.equal(O.isNone(yield* rmq.get(queue)), true, "back to exactly one token");
+      yield* only.ack;
+    }),
+  );
+});

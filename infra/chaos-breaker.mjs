@@ -14,7 +14,8 @@
  *
  * Then the breaker: every replica's log is read back and each transition checked against the machine (closed →
  * open → half-open → closed | open), and the broker's own consumer count on the work queue is compared with the
- * number of replicas that are not open, which is the claim the design rests on.
+ * number of replicas that are not open, which is the claim the design rests on. Every scenario also ends
+ * with exactly one probe permit in the broker, and the dead-letter queue back where it started.
  *
  * Assumes `docker compose up -d`, a shell that reaches the services by name and can run `docker`. It kills real
  * containers and restarts the broker, so do not point it at anything you care about. The compose producer is
@@ -43,6 +44,9 @@ const PROJECT = process.env.COMPOSE_PROJECT_NAME ?? "workspace";
 const API = "payments-provider";
 const WORK = `${API}.work`;
 const DEAD = `${API}.work.dead`;
+const PERMIT = `${API}.probe-permit`;
+const REDRIVE_TRIGGER = `${API}.redrive-trigger`;
+const MANAGEMENT = process.env.RABBITMQ_MANAGEMENT ?? "http://guest:guest@rabbitmq:15672";
 
 const BASE_RATE = Number(flag("rate", 200));
 const SPIKE_RATE = Number(flag("spike", 1000));
@@ -96,6 +100,39 @@ const breakerStates = async () => {
   return body?.status === "success" ? body.data.result.map((r) => Number(r.value[1])) : undefined;
 };
 
+/** Ready plus held: `x-max-length` counts only ready, so a duplicate hides behind a held token. */
+const permitTokens = async () => {
+  const url = new URL(`${MANAGEMENT}/api/queues/%2F/${PERMIT}`);
+  const auth = `Basic ${Buffer.from(`${url.username}:${url.password}`).toString("base64")}`;
+  url.username = url.password = "";
+  const q = await fetch(url, { headers: { authorization: auth } }).then((r) => r.json());
+  return { ready: q.messages_ready, held: q.messages_unacknowledged };
+};
+
+/** The container RabbitMQ has made the single active consumer of the redrive trigger. */
+const activeRedriver = async () => {
+  const url = new URL(`${MANAGEMENT}/api/queues/%2F/${REDRIVE_TRIGGER}`);
+  const auth = `Basic ${Buffer.from(`${url.username}:${url.password}`).toString("base64")}`;
+  url.username = url.password = "";
+  const q = await fetch(url, { headers: { authorization: auth } }).then((r) => r.json());
+  const ip = q.consumer_details?.find((c) => c.active)?.channel_details?.peer_host;
+  const containers = await consumerContainers();
+  const ips = await Promise.all(
+    containers.map((c) =>
+      exec("docker", ["inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", c]).then((r) =>
+        r.stdout.trim().split(" "),
+      ),
+    ),
+  );
+  return containers.find((_, i) => ips[i].includes(ip));
+};
+
+const promSum = async (query) => {
+  const res = await fetch(`${PROMETHEUS}/api/v1/query?query=${encodeURIComponent(query)}`).catch(() => undefined);
+  const body = res?.ok ? await res.json() : undefined;
+  return Number(body?.data?.result?.[0]?.value?.[1] ?? 0);
+};
+
 const setFailure = (body) =>
   fetch(`${FLAKY}/__fail`, {
     method: "POST",
@@ -142,15 +179,16 @@ const transitionsOf = async (container, since) => {
   return { container, transitions, holds, violations };
 };
 
-/** The container whose most recent phase is `open`, if any — the one a scenario may kill. */
-const openContainer = async () => {
+/** The container whose most recent phase is `phase`, if any — the one a scenario may kill. */
+const containerIn = async (phase) => {
   for (const c of await consumerContainers()) {
     const { stdout, stderr } = await exec("docker", ["logs", "--tail", "40", c]).catch(() => ({ stdout: "", stderr: "" }));
     const phases = (stdout + stderr).split("\n").flatMap((l) => l.match(/breaker (closed|open|half-open)$/)?.[1] ?? []);
-    if (phases.at(-1) === "open") return c;
+    if (phases.at(-1) === phase) return c;
   }
   return undefined;
 };
+const openContainer = () => containerIn("open");
 
 // ---- a run -------------------------------------------------------------------
 
@@ -229,7 +267,7 @@ const scenario = async (name, fault) => {
   const faultAt = Math.round((Date.now() - t0) / 1000);
   console.log(`  t+${faultAt}s  fault injected, ${BASE_RATE} → ${SPIKE_RATE}/s`);
   await fault.inject();
-  const ctx = { series, t0 };
+  const ctx = { series, t0, run };
   const during = fault.during?.(ctx) ?? Promise.resolve();
   await observe(series, t0, FAULT_S);
   await during;
@@ -250,9 +288,22 @@ const scenario = async (name, fault) => {
     const w = await tryQueueInfo(WORK);
     return w?.ready === 0;
   }, DRAIN_TIMEOUT_S);
+  // Whatever a scenario put in the dead-letter queue has to come back out through the redrive.
+  const deadDrained = await waitFor(async () => {
+    await observe(series, t0, 1);
+    const d = await tryQueueInfo(DEAD);
+    const w = await tryQueueInfo(WORK);
+    return d?.ready === deadBefore && w?.ready === 0;
+  }, DRAIN_TIMEOUT_S * 2);
   await sleep(3000);
 
   const upstream = await audit(run);
+  const extra = await (fault.check?.(ctx) ?? Promise.resolve({ pass: true }));
+  const permit = await permitTokens().catch(() => ({ ready: null, held: null }));
+  // `increase`, not a before/after difference: a killed replica's counters restart at zero.
+  const window = `${Math.ceil((Date.now() - started.getTime()) / 1000)}s`;
+  const permitLost = Math.round(await promSum(`sum(increase(egress_consumer_probe_permit_lost_total[${window}]))`));
+  const redrives = Math.round(await promSum(`sum(increase(egress_consumer_redrives_total[${window}]))`));
   const processed = decodeBits(upstream.bits);
   const confirmed = decodeBits(final.bits);
   const dead = (await queueInfo(DEAD)).ready - deadBefore;
@@ -292,7 +343,11 @@ const scenario = async (name, fault) => {
       lost: lost.length,
       deadLettered: dead,
       drained,
+      deadDrained,
     },
+    permit: { tokensAfter: permit, racesLost: permitLost },
+    redrives,
+    extra,
     breaker: {
       recoveredAllClosed: recovered,
       secondsFromRestoreToAllClosed: recoveredAt - restoredAt,
@@ -308,7 +363,9 @@ const scenario = async (name, fault) => {
     series,
   };
 
-  const verdict = lost.length === 0 && dead === 0 && drained && recovered && violations.length === 0;
+  const onePermit = permit.ready === 1 && permit.held === 0;
+  const verdict =
+    lost.length === 0 && dead === 0 && drained && deadDrained && recovered && violations.length === 0 && onePermit && extra.pass;
   console.log(
     `  sent ${final.sent}, confirmed ${final.confirmed}, processed ${upstream.processed}, duplicates ${upstream.duplicates}, ` +
       `unprocessed ${unprocessed.length}, lost ${lost.length}, dead-lettered ${dead}, drained=${drained}`,
@@ -319,6 +376,10 @@ const scenario = async (name, fault) => {
   );
   console.log(
     `  transitions legal: ${violations.length === 0}; broker consumer count = replicas not open in ${matching.length}/${comparable.length} samples`,
+  );
+  console.log(
+    `  permit: ${permit.ready} ready + ${permit.held} held after (want 1 + 0), ${permitLost} races lost; ${redrives} redriven` +
+      (extra.summary ? `; ${extra.summary}` : ""),
   );
   console.log(`  ${verdict ? "PASS" : "FAIL"}`);
   await exec("docker", ["start", `${PROJECT}-rmq-producer-1`]).catch(() => {});
@@ -356,11 +417,75 @@ const killBrokerWhileOpen = {
   },
 };
 
+/**
+ * Kill the replica holding the probe permit, mid-probe: a hanging third party keeps the call open until its
+ * timeout. The token must come back when the holder's channel dies, and the replica's restart seeds another
+ * while someone else may hold it — so the duplicate must collapse too.
+ */
+const killPermitHolder = {
+  ...outage({ rate: 1, mode: "hang" }),
+  during: async () => {
+    const found = await waitFor(async () => (await permitTokens()).held === 1, 30);
+    const victim = found ? await containerIn("half-open") : undefined;
+    console.log(`  killing ${victim ?? "(no replica held the permit)"} while it holds the probe permit`);
+    await (victim ? exec("docker", ["kill", victim]) : Promise.resolve());
+    await sleep(3000);
+    await (victim ? exec("docker", ["start", victim]) : Promise.resolve());
+  },
+};
+
+/**
+ * Dead-lettered work comes back, and the election survives losing the redriver: messages of a second run go
+ * straight into the dead-letter queue, and the replica RabbitMQ made active is killed once it has moved some.
+ * No outage: the healthy fleet is what the redrive waits for.
+ */
+const REDRIVE_BATCH = 600;
+const redriveFailover = {
+  inject: async () => {},
+  restore: async () => {},
+  during: async (ctx) => {
+    const conn = await amqp.connect(BROKER);
+    const ch = await conn.createConfirmChannel();
+    const run = `${ctx.run}d`;
+    for (let n = 0; n < REDRIVE_BATCH; n++) {
+      ch.sendToQueue(DEAD, Buffer.from(JSON.stringify({ apiId: API, n })), {
+        persistent: true,
+        messageId: `${run}:${n}`,
+        contentType: "application/json",
+        type: "egress.work",
+      });
+    }
+    await ch.waitForConfirms();
+    await conn.close();
+    const deadAtStart = (await queueInfo(DEAD)).ready;
+    const moving = await waitFor(async () => (await queueInfo(DEAD)).ready < deadAtStart, 45);
+    const victim = moving ? await activeRedriver() : undefined;
+    console.log(`  ${REDRIVE_BATCH} messages dead-lettered; killing the elected redriver ${victim ?? "(none moved any)"}`);
+    await (victim ? exec("docker", ["kill", victim]) : Promise.resolve());
+    await sleep(3000);
+    await (victim ? exec("docker", ["start", victim]) : Promise.resolve());
+    ctx.redriveRun = run;
+  },
+  check: async (ctx) => {
+    const a = await audit(ctx.redriveRun);
+    const bits = decodeBits(a.bits);
+    const missing = Array.from({ length: REDRIVE_BATCH }, (_, n) => n).filter((n) => !isSet(bits, n));
+    return {
+      pass: missing.length === 0,
+      summary: `redriven batch: ${REDRIVE_BATCH - missing.length}/${REDRIVE_BATCH} processed, ${a.duplicates} duplicates`,
+      processed: REDRIVE_BATCH - missing.length,
+      duplicates: a.duplicates,
+    };
+  },
+};
+
 const SCENARIOS = {
   outage: () => scenario("outage", outage({ rate: 1 })),
   "outage-hang": () => scenario("outage-hang", outage({ rate: 1, mode: "hang" })),
   "kill-open-replica": () => scenario("kill-open-replica", killOpenReplica),
   "kill-broker-while-open": () => scenario("kill-broker-while-open", killBrokerWhileOpen),
+  "kill-permit-holder": () => scenario("kill-permit-holder", killPermitHolder),
+  "redrive-failover": () => scenario("redrive-failover", redriveFailover),
   // Informational: no correctness claim is made for it. See the article.
   partial: () => scenario("partial", outage({ rate: 0.6 })),
 };

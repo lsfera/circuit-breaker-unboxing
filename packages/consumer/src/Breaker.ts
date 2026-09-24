@@ -12,7 +12,8 @@ import type { CallStatus } from "./Upstream.ts";
  *   closed     work consumer at full prefetch; N calls fail in a row -> trip
  *   open       no consumer; a token is in the chain for `holdSeconds`
  *   half-open  the token is back: a consumer with prefetch 1, so exactly one message is the probe.
- *              It succeeds -> closed, fails -> open again with a longer hold.
+ *              It succeeds -> closed, fails -> open again with a longer hold. Its call needs the fleet's
+ *              one probe permit (Permit.ts); without it no call is made -> open again, same hold.
  *
  * Every consumer-shaped thing is passed in, so the machine is exercised without a broker. This is also where a
  * third party's answer is judged (`classify`): a `client_error` counts as a success — the third party answered —
@@ -72,8 +73,15 @@ export const holdSeconds = (cfg: BreakerConfig, attempt: number, random: () => n
  * differently once it is part of a run (see `decide` in consumer.ts).
  */
 export type Report = (ok: boolean) => number;
+
+/** `no-permit`: another replica was probing, so no call was made and nothing was learned about the third party. */
+export type ProbeVerdict = "ok" | "failed" | "no-permit";
+
 export type Io = {
-  readonly subscribe: (role: "work" | "probe", report: Report) => Effect.Effect<Consumer, RmqError>;
+  /** The work consumer, at full prefetch. */
+  readonly subscribe: (report: Report) => Effect.Effect<Consumer, RmqError>;
+  /** The probe consumer, prefetch 1: `verdict` is told how its one message went. */
+  readonly probe: (verdict: (v: ProbeVerdict) => void) => Effect.Effect<Consumer, RmqError>;
   /** Stop a consumer, let what it holds settle, and close it. */
   readonly retire: (consumer: Consumer) => Effect.Effect<void>;
   /** Send the token and return once it comes back, with the attempt it carries. */
@@ -86,7 +94,7 @@ export const supervise = (cfg: BreakerConfig, io: Io): Effect.Effect<never, RmqE
     yield* io.onPhase("closed");
     const tripped = Deferred.makeUnsafe<void>();
     let failures = 0;
-    const consumer = yield* io.subscribe("work", (ok) => {
+    const consumer = yield* io.subscribe((ok) => {
       failures = ok ? 0 : failures + 1;
       O.map(
         O.liftPredicate(failures, (n) => n >= cfg.consecutiveFailures),
@@ -100,22 +108,23 @@ export const supervise = (cfg: BreakerConfig, io: Io): Effect.Effect<never, RmqE
 
   const probe = Effect.gen(function* () {
     yield* io.onPhase("half-open");
-    const verdict = Deferred.makeUnsafe<boolean>();
-    const consumer = yield* io.subscribe("probe", (ok) => {
-      Deferred.doneUnsafe(verdict, Effect.succeed(ok));
-      return ok ? 0 : 1;
-    });
-    const ok = yield* Deferred.await(verdict);
+    const verdict = Deferred.makeUnsafe<ProbeVerdict>();
+    const consumer = yield* io.probe((v) => Deferred.doneUnsafe(verdict, Effect.succeed(v)));
+    const v = yield* Deferred.await(verdict);
     yield* io.retire(consumer);
-    return ok;
+    return v;
   });
 
   const open = (attempt: number): Effect.Effect<void, RmqError> =>
     Effect.gen(function* () {
       yield* io.onPhase("open");
       const woken = yield* io.hold(holdSeconds(cfg, attempt), attempt);
-      const ok = yield* probe;
-      yield* ok ? Effect.void : open(woken + 1);
+      yield* Match.value(yield* probe).pipe(
+        Match.when("ok", () => Effect.void),
+        Match.when("failed", () => open(woken + 1)),
+        Match.when("no-permit", () => open(woken)),
+        Match.exhaustive,
+      );
     });
 
   return Effect.forever(closed.pipe(Effect.andThen(open(0))));

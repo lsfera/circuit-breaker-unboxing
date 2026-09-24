@@ -38,16 +38,24 @@ test("classify: a 2xx is ok, a 4xx other than 408 and 429 the request's fault, a
 /** A world the test steers: `wake` releases the token in flight, `report` plays the calls a consumer makes. */
 const world = () => {
   const log: string[] = [];
-  const consumers: Array<{ role: string; report: Breaker.Report; live: boolean }> = [];
+  const consumers: Array<{
+    role: string;
+    report: Breaker.Report;
+    verdict: (v: Breaker.ProbeVerdict) => void;
+    live: boolean;
+  }> = [];
   const holds: Array<{ seconds: number; attempt: number; wake: Deferred.Deferred<void> }> = [];
+  const add = (role: string, report: Breaker.Report, verdict: (v: Breaker.ProbeVerdict) => void) =>
+    Effect.sync(() => {
+      const entry = { role, report, verdict, live: true };
+      consumers.push(entry);
+      log.push(`subscribe ${role}`);
+      return entry as unknown as Consumer;
+    });
   const io: Breaker.Io = {
-    subscribe: (role, report) =>
-      Effect.sync(() => {
-        const entry = { role, report, live: true };
-        consumers.push(entry);
-        log.push(`subscribe ${role}`);
-        return entry as unknown as Consumer;
-      }),
+    subscribe: (report) => add("work", report, () => assert.fail("a work consumer gives no verdict")),
+    probe: (verdict) =>
+      add("probe", (ok) => (verdict(ok ? "ok" : "failed"), ok ? 0 : 1), verdict),
     retire: (c) =>
       Effect.sync(() => {
         (c as unknown as { live: boolean }).live = false;
@@ -162,5 +170,26 @@ test("a work consumer is told how long the run of failures is, and a success end
       yield* w.until(() => w.consumers.length === 1);
       const work = w.consumers[0]!;
       assert.deepEqual([false, false, true, false].map((ok) => work.report(ok)), [1, 2, 0, 1]);
+    }),
+  ));
+
+test("a probe that loses the permit race holds again at the same attempt: nothing was learned", () =>
+  drive((w) =>
+    Effect.gen(function* () {
+      yield* w.until(() => w.consumers.length === 1);
+      [false, false, false].forEach(w.consumers[0]!.report);
+      yield* w.until(() => w.holds.length === 1);
+      yield* Deferred.succeed(w.holds[0]!.wake, undefined);
+      yield* w.until(() => w.consumers.length === 2);
+      w.consumers[1]!.verdict("failed");
+      yield* w.until(() => w.holds.length === 2);
+      assert.equal(w.holds[1]!.attempt, 1);
+      yield* Deferred.succeed(w.holds[1]!.wake, undefined);
+      yield* w.until(() => w.consumers.length === 3);
+      w.consumers[2]!.verdict("no-permit");
+      yield* w.until(() => w.holds.length === 3);
+      assert.equal(w.holds[2]!.attempt, 1, "a lost race does not grow the hold");
+      assert.equal(w.consumers.filter((c) => c.live).length, 0, "and it is open again, not consuming");
+      assert.deepEqual(w.log.slice(-4), ["subscribe probe", "retire", "open", "hold 1"]);
     }),
   ));

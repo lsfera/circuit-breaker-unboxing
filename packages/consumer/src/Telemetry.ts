@@ -24,3 +24,11 @@ export const breakerState = Metric.gauge("egress_consumer_breaker_state", {
 export const breakerTrips = Metric.counter("egress_consumer_breaker_trips_total", {
   description: "Times this replica's breaker has opened.",
 });
+
+export const permitLost = Metric.counter("egress_consumer_probe_permit_lost_total", {
+  description: "Half-open probes this replica did not make because another replica held the fleet's one probe permit. The message is released, not charged, and the breaker holds again at the same attempt.",
+});
+
+export const redrives = Metric.counter("egress_consumer_redrives_total", {
+  description: "Dead-lettered messages this replica's redrive passes moved back onto the work queue (outcome=moved) or gave up on as poison (outcome=parked). Nonzero only on the replica RabbitMQ elects active on the redrive-trigger queue.",
+});

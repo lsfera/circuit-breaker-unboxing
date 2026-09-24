@@ -8,6 +8,11 @@ in the process**: "open" is a consumer that isn't consuming, and the timer that
 ends it is a message the broker holds. The full write-up is
 [docs/rabbitmq-held-breaker.md](docs/rabbitmq-held-breaker.md).
 
+Two things are shared through the broker, the same two
+`article/03-rabbitmq-coordination` adds on top of cockatiel: one **probe
+permit** for the whole fleet, so recovery is probed one call at a time, and a
+**redrive** that brings `work.dead` back, run by one replica RabbitMQ elects.
+
 ```mermaid
 flowchart LR
   producer["Producer"] --> queue[("payments-provider.work")]
@@ -28,9 +33,18 @@ flowchart LR
   b1 --> api[("Third-party API\n(flaky-upstream)")]
   b2 --> api
   b3 --> api
+  permit[("probe-permit\n(1 token)")]
+  dead[("work.dead")]
+  parked[("work.parked")]
+  rtrigger[["redrive-trigger\n(single active consumer)"]]
+  b2 -. "half-open: take, call, return" .-> permit
+  queue -. "delivery limit" .-> dead
+  rtrigger -. "elects one replica" .-> c3
+  c3 -. "redrive" .-> dead
+  dead -. "back to work,\nor after 5 redrives" .-> parked
   classDef new fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#1c1917
-  class b1,b2,b3,chain new
-  linkStyle 4,5 stroke:#d97706,stroke-width:3px
+  class b1,b2,b3,chain,permit,parked,rtrigger new
+  linkStyle 4,5,9,11,12,13 stroke:#d97706,stroke-width:3px
 ```
 
 <sub>Amber: new on this branch.</sub>
@@ -135,12 +149,17 @@ nothing re-sends it.
 
 `node infra/chaos-breaker.mjs` injects real faults under a 200 → 1,000/s spike
 and judges each on correctness (per message: nothing lost, dead-letter queue
-not grown) and then on the breaker: an outage, a hanging third party, a
-`docker kill` of a replica while it is open, a broker restart with five tokens
-in the chain, and a 100 s delay across a broker restart. All five graded
-scenarios pass after the `release` fix, about 45,000 messages each: 0 lost, 0
-duplicates, 0 dead-lettered. They passed again on the latest dependencies
-(Effect rc.116), 2026-09-21. Runs are saved under `history/runs/` (git-ignored;
+back where it started, exactly one probe permit left) and then on the breaker:
+an outage, a hanging third party, a `docker kill` of a replica while it is
+open, a broker restart with five tokens in the chain, a 100 s delay across a
+broker restart, a `docker kill` of the replica holding the probe permit, and
+600 dead letters with the elected redriver killed mid-redrive. All seven graded
+scenarios pass, about 45,000 messages each: 0 lost, 0 dead-lettered, one
+duplicate in one run (a replica killed with a call in flight; at-least-once
+permits it), 600 of 600 redriven messages processed, 2026-09-24
+(`docs/runs/chaos-breaker-permit-redrive.json` and `…-rerun.json`; the second
+repeats the two new scenarios after a fix to how the harness counts across a
+killed replica). Runs are saved under `history/runs/` (git-ignored;
 the runs behind the article are kept in `docs/runs/`).
 `infra/capture-incident.mjs` records the dashboard through an incident (it needs
 `playwright-core`, which this repo does not depend on).
@@ -153,16 +172,93 @@ is the fleet's state, and the wake tokens in the delay chain are the open
 breakers. The dead-letter line stays at zero through the outage; every
 breaker had closed 20s after restore.
 
+## Shared through the broker
+
+Two things the replicas share, the same two `article/03-rabbitmq-coordination`
+puts on top of cockatiel. Neither needs new infrastructure.
+
+### One probe at a time: the permit
+
+`packages/consumer/src/Permit.ts`: a queue with `x-max-length: 1` and
+`x-overflow: reject-publish`. Every replica seeds a token at startup; RabbitMQ
+keeps one and nacks the rest, which counts as success. A half-open replica's
+probe message is delivered as before, but the call needs the token: a
+non-blocking `get` first.
+
+- **Token** → make the call, then hand the token back.
+- **No token** → no call; the message is released (not charged), and the
+  breaker goes back to its hold **at the same attempt**. Unlike a failed probe,
+  losing the race says nothing about the third party. Cockatiel can't tell the
+  two apart, so article 3's backoff grows on a lost race; this machine can.
+
+The permit is held for the call only, not while the probe consumer waits for a
+message.
+
+**The token goes back as a publish, then an ack, never a requeue.**
+`x-max-length` counts only *ready* messages, so a seed published while a probe
+holds the token is accepted, and the fleet has two. Measured on RabbitMQ 4.3
+(and pinned by a test in `packages/rmq/test/integration/Client.test.ts`): a
+second seed is refused while the token is ready, and accepted while it is held.
+A quorum queue is worse: its limit let a second seed in with the first still
+ready. Returning the token by publishing first means the publish is refused
+while a duplicate is ready, so a duplicate disappears on its next return. A
+crash between the publish and the ack leaves two tokens, never zero.
+
+**Measured**: every replica open against a hanging third party (so each call
+holds for the 2s timeout), each replica's in-flight gauge polled every 100 ms
+for 90 s:
+
+| | before | with the permit |
+| --- | --- | --- |
+| samples with every replica open or half-open | 802 | 801 |
+| peak calls to the third party in flight at once | **5** | **1** |
+| samples with all five probing together | 56 | 0 |
+
+### A way back from `work.dead`: the redrive
+
+`packages/consumer/src/Redrive.ts`, ported from article 3:
+
+- **Election**: a `redrive-trigger` queue with `x-single-active-consumer`.
+  RabbitMQ delivers to one replica and promotes another if it goes.
+- **A pass** `get`s from `work.dead` and publishes each message back to `work`,
+  keeping its `message_id` (the idempotency key) and bumping
+  `x-egress-redrive-count`. Past 5 redrives it goes to `work.parked` instead.
+  Then it acks. A crash in between duplicates, never loses. At most 200 per
+  pass.
+- **Gate**: the elected replica's own breaker is closed, re-read before every
+  message.
+- **Triggers**: this replica closing (startup included), and a 30 s sweep while
+  it is closed. A message can dead-letter while no breaker moves.
+
+What still reaches `work.dead` here is mostly a `client_error`, a poison
+message, or a message caught between successes in a partial failure. The
+RabbitMQ-held breaker already keeps an outage's messages out of it (see
+*Measured* above).
+
+**Measured**: a message put straight into `work.dead` with every breaker
+closed was back on `work` 20.5 s later (the sweep), and one carrying a redrive
+count of 5 was parked. Both ran on one replica. The chaos run's 60%-failure
+scenario dead-lettered 6 messages and redrove all 6. The write-up's earlier run
+of it left 11 parked.
+
 ## What this still doesn't fix
 
-Five consumers means five breakers, each formed only from the calls that one
-process happened to make. They will trip at different moments, recover at
-different moments, and briefly disagree about whether the same third party
-is up — watch the "Breaker state per replica" panel on the dashboard during
-an incident, or read `infra/incident.mjs`'s own `breaker agreement` line at
-the end of a run. Now that the state lives in the broker, coordinating it into
-one fleet-wide verdict is a smaller step — one token instead of five — but it is
-a different problem.
+- **Five breakers still don't agree.** Each is formed only from the calls that
+  one process happened to make. They trip at different moments, recover at
+  different moments, and briefly disagree about whether the same third party
+  is up. Watch the "Breaker state per replica" panel, or `infra/incident.mjs`'s
+  `breaker agreement` line. The permit serialises probes; it doesn't make one
+  verdict.
+- **The redrive waits on the elected replica's breaker**, which can be open
+  while the rest of the fleet is closed. A pass is up to 30 s late.
+- **Refused work is redriven too.** A `client_error` goes to `work.dead` on its
+  first delivery, and the redrive sends it back until it is parked: five more
+  calls the third party will refuse again. The same holds in article 3.
+- **A trigger that arrives mid-pass is dropped**; the next sweep picks up the
+  rest.
+- **A lost permit is a stuck fleet.** If the permit queue is purged, every
+  probe loses the race, so every breaker that opens stays open until some
+  replica restarts and reseeds.
 
 ## Running it
 
@@ -183,8 +279,8 @@ docker compose up -d --scale rmq-consumer=12   # resize the fleet, no restart ne
 - Grafana: <http://localhost:3000/d/in-process-breaker>
   Panels: breaker state per replica, work-queue depth, dead-letter-queue depth,
   calls by outcome, failed and refused calls by status, breaker trips, active
-  consumers on the work queue, and the wake tokens RabbitMQ holds (the open
-  breakers). Plain `:3000` lands on Grafana's Welcome screen, not this
+  consumers on the work queue, the wake tokens RabbitMQ holds (the open
+  breakers), parked-queue depth, redrives, and probe-permit races lost. Plain `:3000` lands on Grafana's Welcome screen, not this
   dashboard — use the direct link, or
   `Dashboards` in the left nav.
 - Prometheus: <http://localhost:9090>.
@@ -245,8 +341,9 @@ packages/
                and DelayedDelivery.ts: the delay chain a breaker's hold is made of
   rmq-producer/  the load: a steady stream onto <apiId>.work, never backing off
   consumer/    the competing-consumer fleet, each with its own breaker whose
-               state is the broker's (src/Breaker.ts) — see src/consumer.ts
-               for what that still doesn't coordinate
+               state is the broker's (src/Breaker.ts), the fleet's one probe
+               permit (src/Permit.ts) and the dead-letter redrive
+               (src/Redrive.ts), wired together in src/consumer.ts
   tracing/     the /metrics HTTP route every process serves; OpenTelemetry
                tracing is wired but off unless OTEL_EXPORTER_OTLP_ENDPOINT is set
 infra/

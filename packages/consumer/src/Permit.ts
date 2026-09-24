@@ -1,0 +1,48 @@
+import { Effect, Option as O } from "effect";
+import { Rmq } from "@egress/rmq/Client.ts";
+import type { RmqError } from "@egress/rmq/Client.ts";
+
+/**
+ * The fleet-wide probe permit: one token in a queue that holds at most one ready message (`x-max-length: 1`,
+ * `x-overflow: reject-publish`). A half-open replica calls the third party only while it holds the token, so
+ * however many breakers wake at once, one probe reaches the network at a time.
+ *
+ * The length limit counts only *ready* messages, not one held unacked: a seed published while a probe holds
+ * the token is accepted and makes a second one. So the token goes back as a fresh publish followed by an ack of
+ * the held one, never a requeuing nack. The publish is refused while another token is ready, which collapses a
+ * duplicate on its next return, and a crash between the two leaves two tokens rather than none.
+ */
+
+export const permitQueueFor = (apiId: string): string => `${apiId}.probe-permit`;
+
+/** Classic, not quorum: a quorum queue's length limit is enforced loosely and let two seeds in. */
+const PERMIT_QUEUE_OPTIONS = { args: { "x-max-length": 1, "x-overflow": "reject-publish" } } as const;
+
+/** Publish a token, and treat the broker refusing it (one is already there) as success. */
+const offer = (apiId: string) =>
+  Effect.gen(function* () {
+    const rmq = yield* Rmq;
+    const pub = yield* rmq.publisherToQueue(permitQueueFor(apiId));
+    yield* rmq.send(pub, "permit").pipe(Effect.ignore);
+  });
+
+/** Every replica seeds at startup; all but the first are refused. */
+export const seed = Effect.fn(function* (apiId: string) {
+  const rmq = yield* Rmq;
+  yield* rmq.declareQueue(permitQueueFor(apiId), PERMIT_QUEUE_OPTIONS);
+  yield* offer(apiId);
+});
+
+/** The permit if it is free, as the effect that hands it back; `None` if another replica holds it. */
+export const take = (apiId: string): Effect.Effect<O.Option<Effect.Effect<void>>, RmqError, Rmq> =>
+  Effect.gen(function* () {
+    const rmq = yield* Rmq;
+    const got = yield* rmq.get(permitQueueFor(apiId));
+    return O.map(got, (token) =>
+      offer(apiId).pipe(
+        Effect.ignore,
+        Effect.andThen(token.ack),
+        Effect.provideService(Rmq, rmq),
+      ),
+    );
+  });

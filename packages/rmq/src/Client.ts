@@ -51,6 +51,20 @@ export type SendOptions = {
   readonly messageId?: string;
 };
 
+/**
+ * One message fetched by `get`, held unsettled until `ack`/`nack` runs — `ack` drops it, `nack` requeues it.
+ * `Settlement`'s `requeue`/`release` split doesn't apply here: just "done with it" or "put it back".
+ */
+export type GotMessage = {
+  readonly body: string;
+  /** Headers as strings, the same shape as `DeliveryInfo.properties`. */
+  readonly properties: Readonly<Record<string, string>>;
+  /** The AMQP `message_id`, so a caller that republishes this message carries the same idempotency key forward. */
+  readonly messageId: O.Option<string>;
+  readonly ack: Effect.Effect<void>;
+  readonly nack: Effect.Effect<void>;
+};
+
 /** The broker returned a mandatory message it could not route to any queue. */
 export class Unroutable extends Error {}
 
@@ -165,6 +179,11 @@ export interface RmqService {
     ) => void | Settlement | Promise<void | Settlement>,
     options?: { readonly prefetch?: number },
   ) => Effect.Effect<Consumer, RmqError>;
+  /**
+   * A single non-blocking fetch — `basic.get`, not a subscription. `None` when the queue was empty. Its own
+   * throwaway channel, held open only until `GotMessage` is settled — not part of `topology` replay.
+   */
+  readonly get: (queue: string) => Effect.Effect<O.Option<GotMessage>, RmqError>;
   /** One publisher per fixed (exchange, routingKey) or (queue) target. */
   readonly publisherToExchange: (
     exchange: string,
@@ -271,6 +290,10 @@ const when = (condition: boolean, effect: () => void): void => {
 const inSequence = <A>(items: Iterable<A>, run: (item: A) => Promise<unknown>): Promise<unknown> =>
   Array.from(items).reduce<Promise<unknown>>((done, item) => done.then(() => run(item)), Promise.resolve());
 
+/** Headers as amqplib hands them back (values of unknown type) to the string-valued shape every caller here wants. */
+const stringifyHeaders = (headers: Record<string, unknown>): Readonly<Record<string, string>> =>
+  Object.fromEntries(Object.entries(headers).map(([k, v]) => [k, String(v)]));
+
 const describe = (delivery: ConsumeMessage): DeliveryInfo => {
   const headers = delivery.properties.headers ?? {};
   const header = (name: string) => O.liftPredicate(headers[name], Predicate.isString);
@@ -280,9 +303,7 @@ const describe = (delivery: ConsumeMessage): DeliveryInfo => {
       reason: O.getOrElse(header("x-first-death-reason"), () => "unknown"),
     })),
   );
-  const properties = lazily(() =>
-    Object.fromEntries(Object.entries(headers).map(([k, v]) => [k, String(v)])),
-  );
+  const properties = lazily(() => stringifyHeaders(headers));
   const contentType = O.liftPredicate(delivery.properties.contentType, Predicate.isString);
   const contentEncoding = O.liftPredicate(delivery.properties.contentEncoding, Predicate.isString);
   const type = O.liftPredicate(delivery.properties.type, Predicate.isString);
@@ -815,6 +836,37 @@ export const makeRmq = Effect.fnUntraced(function* (
         await ch.bindExchange(destination as string, source as string, routingKey);
       }).pipe(Effect.asVoid);
     },
+    get: (queue) =>
+      wrap("get", async () => {
+        const ch = await connection.createChannel();
+        ch.on("error", () => {});
+        const msg = await ch.get(queue, { noAck: false });
+        if (msg === false) {
+          await ch.close().catch(() => {});
+          return O.none();
+        }
+        // Settled at most once, and tolerant of a channel that closed under the caller: the broker has the
+        // delivery back by then.
+        let settled = false;
+        const settleOnce = (act: () => void) =>
+          Effect.sync(() => {
+            if (settled) return;
+            settled = true;
+            try {
+              act();
+            } catch {
+              // channel already gone
+            }
+            ch.close().catch(() => {});
+          });
+        return O.some({
+          body: msg.content.toString("utf8"),
+          properties: stringifyHeaders(msg.properties.headers ?? {}),
+          messageId: O.liftPredicate(msg.properties.messageId, Predicate.isString),
+          ack: settleOnce(() => ch.ack(msg)),
+          nack: settleOnce(() => ch.nack(msg, false, true)),
+        });
+      }),
     publisherToExchange: (exchange, routingKey, format) =>
       Effect.succeed({
         exchange,

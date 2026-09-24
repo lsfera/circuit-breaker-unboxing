@@ -80,6 +80,34 @@ const deadLetterArgs = (apiId: string): Record<string, unknown> => ({
 const workQueueArgs = deadLetterArgs;
 
 /**
+ * The redrive election: `x-single-active-consumer` delivers to one bound consumer and holds the rest as backups,
+ * promoting one if the active one disconnects. Nothing is published here but the trigger itself.
+ */
+export const redriveTriggerQueueFor = (apiId: string): string => `${apiId}.redrive-trigger`;
+
+export const redriveTriggerQueueOptions = () => ({
+  args: { "x-queue-type": "quorum", "x-single-active-consumer": true },
+  durable: true,
+});
+
+/** Where a message goes once it has been redriven `MAX_REDRIVES` times: terminal, like the dead-letter queue. */
+export const parkedQueueFor = (apiId: string): string => `${apiId}.work.parked`;
+
+export const parkedQueueOptions = () => ({
+  args: { "x-queue-type": "quorum", "x-delivery-limit": -1 },
+  durable: true,
+});
+
+/** Stamped on a redriven message; absent means it has never been redriven. */
+export const REDRIVE_COUNT_HEADER = "x-egress-redrive-count";
+
+/**
+ * Redrives before a message is treated as poison rather than unlucky. Each one grants a fresh
+ * `WORK_DELIVERY_LIMIT`, so this bounds outages survived, not attempts.
+ */
+export const MAX_REDRIVES = 5;
+
+/**
  * Attempts before the broker parks a message. The budget belongs to the queue, not the daemon: an in-process
  * counter is lost when the message moves to another consumer, which is what an outage causes. Low because
  * RabbitMQ redelivers with no backoff, so every extra attempt is load on a failing upstream.

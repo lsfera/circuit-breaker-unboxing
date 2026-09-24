@@ -242,7 +242,9 @@ logs.)
   counts consecutive failures barely notices: it opened 83 times, flapping,
   and 11 healthy messages were still parked. Nothing was lost, but the
   dead-letter queue grew. That is the case a failure-*rate* breaker exists for,
-  and it is the next part of the series.
+  and it is the next part of the series. The redrive added since (README,
+  *Shared through the broker*) brings such messages back: in the next run of
+  this scenario, the 6 it dead-lettered were all redriven.
 - **Five replicas are still five breakers.** They trip at their own moments
   and come back at their own moments — the recovery in the recording is
   spread over 14 seconds, from under one to 14 s after the restore. What has changed is that the state now lives in one place. Turning
