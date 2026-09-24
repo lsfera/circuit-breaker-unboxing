@@ -71,6 +71,12 @@ export const controlDuplicates = Metric.counter("egress_daemon_control_duplicate
 });
 
 
+export const concurrencyLimit = Metric.gauge("egress_daemon_concurrency_limit", {
+  description:
+    "How many third-party calls this daemon currently lets itself have open at once: the " +
+    "limit learned from 429s (Envoy shedding, or the third party's own), never above MAX_IN_FLIGHT.",
+});
+
 export const discarded = Metric.counter("egress_daemon_discarded_total", {
   description:
     "Work deliveries this daemon refused to spend a call on, by reason: `format` (a content " +

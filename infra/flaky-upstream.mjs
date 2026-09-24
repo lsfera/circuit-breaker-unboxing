@@ -9,14 +9,16 @@
 // tell the same story rather than merely producing the same record shape.
 //
 //   curl -X POST localhost:8080/__fail -d '{"rate":1.0}'                  # 503s
+//   curl -X POST localhost:8080/__fail -d '{"rate":1.0,"status":422}'     # 422s: refused, not down
 //   curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"hang"}'    # never answers
 //   curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"reset"}'   # drops the connection
 //   curl -X POST localhost:8080/__fail -d '{"delayMs":1500}'              # slow, still correct
+//   curl -X POST localhost:8080/__fail -d '{"delayMs":100,"capacity":20}' # at most 20 in flight, the rest get 429
 //   for p in $(seq 8080 8085); do ... ; done                              # the whole cluster
 //
 // Every field is optional and a POST replaces the whole behaviour, so `{}`
 // restores a healthy endpoint.
-import { createServer } from "node:http";
+import { createServer, STATUS_CODES } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
 
 // 8086-8089 is deliberately skipped: the aggregator pair publishes 8088 and
@@ -33,6 +35,7 @@ const CLUSTERS = {
  *
  *   curl 'localhost:8080/__audit?run=abc'            # bitmap of n, plus counts
  *   curl -X DELETE 'localhost:8080/__audit?run=abc'
+ *   curl 'localhost:8080/__audit'                    # counts summed over every run
  *
  * Keys in any other shape are counted and otherwise ignored.
  */
@@ -60,7 +63,7 @@ const recordProcessed = (key) => {
 };
 
 const MODES = new Set(["error", "hang", "reset"]);
-const HEALTHY = { rate: 0, mode: "error", delayMs: 0 };
+const HEALTHY = { rate: 0, mode: "error", delayMs: 0, status: 503, capacity: 0 };
 const behaviour = new Map();
 
 const parse = (raw) => {
@@ -69,12 +72,29 @@ const parse = (raw) => {
     rate: Math.min(1, Math.max(0, Number(body.rate) || 0)),
     mode: MODES.has(body.mode) ? body.mode : "error",
     delayMs: Math.min(60_000, Math.max(0, Number(body.delayMs) || 0)),
+    status: Number.isInteger(body.status) && body.status >= 400 && body.status <= 599 ? body.status : 503,
+    // Concurrent requests this endpoint will serve; 0 is unlimited. The one
+    // failure here that depends on how hard it is pushed rather than on a coin.
+    capacity: Math.max(0, Math.floor(Number(body.capacity) || 0)),
   };
 };
 
-/** Answers one request the way this endpoint is currently told to behave. */
-const misbehave = async (b, req, res, ok, failure) => {
-  if (b.delayMs > 0) await sleep(b.delayMs);
+const serving = new Map();
+
+/**
+ * Answers one request the way this endpoint is currently told to behave. A
+ * request arriving with `capacity` already in flight is turned away at once
+ * with a 429, as a rate-limited third party does — it costs nothing to serve
+ * and says nothing about the service being broken.
+ */
+const misbehave = async (b, req, res, ok, failure, tooBusy = () => (res.writeHead(429), res.end("slow down"))) => {
+  if (b.capacity > 0 && (serving.get(b) ?? 0) >= b.capacity) return tooBusy();
+  serving.set(b, (serving.get(b) ?? 0) + 1);
+  try {
+    if (b.delayMs > 0) await sleep(b.delayMs);
+  } finally {
+    serving.set(b, serving.get(b) - 1);
+  }
   if (Math.random() >= b.rate) return ok();
   // A hung request holds its socket until the client gives up; nothing is ever written.
   if (b.mode === "hang") return;
@@ -94,7 +114,19 @@ for (const [cluster, ports] of Object.entries(CLUSTERS)) {
         return res.end(JSON.stringify({ cluster, port, ...behaviour.get(port) }));
       }
       if (req.url.startsWith("/__audit")) {
-        const run = new URL(req.url, "http://x").searchParams.get("run") ?? "";
+        const run = new URL(req.url, "http://x").searchParams.get("run");
+        if (run === null) {
+          const all = [...audits.values()];
+          res.writeHead(200, { "content-type": "application/json" });
+          return res.end(
+            JSON.stringify({
+              runs: all.length,
+              processed: all.reduce((sum, a) => sum + a.processed, 0),
+              duplicates: all.reduce((sum, a) => sum + a.duplicates, 0),
+              foreignKeys,
+            }),
+          );
+        }
         if (req.method === "DELETE") audits.delete(run);
         const a = audits.get(run);
         res.writeHead(200, { "content-type": "application/json" });
@@ -139,7 +171,7 @@ for (const [cluster, ports] of Object.entries(CLUSTERS)) {
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({ cluster, port, ok: true }));
         },
-        () => (res.writeHead(503), res.end("upstream unavailable")),
+        () => (res.writeHead(b.status), res.end(STATUS_CODES[b.status])),
       );
     }).listen(port);
   }

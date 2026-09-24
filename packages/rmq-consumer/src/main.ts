@@ -1,4 +1,4 @@
-import { Config, Data, Deferred, Effect, Layer } from "effect";
+import { Config, Data, Deferred, Effect, Layer, Option as O, Schema } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { HttpRouter } from "effect/unstable/http";
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
@@ -30,6 +30,11 @@ import { runDaemon } from "./daemon.ts";
  * this by hand — and `--help` lists the lot, which is the part that was
  * missing. Reading main.ts was the documentation before.
  */
+// Strictly between: a decrease of 0 or 1 is a limit that collapses or never moves.
+const OpenFraction = Schema.Finite.check(
+  Schema.isBetween({ minimum: 0, maximum: 1, exclusiveMinimum: true, exclusiveMaximum: true }),
+);
+
 const flags = {
   broker: brokerFlag("Broker to consume work and circuit.control from"),
   apiId: Flag.String("api-id").pipe(
@@ -71,6 +76,25 @@ const flags = {
     Flag.withDefault(5000),
     Flag.withDescription("Messages moved per redrive pass"),
   ),
+  adaptiveLimit: Flag.Boolean("adaptive-limit").pipe(
+    Flag.withFallbackConfig(Config.Boolean("ADAPTIVE_LIMIT")),
+    Flag.withDefault(true),
+    Flag.withDescription(
+      "Shrink this daemon's concurrent-call limit on a 429 and grow it back on a 200; off, the limit stays at MAX_IN_FLIGHT",
+    ),
+  ),
+  limitMin: Flag.Int("limit-min").pipe(
+    Flag.withSchema(PositiveInt),
+    Flag.withFallbackConfig(Config.schema(PositiveInt, "LIMIT_MIN")),
+    Flag.withDefault(1),
+    Flag.withDescription("Floor the adaptive limit never goes below"),
+  ),
+  limitDecrease: Flag.Finite("limit-decrease").pipe(
+    Flag.withSchema(OpenFraction),
+    Flag.withFallbackConfig(Config.schema(OpenFraction, "LIMIT_DECREASE")),
+    Flag.withDefault(0.7),
+    Flag.withDescription("What the limit is multiplied by on a 429 (once per round trip, not once per 429)"),
+  ),
   metricsPort: metricsPortFlag,
 };
 
@@ -105,7 +129,18 @@ const daemon = Command.make("rmq-daemon", flags, (settings) => {
 
   const Daemon = Layer.effectDiscard(
     Effect.forkScoped(
-      Effect.orDie(runDaemon(settings)).pipe(
+      Effect.orDie(
+        runDaemon({
+          ...settings,
+          limit: settings.adaptiveLimit
+            ? O.some({
+                min: Math.min(settings.limitMin, settings.maxInFlight),
+                max: settings.maxInFlight,
+                decrease: settings.limitDecrease,
+              })
+            : O.none(),
+        }),
+      ).pipe(
         Effect.catchDefect((defect) =>
           Effect.logFatal("daemon died, restarting the process", defect).pipe(
             Effect.andThen(stop("daemon died")),

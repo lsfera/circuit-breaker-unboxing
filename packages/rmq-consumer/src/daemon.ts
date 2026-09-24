@@ -47,6 +47,7 @@ import { makeRedrive } from "./Redrive.ts";
 import { desired, initialState, plan, reduce } from "./DaemonState.ts";
 import { position } from "./DaemonPolicy.ts";
 import * as Attempts from "./Attempts.ts";
+import * as Limiter from "./Limiter.ts";
 import * as Tally from "./Tally.ts";
 import * as Telemetry from "./Telemetry.ts";
 import type { Consumer, DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
@@ -103,6 +104,8 @@ type DaemonConfig = {
   readonly redriveOnClose: boolean;
   /** Messages moved per redrive pass, so a large backlog is recovered in bounded bites. */
   readonly redriveMax: number;
+  /** Learn the concurrent-call limit from 429s (Limiter.ts). `None`: it stays at `maxInFlight`. */
+  readonly limit: O.Option<Limiter.LimiterConfig>;
 };
 
 /** How often the daemon publishes counters, advances its ramp, and says it is alive. */
@@ -242,6 +245,15 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   const runInContext = Effect.runPromiseWith(services);
   const forkInContext = Effect.runForkWith(services);
 
+  const limit = O.map(cfg.limit, (c) => new Limiter.AdaptiveLimit(c));
+  const initialSlots = O.match(limit, { onNone: () => cfg.maxInFlight, onSome: (l) => l.slots });
+  const slots = Semaphore.makeUnsafe(initialSlots);
+  yield* Metric.update(Metric.withAttributes(Telemetry.concurrencyLimit, attrs), initialSlots);
+  const resize = (to: number) =>
+    Semaphore.resize(slots, to).pipe(
+      Effect.andThen(Metric.update(Metric.withAttributes(Telemetry.concurrencyLimit, attrs), to)),
+    );
+
   /**
    * One call to the third party, and what happens to the delivery
    * afterwards. Plain async — it is awaited by the AMQP handler, and Effect
@@ -254,8 +266,7 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
    *
    * `Attempts.nextAttempt` is the decision; this is only the shell around it.
    */
-  const attempt = async (body: string, delivery: DeliveryInfo, key: string): Promise<Settlement> => {
-    let status: number | "error";
+  const fetchStatus = async (key: string): Promise<number | "error"> => {
     inFlight++;
     try {
       const res = await fetch(`${cfg.egressAddr}${cfg.apiPath}`, {
@@ -265,14 +276,47 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
       // Drain the body even though nothing wants it: an unconsumed response holds
       // its connection out of the pool, which at this rate leaks sockets.
       await res.text().catch(() => {});
-      status = res.status;
+      return res.status;
     } catch {
       // Connection refused or timeout is the expected shape of an outage, not an
       // error to report: the aggregator judges the API's health from Envoy's view.
-      status = "error";
+      return "error";
     } finally {
       inFlight--;
     }
+  };
+
+  /**
+   * The call, inside a slot when the limit adapts. A delivery waiting for a
+   * slot stays unacked, so the broker holds the rest: the limit only ever
+   * narrows what prefetch already allows. Moved once per round trip, not once
+   * per 429 — see Limiter.ts's `epoch`.
+   */
+  const limitedStatus = (key: string): Promise<number | "error"> =>
+    O.match(limit, {
+      onNone: () => fetchStatus(key),
+      onSome: (l) =>
+        runInContext(
+          Semaphore.withPermit(
+            slots,
+            Effect.gen(function* () {
+              const startedIn = l.epoch;
+              const status = yield* Effect.promise(() => fetchStatus(key));
+              const before = l.slots;
+              Match.value(Attempts.classify(status)).pipe(
+                Match.when("ok", () => l.succeeded()),
+                Match.when("shed", () => l.throttled(startedIn)),
+                Match.orElse(() => {}),
+              );
+              yield* Effect.when(resize(l.slots), Effect.sync(() => l.slots !== before));
+              return status;
+            }),
+          ),
+        ),
+    });
+
+  const attempt = async (body: string, delivery: DeliveryInfo, key: string): Promise<Settlement> => {
+    const status = await limitedStatus(key);
     const outcome = Attempts.classify(status);
 
     // Headers are only materialized when the call failed: the success path runs thousands of times a second.
@@ -675,6 +719,7 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   yield* reconcile;
   yield* Effect.log(
     `${label}: up — position=${selfPosition.toFixed(3)} maxInFlight=${cfg.maxInFlight} ` +
+      `limit=${O.match(cfg.limit, { onNone: () => "off", onSome: (l) => `${l.min}-${l.max} x${l.decrease}` })} ` +
       `egress=${cfg.egressAddr}${cfg.apiPath} work=${workQueue} control=${controlQueue}`,
   );
 

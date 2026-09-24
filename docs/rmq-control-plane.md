@@ -373,6 +373,17 @@ fresh outage — three attempts per outage, not three ever, up to
 again. Measured, pinned by a test, and written up in
 [docs/decisions/016-the-retry-budget-travels-with-the-message.md](decisions/016-the-retry-budget-travels-with-the-message.md).
 
+**A 429 shrinks the daemon's own limit.** Envoy's adaptive-concurrency filter
+sheds with a 429, and so does a third party that is full rather than broken.
+Either way the call is released uncounted, and the daemon's concurrent-call
+limit (`Limiter.ts`, article 3's) is multiplied by 0.7, once per round trip,
+then grows back by one slot per round trip of successes, never above
+`MAX_IN_FLIGHT`. Envoy's filter reacts to latency, not to a third party's
+429s, so without this a daemon kept pushing at `MAX_IN_FLIGHT` into a third
+party that was turning most of it away: on article 3's harness, about 11,400
+429s in an incident against about 740 with the limit learning. It is gauged
+as `egress_daemon_concurrency_limit`; `ADAPTIVE_LIMIT=false` turns it off.
+
 **A refused request is parked, not retried.** Only a 5xx, a 408 or no
 response at all spends the budget. A 429 is released uncounted, and any other
 4xx is the third party refusing this request: retrying or redriving it sends
