@@ -273,6 +273,47 @@ top panel is `egress:fleet_open`.
 - The fraction returned to 0 57s after restore. The last replica was still in
   a long hold (see *The price of a long hold*).
 
+## Against article 3, on the same harness
+
+Article 3 has the same three additions on top of cockatiel. Both designs
+were run through the same `chaos-breaker.mjs` scenarios, against the same
+broker and third party, on 2026-09-24. Each ran with its own branch's image
+and compose file, one run per scenario. The harness detects which design is
+running. It also voids a run if the host was suspended during it; none was.
+
+Both passed every graded scenario, and `partial` too: nothing lost, no net
+dead letters, and exactly one probe permit afterwards. 600 of 600 redriven
+messages were processed with the redriver killed. The differences:
+
+| scenario | failed calls reaching the third party (cockatiel · held) | refused locally | breaker openings | all closed after restore | redriven |
+| --- | --- | --- | --- | --- | --- |
+| outage | 32 · 26 | 22,070 · **0** | 34 · 37 | 28s · 25s | 1 · 0 |
+| outage-hang | 111 · 40 | 21,736 · **0** | 34 · 74 | 32s · 9s | 0 · 0 |
+| partial (60%) | 863 · 565 | 18,922 · **0** | 97 · 57 | 26s · 26s | **68 · 3** |
+| kill-open-replica | 72 · 45 | 21,907 · **0** | 36 · 34 | 22s · 23s | 4 · 0 |
+| kill-broker-while-open | 50 · 52 | 21,437 · **0** | 34 · 36 | 28s · 30s | 0 · 0 |
+| restart-during-probe | 152 · 186 | 17,586 · **0** | 40 · 57 | 24s · 16s | 0 · 0 |
+
+- **The held breaker never refuses a message it was handed.** Cockatiel's
+  open breaker still consumes. Each delivery is rejected locally, held
+  100–400ms, and released back to the broker: about 20,000 round trips per
+  40s outage. The held breaker isn't consuming, so the broker simply keeps
+  the work.
+- **Fewer messages reach the dead-letter queue in a partial failure** (3
+  against 68, all redriven either way). The held design releases a failure
+  that follows another one, instead of charging it to the message.
+- **Similar load on the failing third party, and similar recovery.** The
+  held design sent fewer failed calls in four scenarios and more in two.
+  Recovery was faster in two, slower in two, and level in one. With one run
+  each, differences of a few seconds or a few dozen calls are noise.
+  Long holds (up to 24h) are the held design's recovery risk, and a 40s
+  outage doesn't reach them.
+- **What the held design pays for this:** a 17-queue delay chain for its
+  timer, and its own breaker machine instead of a library.
+
+Runs: `docs/runs/compare-article3-cockatiel.json` and
+`docs/runs/compare-held.json`.
+
 ## What this still doesn't fix
 
 - **Five breakers still don't agree.** Each is formed only from the calls that

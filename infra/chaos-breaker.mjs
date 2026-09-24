@@ -17,6 +17,10 @@
  * number of replicas that are not open, which is the claim the design rests on. Every scenario also ends
  * with exactly one probe permit in the broker, and the dead-letter queue back where it started.
  *
+ * Runs against either breaker design in this series, detected from the replicas' logs: `held` (this branch: the
+ * open state is a token in the broker) or `cockatiel` (article 3: an in-process breaker, run by that branch's
+ * compose file). Scenarios that only mean something for one design say so and are skipped for the other.
+ *
  * Assumes `docker compose up -d`, a shell that reaches the services by name and can run `docker`. It kills real
  * containers and restarts the broker, so do not point it at anything you care about. The compose producer is
  * stopped for a run (all traffic comes from one forked publisher) and started again at the end, along with
@@ -152,8 +156,20 @@ const decodeBits = (b64) => Buffer.from(b64 ?? "", "base64");
 
 // ---- the breaker, read back from the replicas' own logs ---------------------
 
-const LINE = /^\[(\d\d:\d\d:\d\d\.\d+)\].*consumer: (up —|breaker (closed|open for (\d+)s \(attempt (\d+)\)|open|half-open))/;
-const LEGAL = { closed: ["open"], open: ["half-open"], "half-open": ["closed", "open"] };
+const LINE = /^\[(\d\d:\d\d:\d\d\.\d+)\].*consumer: (up —|breaker (closed|open for (\d+)s \(attempt (\d+)\)|opened|open|half-open))/;
+/** Cockatiel logs no half-open, and logs "opened" again when a probe fails, so its only rule is open ↔ closed. */
+const LEGAL = {
+  held: { closed: ["open"], open: ["half-open"], "half-open": ["closed", "open"] },
+  cockatiel: { closed: ["open"], open: ["open", "closed"] },
+};
+
+/** Which design the running fleet is: only the held breaker names a wake queue in its startup line. */
+const detectDesign = async () => {
+  const [first] = await consumerContainers();
+  const { stdout, stderr } = await exec("docker", ["logs", first]);
+  return (stdout + stderr).includes("wake=") ? "held" : "cockatiel";
+};
+let DESIGN = "held";
 
 /** The phase sequence one replica logged since `since`, restarting at each process start. */
 const transitionsOf = async (container, since) => {
@@ -162,6 +178,7 @@ const transitionsOf = async (container, since) => {
   const violations = [];
   let previous;
   let transitions = 0;
+  let openings = 0;
   (stdout + stderr)
     .split("\n")
     .map((l) => l.match(LINE))
@@ -173,17 +190,21 @@ const transitionsOf = async (container, since) => {
       // "open" is logged twice per opening: the phase, then the hold it chose. Count the phase only.
       if (name === "open" && seconds !== undefined) return void holds.push({ seconds: Number(seconds), attempt: Number(attempt) });
       transitions++;
-      if (previous !== undefined && !LEGAL[previous].includes(name)) violations.push(`${previous} → ${name}`);
+      if (name === "open") openings++;
+      if (previous !== undefined && !LEGAL[DESIGN][previous].includes(name)) violations.push(`${previous} → ${name}`);
       previous = name;
     });
-  return { container, transitions, holds, violations };
+  return { container, transitions, openings, holds, violations };
 };
 
 /** The container whose most recent phase is `phase`, if any — the one a scenario may kill. */
 const containerIn = async (phase) => {
   for (const c of await consumerContainers()) {
     const { stdout, stderr } = await exec("docker", ["logs", "--tail", "40", c]).catch(() => ({ stdout: "", stderr: "" }));
-    const phases = (stdout + stderr).split("\n").flatMap((l) => l.match(/breaker (closed|open|half-open)$/)?.[1] ?? []);
+    const phases = (stdout + stderr)
+      .split("\n")
+      .flatMap((l) => l.match(/breaker (closed|opened|open|half-open)$/)?.[1] ?? [])
+      .map((p) => (p === "opened" ? "open" : p));
     if (phases.at(-1) === phase) return c;
   }
   return undefined;
@@ -250,8 +271,12 @@ const allClosed = async () => {
 /**
  * @param fault {{ inject: () => Promise<void>, during?: (ctx) => Promise<void>, restore: () => Promise<void> }}
  */
+/** Grows only while the host is suspended: wall clock minus the monotonic clock. */
+const skewMs = () => Date.now() - performance.timeOrigin - performance.now();
+
 const scenario = async (name, fault) => {
   const started = new Date();
+  const skewAtStart = skewMs();
   const run = `${name.replace(/[^a-z]/g, "").slice(0, 6)}${Date.now().toString(36)}`;
   console.log(`\n== ${name} (run ${run}) ==`);
   await setFailure({});
@@ -304,6 +329,14 @@ const scenario = async (name, fault) => {
   const window = `${Math.ceil((Date.now() - started.getTime()) / 1000)}s`;
   const permitLost = Math.round(await promSum(`sum(increase(egress_consumer_probe_permit_lost_total[${window}]))`));
   const redrives = Math.round(await promSum(`sum(increase(egress_consumer_redrives_total[${window}]))`));
+  const calls = Object.fromEntries(
+    await Promise.all(
+      ["ok", "failed", "open", "client_error"].map(async (o) => [
+        o,
+        Math.round(await promSum(`sum(increase(egress_consumer_calls_total{outcome="${o}"}[${window}]))`)),
+      ]),
+    ),
+  );
   const processed = decodeBits(upstream.bits);
   const confirmed = decodeBits(final.bits);
   const dead = (await queueInfo(DEAD)).ready - deadBefore;
@@ -320,11 +353,14 @@ const scenario = async (name, fault) => {
   const holds = replicas.flatMap((r) => r.holds);
   const maxHold = Math.max(0, ...holds.map((h) => h.seconds));
   const maxAttempt = Math.max(0, ...holds.map((h) => h.attempt));
-  const openings = replicas.reduce((sum, r) => sum + r.holds.length, 0);
+  const openings = replicas.reduce((sum, r) => sum + r.openings, 0);
 
   // "Open is no consumer": while the fleet's gauges are all in, the broker's own
   // consumer count should be the replicas that are not open (half-open consumes).
-  const comparable = series.filter((s) => s.consumers !== null && s.closed !== null && s.closed + s.open + s.halfOpen >= 5);
+  const comparable =
+    DESIGN === "held"
+      ? series.filter((s) => s.consumers !== null && s.closed !== null && s.closed + s.open + s.halfOpen >= 5)
+      : [];
   const matching = comparable.filter((s) => s.consumers === s.closed + s.halfOpen);
   const peakOpen = Math.max(0, ...series.map((s) => s.open ?? 0));
   const peakTokens = Math.max(0, ...series.map((s) => s.tokens ?? 0));
@@ -345,7 +381,9 @@ const scenario = async (name, fault) => {
       drained,
       deadDrained,
     },
-    permit: { tokensAfter: permit, racesLost: permitLost },
+    design: DESIGN,
+    calls,
+    permit: { tokensAfter: permit, racesLost: DESIGN === "held" ? permitLost : null },
     redrives,
     extra,
     breaker: {
@@ -364,6 +402,8 @@ const scenario = async (name, fault) => {
   };
 
   const onePermit = permit.ready === 1 && permit.held === 0;
+  // A host that slept mid-run stretches every timing and can trip a timeout: the run says nothing either way.
+  const suspendedMs = Math.round(skewMs() - skewAtStart);
   const verdict =
     lost.length === 0 && dead === 0 && drained && deadDrained && recovered && violations.length === 0 && onePermit && extra.pass;
   console.log(
@@ -378,12 +418,18 @@ const scenario = async (name, fault) => {
     `  transitions legal: ${violations.length === 0}; broker consumer count = replicas not open in ${matching.length}/${comparable.length} samples`,
   );
   console.log(
-    `  permit: ${permit.ready} ready + ${permit.held} held after (want 1 + 0), ${permitLost} races lost; ${redrives} redriven` +
+    `  calls: ${calls.failed} reached the third party and failed, ${calls.open} refused locally, ${calls.ok} ok`,
+  );
+  console.log(
+    `  permit: ${permit.ready} ready + ${permit.held} held after (want 1 + 0)` +
+      (DESIGN === "held" ? `, ${permitLost} races lost` : "") +
+      `; ${redrives} redriven` +
       (extra.summary ? `; ${extra.summary}` : ""),
   );
-  console.log(`  ${verdict ? "PASS" : "FAIL"}`);
+  const voided = suspendedMs > 2000;
+  console.log(`  ${voided ? `VOID (the host was suspended for ${Math.round(suspendedMs / 1000)}s)` : verdict ? "PASS" : "FAIL"}`);
   await exec("docker", ["start", `${PROJECT}-rmq-producer-1`]).catch(() => {});
-  return { ...result, pass: verdict };
+  return { ...result, suspendedMs, void: voided, pass: verdict };
 };
 
 // ---- the faults --------------------------------------------------------------
@@ -406,14 +452,39 @@ const killOpenReplica = {
   },
 };
 
-/** Restart the broker while several breakers are open: the tokens are messages in quorum queues, and must come back. */
+/**
+ * Restart the broker while several breakers are open. For the held breaker the tokens are messages in quorum
+ * queues and must come back; for cockatiel the open state is in the processes and must survive losing the broker.
+ */
 const killBrokerWhileOpen = {
   ...outage({ rate: 1 }),
   during: async () => {
-    await waitFor(async () => ((await tokensInChain()) ?? 0) >= 3, 30);
-    console.log(`  restarting the broker with ${await tokensInChain()} tokens in the chain`);
+    await waitFor(async () => ((await breakerStates()) ?? []).filter((s) => s !== 0).length >= 3, 30);
+    console.log(`  restarting the broker with ${((await breakerStates()) ?? []).filter((s) => s !== 0).length} breakers open`);
     await exec("docker", ["restart", `${PROJECT}-rabbitmq-1`]);
-    await waitFor(async () => (await tokensInChain()) !== undefined, 90);
+    await waitFor(async () => (await tryQueueInfo(WORK)) !== undefined, 90);
+  },
+};
+
+/** Ready tokens right now, over AMQP: the management API's figures lag by seconds. */
+const permitReady = async () => (await tryQueueInfo(PERMIT))?.ready;
+
+/**
+ * Restart replicas while a probe holds the permit, three times: a hanging third party keeps each probe open for
+ * its timeout. A victim that was the holder must not take the token with it; a victim that wasn't seeds a token
+ * on startup while the holder still has it, which the return must collapse. Either way one token is left.
+ */
+const restartDuringProbe = {
+  ...outage({ rate: 1, mode: "hang" }),
+  during: async () => {
+    for (let i = 0; i < 3; i++) {
+      const held = await waitFor(async () => (await permitReady()) === 0, 20);
+      const all = await consumerContainers();
+      const victim = held ? all[Math.floor(Math.random() * all.length)] : undefined;
+      console.log(`  ${held ? `the permit is held; restarting ${victim}` : "never saw the permit held"}`);
+      await (victim ? exec("docker", ["kill", victim]).then(() => exec("docker", ["start", victim])) : Promise.resolve());
+      await sleep(4000);
+    }
   },
 };
 
@@ -484,6 +555,8 @@ const SCENARIOS = {
   "outage-hang": () => scenario("outage-hang", outage({ rate: 1, mode: "hang" })),
   "kill-open-replica": () => scenario("kill-open-replica", killOpenReplica),
   "kill-broker-while-open": () => scenario("kill-broker-while-open", killBrokerWhileOpen),
+  "restart-during-probe": () => scenario("restart-during-probe", restartDuringProbe),
+  // Held only: it finds the holder by its logged half-open phase, which cockatiel doesn't log.
   "kill-permit-holder": () => scenario("kill-permit-holder", killPermitHolder),
   "redrive-failover": () => scenario("redrive-failover", redriveFailover),
   // Informational: no correctness claim is made for it. See the article.
@@ -539,9 +612,16 @@ const delaySurvivesRestart = async () => {
 };
 SCENARIOS["delay-survives-broker-restart"] = delaySurvivesRestart;
 
+/** Scenarios that only exercise the held breaker's own machinery. */
+const HELD_ONLY = new Set(["kill-permit-holder", "delay-survives-broker-restart"]);
+
 const main = async () => {
   if (flag("list", false)) return void console.log(Object.keys(SCENARIOS).join("\n"));
-  const chosen = String(flag("scenarios", Object.keys(SCENARIOS).join(","))).split(",");
+  DESIGN = await detectDesign();
+  console.log(`design: ${DESIGN}`);
+  const chosen = String(flag("scenarios", Object.keys(SCENARIOS).join(",")))
+    .split(",")
+    .filter((name) => DESIGN === "held" || !HELD_ONLY.has(name));
   const results = [];
   try {
     for (const name of chosen) {
@@ -559,7 +639,7 @@ const main = async () => {
     writeFileSync(OUT, JSON.stringify({ at: new Date().toISOString(), results }, null, 2));
     console.log(`\nwrote ${OUT}`);
   }
-  const graded = results.filter((r) => r.scenario !== "partial");
+  const graded = results.filter((r) => r.scenario !== "partial" && !r.void);
   console.log(`\n${graded.filter((r) => r.pass).length}/${graded.length} graded scenarios passed`);
   process.exitCode = graded.every((r) => r.pass) ? 0 : 1;
 };
