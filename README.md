@@ -136,10 +136,10 @@ from Prometheus (`PROMETHEUS`, default `http://localhost:9090`).
 ### What it measured
 
 A 15s error-mode outage at 200 msg/s, five consumers, five breakers, recorded
-2026-09-20 (2.4× real time, also as [video](docs/media/incident-in-process-breaker.webm)):
-four breakers trip within seconds of each other, a fifth later (in the recording
-one never trips), the work queue peaks and the dead-letter queue climbs, and
-after restore the replicas close out of step, the last one 28s later.
+2026-09-24 (3.71× real time, also as [video](docs/media/incident-in-process-breaker.webm)):
+all five breakers open within 2s of each other, the work queue peaks at 1,449
+and 1,826 messages are dead-lettered, and after restore the replicas close
+out of step over about 7s.
 
 ![Grafana during a 15s outage with five in-process breakers](docs/media/incident-in-process-breaker.gif)
 
