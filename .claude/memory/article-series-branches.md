@@ -1,6 +1,6 @@
 ---
 name: article-series-branches
-description: The article/NN-* branch lineup after the 2026-09-23/24 merges and renumbering (04 = master, platform level), and how changes move between them.
+description: The article/NN-* branch lineup after the 2026-09-23/24 merges and renumbering (04 = old master, platform level; main is empty), and how changes move between them.
 metadata:
   type: project
 ---
@@ -11,7 +11,7 @@ The branch lineup, as of 2026-09-24:
 - 02-in-process-breaker
 - 02-rabbitmq-only-breaker: the breaker held by RabbitMQ (delay-chain token), kept as 02 by the user's choice. Since 2026-09-24 it carries everything 03 has (permit, redrive, fleet-view rule, the 429 classification and Limiter.ts), each measured again on this design, plus a same-harness comparison with 03 in its README.
 - 03-rabbitmq-coordination: probe permit, counted attempts and redrive, the fleet view as Prometheus rules (infra/monitoring/rules.yml, with a 10s freshness filter), and, merged in from 04 on 2026-09-24, the 429 work: `throttled` classification, the AIMD limit (Limiter.ts), and the failure-rate negative result.
-- 04-platform-control-plane: created 2026-09-24 from master (no ancestry change; master stays). The last article: Envoy + aggregators + published per-API events, framed as "scaling the design at platform level", with entry criteria (other systems act on the verdict, visible hosts for DEGRADED, shared egress for many services, many APIs). The user's assessment: for a consumer-only daemon 03 / 02-rabbitmq-only are the right compromise; master is ~4× the code and only pays off at platform level.
+- 04-platform-control-plane: created 2026-09-24 from master; master was then deleted (it is 04's parent, faef7e072), and `main` is now an empty orphan branch (one empty commit) set as init.defaultBranch. The last article: Envoy + aggregators + published per-API events, framed as "scaling the design at platform level", with entry criteria (other systems act on the verdict, visible hosts for DEGRADED, shared egress for many services, many APIs). The user's assessment: for a consumer-only daemon 03 / 02-rabbitmq-only are the right compromise; master is ~4× the code and only pays off at platform level.
 - (old) 04-429-backpressure: merged into 03 and ported to 02-rabbitmq-only-breaker on 2026-09-24, then deleted at the user's request (was 27443d8d1; reflog only).
 
 History:
