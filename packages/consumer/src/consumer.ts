@@ -82,7 +82,7 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   yield* rmq.declareQueue(workQueue, workQueueOptions(cfg.apiId));
 
   // Captured so the plain-async handler below (amqplib's callback, not an Effect fiber) can still reach these
-  // services — `Rmq` is needed for `Breaker.withPermit`'s own `get`/`nack`.
+  // services — `Rmq` is needed for `Breaker.withPermit`'s own `get`, publish and `ack`.
   const services = yield* Effect.context<HttpClient.HttpClient | Rmq>();
   const runInContext = Effect.runPromiseWith(services);
 
@@ -182,12 +182,12 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   };
 
   const attempt = async (key: string): Promise<Settlement> => {
-    // Checked before execute() rather than inside the wrapped function: a race with cockatiel's own
-    // Closed/Open/HalfOpen decision is possible but harmless, since only HalfOpen changes which function runs.
-    const attemptUpstream =
+    // Checked inside the wrapped function, not before execute(): cockatiel moves Open -> HalfOpen inside
+    // execute(), just before running the probe, so a check made before it reads Open and the probe would skip the permit.
+    const attemptUpstream = () =>
       breaker.state === CircuitState.HalfOpen
-        ? () => runInContext(Breaker.withPermit(cfg.apiId, () => callUpstream(key)))
-        : () => callUpstream(key);
+        ? runInContext(Breaker.withPermit(cfg.apiId, () => callUpstream(key)))
+        : callUpstream(key);
 
     const { outcome, status } = await breaker.execute(attemptUpstream).then(
       (answer): Attempt => ({ outcome: Breaker.classify(answer), status: String(answer) }),

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { CircuitState } from "cockatiel";
 import { Effect, Option as O } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
+import { RmqError } from "@egress/rmq/Client.ts";
 import type { RmqService } from "@egress/rmq/Client.ts";
 import * as Breaker from "../src/Breaker.ts";
 
@@ -55,6 +56,21 @@ test("half-opens after the backoff and closes on a successful probe", async () =
   assert.equal(breaker.state, CircuitState.Closed);
 });
 
+test("a probe sees HalfOpen only from inside execute: before it, the breaker still reads Open", async () => {
+  // consumer.ts decides whether a call needs the probe permit from inside the function it hands to execute().
+  const breaker = Breaker.make({ consecutiveFailures: 1, initialDelayMs: 15, maxDelayMs: 50 });
+  await breaker.execute(() => Promise.reject(new Error("boom"))).catch(() => {});
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.equal(breaker.state, CircuitState.Open, "the backoff has elapsed, but nothing has half-opened it yet");
+  let inside: CircuitState | undefined;
+  await breaker.execute(() => {
+    inside = breaker.state;
+    return Promise.resolve("ok");
+  });
+  assert.equal(inside, CircuitState.HalfOpen);
+});
+
 test("STATE_CODE gives every reachable state a stable number, closed is the initial one", () => {
   assert.equal(Breaker.STATE_CODE[CircuitState.Closed], 0);
   assert.equal(Breaker.STATE_CODE[CircuitState.Open], 1);
@@ -96,41 +112,56 @@ test("a client_error is a success: it never opens the breaker, however many call
  * what makes "exactly one of two simultaneous callers wins" testable
  * without a real race.
  */
-const fakePermitRmq = (): RmqService => {
-  let token: string | null = "permit";
+const fakePermitRmq = (): RmqService & { readonly ready: () => number } => {
+  // Ready tokens only, as `x-max-length` counts them: a held token is not in here.
+  let ready = 1;
   const unimplemented =
     (op: string) =>
     (..._args: ReadonlyArray<unknown>) =>
       Effect.die(new Error(`${op}: not used by withPermit`));
-  return Rmq.of({
-    declareQueue: unimplemented("declareQueue"),
+  const rmq = Rmq.of({
+    declareQueue: () => Effect.void,
     declareTopicExchange: unimplemented("declareTopicExchange"),
     bind: unimplemented("bind"),
     consume: unimplemented("consume"),
     get: () =>
       Effect.sync(() => {
-        if (token === null) return O.none();
-        const held = token;
-        token = null;
+        if (ready === 0) return O.none();
+        ready--;
         return O.some({
-          body: held,
+          body: "permit",
           properties: {},
           messageId: O.none(),
           ack: Effect.sync(() => {}),
           nack: Effect.sync(() => {
-            token = held;
+            ready++;
           }),
         });
       }),
     publisherToExchange: unimplemented("publisherToExchange"),
-    publisherToQueue: unimplemented("publisherToQueue"),
-    send: unimplemented("send"),
+    publisherToQueue: (queue) =>
+      Effect.succeed({
+        exchange: "",
+        routingKey: queue,
+        contentType: O.none(),
+        contentEncoding: O.none(),
+        type: O.none(),
+        mandatory: true,
+      }),
+    // reject-publish: refused while a token is ready.
+    send: () =>
+      ready >= 1
+        ? Effect.fail(new RmqError({ operation: "send", cause: "message nacked" }))
+        : Effect.sync(() => {
+            ready++;
+          }),
     cancelConsumer: unimplemented("cancelConsumer"),
     closeConsumer: unimplemented("closeConsumer"),
     lost: Effect.never,
     isConnected: Effect.succeed(true),
     resetConnection: Effect.sync(() => {}),
   });
+  return Object.assign(rmq, { ready: () => ready });
 };
 
 test("withPermit lets only one of two racing replicas reach the network, and hands the permit back after", async () => {
@@ -164,4 +195,25 @@ test("withPermit lets only one of two racing replicas reach the network, and han
   calls = 0;
   await run(Breaker.withPermit("payments-provider", attempt));
   assert.equal(calls, 1, "the permit must be available again after being released");
+});
+
+test("a token seeded while a probe holds the permit is a duplicate, and the probe's return collapses it", async () => {
+  const rmq = fakePermitRmq();
+  const run = <A>(effect: Effect.Effect<A, unknown, Rmq>) =>
+    Effect.runPromise(Effect.provideService(effect, Rmq, rmq));
+
+  let release = () => {};
+  const probing = run(
+    Breaker.withPermit("payments-provider", () => new Promise<void>((resolve) => (release = resolve))),
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(rmq.ready(), 0, "the probe holds the only token");
+
+  // A replica starting now: the broker accepts its seed, since the held token does not count.
+  await run(Breaker.seedPermit("payments-provider"));
+  assert.equal(rmq.ready(), 1, "a second token exists while the first is held");
+
+  release();
+  await probing;
+  assert.equal(rmq.ready(), 1, "the return is refused while the duplicate is ready: one token again, not two");
 });

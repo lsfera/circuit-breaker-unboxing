@@ -85,13 +85,36 @@ the rejection was silent and crash-looped four replicas on boot.)
 
 A half-open replica does a non-blocking `get` first:
 
-- **Token** → make the real call, then `nack` the token back whatever the
-  result.
+- **Token** → make the real call, then hand the token back whatever the
+  result: publish a fresh one, then ack the one held.
 - **Empty** → fail at once with `Breaker.NoPermit`, no network call;
   cockatiel treats it as a failed probe and backs off.
 
-**Measured:** 20 concurrent half-open probes against the live broker —
-exactly one reached a real call every time, the other 19 failed instantly.
+**Measured:** 20 concurrent `withPermit` calls against the live broker:
+exactly one reached a real call every time, and the other 19 failed instantly.
+
+That measured the permit, not the fleet using it, and the fleet wasn't using
+it. Cockatiel moves Open → HalfOpen inside `execute()`, just before running
+the probe. `consumer.ts` checked the state *before* `execute()`, so every
+probe read Open and went straight to the third party. Across 616,643 polls of
+the permit queue during a hanging outage, the token was never taken. The
+check now runs inside the function handed to `execute()`, and a test pins
+cockatiel's behaviour. With every replica open against a hanging third party,
+counting in-flight calls on half-open replicas every 100 ms for 90 s (from 5 s
+into the outage, once calls made before the trip had timed out):
+
+| | before the fix | after |
+| --- | --- | --- |
+| peak probes in flight at once | 6 | **1** |
+| samples with 5 or more | 15 of 814 | 0 of 815 |
+
+**Why publish-then-ack, not `nack`:** `x-max-length` counts only *ready*
+messages. Measured on RabbitMQ 4.3: a seed is refused while the token is
+ready, but accepted while a probe holds it, so a replica starting mid-probe
+made a second permit, and a requeuing `nack` kept both for good. The return
+publish is refused while a duplicate is ready, so the duplicate collapses on
+its next return; a crash between publish and ack leaves two tokens, never
+none.
 
 A single-active-consumer queue doesn't fit here: it hands over on
 disconnect, not when a replica's backoff elapses.

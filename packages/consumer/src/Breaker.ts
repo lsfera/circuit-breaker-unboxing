@@ -76,8 +76,7 @@ export const INITIAL_STATE_CODE: number = STATE_CODE[CircuitState.Closed];
 export { isBrokenCircuitError };
 
 /**
- * Fleet-wide cap on concurrent half-open probes: exactly one token, ever (`x-max-length: 1`,
- * `x-overflow: reject-publish`). Whichever replica's backoff clock elapses first wins it and is the only one
+ * Fleet-wide cap on concurrent half-open probes: one token (`x-max-length: 1`, `x-overflow: reject-publish`). Whichever replica's backoff clock elapses first wins it and is the only one
  * whose probe reaches the network; everyone else's `get` is an empty miss, indistinguishable from a failed
  * probe to their own breaker. Stops the recovery burst; does not make the five breakers agree — see README.md.
  */
@@ -92,25 +91,33 @@ const PERMIT_QUEUE_ARGS = { "x-max-length": 1, "x-overflow": "reject-publish" } 
  */
 export const seedPermit = Effect.fn(function* (apiId: string) {
   const rmq = yield* Rmq;
-  const queue = permitQueueFor(apiId);
-  yield* rmq.declareQueue(queue, { args: PERMIT_QUEUE_ARGS });
-  const pub = yield* rmq.publisherToQueue(queue);
-  yield* rmq.send(pub, "permit").pipe(Effect.ignore);
+  yield* rmq.declareQueue(permitQueueFor(apiId), { args: PERMIT_QUEUE_ARGS });
+  yield* offerPermit(apiId);
 });
+
+/** Publish a token; the broker refusing it (one is already ready) is success. */
+const offerPermit = (apiId: string) =>
+  Effect.gen(function* () {
+    const rmq = yield* Rmq;
+    const pub = yield* rmq.publisherToQueue(permitQueueFor(apiId));
+    yield* rmq.send(pub, "permit");
+  }).pipe(Effect.ignore);
 
 /** Thrown when this replica loses the race for the probe permit — cockatiel treats it exactly like a failed probe (see `consumer.ts`'s `call`). */
 export class NoPermit extends Error {}
 
 /**
  * Runs `attempt` only if this replica holds the fleet-wide probe permit; otherwise fails with `NoPermit`
- * without calling it. The permit is always handed back (`nack`, requeuing the token — never ack-and-republish,
- * so there's no window with zero tokens if this process dies mid-probe) regardless of outcome.
+ * without calling it. The permit is always handed back, as a fresh publish and then an ack of the held token,
+ * never a requeuing `nack`: `x-max-length` counts only *ready* messages, so a seed that lands while a probe holds
+ * the token makes a second one. The return publish is refused while another token is ready, which collapses
+ * the duplicate, and a crash between publish and ack leaves two tokens, never none.
  */
 export const withPermit = Effect.fn(function* <A>(apiId: string, attempt: () => Promise<A>) {
   const rmq = yield* Rmq;
   const got = yield* rmq.get(permitQueueFor(apiId));
   if (O.isNone(got)) return yield* Effect.fail(new NoPermit());
   return yield* Effect.tryPromise({ try: attempt, catch: (cause) => cause }).pipe(
-    Effect.ensuring(got.value.nack),
+    Effect.ensuring(offerPermit(apiId).pipe(Effect.andThen(got.value.ack), Effect.provideService(Rmq, rmq))),
   );
 });
