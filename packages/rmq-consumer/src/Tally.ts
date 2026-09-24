@@ -19,6 +19,7 @@ type Counts = {
   shed: number;
   probed: number;
   undecodable: number;
+  stale: number;
   /**
    * Control-plane events by CloudEvents type — read directly by the heartbeat
    * log line (its `control=` count), not published as a metric: RabbitMQ's own
@@ -33,6 +34,7 @@ export const zero = (): Counts => ({
   shed: 0,
   probed: 0,
   undecodable: 0,
+  stale: 0,
   byType: new Map(),
 });
 
@@ -52,6 +54,7 @@ type Snapshot = {
   readonly shed: number;
   readonly probed: number;
   readonly undecodable: number;
+  readonly stale: number;
   readonly gaps: number;
   readonly duplicates: number;
 };
@@ -62,6 +65,7 @@ export const nothing: Snapshot = {
   shed: 0,
   probed: 0,
   undecodable: 0,
+  stale: 0,
   gaps: 0,
   duplicates: 0,
 };
@@ -72,6 +76,7 @@ export const snapshot = (counts: Counts, contract: ContractState): Snapshot => (
   shed: counts.shed,
   probed: counts.probed,
   undecodable: counts.undecodable,
+  stale: counts.stale,
   gaps: contract.gaps,
   duplicates: contract.duplicates,
 });
@@ -83,6 +88,7 @@ type Delta = {
   readonly shed: number;
   readonly probed: number;
   readonly undecodable: number;
+  readonly stale: number;
   readonly gaps: number;
   readonly duplicates: number;
 };
@@ -93,6 +99,7 @@ export const since = (published: Snapshot, current: Snapshot): Delta => ({
   shed: current.shed - published.shed,
   probed: current.probed - published.probed,
   undecodable: current.undecodable - published.undecodable,
+  stale: current.stale - published.stale,
   gaps: current.gaps - published.gaps,
   duplicates: current.duplicates - published.duplicates,
 });

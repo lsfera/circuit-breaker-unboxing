@@ -48,6 +48,20 @@ low number, it is an unrecognisable one.
 and asserts that the leader still holding a pre-wipe token can no longer
 write, while the instance that actually holds the lease can.
 
+**The fence is on the checkpoint, not on the broker.** A leader paused past
+its lease that resumes still publishes the event it was about to, before its
+checkpoint save is refused and it steps down. A successor that re-derives an
+event its predecessor published but never checkpointed reuses that sequence,
+possibly with a different state. So every event carries the publishing
+leader's lease (`data.lease`, the same epoch and counter), and a reader ranks
+by it before the sequence (`supersedes` in `packages/domain/src/Model.ts`): a
+newer lease wins whatever its sequence, an older one loses whatever its
+sequence, and a new epoch is accepted, since a coordinator that lost its state
+restarts sequences and would otherwise be ignored for good. The daemons apply
+this and count what they ignore in `egress_daemon_control_stale_total`. Until
+2026-09-24 they applied every event and only counted duplicates, so the paused
+leader's one event was obeyed until the next snapshot, up to 15 s later.
+
 Two things make that survivable as a *deployment* and not only as a design.
 
 **A planned stop hands the lease back.** `LeaderElection.release` existed from

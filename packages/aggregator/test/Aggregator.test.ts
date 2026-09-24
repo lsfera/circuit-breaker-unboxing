@@ -170,6 +170,10 @@ test("every published event is a valid CloudEvent carrying full state", async ()
     // changed still has to report when its current condition began.
     assert.ok(Number.isFinite(Date.parse(e.data.observedSince)));
     assert.notEqual(e.data.observedSince, "1970-01-01T00:00:00.000Z");
+    // The publishing leader's lease, so a reader can rank it against a paused
+    // predecessor. Solo mode is one instance holding the first handoff.
+    assert.equal(e.data.lease?.counter, 1);
+    assert.ok(e.data.lease?.epoch);
   }
 });
 

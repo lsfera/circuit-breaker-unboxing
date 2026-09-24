@@ -184,7 +184,8 @@ Verified end to end on the push path: `CLOSED → OPEN
     "healthyEndpoints": 0,
     "totalEndpoints": 6,
     "observedSince": "2026-09-02T14:22:18.900Z",
-    "reportingReplicas": 9
+    "reportingReplicas": 9,
+    "lease": { "epoch": "5b0c…", "counter": 12 }
   }
 }
 ```

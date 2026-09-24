@@ -41,6 +41,7 @@ import {
   workQueueOptions,
 } from "@egress/rmq/ControlPlane.ts";
 import { decodeCircuitEvent, State, STATE_CODE } from "@egress/domain/Model.ts";
+import type { CircuitEvent } from "@egress/domain/Model.ts";
 import { initialContract, observe } from "./Contract.ts";
 import { makeRedrive } from "./Redrive.ts";
 import { desired, initialState, plan, reduce } from "./DaemonState.ts";
@@ -546,14 +547,22 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   });
 
   /** Order matters: apply, reconcile, log, and only then publish the triggers. */
-  const applyEvent = Effect.fnUntraced(function* (circuitState: State, sequence: number, reason: string) {
+  const applyEvent = Effect.fnUntraced(function* (event: CircuitEvent) {
+    const { state: circuitState, sequence, reason } = event.data;
     const at = yield* Clock.currentTimeMillis;
-    const { actions } = yield* dispatch({
+    const { prior, next, actions } = yield* dispatch({
       _tag: "CircuitChanged",
+      type: event.type,
+      lease: O.fromUndefinedOr(event.data.lease),
       state: circuitState,
       sequence,
       at,
     });
+    // Out-ranked by an event already applied: nothing changed, and saying so is the log line.
+    if (next === prior) {
+      counts.stale++;
+      return yield* Effect.logWarning(`${label}: seq=${sequence} (${reason}, ${circuitState}) is stale, ignored`);
+    }
     yield* reconcile;
     yield* Effect.log(`${label}: seq=${sequence} (${reason}) ${yield* describe}`);
     yield* performAll(actions);
@@ -569,7 +578,8 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
             ? "control message that is not JSON"
             : "control message that does not match the published schema",
         ),
-      onSuccess: ({ data, type }) => {
+      onSuccess: (event) => {
+        const { data, type } = event;
         if (data.apiId !== cfg.apiId) return; // belt and braces; the binding already filters
         Tally.observed(counts, type);
 
@@ -585,7 +595,7 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
         }
 
         forkInContext(
-          applyEvent(data.state, data.sequence, data.reason).pipe(
+          applyEvent(event).pipe(
             Effect.catchCause((cause) =>
               Effect.logError(`${label}: applying event failed`, cause),
             ),
@@ -668,6 +678,7 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
     ["undecodable", Metric.withAttributes(Telemetry.undecodable, attrs)],
     ["gaps", Metric.withAttributes(Telemetry.controlGaps, attrs)],
     ["duplicates", Metric.withAttributes(Telemetry.controlDuplicates, attrs)],
+    ["stale", Metric.withAttributes(Telemetry.controlStale, attrs)],
   ] as const;
 
   const flush = Effect.gen(function* () {

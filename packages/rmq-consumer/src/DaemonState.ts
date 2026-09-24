@@ -1,5 +1,6 @@
-import { Match } from "effect";
-import { State } from "@egress/domain/Model.ts";
+import { Match, Option as O } from "effect";
+import { State, supersedes } from "@egress/domain/Model.ts";
+import type { Applied, EventType, Lease } from "@egress/domain/Model.ts";
 import { initial as initialPolicy, runsWork, step } from "./DaemonPolicy.ts";
 import type { DaemonPolicyState } from "./DaemonPolicy.ts";
 
@@ -15,6 +16,11 @@ import type { DaemonPolicyState } from "./DaemonPolicy.ts";
  */
 export type DaemonState = {
   readonly circuit: State;
+  /**
+   * The event `circuit` came from. A stale one — a paused leader resuming, a
+   * duplicate, an out-of-order delivery — is ignored rather than applied.
+   */
+  readonly applied: O.Option<Applied>;
   readonly policy: DaemonPolicyState;
   /**
    * Highest circuit sequence this daemon has already probed for.
@@ -33,6 +39,7 @@ export const initialState = (now: number): DaemonState => ({
   // CLOSED until told otherwise: a daemon that starts mid-incident learns the
   // real state from the aggregator's next snapshot.
   circuit: State.CLOSED,
+  applied: O.none(),
   policy: initialPolicy(now),
   probedSequence: -1,
   redrivenSequence: -1,
@@ -42,6 +49,8 @@ export const initialState = (now: number): DaemonState => ({
 export type Command =
   | {
       readonly _tag: "CircuitChanged";
+      readonly type: EventType;
+      readonly lease: O.Option<Lease>;
       readonly state: State;
       readonly sequence: number;
       readonly at: number;
@@ -80,8 +89,10 @@ export const reduce = (
 ): Transition =>
   Match.valueTags(command, {
     CircuitChanged: (command): Transition => {
+      if (!supersedes(state.applied, command)) return { next: state, actions: [] };
       const next: DaemonState = {
         ...state,
+        applied: O.some({ lease: command.lease, sequence: command.sequence }),
         circuit: command.state,
         policy: step(state.policy, command.state, command.at),
       };

@@ -387,7 +387,11 @@ const make = Effect.gen(function* () {
         });
 
         return [
-          Arr.flatMap(stepped, ({ event }) => O.toArray(event)) as ReadonlyArray<CircuitEvent>,
+          // Stamped with this tick's lease, so a reader can rank this leader
+          // against a paused predecessor or a successor — see `supersedes`.
+          Arr.flatMap(stepped, ({ event }) =>
+            O.toArray(O.map(event, (e) => ({ ...e, data: { ...e.data, lease: token } }))),
+          ) as ReadonlyArray<CircuitEvent>,
           {
             breakers: new Map(Arr.map(stepped, ({ apiId, after }) => [apiId, after] as const)),
             // Anything published restarts that API's snapshot clock, so a
@@ -420,8 +424,12 @@ const make = Effect.gen(function* () {
       //
       // Not gapless in one narrow window: a leader that crashes after the
       // broker confirms but before the checkpoint save leaves its successor
-      // to re-publish the same sequence. Daemons already de-duplicate on
-      // sequence, so that is a harmless duplicate rather than a gap.
+      // to re-publish the same sequence, possibly with a different state.
+      // The successor's lease outranks the crashed leader's, so daemons act
+      // on its event (Model.ts's `supersedes`). The fence here is on the
+      // checkpoint, not on the broker: a paused leader that resumes can still
+      // publish once before its save is refused, and its older lease is what
+      // makes daemons ignore that event.
       type Publishing = {
         readonly publishable: ReadonlyArray<CircuitEvent>;
         readonly stopped: boolean;

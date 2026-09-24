@@ -109,6 +109,20 @@ export type ApiSnapshot = {
  * than any string, so nothing has to cast it back. The counts stay `Number` —
  * they are reported, not reasoned with.
  */
+/**
+ * The publishing leader's fencing token, stamped on every event it publishes.
+ * A sequence alone cannot rank two leaders: a paused leader that resumes, and a
+ * successor that re-derives an event its predecessor published but never
+ * checkpointed, both reuse a number, and a coordinator that lost its state makes
+ * sequences start over. `counter` ranks leaders within one coordinator's epoch;
+ * across epochs they are incomparable. See `supersedes`.
+ */
+const LeaseSchema = Schema.Struct({
+  epoch: Schema.NonEmptyString,
+  counter: Schema.Natural,
+});
+export type Lease = typeof LeaseSchema.Type;
+
 const CircuitEventData = Schema.Struct({
   apiId: Schema.String,
   sequence: Schema.Natural,
@@ -119,6 +133,8 @@ const CircuitEventData = Schema.Struct({
   totalEndpoints: Schema.Number,
   observedSince: Schema.String,
   reportingReplicas: Schema.Number,
+  /** Absent from a publisher that predates it, which is then ranked by sequence alone. */
+  lease: Schema.optionalKey(LeaseSchema),
 });
 
 export const CircuitEvent = Schema.Struct({
@@ -213,6 +229,45 @@ export const classifySequence = (
     onNone: () => "first" as const,
     onSome: (last) =>
       sequence <= last ? "duplicate" : sequence > last + 1 ? "gap" : "next",
+  });
+
+/** The last event a reader acted on, as `supersedes` ranks it. */
+export type Applied = {
+  readonly lease: O.Option<Lease>;
+  readonly sequence: number;
+};
+
+/**
+ * Whether an event should replace what a reader last acted on, rather than be
+ * ignored as stale. A newer leader wins whatever its sequence; an older one
+ * loses whatever its sequence; within one leader a transition must move the
+ * sequence forward, and a snapshot, which repeats the current sequence, must
+ * not move it back.
+ *
+ * A different epoch is accepted: the coordinator lost its state, the new epoch
+ * is the only one issuing leases, and a leader still holding an old-epoch token
+ * is fenced at its next checkpoint, so at worst it is believed for one tick.
+ */
+export const supersedes = (
+  applied: O.Option<Applied>,
+  incoming: { readonly type: EventType; readonly lease: O.Option<Lease>; readonly sequence: number },
+): boolean =>
+  O.match(applied, {
+    onNone: () => true,
+    onSome: (last) => {
+      // No lease reads as epoch "" and counter 0: a publisher that predates it.
+      const epoch = (lease: O.Option<Lease>) => O.getOrElse(O.map(lease, (l) => l.epoch), () => "");
+      const counter = (lease: O.Option<Lease>) => O.getOrElse(O.map(lease, (l) => l.counter), () => 0);
+      const sameEpoch = epoch(last.lease) === epoch(incoming.lease);
+      const ahead = counter(incoming.lease) - counter(last.lease);
+      return !sameEpoch || ahead > 0
+        ? true
+        : ahead < 0
+          ? false
+          : incoming.type === SEQUENCED_EVENT
+            ? incoming.sequence > last.sequence
+            : incoming.sequence >= last.sequence;
+    },
   });
 
 export class DeliveryFailed extends Data.TaggedError("DeliveryFailed")<{

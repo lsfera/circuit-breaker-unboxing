@@ -78,3 +78,10 @@ export const discarded = Metric.counter("egress_daemon_discarded_total", {
     "decode as a work message) or `keyless` (no `message_id` to use as the idempotency key). " +
     "Each goes to the dead-letter queue unread.",
 });
+
+export const controlStale = Metric.counter("egress_daemon_control_stale_total", {
+  description:
+    "Control events this daemon ignored because an event it had already applied " +
+    "out-ranks them: an older leader's lease, or a sequence behind the one applied. " +
+    "Non-zero around a failover is a paused leader resuming; anywhere else it is worth a look.",
+});
