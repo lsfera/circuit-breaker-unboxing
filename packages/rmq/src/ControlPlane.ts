@@ -139,9 +139,11 @@ const sacQueueArgs = (apiId: string): Record<string, unknown> => ({
 });
 
 /**
- * Attempts before the broker parks a message. The budget belongs to the queue,
- * not the daemon: an in-process counter is lost the moment the message moves to
- * another consumer, which is what an outage causes.
+ * Calls a message gets per outage. The daemon spends it, counting in
+ * `ATTEMPTS_HEADER` on each republish (ADR 016); the same number is the work
+ * queue's `x-delivery-limit`, the broker's backstop for a delivery that keeps
+ * coming back unsettled — a daemon killed mid-call — and never reaches a
+ * republish.
  *
  * Low because RabbitMQ redelivers with no backoff, so every extra attempt is
  * load on a failing upstream. A redrive republishes the body, so a replayed

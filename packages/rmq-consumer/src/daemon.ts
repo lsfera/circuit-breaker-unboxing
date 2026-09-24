@@ -77,9 +77,11 @@ import type { Action, Command, DaemonState } from "./DaemonState.ts";
  * `prefetch: maxInFlight` the broker holds the next delivery until this daemon
  * finishes one — see docs/decisions/011-the-ceiling-belongs-to-the-broker.md.
  *
- * Failed work is requeued and the *broker* counts the attempts
- * (`x-delivery-limit`), because an in-process counter is lost the moment a
- * message moves to another daemon. `REDRIVE_ON_CLOSE` replays the dead-letter
+ * A failed call is retried by republishing the message with its attempt count
+ * in a header (Attempts.ts, ADR 016), because an in-process counter is lost
+ * the moment a message moves to another daemon; the queue's
+ * `x-delivery-limit` is only the backstop for a delivery that never gets that
+ * far. A refused one is parked, a 429 is released. `REDRIVE_ON_CLOSE` replays the dead-letter
  * queue on recovery, from the one daemon a second election picks; off by
  * default, because whether stale work is still worth doing is a property of the
  * workload.

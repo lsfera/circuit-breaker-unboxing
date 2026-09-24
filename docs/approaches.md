@@ -172,11 +172,10 @@ work between brokers gets harder: a delayed message is a message part-way
 through 28 queues, and Particular documents that a shovel cannot move them. And
 it rests on dead-lettering, which quorum queues do *at most once* unless the
 source queue is declared with `x-dead-letter-strategy: at-least-once` (which
-also requires `x-overflow: reject-publish`). This stack's own work queue is the
-default: the broker's
-`rabbitmq_global_messages_dead_lettered_delivery_limit_total` counter reads
-`dead_letter_strategy="at_most_once"`, so a dead-lettering the broker cannot
-complete drops the message instead of retrying it.
+also requires `x-overflow: reject-publish`). At most once, a dead-lettering
+the broker cannot complete drops the message instead of retrying it, which is
+why this stack's work queue declares both (`packages/rmq/src/ControlPlane.ts`).
+A cascade would need the same on every level.
 
 **A cascade of retry queues for backoff.** The simpler variant of the same
 idea: a fixed ladder of queues, for example `work.retry.1s`, `work.retry.10s`,
@@ -261,7 +260,7 @@ The column that matters is the third one.
 | | What it fixes | What it cannot fix | Used here |
 |---|---|---|---|
 | Timeout | unbounded waits | load — may increase it | yes, 2s |
-| Retry | transient failures | multiplies load in an outage | yes, budget held by the broker |
+| Retry | transient failures | multiplies load in an outage | yes, budget carried with the message ([ADR 016](decisions/016-the-retry-budget-travels-with-the-message.md)) |
 | Backoff / jitter | retry bursts | still retrying blindly | at the breaker, not the call |
 | Breaker library | one process calling a dead API; with the broker coordinating, agreement too (article 3) | publishing, `DEGRADED` | no — [why](breaker-library.md) |
 | Bulkhead | your workers | the upstream sees *N × k* | prefetch does this per channel |
