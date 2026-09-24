@@ -86,6 +86,20 @@ test("classify: a 2xx is ok, a 4xx other than 408 and 429 the request's fault, a
   }
 });
 
+test("classify: while throttling, a 429 is throttled and every other status reads as it did", () => {
+  assert.equal(Breaker.classify(429, true), "throttled");
+  assert.equal(Breaker.classify(408, true), "failed");
+  assert.equal(Breaker.classify(503, true), "failed");
+  assert.equal(Breaker.classify(422, true), "client_error");
+  assert.equal(Breaker.classify(200, true), "ok");
+});
+
+test("a throttled call is not a breaker failure, however many come back", async () => {
+  const breaker = Breaker.make({ consecutiveFailures: 2, initialDelayMs: 20, maxDelayMs: 50 }, true);
+  for (let i = 0; i < 10; i++) await breaker.execute(() => Promise.resolve(429));
+  assert.equal(breaker.state, CircuitState.Closed);
+});
+
 test("a returned failure counts against the threshold like a throw, and is handed back to the caller", async () => {
   const breaker = Breaker.make({ consecutiveFailures: 2, initialDelayMs: 20, maxDelayMs: 50 });
 

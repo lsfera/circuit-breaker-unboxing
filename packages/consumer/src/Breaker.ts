@@ -30,15 +30,21 @@ export type BreakerConfig = {
  * `ok` is a 2xx. `client_error` is a 4xx other than 408 and 429: the third party is up and refused this
  * request, and repeating it gets the same answer. `failed` is everything else, the third party or the way to
  * it not working: a 5xx, 408, 429, no answer in time, a dropped connection, a 1xx or 3xx nobody expects.
+ * `throttled` is a 429 while `throttling` — this replica adapting its concurrency to them (Limiter.ts): the
+ * third party is full, not broken, so it is not a breaker failure. Otherwise a 429 is `failed`, like a 408.
  */
-export type CallOutcome = "ok" | "client_error" | "failed";
+export type CallOutcome = "ok" | "client_error" | "throttled" | "failed";
 
 /** The two 4xx that mean "try again": the third party's failure, not the request's. */
 const TRY_AGAIN = new Set([408, 429]);
 
-export const classify = (status: CallStatus): CallOutcome =>
+export const classify = (status: CallStatus, throttling = false): CallOutcome =>
   Match.value(status).pipe(
     Match.when(Predicate.isString, (): CallOutcome => "failed"),
+    Match.when(
+      (n) => throttling && n === 429,
+      (): CallOutcome => "throttled",
+    ),
     Match.when(
       (n) => n >= 200 && n < 300,
       (): CallOutcome => "ok",
@@ -50,11 +56,10 @@ export const classify = (status: CallStatus): CallOutcome =>
     Match.orElse((): CallOutcome => "failed"),
   );
 
-/** cockatiel's `resultFilter`: true means "count this returned value as a failure." Only `failed` does. */
-const failedCall = (result: unknown): boolean => isCallStatus(result) && classify(result) === "failed";
 
-export const make = (cfg: BreakerConfig): CircuitBreakerPolicy =>
-  circuitBreaker(handleAll.orWhenResult(failedCall), {
+/** cockatiel's `resultFilter` — true means "count this returned value as a failure" — takes only `failed`. */
+export const make = (cfg: BreakerConfig, throttling = false): CircuitBreakerPolicy =>
+  circuitBreaker(handleAll.orWhenResult((result) => isCallStatus(result) && classify(result, throttling) === "failed"), {
     breaker: new ConsecutiveBreaker(cfg.consecutiveFailures),
     halfOpenAfter: new ExponentialBackoff({
       initialDelay: cfg.initialDelayMs,

@@ -1,4 +1,4 @@
-import { Config, Data, Deferred, Effect, Layer } from "effect";
+import { Config, Data, Deferred, Effect, Layer, Option as O, Schema } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient, HttpRouter } from "effect/unstable/http";
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
@@ -17,6 +17,11 @@ import { runConsumer } from "./consumer.ts";
  * One address, no replica names — a client of whatever the third party exposes. Each process gets its own
  * in-process circuit breaker (Breaker.ts); nothing yet makes five replicas' breakers agree with each other.
  */
+
+// Strictly between: a decrease of 0 or 1 is a limit that collapses or never moves.
+const OpenFraction = Schema.Finite.check(
+  Schema.isBetween({ minimum: 0, maximum: 1, exclusiveMinimum: true, exclusiveMaximum: true }),
+);
 
 const flags = {
   broker: brokerFlag("Broker to consume work from"),
@@ -59,6 +64,25 @@ const flags = {
     Flag.withDefault(30_000),
     Flag.withDescription("Ceiling the half-open backoff grows to"),
   ),
+  adaptiveLimit: Flag.Boolean("adaptive-limit").pipe(
+    Flag.withFallbackConfig(Config.Boolean("ADAPTIVE_LIMIT")),
+    Flag.withDefault(true),
+    Flag.withDescription(
+      "Shrink this replica's concurrent-call limit when the third party answers 429 and grow it back while it answers 200; off, a 429 is a plain failed call and the limit stays at MAX_IN_FLIGHT",
+    ),
+  ),
+  limitMin: Flag.Int("limit-min").pipe(
+    Flag.withSchema(PositiveInt),
+    Flag.withFallbackConfig(Config.schema(PositiveInt, "LIMIT_MIN")),
+    Flag.withDefault(1),
+    Flag.withDescription("Floor the adaptive limit never goes below; setting it to MAX_IN_FLIGHT keeps 429 handling but stops the limit adapting"),
+  ),
+  limitDecrease: Flag.Finite("limit-decrease").pipe(
+    Flag.withSchema(OpenFraction),
+    Flag.withFallbackConfig(Config.schema(OpenFraction, "LIMIT_DECREASE")),
+    Flag.withDefault(0.7),
+    Flag.withDescription("What the limit is multiplied by on a 429 (once per round trip, not once per 429)"),
+  ),
   metricsPort: metricsPortFlag,
 };
 
@@ -83,6 +107,13 @@ const consumer = Command.make("consumer", flags, (settings) => {
       initialDelayMs: settings.breakerInitialDelayMs,
       maxDelayMs: settings.breakerMaxDelayMs,
     },
+    limit: settings.adaptiveLimit
+      ? O.some({
+          min: Math.min(settings.limitMin, settings.maxInFlight),
+          max: settings.maxInFlight,
+          decrease: settings.limitDecrease,
+        })
+      : O.none(),
   };
 
   const Consumer = Layer.effectDiscard(

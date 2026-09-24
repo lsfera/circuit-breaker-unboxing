@@ -18,6 +18,10 @@ test("a call rejected by this replica's own open breaker is released, not requeu
   assert.equal(decide("open"), "release");
 });
 
+test("a call the third party answered 429 is released, not requeued: it is not the message's fault", () => {
+  assert.equal(decide("throttled"), "release");
+});
+
 test("a client error is dead-lettered at once: repeating the request would get the same answer", () => {
   assert.equal(decide("client_error"), "discard");
 });

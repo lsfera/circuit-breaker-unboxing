@@ -1,4 +1,4 @@
-import { Effect, Match, Metric, Option as O, Ref } from "effect";
+import { Effect, Match, Metric, Option as O, Ref, Semaphore } from "effect";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { HttpClient } from "effect/unstable/http";
 import { Rmq } from "@egress/rmq/Client.ts";
@@ -15,6 +15,7 @@ import {
   workQueueOptions,
 } from "@egress/rmq/ControlPlane.ts";
 import * as Breaker from "./Breaker.ts";
+import * as Limiter from "./Limiter.ts";
 import * as Redrive from "./Redrive.ts";
 import * as Telemetry from "./Telemetry.ts";
 import * as Upstream from "./Upstream.ts";
@@ -30,6 +31,10 @@ import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
  * that one elected replica's own breaker, the same local-view tradeoff the probe permit already made. A pass
  * starts either on a transition into Closed or on a fixed clock (`REDRIVE_SWEEP_MS`), since a message can
  * dead-letter without any transition happening at all.
+ *
+ * Article 4 adds a third thing beside the breaker rather than in it: a concurrency limit learned from the
+ * third party's own `429`s (Limiter.ts), for the case the breaker has no good answer to — a third party that
+ * is full rather than broken.
  */
 
 export type ConsumerConfig = {
@@ -40,6 +45,12 @@ export type ConsumerConfig = {
   /** Concurrent third-party calls, applied as the work consumer's prefetch. */
   readonly maxInFlight: number;
   readonly breaker: Breaker.BreakerConfig;
+  /**
+   * Adapt the concurrent-call limit to the third party's `429`s. `None`: a
+   * `429` is just a failed call like any other non-2xx and `maxInFlight` never
+   * moves — the behaviour before article 4.
+   */
+  readonly limit: O.Option<Limiter.LimiterConfig>;
 };
 
 /**
@@ -47,7 +58,10 @@ export type ConsumerConfig = {
  * call was attempted, so it releases: RabbitMQ 4.3 doesn't count a release toward `x-delivery-limit`, and three
  * redeliveries onto open breakers would otherwise dead-letter work the third party never saw. `"failed"`
  * requeues, spending the budget on a real call. `"client_error"` skips straight to the dead-letter queue: a
- * retry gets the same answer.
+ * retry gets the same answer. `"throttled"` releases too, for the opposite reason to `"open"`: a call was
+ * made and the third party answered "not right now", which says nothing about the message — spending its
+ * budget on that would dead-letter healthy work merely because the third party was busy (master's ADR 010
+ * measured 22,226 of those from a proxy shedding with a 503).
  */
 export type CallOutcome = Breaker.CallOutcome | "open";
 export const decide = (outcome: CallOutcome): Settlement =>
@@ -55,7 +69,7 @@ export const decide = (outcome: CallOutcome): Settlement =>
     Match.when("ok", (): Settlement => "accept"),
     Match.when("client_error", (): Settlement => "discard"),
     Match.when("failed", (): Settlement => "requeue"),
-    Match.when("open", (): Settlement => "release"),
+    Match.whenOr("open", "throttled", (): Settlement => "release"),
     Match.exhaustive,
   );
 
@@ -69,6 +83,8 @@ const TURNED_AWAY: Attempt = { outcome: "open", status: "none" };
  */
 const OPEN_REQUEUE_DELAY_MIN_MS = 100;
 const OPEN_REQUEUE_DELAY_MAX_MS = 400;
+const holdMs = (): number =>
+  OPEN_REQUEUE_DELAY_MIN_MS + Math.random() * (OPEN_REQUEUE_DELAY_MAX_MS - OPEN_REQUEUE_DELAY_MIN_MS);
 
 /** How often the elected replica re-triggers a redrive pass even without a fresh breaker transition — see the sweep's own comment in `runConsumer`. */
 const REDRIVE_SWEEP_MS = 30_000;
@@ -87,7 +103,27 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   const runInContext = Effect.runPromiseWith(services);
 
   // One breaker per process, shared across every message: a fresh one per call would never accumulate a failure count.
-  const breaker = Breaker.make(cfg.breaker);
+  // With the concurrency limit adapting, a 429 means "full", not "broken": `throttled`, not a breaker failure.
+  const throttling = O.isSome(cfg.limit);
+  const breaker = Breaker.make(cfg.breaker, throttling);
+
+  // Article 4: how many of the `maxInFlight` prefetched messages may be in a
+  // call at once. Without a `limit` config the semaphore never resizes, so it
+  // admits exactly what the consumer's own prefetch already did.
+  const limit = O.map(cfg.limit, (c) => new Limiter.AdaptiveLimit(c));
+  const initialSlots = O.match(limit, { onNone: () => cfg.maxInFlight, onSome: (l) => l.slots });
+  const slots = Semaphore.makeUnsafe(initialSlots);
+  yield* Metric.update(Telemetry.concurrencyLimit, initialSlots);
+  const adapt = (change: (l: Limiter.AdaptiveLimit) => void) =>
+    O.map(limit, (l) => {
+      const before = l.slots;
+      change(l);
+      return l.slots === before
+        ? undefined
+        : runInContext(
+            Semaphore.resize(slots, l.slots).pipe(Effect.andThen(Metric.update(Telemetry.concurrencyLimit, l.slots))),
+          );
+    });
 
   // Every replica seeds the same permit queue; RabbitMQ's own x-max-length/x-overflow keeps exactly one token
   // regardless of how many replicas race this on startup — see Breaker.ts's module doc.
@@ -160,11 +196,30 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   const setInFlight = (delta: 1 | -1) =>
     Effect.suspend(() => Metric.update(Telemetry.inFlight, (inFlight += delta)));
 
+  // A `429` keeps its concurrency slot through the hold. Released first, the slot is free again in the
+  // millisecond a 429 takes to come back and the next waiting message spends it on another 429: measured at two
+  // rejected calls for every accepted one. Holding it makes each rejection cost the replica 100-400ms of that
+  // slot, which is the backoff the third party asked for.
   const callUpstream = (key: string): Promise<Upstream.CallStatus> =>
     runInContext(
-      setInFlight(1).pipe(
-        Effect.andThen(Upstream.call(`${cfg.egressAddr}${cfg.apiPath}`, key)),
-        Effect.ensuring(setInFlight(-1)),
+      Semaphore.withPermit(
+        slots,
+        Effect.suspend(() => {
+          const startedIn = O.match(limit, { onNone: () => 0, onSome: (l) => l.epoch });
+          return setInFlight(1).pipe(
+            Effect.andThen(Upstream.call(`${cfg.egressAddr}${cfg.apiPath}`, key)),
+            Effect.ensuring(setInFlight(-1)),
+            Effect.tap((status) =>
+              Match.value(Breaker.classify(status, throttling)).pipe(
+                Match.when("ok", () => Effect.sync(() => adapt((l) => l.succeeded()))),
+                Match.when("throttled", () =>
+                  Effect.sync(() => adapt((l) => l.throttled(startedIn))).pipe(Effect.andThen(Effect.sleep(holdMs()))),
+                ),
+                Match.orElse(() => Effect.void),
+              ),
+            ),
+          );
+        }),
       ),
     );
 
@@ -190,7 +245,7 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
         : callUpstream(key);
 
     const { outcome, status } = await breaker.execute(attemptUpstream).then(
-      (answer): Attempt => ({ outcome: Breaker.classify(answer), status: String(answer) }),
+      (answer): Attempt => ({ outcome: Breaker.classify(answer, throttling), status: String(answer) }),
       // isBrokenCircuitError (breaker open) and NoPermit (lost the permit race) both mean no call was
       // attempted — same "open" telemetry. Anything else threw, which counts as failed.
       (err): Attempt =>
@@ -201,7 +256,7 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
 
     runInContext(Metric.update(Metric.withAttributes(Telemetry.calls, { outcome, status }), 1));
     await Match.value(outcome).pipe(
-      Match.when("open", () => sleep(OPEN_REQUEUE_DELAY_MIN_MS + Math.random() * (OPEN_REQUEUE_DELAY_MAX_MS - OPEN_REQUEUE_DELAY_MIN_MS))),
+      Match.when("open", () => sleep(holdMs())),
       Match.when("client_error", () =>
         warnAtMostOncePerSecond(() => `${cfg.apiId}/consumer: third party refused message_id ${key} with ${status}, dead-lettering it`),
       ),
@@ -259,6 +314,7 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
 
   yield* Effect.log(
     `${cfg.apiId}/consumer: up — maxInFlight=${cfg.maxInFlight} egress=${cfg.egressAddr}${cfg.apiPath} work=${workQueue} ` +
-      `breaker=${cfg.breaker.consecutiveFailures}consecutive/${cfg.breaker.initialDelayMs}-${cfg.breaker.maxDelayMs}ms`,
+      `breaker=${cfg.breaker.consecutiveFailures}consecutive/${cfg.breaker.initialDelayMs}-${cfg.breaker.maxDelayMs}ms ` +
+      `limit=${O.match(cfg.limit, { onNone: () => "off", onSome: (l) => `${l.min}-${l.max} x${l.decrease}` })}`,
   );
 });

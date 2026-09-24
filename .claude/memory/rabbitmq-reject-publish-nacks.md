@@ -1,6 +1,6 @@
 ---
 name: rabbitmq-reject-publish-nacks
-description: "RabbitMQ's x-overflow reject-publish nacks the losing publisher's confirm rather than silently dropping the message — verify broker-argument semantics against real behavior, not the plausible-sounding reading of the name"
+description: "RabbitMQ's x-overflow reject-publish nacks the loser's confirm (not a silent drop), and x-max-length counts only READY messages — a held token lets a duplicate in; verify broker-argument wire behavior"
 metadata: 
   node_type: memory
   type: feedback
@@ -37,3 +37,22 @@ as distinct from the default `drop-head` — the name says what happens to
 the message, not whether the publisher is told. See
 [[check-before-building]] for the related, more general lesson about
 verifying real behavior instead of assuming it.
+
+
+**Second finding, 2026-09-24:** `x-max-length` counts only *ready* messages.
+Measured on RabbitMQ 4.3: with the one permit token held unacked (a `get` in
+progress), a new seed publish is *accepted*, and the queue then has two tokens.
+A quorum queue's limit was looser still (a second seed got in with the first
+ready). So "one-token queue" permits need the token returned by
+publish-then-ack (the publish is refused while a duplicate is ready, which
+collapses it), never by a requeuing nack. Fixed on all three
+branches that have a permit (2026-09-24): `article/02-rabbitmq-only-breaker`
+(Permit.ts), `article/03-rabbitmq-coordination` (ec207a41c) and
+`article/04-429-backpressure` (39cd1ec7c; then named 04-proportional-shedding).
+
+**Same day, a worse one on 03/04:** the permit had never gated a probe at all.
+cockatiel moves Open→HalfOpen *inside* `execute()`, just before running the
+probe, and `consumer.ts` read `breaker.state` before calling it, so probes
+always read Open. Found only by polling the permit queue live (616k polls,
+token never taken). A unit test of `withPermit` alone had "proved" it worked.
+Lesson: measure the component through its real caller, not in isolation.

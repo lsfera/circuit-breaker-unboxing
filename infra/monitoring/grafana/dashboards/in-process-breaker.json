@@ -110,7 +110,7 @@
    "id": 2,
    "type": "timeseries",
    "title": "Dead-letter queue depth — payments-provider.work.dead",
-   "description": "Messages that exhausted the broker's delivery limit (x-delivery-limit, 3 attempts). The SAC-elected redriver moves these back onto the work queue once its own breaker closes, on every reset and a 30s sweep — see Redrives and Redrive.ts.",
+   "description": "Messages that exhausted the broker's delivery limit (x-delivery-limit, 3 attempts). The SAC-elected redriver moves these back onto the work queue while the fleet verdict reads closed (its own breaker if no verdict is fresh), on every reset and a 30s sweep — see Redrives and Redrive.ts.",
    "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
@@ -126,7 +126,7 @@
    "id": 3,
    "type": "timeseries",
    "title": "Calls to the third party, by outcome",
-   "description": "egress_consumer_calls_total. \"open\": rejected by this replica's own breaker, or a half-open probe that lost the permit race — never reached the third party. \"client_error\": a 4xx other than 408/429, the third party's own refusal — dead-lettered at once, not counted by the breaker.",
+   "description": "egress_consumer_calls_total. \"open\": rejected by this replica's own breaker, or a half-open probe that lost the permit race — never reached the third party. \"client_error\": a 4xx other than 408/429, the third party's own refusal — dead-lettered at once, not counted by the breaker. \"throttled\": a 429 while the concurrency limit adapts — released, not counted.",
    "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
@@ -203,11 +203,27 @@
    ]
   },
   {
-   "id": 10,
+   "id": 12,
+   "type": "timeseries",
+   "title": "Concurrency limit per replica",
+   "description": "How many third-party calls each replica currently lets itself have open, learned from the third party's 429s (article 4): multiplied down when it says slow down, grown back one slot per limit's-worth of 200s. It starts at MAX_IN_FLIGHT and, against a third party that is merely full, settles near that replica's share of the third party's real capacity. Nothing moves it for a 5xx \u2014 that is the breaker's business.",
+   "gridPos": { "x": 0, "y": 43, "w": 24, "h": 8 },
+   "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+   "targets": [
+    {
+     "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+     "expr": "egress_consumer_concurrency_limit",
+     "legendFormat": "{{instance}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 13,
    "type": "timeseries",
    "title": "Failed and refused calls, by HTTP status",
    "description": "egress_consumer_calls_total for outcome failed or client_error, by status — the HTTP status answered, or timeout/network when none came. See \"Calls to the third party, by outcome\" for what counts as client_error.",
-   "gridPos": { "x": 0, "y": 43, "w": 24, "h": 8 },
+   "gridPos": { "x": 0, "y": 51, "w": 24, "h": 8 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [
     {

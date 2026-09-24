@@ -60,7 +60,7 @@ const auth = "Basic " + Buffer.from("guest:guest").toString("base64");
 
 // ---- reading the stack ------------------------------------------------
 
-// `undefined` on any failure, matching `breakerStates` below —
+// `undefined` on any failure, matching `breakerStates`/`fleetVerdict` below —
 // a `kill-broker` fault means this endpoint is briefly unreachable by
 // design, not a harness bug, and the settle loop below already treats
 // "no fresh answer this tick" as "not settled yet."
@@ -97,6 +97,16 @@ const breakerStates = async () => {
   const body = await res.json();
   if (body.status !== "success") return undefined;
   return body.data.result.map((r) => ({ instance: r.metric.instance, state: Number(r.value[1]) }));
+};
+
+/** The `egress:fleet_open` rule (infra/monitoring/rules.yml): 1 when half the fleet or more is open. */
+const fleetVerdict = async () => {
+  const query = encodeURIComponent("egress:fleet_open");
+  const res = await fetch(`${PROMETHEUS}/api/v1/query?query=${query}`).catch(() => undefined);
+  if (!res || !res.ok) return undefined;
+  const body = await res.json();
+  if (body.status !== "success" || body.data.result.length === 0) return undefined;
+  return Number(body.data.result[0].value[1]);
 };
 
 const setFailure = (rate, mode) =>
@@ -191,6 +201,25 @@ const FAULTS = {
       await queueDepthReady(WORK, 30, 1000);
     },
   },
+  "upstream-overload": {
+    description:
+      "the third party serves 20 calls at a time (200/s) and answers 429 to the rest, under a load that exceeds it — full, not broken: no breaker or fleet verdict may open, and nothing may dead-letter",
+    expectNoVerdictOpen: true,
+    verdictOpenedWrongly:
+      "the fleet verdict opened although the third party was only full (429), never broken — a 429 was counted as a failure",
+    // Above the 200/s ceiling by enough to keep every replica saturated for the whole fault.
+    spike: 500,
+    async run({ faultSeconds }) {
+      console.log("    flaky-upstream at capacity 20, 100ms a call (200/s), 429 beyond that");
+      await fetch(`${FLAKY_UPSTREAM}/__fail`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ capacity: 20, delayMs: 100 }),
+      });
+      await sleep(faultSeconds * 1000);
+      await setFailure(0);
+    },
+  },
   "flaky-storm": {
     description: "cycles flaky-upstream through error -> hang -> reset -> healthy under one spike",
     async run({ faultSeconds }) {
@@ -238,10 +267,24 @@ const runOneFault = async (name) => {
   publisher.send({ type: "rate", rate: RATE });
   await sleep(BASELINE_WARMUP_MS);
 
-  console.log(`  injecting fault at spike rate (${SPIKE}/s)...`);
-  publisher.send({ type: "rate", rate: SPIKE });
+  console.log(`  injecting fault at spike rate (${fault.spike ?? SPIKE}/s)...`);
+  publisher.send({ type: "rate", rate: fault.spike ?? SPIKE });
   const faultStarted = Date.now();
-  await fault.run({ faultSeconds: FAULT_SECONDS });
+  // Sampled during the fault, not just after: a verdict that opens while the
+  // fault is live and closes before the settle loop starts would otherwise
+  // never be seen, and `expectNoVerdictOpen` would pass vacuously.
+  let sawOpenBreaker = false;
+  let sawOpenVerdict = false;
+  const duringFault = setInterval(async () => {
+    const [states, verdict] = await Promise.all([breakerStates(), fleetVerdict()]);
+    if (states?.some((st) => st.state === 1)) sawOpenBreaker = true;
+    if (verdict === 1) sawOpenVerdict = true;
+  }, 1000);
+  try {
+    await fault.run({ faultSeconds: FAULT_SECONDS });
+  } finally {
+    clearInterval(duringFault);
+  }
   const remaining = FAULT_SECONDS * 1000 - (Date.now() - faultStarted);
   if (remaining > 0) await sleep(remaining);
 
@@ -262,11 +305,14 @@ const runOneFault = async (name) => {
   // `work` is defined.
   let work;
   let breakersClosed = false;
-  let sawOpenBreaker = false;
+  let verdictClosed = false;
   while (Date.now() - settleStart < SETTLE_TIMEOUT_MS) {
     const states = await breakerStates();
+    const verdict = await fleetVerdict();
     if (states?.some((s) => s.state === 1)) sawOpenBreaker = true;
+    if (verdict === 1) sawOpenVerdict = true;
     breakersClosed = states !== undefined && states.length > 0 && states.every((s) => s.state === 0);
+    verdictClosed = verdict === 0;
     work = (await queueDepth(WORK)) ?? work;
     if (work?.total === 0 && breakersClosed) break;
     await sleep(1000);
@@ -277,16 +323,41 @@ const runOneFault = async (name) => {
   publisher.send({ type: "stop" });
   await new Promise((resolve) => publisher.on("exit", resolve));
 
-  const dead = await queueDepthReady(DEAD);
-  const parked = await queueDepthReady(PARKED);
-  const auditResult = await audit(runId);
-
-  const confirmedBits = finalStats ? Buffer.from(finalStats.bits, "base64") : Buffer.alloc(0);
-  const processedBits = auditResult?.bits ? Buffer.from(auditResult.bits, "base64") : Buffer.alloc(0);
-  const confirmedNotProcessed = countSetNotIn(confirmedBits, processedBits);
+  // One snapshot of everything that can hold a confirmed message, read
+  // together — never `work` from the settle loop above. That earlier read
+  // predates the publisher's exit by seconds, and a redrive pass moving
+  // dead letters back onto `work` in that gap leaves a message in none of the
+  // three places the accounting looks (measured: 11 "lost" that were not).
+  // A real loss does not heal, so a nonzero answer is re-taken for up to 30s
+  // and only a figure that survives it is reported.
+  const snapshot = async () => {
+    const [w, d, p, a] = await Promise.all([
+      queueDepthReady(WORK),
+      queueDepthReady(DEAD),
+      queueDepthReady(PARKED),
+      audit(runId),
+    ]);
+    const confirmedBits = finalStats ? Buffer.from(finalStats.bits, "base64") : Buffer.alloc(0);
+    const processedBits = a?.bits ? Buffer.from(a.bits, "base64") : Buffer.alloc(0);
+    const notProcessed = countSetNotIn(confirmedBits, processedBits);
+    return { work: w, dead: d, parked: p, auditResult: a, confirmedNotProcessed: notProcessed, unaccounted: notProcessed - (w.total + d.total + p.total) };
+  };
+  let snap = await snapshot();
+  const firstUnaccounted = snap.unaccounted;
+  for (let retries = 0; snap.unaccounted > 0 && retries < 10; retries++) {
+    await sleep(3000);
+    snap = await snapshot();
+  }
+  work = snap.work;
+  const dead = snap.dead;
+  const parked = snap.parked;
+  const auditResult = snap.auditResult;
+  const confirmedNotProcessed = snap.confirmedNotProcessed;
   const stillQueued = work.total + dead.total + parked.total;
-  const unaccounted = confirmedNotProcessed - stillQueued;
-  const pass = unaccounted <= 0;
+  const unaccounted = snap.unaccounted;
+  const verdictExpectationMet =
+    !(fault.expectNoVerdictOpen && sawOpenVerdict) && !(fault.expectVerdictOpen && !sawOpenVerdict);
+  const pass = unaccounted <= 0 && verdictExpectationMet;
 
   const result = {
     fault: name,
@@ -307,9 +378,13 @@ const runOneFault = async (name) => {
     stillInDead: dead.total,
     stillInParked: parked.total,
     unaccounted: Math.max(0, unaccounted),
+    unaccountedAtFirstLook: Math.max(0, firstUnaccounted),
     settledWithinTimeout: work.total === 0 && breakersClosed,
     settleMs,
     sawOpenBreaker,
+    sawOpenVerdict,
+    verdictClosed,
+    verdictExpectationMet,
   };
 
   console.log(
@@ -318,9 +393,25 @@ const runOneFault = async (name) => {
   );
   console.log(
     `  settled ${result.settledWithinTimeout ? "within" : "NOT within"} ${SETTLE_TIMEOUT_MS}ms ` +
-      `(${(settleMs / 1000).toFixed(1)}s) — breaker open seen: ${sawOpenBreaker}`,
+      `(${(settleMs / 1000).toFixed(1)}s) — breaker open seen: ${sawOpenBreaker}, verdict open seen: ${sawOpenVerdict}, ` +
+      `verdict closed at end: ${verdictClosed}`,
   );
-  if (!pass) {
+  if (firstUnaccounted > 0 && unaccounted <= 0) {
+    console.log(
+      `  (${firstUnaccounted} message(s) looked unaccounted at first and were found on re-check — a redrive pass was moving them between queues)`,
+    );
+  }
+  if (fault.expectNoVerdictOpen && sawOpenVerdict) {
+    console.error(
+      `  !! ${fault.verdictOpenedWrongly ?? "the fleet verdict opened although only one of the fleet's replicas was cut off — the registry is not counting the whole fleet"}`,
+    );
+  }
+  if (fault.expectVerdictOpen && !sawOpenVerdict) {
+    console.error(
+      `  !! the fleet verdict never opened although the third party was failing 30% of calls — no breaker saw a rate`,
+    );
+  }
+  if (unaccounted > 0) {
     console.error(
       `  !! ${result.unaccounted} confirmed message(s) are neither processed nor sitting in work/dead/parked — genuine loss`,
     );
@@ -367,7 +458,7 @@ const main = async () => {
   const failed = results.filter((r) => !r.pass);
   const ranAll = results.length === names.length;
   if (failed.length > 0) {
-    console.error(`\n${failed.length}/${results.length} fault(s) FAILED the no-loss bar.`);
+    console.error(`\n${failed.length}/${results.length} fault(s) FAILED (no-loss bar or a fault's own expectation).`);
     process.exitCode = 1;
   } else if (!ranAll) {
     console.error(`\nStopped early after ${results.length}/${names.length} fault(s).`);

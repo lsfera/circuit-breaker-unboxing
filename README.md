@@ -19,6 +19,11 @@ delivery limit, and a single-active-consumer election. And the fleet's
 view of the third party is a Prometheus rule over the breaker gauges every
 replica already exports.
 
+A fourth problem is a third party that is full, not broken, and says so
+with a `429`. A breaker treats that as an outage. The answer is to classify
+it as backpressure, and to let each replica learn a concurrency limit from
+it (*A 429 is backpressure*, below).
+
 ```mermaid
 flowchart LR
   producer["Producer"] --> queue[("payments-provider.work")]
@@ -28,12 +33,15 @@ flowchart LR
   rtrigger[["redrive-trigger\n(SAC)"]]
   subgraph c1["consumer 1"]
     b1{{"breaker\n(cockatiel)"}}
+    l1[/"limit\n(learned from 429s)"/]
   end
   subgraph c2["consumer 2"]
     b2{{"breaker\n(cockatiel)"}}
+    l2[/"limit\n(learned from 429s)"/]
   end
   subgraph c3["consumer N"]
     b3{{"breaker\n(cockatiel)"}}
+    l3[/"limit\n(learned from 429s)"/]
   end
   queue --> c1
   queue --> c2
@@ -41,9 +49,12 @@ flowchart LR
   b1 <-.->|"half-open only"| permit
   b2 <-.->|"half-open only"| permit
   b3 <-.->|"half-open only"| permit
-  b1 --> api[("Third-party API\n(flaky-upstream)")]
-  b2 --> api
-  b3 --> api
+  b1 --> l1
+  b2 --> l2
+  b3 --> l3
+  l1 --> api[("Third-party API\n(flaky-upstream)")]
+  l2 --> api
+  l3 --> api
   queue -.->|"exhausts delivery limit\n(real calls only)"| dead
   b1 -.->|"onReset"| rtrigger
   b2 -.->|"onReset"| rtrigger
@@ -55,8 +66,8 @@ flowchart LR
   b2 -.->|"breaker state"| prom
   b3 -.->|"breaker state"| prom
   classDef new fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#1c1917
-  class permit,dead,parked,rtrigger,prom new
-  linkStyle 4,5,6,10,11,12,13,14,15,16,17,18,19 stroke:#d97706,stroke-width:3px
+  class permit,dead,parked,rtrigger,prom,l1,l2,l3 new
+  linkStyle 4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22 stroke:#d97706,stroke-width:3px
 ```
 
 <sub>Amber: new or changed on this branch.</sub>
@@ -150,11 +161,12 @@ outage after. The work queue grows instead (6,800 at 40s, still climbing).
 ## The breaker
 
 As in article 2: 5 consecutive failures trip it, half-open after 1s–30s
-exponential backoff. `classify` (`Breaker.ts`) gives four outcomes: `ok`
-accept, `client_error` (4xx except 408/429) dead-letter at once, `failed`
-requeue, `open` release after a 100–400ms hold. A 4xx that is really ours
-(401, 403, 404) dead-letters every message it touches; the `status` label
-on `egress_consumer_calls_total` shows it.
+exponential backoff. `classify` (`Breaker.ts`) gives five outcomes: `ok`
+accept, `throttled` (a `429`, while the limit adapts) release after a
+100–400ms hold, `client_error` (4xx except 408/429) dead-letter at once,
+`failed` requeue, `open` release after a 100–400ms hold. A 4xx that is
+really ours (401, 403, 404) dead-letters every message it touches; the
+`status` label on `egress_consumer_calls_total` shows it.
 
 ## The fleet view: a Prometheus rule
 
@@ -172,6 +184,116 @@ measured, six series for five replicas after a rebuild, diluting a full
 outage to 5/6. **Measured:** a 100% outage read 1.0 and fired the alert
 after 30s; it read 0 again after restore.
 
+## A 429 is backpressure
+
+A third party that is full rather than broken answers `429`. Three
+findings, in order of how much they matter:
+
+1. **Classify the `429` as "slow down", not "failed".** Counting it as a
+   failure trips every breaker and delivers a quarter of what the third
+   party can take. Releasing it uncounted delivers 98%.
+2. **A limit learned from `429`s makes the fleet polite, not faster.** It
+   cuts the calls the third party has to refuse by 94%, costs about 4% of
+   throughput, and leaves the backlog as it was.
+3. **A failure-*rate* breaker doesn't pay** against a partial failure. It
+   refused 7,000–9,000 calls that would have succeeded to avoid about 750
+   that wouldn't.
+
+A third party serving 5 at once, 100ms each (50/s), offered 400/s for 30s,
+recorded 2026-09-24 with `infra/capture-incident.mjs --capacity=5`
+(4.38× real time, [video](docs/media/429-backpressure-incident.webm));
+the concurrency-limit panel is spliced under the queues.
+
+![Grafana during an overload incident: all five breakers stay closed and the fleet stays closed, the work queue grows to about 6,000 and drains after restore, and every replica's concurrency limit falls from 20 to about 1–3 and climbs back to 20.](docs/media/429-backpressure-incident.gif)
+
+Recorded with the since-removed failure-rate rule still in the breaker. No
+call failed in this run, so the rule never counted anything. From
+Prometheus: 46–50 successful calls a second against the 50/s ceiling, and
+764 calls answered `429`. The fleet's summed limit fell from 100 to 7–12
+and was back to 100 four seconds after restore. The backlog peaked at
+9,533. No breaker opened, the fleet never read open, and nothing was
+dead-lettered.
+
+### The classification
+
+A `429` means the third party is up and full. Counted as `failed`, it trips
+the streak breaker like an outage would, and every open breaker refuses work
+the third party could have done. As `throttled` it is released (not charged
+to the message's delivery budget), held 100–400ms, and never counts toward
+tripping. `master`'s ADR 010 learned this the hard way: a shed treated as a
+failure dead-lettered 22,226 healthy messages.
+
+### The limit
+
+`Limiter.ts` (~40 lines, pure) sizes a `Semaphore` in `consumer.ts`. AIMD,
+TCP's rule for an unknown capacity: a `429` multiplies the limit by 0.7,
+each success adds `1/limit`. Starts at `MAX_IN_FLIGHT`, floor `LIMIT_MIN`
+(1). No new queue. `ADAPTIVE_LIMIT=false` turns it off, and the
+classification with it: a `429` is then a plain failure (the first row
+under *Measured*).
+
+- **Only a `429`.** A `5xx` means broken, which is the breaker's business,
+  so the limiter ignores a coin-flip failure like the 30% below.
+- **The slot is held through the 100–400ms hold**, or the next message
+  spends it on another `429` (see *Measured*).
+
+### Measured
+
+A third party serving 5 calls at once, 100ms each (a 50/s ceiling), offered
+400/s for 30s against 5 replicas. Three runs per configuration, 2026-09-24,
+with `pnpm run incident` (`CAPACITY=5 DELAY_MS=100 WINDOW_MS=30000`, producer
+at `RATE_PER_SECOND=400`). Goodput counts distinct messages answered 200,
+from the third party's own audit.
+
+| configuration | goodput | calls answered `429` | refused locally | open at peak | fleet open (ticks) | peak backlog |
+| --- | --- | --- | --- | --- | --- | --- |
+| `429` is a failure (`ADAPTIVE_LIMIT=false`) | **13 · 11 · 14 /s** | 572 · 510 · 578, counted as failed | 11,930 · 12,701 · 11,911 | 5 of 5 | 29/61 · 31/55 · 29/45 | 9,457 · 9,114 · 9,086 |
+| `429` throttled, limit fixed at 20 (`LIMIT_MIN=20`) | **49 · 49 · 49 /s** | 11,458 · 11,440 · 11,557 | 0 | 0 | 0 | 8,000 · 8,070 · 8,175 |
+| `429` throttled, adaptive limit (default) | **47 · 47 · 47 /s** | **750 · 740 · 739** | 0 | 0 | 0 | 7,983 · 8,445 · 8,485 |
+
+- **The classification is most of it:** 11–14/s against a ceiling of 50
+  when a `429` trips breakers, 49/s when it doesn't, with no limit at all.
+  The first row used to be measured only with the failure-rate rule on.
+  Without it the result is the same.
+- **The limit is politeness:** 94% fewer `429`s (~11,500 → ~740), which
+  matters against a real API's quota or ban. It costs 2/s of goodput.
+- **It doesn't shrink the backlog:** 8,000–8,500 either way, since the
+  excess still has to wait somewhere.
+- **The fleet's limit settles above the ceiling:** summed over 5 replicas it
+  averaged 9.1–9.3 in the later half, with a low of 6–7, against a third
+  party that serves 5.
+
+An earlier build that freed the slot *before* the 100–400ms hold, instead of
+holding it through, was measured at 49/s with 6,067–6,778 `429`s: the next
+message spent the freed slot on another `429`. Holding it is what makes the
+limit polite. That build isn't reproducible from this branch.
+
+Also from earlier builds, not re-run: at a 200/s ceiling, 127/s counting a
+`429` as a failure, 196/s with a fixed limit, and 185/s adaptive.
+
+### A failure-rate rule doesn't pay
+
+Tried and removed. cockatiel's `SamplingBreaker` beside the streak rule,
+opening when either would, at `BREAKER_FAILURE_RATE` 0.25 over 10s. Each
+row a 30s injected failure against the fleet, the 30% rows three times:
+
+| injected | rate rule | open at peak | fleet open (ticks) | failed calls | refused locally | peak backlog |
+| --- | --- | --- | --- | --- | --- | --- |
+| 10% | off | 0 of 5 | 0 / 42 ticks | 704 | 0 | 7 |
+| 10% | 0.25 | 0 of 5 | 0 / 37 ticks | 649 | 0 | 0 |
+| 30% | off (×3) | 2 of 5 | **0** / 39, 50, 42 | 2,620 / 2,596 / 2,616 | 1,032 / 1,846 / 734 | 29 / 51 / 23 |
+| 30% | 0.25 (×3) | 5 of 5 | **26 / 47, 20 / 45, 24 / 45** | 1,744 / 1,935 / 1,945 | 9,983 / 8,929 / 9,698 | 1,718 / 1,069 / 1,097 |
+| 60% | off | 5 of 5 | 32 / 51 | 774 | 12,652 | 4,455 |
+| 60% | 0.25 | 5 of 5 | 29 / 50 | 685 | 12,833 | 4,374 |
+
+At 30% it opened the fleet on about half the ticks and cut the failing
+calls reaching the third party by ~28% (~2,600 → ~1,875). Those ~750
+avoided failures cost 7,000–9,000 more calls refused locally — most would
+have succeeded — a 20–70× deeper backlog, and a breaker that flaps. At 10%
+it changed nothing; at 60% the streak rule already opened everything; at
+the conventional 0.5 it looked like "off". A per-replica breaker cannot
+shed only the share that would fail.
+
 ## What this still doesn't fix
 
 - **The five breakers still don't agree.** The permit stops the recovery
@@ -180,12 +302,22 @@ after 30s; it read 0 again after restore.
   rest of the fleet has closed; the fleet view is for people and alerts,
   not for the redriver.
 - **A long outage grows the work queue without bound.** The delivery limit
-  used to cap it by accident.
+  used to cap it by accident. Pacing a full third party doesn't shrink it
+  either: the peak backlog was the same with or without the limit
+  (8,000–8,500).
 - **Losing the permit race grows backoff** like a failed probe — cockatiel
   can't tell them apart.
 - **The permit is one more dependency:** if its token is lost, half-open
   probes fail until a restart reseeds it.
 - **A trigger arriving mid-pass is dropped.**
+- **Only a `429` teaches the limit.** A third party that sheds by slowing
+  down or with `503`s gets no help. Expected, not measured.
+- **The floor can exceed the ceiling:** five replicas, each at least
+  `LIMIT_MIN` 1, summed to 6–9 against a ceiling of 5.
+- **Replicas learn independently**; nothing sees the fleet's limit but the
+  dashboard.
+- **A load-independent partial failure** has no good answer here: the
+  streak breaker misses it, and a rate rule sheds the good traffic too.
 
 ## Running it
 
@@ -198,7 +330,8 @@ docker compose up -d --scale rmq-consumer=12   # resize the fleet, no restart ne
 - RabbitMQ: <http://localhost:15672> (guest/guest).
 - Grafana: <http://localhost:3000/d/in-process-breaker/in-process-breaker-e28094-five-not-one>
   (anonymous; two 401 toasts on first load are harmless). New panels:
-  "Fleet open", "Parked queue depth" and "Redrives".
+  "Fleet open", "Parked queue depth", "Redrives" and "Concurrency limit
+  per replica".
 - Prometheus: <http://localhost:9090>.
 
 Inside the devcontainer use service names (`rabbitmq`, `grafana`, …); a
@@ -214,6 +347,7 @@ curl -X POST localhost:8080/__fail -d '{"rate":1.0,"status":422}'   # 422s: refu
 curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"hang"}'  # never answers
 curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"reset"}' # drops the connection
 curl -X POST localhost:8080/__fail -d '{"delayMs":1500}'            # slow, still correct
+curl -X POST localhost:8080/__fail -d '{"delayMs":100,"capacity":5}' # full, not broken: 5 at once (50/s), 429 beyond
 curl -X POST localhost:8080/__fail -d '{}'                          # healthy again
 ```
 
@@ -223,12 +357,15 @@ curl -X POST localhost:8080/__fail -d '{}'                          # healthy ag
 pnpm run incident
 MODE=hang node infra/incident.mjs
 STATUS=422 node infra/incident.mjs
+RATE_PER_SECOND=400 docker compose up -d rmq-producer && CAPACITY=5 DELAY_MS=100 node infra/incident.mjs
 ```
 
 Injects a failure, restores, and reports peak backlog, dead-lettered,
-drain time, audit counts, breaker agreement, and what redrive moved or
-parked. Unless `STATUS` is set, it ends with a 422 phase.
-`infra/capture-incident.mjs` records the dashboard (needs `playwright-core`).
+drain time, audit counts, breaker agreement, fleet-open timing, calls by
+outcome, and what redrive moved or parked. With `CAPACITY` set, also
+goodput and the fleet's summed limit. Unless `STATUS` or `CAPACITY` is set,
+it ends with a 422 phase. `infra/capture-incident.mjs` records the dashboard
+(needs `playwright-core`).
 
 ## Load
 
@@ -255,6 +392,11 @@ Faults: `kill-one-consumer`, `kill-all-consumers`, `kill-broker`,
 unaccounted. `work.dead` stayed at 0, so the redriver never fired under
 chaos; after `flaky-storm` a breaker can stay open 90s+ at its backoff cap.
 
+A fifth fault, `upstream-overload`: 20 at once (200/s) under a 500/s spike.
+No breaker or fleet-open may fire, and nothing may dead-letter. It failed 2
+of 2 with `ADAPTIVE_LIMIT=false` and passed with it on. Re-run 2026-09-24,
+without the rate rule: passed, 10,585 confirmed, 0 unaccounted.
+
 ## Layout
 
 ```
@@ -264,7 +406,8 @@ packages/
                  options and wire schemas shared by every process
                  (ControlPlane.ts)
   rmq-producer/  steady load onto <apiId>.work, message_id as idempotency key
-  consumer/      the fleet: Breaker.ts (breaker + permit), Redrive.ts,
+  consumer/      the fleet: Breaker.ts (breaker + permit),
+                 Limiter.ts (the concurrency limit learned from 429s), Redrive.ts,
                  Upstream.ts (the HTTP call), consumer.ts (wiring, and decide())
   tracing/       /metrics route; OpenTelemetry, off unless OTEL_EXPORTER_OTLP_ENDPOINT is set
 infra/
