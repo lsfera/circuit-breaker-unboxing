@@ -200,7 +200,9 @@ work queue, which now *is* the fleet's state, and the wake tokens sitting in the
 delay chain, one line per level. The later additions have their own panels:
 - the fleet view on top (a Prometheus rule, open while half the replicas are);
 - parked-queue depth and redrives;
-- probe-permit races lost.
+- probe-permit races lost;
+- the concurrency limit each replica learns from `429`s, at the bottom. A
+  `503` outage sends none, so it stays at 20 throughout.
 
 The [recording](media/incident.webm) runs the whole incident, start to finish.
 
@@ -217,15 +219,16 @@ race holds again at the same length, so it does not add to the backoff.
 
 ![the outage begins](media/2-mid-outage.png)
 
-**3 · The third party is restored.** The backlog is about 4,100 messages, held in
+**3 · The third party is restored.** The backlog is about 3,900 messages, held in
 the queue, not spinning through it. No consumers. Tokens are still in flight,
 because the holds have grown to 8–15 s; the replicas do not yet know.
 
 ![restored, replicas still holding](media/3-restored.png)
 
-**4 · Recovered.** The breakers came back at different moments: 1, 3, 3, 7 and
-10 s after the restore, as each hold ended (the replicas' logs). The fleet view
-closed once three had. The backlog drained as they did. No dead letters appeared,
+**4 · Recovered.** The breakers came back at different moments: 0.2, 1.3, 2.2,
+3.4 and 3.5 s after the restore, as each hold ended (the replicas' logs). The
+holds happened to end just after the restore; in other runs the last replica
+closed 10 s or more after it. The fleet view closed with them. The backlog drained as they did. No dead letters appeared,
 so there was nothing to redrive or park.
 
 ![recovered](media/4-recovered.png)

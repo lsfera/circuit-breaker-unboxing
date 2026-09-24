@@ -11,7 +11,7 @@ The branch lineup, as of 2026-09-24:
 - 02-in-process-breaker
 - 02-rabbitmq-only-breaker: the breaker held by RabbitMQ (delay-chain token), kept as 02 by the user's choice. Since 2026-09-24 it carries everything 03 has (permit, redrive, fleet-view rule, the 429 classification and Limiter.ts), each measured again on this design, plus a same-harness comparison with 03 in its README.
 - 03-rabbitmq-coordination: probe permit, counted attempts and redrive, the fleet view as Prometheus rules (infra/monitoring/rules.yml, with a 10s freshness filter), and, merged in from 04 on 2026-09-24, the 429 work: `throttled` classification, the AIMD limit (Limiter.ts), and the failure-rate negative result. The last article.
-- 04-429-backpressure: merged into 03 on 2026-09-24, and its 429 work ported to 02-rabbitmq-only-breaker; kept until the user decides to delete it.
+- 04-429-backpressure: merged into 03 and ported to 02-rabbitmq-only-breaker on 2026-09-24, then deleted at the user's request (was 27443d8d1; reflog only).
 
 History:
 

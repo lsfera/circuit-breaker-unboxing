@@ -187,11 +187,14 @@ The dashboard 12 seconds into a 24s total outage, recorded 2026-09-24
   tokens in the delay chain are the open breakers.
 - The permit panel shows races lost while the holds are still 1–2s.
 - The dead-letter line stays at zero through the outage.
+- The concurrency limit (bottom) stays at 20: a `503` outage sends no
+  `429`s, so the limit has nothing to learn from.
 
 ![Grafana after recovery: every breaker closed, backlog drained, fleet view closed again](docs/media/4-recovered.png)
 
-After the restore, every breaker had closed within 10s (1 to 10s, by the
-replicas' logs). The fleet view closed once three of the five had.
+After the restore, every breaker had closed within 4s (0.2 to 3.5s, by the
+replicas' logs), because their holds happened to end just after it. The
+fleet view closed with them.
 
 ## Shared through the broker
 
