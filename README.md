@@ -8,10 +8,11 @@ in the process**: "open" is a consumer that isn't consuming, and the timer that
 ends it is a message the broker holds. The full write-up is
 [docs/rabbitmq-held-breaker.md](docs/rabbitmq-held-breaker.md).
 
-Two things are shared through the broker, the same two
+Three things are added on top, the same three
 `article/03-rabbitmq-coordination` adds on top of cockatiel: one **probe
-permit** for the whole fleet, so recovery is probed one call at a time, and a
-**redrive** that brings `work.dead` back, run by one replica RabbitMQ elects.
+permit** for the whole fleet, so recovery is probed one call at a time, a
+**redrive** that brings `work.dead` back, run by one replica RabbitMQ elects,
+and a **fleet view** of the third party, as a Prometheus rule.
 
 ```mermaid
 flowchart LR
@@ -241,14 +242,38 @@ count of 5 was parked. Both ran on one replica. The chaos run's 60%-failure
 scenario dead-lettered 6 messages and redrove all 6. The write-up's earlier run
 of it left 11 parked.
 
+## The fleet view: a Prometheus rule
+
+`infra/monitoring/rules.yml`, the same as article 3's:
+
+- `egress:fleet_open_fraction` is the share of replicas whose breaker is open
+  or half-open. Only samples under 10s old count.
+- `egress:fleet_open` is 1 when half or more are open.
+- The alert `EgressThirdPartyDown` fires after 30s of that.
+
+It needs no extra process and no heartbeat: a replica counts while Prometheus
+scrapes it, and nothing in the fleet reads the rule back. The freshness filter
+is there because a removed container's last sample stays visible for
+Prometheus's 5-minute lookback. Article 3 measured six series for five
+replicas after a rebuild, which diluted a full outage to 5/6. The dashboard's
+top panel is `egress:fleet_open`.
+
+**Measured** on this fleet, in a 45s full outage polled every 4s:
+
+- The fraction read 1.0 at the first poll.
+- The alert went pending, then fired 32s in.
+- It cleared at the first poll below half, about 4s after restore.
+- The fraction returned to 0 57s after restore. The last replica was still in
+  a long hold (see *The price of a long hold*).
+
 ## What this still doesn't fix
 
 - **Five breakers still don't agree.** Each is formed only from the calls that
   one process happened to make. They trip at different moments, recover at
   different moments, and briefly disagree about whether the same third party
   is up. Watch the "Breaker state per replica" panel, or `infra/incident.mjs`'s
-  `breaker agreement` line. The permit serialises probes; it doesn't make one
-  verdict.
+  `breaker agreement` line. The permit serialises probes, and the fleet view
+  is a verdict for people and alerts: no replica acts on it.
 - **The redrive waits on the elected replica's breaker**, which can be open
   while the rest of the fleet is closed. A pass is up to 30 s late.
 - **Refused work is redriven too.** A `client_error` goes to `work.dead` on its
@@ -280,8 +305,9 @@ docker compose up -d --scale rmq-consumer=12   # resize the fleet, no restart ne
   Panels: breaker state per replica, work-queue depth, dead-letter-queue depth,
   calls by outcome, failed and refused calls by status, breaker trips, active
   consumers on the work queue, the wake tokens RabbitMQ holds (the open
-  breakers), parked-queue depth, redrives, and probe-permit races lost. Plain `:3000` lands on Grafana's Welcome screen, not this
-  dashboard — use the direct link, or
+  breakers), parked-queue depth, redrives, and probe-permit races lost, with
+  "Fleet open" (see *The fleet view*) at the top. Plain `:3000` lands on
+  Grafana's Welcome screen, not this dashboard — use the direct link, or
   `Dashboards` in the left nav.
 - Prometheus: <http://localhost:9090>.
 
@@ -354,7 +380,8 @@ infra/
   chaos-breaker.mjs    real faults under a load spike, graded per message
   chaos-publisher.mjs  its load generator: remembers which messages were confirmed
   capture-incident.mjs records the dashboard through an incident
-  monitoring/          Prometheus scrape config and the Grafana dashboard
+  monitoring/          Prometheus scrape config, the fleet-view rule (rules.yml)
+                       and the Grafana dashboard
 docs/                  the write-up, its screenshots and recording, saved chaos runs
 docker-compose.yml     the whole stack
 ```

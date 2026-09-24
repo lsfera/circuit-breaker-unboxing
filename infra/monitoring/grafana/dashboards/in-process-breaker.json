@@ -22,13 +22,64 @@
  },
  "panels": [
   {
+   "id": 12,
+   "type": "state-timeline",
+   "title": "Fleet open (half or more replicas)",
+   "description": "egress:fleet_open, a Prometheus recording rule over every scraped replica's egress_consumer_breaker_state (infra/monitoring/rules.yml). Nothing reads it back; the EgressThirdPartyDown alert fires on it after 30s.",
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 5
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS_PROMETHEUS}"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS_PROMETHEUS}"
+     },
+     "expr": "egress:fleet_open",
+     "legendFormat": "fleet",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "CLOSED",
+         "color": "green"
+        },
+        "1": {
+         "text": "OPEN",
+         "color": "red"
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "mergeValues": true,
+    "showValue": "always"
+   }
+  },
+  {
    "id": 5,
    "type": "state-timeline",
    "title": "Breaker state per replica",
    "description": "egress_consumer_breaker_state, one line per instance. Each replica's breaker is entirely its own — this panel is where that shows: watch them open and close at different moments for the same incident, not together.",
    "gridPos": {
     "x": 0,
-    "y": 0,
+    "y": 5,
     "w": 24,
     "h": 7
    },
@@ -83,7 +134,7 @@
    "description": "Messages ready plus in flight. Only climbs when the third party fails slowly enough to pin every consumer's in-flight slots (e.g. flaky-upstream's hang mode) — a fast failure dead-letters before a backlog can form. See the dead-letter panel for that case.",
    "gridPos": {
     "x": 0,
-    "y": 7,
+    "y": 12,
     "w": 12,
     "h": 8
    },
@@ -119,7 +170,7 @@
    "description": "Messages that exhausted the broker's own delivery limit (x-delivery-limit, 3 attempts). Nothing here recovers them — that is a later article's problem.",
    "gridPos": {
     "x": 12,
-    "y": 7,
+    "y": 12,
     "w": 12,
     "h": 8
    },
@@ -146,7 +197,7 @@
    "description": "egress_consumer_calls_total: ok, failed (counts toward tripping) or client_error (a 4xx other than 408/429 — dead-lettered at once, not counted). No 'open': an open breaker has no consumer, so nothing is rejected locally — the queue holds the work instead.",
    "gridPos": {
     "x": 0,
-    "y": 15,
+    "y": 20,
     "w": 12,
     "h": 8
    },
@@ -173,7 +224,7 @@
    "description": "sum(rate(egress_consumer_breaker_trips_total)) across all replicas. Each trip is one replica's own breaker opening — this counts events, not the disagreement between them; see the state-timeline panel for that.",
    "gridPos": {
     "x": 12,
-    "y": 15,
+    "y": 20,
     "w": 12,
     "h": 8
    },
@@ -200,7 +251,7 @@
    "description": "The broker's own count. With this breaker it is also the fleet's state: a replica whose breaker is open has cancelled its consumer, so the line steps down by one per open replica and back up as each half-opens (a half-open replica consumes with prefetch 1, so it counts). It should track --scale rmq-consumer=N only while every breaker is closed.",
    "gridPos": {
     "x": 0,
-    "y": 23,
+    "y": 28,
     "w": 12,
     "h": 8
    },
@@ -227,7 +278,7 @@
    "description": "egress_consumer_calls_total for outcome failed or client_error, by status: the HTTP status the third party answered with, or timeout / network when it never did. A 4xx other than 408 and 429 is a client_error: dead-lettered at once and not counted toward tripping. Everything else here counts.",
    "gridPos": {
     "x": 0,
-    "y": 31,
+    "y": 36,
     "w": 24,
     "h": 8
    },
@@ -254,7 +305,7 @@
    "description": "rabbitmq_detailed_queue_messages for the delay chain (rmq.delay.level.NN), one line per level a token is waiting in. Level n holds a token for 2^n seconds, so a token in level 4 is a breaker that has been told to stay open 16s, and a token in level 16 would be an 18-hour hold. Each open replica is exactly one token here; a closed fleet has none. Read alongside the panel to the left: consumers leave the work queue as tokens enter the chain.",
    "gridPos": {
     "x": 12,
-    "y": 23,
+    "y": 28,
     "w": 12,
     "h": 8
    },
@@ -281,7 +332,7 @@
    "description": "Messages redriven MAX_REDRIVES (5) times without succeeding — true poison, not just an outage. Should stay 0 for any incident this series injects; nonzero means something the third party will never accept.",
    "gridPos": {
     "x": 0,
-    "y": 39,
+    "y": 44,
     "w": 8,
     "h": 8
    },
@@ -308,7 +359,7 @@
    "description": "Dead-lettered messages the redrive moved back onto the work queue (moved) or parked as poison (parked). Nonzero only on the replica RabbitMQ elects active on the redrive-trigger queue.",
    "gridPos": {
     "x": 8,
-    "y": 39,
+    "y": 44,
     "w": 8,
     "h": 8
    },
@@ -335,7 +386,7 @@
    "description": "Half-open probes that found the one fleet-wide permit held by another replica: no call made, the message released, and the breaker held again at the same attempt.",
    "gridPos": {
     "x": 16,
-    "y": 39,
+    "y": 44,
     "w": 8,
     "h": 8
    },
