@@ -240,8 +240,8 @@ A pass opens its own channel on the daemon's single connection, consumes
 `<apiId>.work.dead`, and decides per message:
 
 - **Dead-lettered from the work queue, redriven fewer than `MAX_REDRIVES` (5)
-  times** — republish the body onto the work queue, carrying the idempotency
-  key forward and a fresh `x-egress-attempts` budget, and accept it off the
+  times** — republish the body onto the work queue, carrying its `message_id`
+  (the idempotency key) forward and a fresh `x-egress-attempts` budget, and accept it off the
   dead-letter queue. Publish *then* accept, never the reverse: a crash between
   the two redelivers something already replayed, which is a duplicate, where
   accepting first would lose it outright. Duplicates are recoverable; losses

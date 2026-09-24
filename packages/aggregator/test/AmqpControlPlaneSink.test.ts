@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Duration, Effect, Fiber, Ref } from "effect";
+import { Duration, Effect, Fiber, Option as O, Ref } from "effect";
 import { TestClock } from "effect/testing";
 import { Rmq, RmqError } from "@egress/rmq/Client.ts";
 import type { RmqService } from "@egress/rmq/Client.ts";
@@ -25,7 +25,16 @@ const fakeRmq = (
     declareTopicExchange: () => Effect.succeed<unknown>(undefined),
     bind: () => notUsed,
     consume: () => notUsed,
-    publisherToExchange: (exchange, routingKey) => Effect.succeed({ exchange, routingKey }),
+    get: () => notUsed,
+    publisherToExchange: (exchange, routingKey) =>
+      Effect.succeed({
+        exchange,
+        routingKey,
+        contentType: O.none(),
+        contentEncoding: O.none(),
+        type: O.none(),
+        mandatory: false,
+      }),
     publisherToQueue: () => notUsed,
     send: () => Effect.flatMap(Ref.get(sendResult), (e) => e),
     cancelConsumer: () => Effect.void,

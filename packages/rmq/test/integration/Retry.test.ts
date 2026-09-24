@@ -7,7 +7,6 @@ import {
   ATTEMPTS_HEADER,
   deadLetterQueueFor,
   deadLetterQueueOptions,
-  IDEMPOTENCY_KEY_HEADER,
   ORIGIN_QUEUE_HEADER,
   ORIGIN_REASON_HEADER,
   workQueueFor,
@@ -15,10 +14,6 @@ import {
 } from "../../src/ControlPlane.ts";
 
 /**
- * NOT RUN as part of `pnpm run check` or this change — see the task report.
- * Exercised only by hand against a real broker (`docker` is off-limits while
- * the chaos run in progress uses the live stack).
- *
  * The daemon now retries a failed call by *republishing* rather than by a
  * broker requeue — see packages/rmq-consumer/src/Attempts.ts — and once
  * WORK_DELIVERY_LIMIT is spent it publishes straight onto the dead-letter
@@ -56,10 +51,12 @@ test("a message the daemon dead-letters itself carries no broker death annotatio
       // What Attempts.ts's "republish" -> "dead" branch does: publish
       // straight onto the dead-letter queue, never through a broker reject.
       yield* rmq.send(toDead, "poison-work", {
-        [IDEMPOTENCY_KEY_HEADER]: key,
-        [ATTEMPTS_HEADER]: "3",
-        [ORIGIN_QUEUE_HEADER]: work,
-        [ORIGIN_REASON_HEADER]: "attempts-exhausted",
+        messageId: key,
+        headers: {
+          [ATTEMPTS_HEADER]: "3",
+          [ORIGIN_QUEUE_HEADER]: work,
+          [ORIGIN_REASON_HEADER]: "attempts-exhausted",
+        },
       });
 
       const seen: Array<{
@@ -73,7 +70,7 @@ test("a message the daemon dead-letters itself carries no broker death annotatio
           deadLetter: O.isSome(delivery.deadLetter),
           originQueue: delivery.properties[ORIGIN_QUEUE_HEADER],
           originReason: delivery.properties[ORIGIN_REASON_HEADER],
-          key: delivery.idempotencyKey,
+          key: delivery.messageId,
         });
         return "accept" as const;
       });

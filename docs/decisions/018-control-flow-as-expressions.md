@@ -1,9 +1,10 @@
 # 018 — Control flow as expressions: `Match`, `Option`, and one codec
 
 **Status**: in progress — applied to `@egress/rmq`'s `Client.ts` and `Trace.ts`,
-and to the base consumer's work message, on `article/01-base-scenario`
-(uncommitted when this was written). Not yet carried up the article branches
-or applied to this branch's other packages.
+and to the base consumer's work message, on `article/01-base-scenario`, then
+carried up articles 2 and 3, and on 2026-09-24 to this branch (see the last
+amendment). The rest of this branch's packages were not swept for `if`,
+`undefined` or loops.
 **Date**: 2026-09-20.
 **Context**: a review pass over `Client.ts`, asked for in four steps: replace the
 `if`/`else if` chain in `settle` with `Match`; then remove every `if` and every
@@ -232,6 +233,31 @@ dead-letter queue), while a well-formed one was called. **Not done:** the later
 branches. Their redrive must carry `messageId`, their chaos harness reads the
 audit by `apiId` and now needs the run, and `body.n` is still in the message
 though nothing keys on it.
+
+## Amendment — 2026-09-24: carried to this branch
+
+This branch, now article 4, was still running the client from before this
+record. A review found what that cost here: a handler that threw was
+acknowledged, so its work was lost; a publish to a missing queue vanished; and
+the idempotency key was minted by the consumer on a message's first attempt, so
+a daemon that crashed between the call and its retry's republish sent the
+redelivery under a new key, and the third party could charge twice.
+
+`Client.ts` is now article 3's, which is article 1's plus `get`. The producer
+stamps `message_id` as `<run>:<n>` and declares `application/json` and
+`egress.work`. The daemon (`rmq-consumer/src/daemon.ts`) calls with the
+delivery's `message_id` as the key, and dead-letters unread, counted in
+`egress_daemon_discarded_total` by reason, a delivery that is in a format it
+does not read, does not decode, or has no id. Its retry republish and both of
+`Redrive.ts`'s republishes pass `messageId` forward. The chaos publisher and
+`chaos-load.mjs`'s queue reader moved from the `x-idempotency-key` AMQP header
+to `message_id`.
+
+**Checked:** typecheck, 146 unit tests, and 27 of 27 integration tests against
+a real broker (article 3's `Client.test.ts` and `DeadLetter.test.ts`, which add
+the stamped-properties, unroutable, throwing-handler, blocked-connection and
+`get` cases, plus this branch's `Retry.test.ts` moved to `message_id`). **Not
+done:** a run on the compose stack; the running stack is article 2's.
 
 ## What this does not settle
 

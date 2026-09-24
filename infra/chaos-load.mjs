@@ -19,7 +19,7 @@
  * API's publish/ack totals are summed from channel stats that lose their last
  * collection interval whenever a channel closes, and every producer, redrive
  * pass and retired consumer closes channels. Instead every message carries
- * `x-idempotency-key: <run>:<n>`; the publisher reports exactly which n the
+ * `<run>:<n>` as its message_id; the publisher reports exactly which n the
  * broker confirmed, the flaky upstream reports which n it answered 200, and
  *
  *   lost = confirmed ∧ ¬processed ∧ ¬(still in the work or dead-letter queue)
@@ -354,7 +354,7 @@ const keysIn = async (name, runId, depth) => {
   const msgs = res?.ok ? await res.json() : [];
   return new Set(
     msgs
-      .map((m) => m.properties?.headers?.["x-idempotency-key"])
+      .map((m) => m.properties?.message_id)
       .filter((k) => typeof k === "string" && k.startsWith(`${runId}:`))
       .map((k) => Number(k.slice(runId.length + 1))),
   );

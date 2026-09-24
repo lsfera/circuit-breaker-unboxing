@@ -70,3 +70,11 @@ export const controlDuplicates = Metric.counter("egress_daemon_control_duplicate
   description: "Repeated sequences observed in the state_changed stream on circuit.control.",
 });
 
+
+export const discarded = Metric.counter("egress_daemon_discarded_total", {
+  description:
+    "Work deliveries this daemon refused to spend a call on, by reason: `format` (a content " +
+    "type, encoding or message type it does not read), `malformed` (a body that does not " +
+    "decode as a work message) or `keyless` (no `message_id` to use as the idempotency key). " +
+    "Each goes to the dead-letter queue unread.",
+});

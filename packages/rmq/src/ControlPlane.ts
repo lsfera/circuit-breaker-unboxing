@@ -1,4 +1,4 @@
-import { Result, Schema } from "effect";
+import { Option as O, Result, Schema } from "effect";
 import { readerFor } from "@egress/domain/Model.ts";
 import type { CircuitEvent, DecodeFailure } from "@egress/domain/Model.ts";
 
@@ -12,16 +12,52 @@ import type { CircuitEvent, DecodeFailure } from "@egress/domain/Model.ts";
 export const CONTROL_EXCHANGE = "circuit.control";
 
 /**
- * The payments idempotency key: an AMQP header inbound, an HTTP header on the
- * call it authorizes. Minted by the consumer on a message's first call
- * attempt, not by the producer — a key only protects the third party if every
- * retry of the same attempt sends the same one, and a broker requeue hands
- * back the original message with no way to add a header to it. So a failed
- * call is retried by republishing with the key carried forward — see
- * `packages/rmq-consumer/src/Attempts.ts` — and this is the one name that
- * republish, the redrive, and the call itself all import rather than repeat.
+ * The payments idempotency key, as the third party receives it. On the broker
+ * it is the AMQP `message_id`, assigned once by the producer: a broker
+ * redelivery hands back the same message, so it carries the same key for free,
+ * and every republish (a retry, a redrive) passes `messageId` forward rather
+ * than letting `send` invent a new one.
  */
-export const IDEMPOTENCY_KEY_HEADER = "x-idempotency-key";
+export const IDEMPOTENCY_KEY_HTTP_HEADER = "x-idempotency-key";
+
+/** A work message's identity, stable for its life. `n` alone would collide across producer restarts. */
+export const workMessageId = (run: string, n: number): string => `${run}:${n}`;
+
+/** What a work message says, declared once so encoder and decoder can't drift. Unknown fields are ignored. */
+export const WorkMessage = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
+export type WorkMessage = typeof WorkMessage.Type;
+
+/** The AMQP `content_type` a work publisher declares. AMQP has no `Accept`, so negotiation is the reader's. */
+export const WORK_CONTENT_TYPE = "application/json";
+
+/** The AMQP `type` of a work message, dot-separated by RabbitMQ's convention. A daemon declines any other type. */
+export const WORK_MESSAGE_TYPE = "egress.work";
+
+const mediaType = (contentType: string): string => contentType.split(";")[0]!.trim().toLowerCase();
+
+/** `content_encoding` may list several, comma-separated; only "nothing applied" is readable. */
+const unencoded = (contentEncoding: string): boolean =>
+  contentEncoding.split(",").every((encoding) => ["", "identity"].includes(encoding.trim().toLowerCase()));
+
+/** What a delivery declared about itself; `None` wherever the publisher said nothing, which is read as a match. */
+type Declared = {
+  readonly contentType: O.Option<string>;
+  readonly contentEncoding: O.Option<string>;
+  readonly type: O.Option<string>;
+};
+
+const readsFormat =
+  (contentType: string, messageType: string) =>
+  (declared: Declared): boolean =>
+    O.match(declared.contentType, { onNone: () => true, onSome: (t) => mediaType(t) === contentType }) &&
+    O.match(declared.contentEncoding, { onNone: () => true, onSome: unencoded }) &&
+    O.match(declared.type, { onNone: () => true, onSome: (t) => t === messageType });
+
+export const readsWorkFormat = readsFormat(WORK_CONTENT_TYPE, WORK_MESSAGE_TYPE);
+
+const WorkMessageJson = Schema.fromJsonString(WorkMessage);
+export const encodeWorkMessage = Schema.encodeSync(WorkMessageJson);
+export const decodeWorkMessage = Schema.decodeUnknownOption(WorkMessageJson);
 
 /**
  * How many times a message has been *called* — not delivered — since it was

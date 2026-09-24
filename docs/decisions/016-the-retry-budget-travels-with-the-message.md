@@ -50,8 +50,8 @@ requeue.
 
 A failed call (anything other than a 2xx or a 429) is retried by
 **republishing** the body — never by `requeue` — carrying
-`x-idempotency-key` (`Attempts.ts`, `ControlPlane.ts`'s `IDEMPOTENCY_KEY_HEADER`)
-and `x-egress-attempts` forward, incremented, plus `x-egress-redrive-count`
+the idempotency key (since 2026-09-24 the AMQP `message_id`, see ADR 018's last
+amendment) and `x-egress-attempts` forward, incremented, plus `x-egress-redrive-count`
 when the delivery already had one. The original is acked only after the
 republish succeeds — publish first, ack second, so a crash between the two
 produces a duplicate rather than a loss. Attempts 1 and 2 go back to

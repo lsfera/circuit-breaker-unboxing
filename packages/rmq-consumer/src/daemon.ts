@@ -10,7 +10,6 @@ import {
   Schedule,
   Semaphore,
 } from "effect";
-import { randomUUID } from "node:crypto";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
   ATTEMPTS_HEADER,
@@ -24,17 +23,21 @@ import {
   floorQueueOptions,
   decodeElectionTrigger,
   encodeElectionTrigger,
-  IDEMPOTENCY_KEY_HEADER,
+  decodeWorkMessage,
+  IDEMPOTENCY_KEY_HTTP_HEADER,
   ORIGIN_QUEUE_HEADER,
   ORIGIN_REASON_HEADER,
   parkedQueueFor,
   parkedQueueOptions,
+  readsWorkFormat,
   probeTriggerQueueFor,
   REDRIVE_COUNT_HEADER,
   redriveTriggerQueueFor,
   routingKeyFor,
   sacQueueOptions,
   workQueueFor,
+  WORK_CONTENT_TYPE,
+  WORK_MESSAGE_TYPE,
   workQueueOptions,
 } from "@egress/rmq/ControlPlane.ts";
 import { decodeCircuitEvent, State, STATE_CODE } from "@egress/domain/Model.ts";
@@ -112,9 +115,19 @@ const HEARTBEAT_INTERVAL = Duration.seconds(15);
  */
 const SWEEP_INTERVAL = Duration.seconds(30);
 
+/** What a retry declares about its body, the same as the producer's publish. */
+const WORK_FORMAT = { contentType: WORK_CONTENT_TYPE, type: WORK_MESSAGE_TYPE };
+
 export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   const control = yield* Rmq;
   const label = `${cfg.apiId}/${cfg.instanceId}`;
+  // The instance id is a label, not only a log prefix. The fleet is one
+  // scaled service discovered by DNS, so Prometheus's own `instance` is an
+  // IP address — without this there is no way to tell from a dashboard which
+  // daemon holds the floor, or which one stopped hearing the control plane.
+  // It is also the container's hostname, which is what makes a daemon
+  // identified here killable by name.
+  const attrs = { apiId: cfg.apiId, daemon: cfg.instanceId };
 
   const workQueue = workQueueFor(cfg.apiId);
   const deadQueue = deadLetterQueueFor(cfg.apiId);
@@ -200,7 +213,7 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   const self = () => ({ position: selfPosition, isFloor: floorHeld() });
 
   /** Confirmed publishers the retry path needs, alive for the daemon's whole life — same pattern as `trigger`/`redriveTrigger` below. */
-  const workPublisher = yield* control.publisherToQueue(workQueue);
+  const workPublisher = yield* control.publisherToQueue(workQueue, WORK_FORMAT);
   const deadPublisher = yield* control.publisherToQueue(deadQueue);
 
   /**
@@ -233,21 +246,19 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
    * would buy nothing for the call itself — except for a republish, which
    * runs through `runInContext` the same way Redrive.ts's replay does.
    *
-   * The key: reused from the delivery when present — a broker redelivery, a
-   * republish below, or a redrive all set it — minted here only on a
-   * message's true first attempt. See ControlPlane.ts's
-   * IDEMPOTENCY_KEY_HEADER for why the producer never sets one.
+   * The key is the message's `message_id`, assigned once by the producer; a
+   * broker redelivery, the republish below and a redrive all carry it. See
+   * ControlPlane.ts's IDEMPOTENCY_KEY_HTTP_HEADER.
    *
    * `Attempts.nextAttempt` is the decision; this is only the shell around it.
    */
-  const call = async (body: string, delivery: DeliveryInfo): Promise<Settlement> => {
-    const key = O.getOrElse(delivery.idempotencyKey, () => randomUUID());
+  const attempt = async (body: string, delivery: DeliveryInfo, key: string): Promise<Settlement> => {
     let outcome: Attempts.CallOutcome;
     inFlight++;
     try {
       const res = await fetch(`${cfg.egressAddr}${cfg.apiPath}`, {
         signal: AbortSignal.timeout(2000),
-        headers: { [IDEMPOTENCY_KEY_HEADER]: key },
+        headers: { [IDEMPOTENCY_KEY_HTTP_HEADER]: key },
       });
       // Drain the body even though nothing wants it: an unconsumed response holds
       // its connection out of the pool, which at this rate leaks sockets.
@@ -297,7 +308,6 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
         const target = toDead ? deadPublisher : workPublisher;
         const destinationQueue = toDead ? deadQueue : workQueue;
         const headers: Record<string, string> = {
-          [IDEMPOTENCY_KEY_HEADER]: key,
           [ATTEMPTS_HEADER]: String(decision.attempts),
           // Carried forward, or a redriven poison message would reset its count on every failure and never park.
           ...O.match(O.fromNullishOr(delivery.properties[REDRIVE_COUNT_HEADER]), {
@@ -313,7 +323,7 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
             : {}),
         };
         try {
-          const send = control.send(target, body, headers);
+          const send = control.send(target, body, { messageId: key, headers });
           await runInContext(
             O.map(delivery.parent, (span) =>
               send.pipe(
@@ -341,14 +351,36 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   };
 
   /**
+   * A delivery in a format this daemon can't read, that doesn't decode, or with
+   * no `message_id` to use as its idempotency key was never published by this
+   * fleet: dead-lettered unread rather than spending retries no fix helps.
+   */
+  const discard = (reason: "format" | "malformed" | "keyless"): Settlement => {
+    forkInContext(Metric.update(Metric.withAttributes(Telemetry.discarded, { ...attrs, reason }), 1));
+    return "discard";
+  };
+
+  const call = (body: string, delivery: DeliveryInfo): Settlement | Promise<Settlement> =>
+    readsWorkFormat(delivery)
+      ? O.match(decodeWorkMessage(body), {
+          onNone: () => discard("malformed"),
+          onSome: () =>
+            O.match(delivery.messageId, {
+              onNone: () => discard("keyless"),
+              onSome: (key) => attempt(body, delivery, key),
+            }),
+        })
+      : discard("format");
+
+  /**
    * The same call inside a span, only when the message carried a parent:
    * the parent mapped to a traced call, or the plain one. Untraced is the
    * common case and stays a plain `fetch` with no Effect runtime around it.
    */
-  const callEgress = (body: string, delivery: DeliveryInfo): Promise<Settlement> =>
+  const callEgress = (body: string, delivery: DeliveryInfo): Settlement | Promise<Settlement> =>
     O.map(delivery.parent, (span) =>
       runInContext(
-        Effect.promise(() => call(body, delivery)).pipe(
+        Effect.promise(async () => call(body, delivery)).pipe(
           Effect.tap((outcome) =>
             Effect.annotateCurrentSpan({ "egress.settlement": outcome }),
           ),
@@ -618,14 +650,6 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
    * async function running a few hundred times a second, and a fiber per metric
    * write would be the most expensive thing in it.
    */
-  // The instance id is a label, not only a log prefix. The fleet is one
-  // scaled service discovered by DNS, so Prometheus's own `instance` is an
-  // IP address — without this there is no way to tell from a dashboard which
-  // daemon holds the floor, or which one stopped hearing the control plane.
-  // It is also the container's hostname, which is what makes a daemon
-  // identified here killable by name.
-  const attrs = { apiId: cfg.apiId, daemon: cfg.instanceId };
-
   /** Advanced from the same snapshot the delta came from, never by re-reading — see Tally.ts. */
   let published = Tally.nothing;
 

@@ -68,8 +68,8 @@ load at the exact moment the dependency can least take it, and the picture in
 happening by default. Worse, an in-process attempt counter is lost the moment
 the message moves to another consumer — so "three attempts" quietly becomes
 three attempts *per consumer*. Here the daemon republishes on a failed call
-rather than requeuing, carrying an attempt count and a per-attempt
-idempotency key forward in headers, rather than relying only on the broker's
+rather than requeuing, carrying an attempt count forward in a header and the
+message's `message_id`, its idempotency key, as the new message's id, rather than relying only on the broker's
 `x-delivery-limit` — which stays on the queue as a backstop for a delivery
 that never gets that far, not as the primary counter. This is close to the
 retry-queue ladder further down, and paid for the same reason: see

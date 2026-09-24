@@ -1,13 +1,14 @@
 import { Duration, Effect, Option as O, Ref, Schedule } from "effect";
 import { randomUUID } from "node:crypto";
 import {
-  IDEMPOTENCY_KEY_HEADER,
   MAX_REDRIVES,
+  WORK_CONTENT_TYPE,
+  WORK_MESSAGE_TYPE,
   ORIGIN_QUEUE_HEADER,
   ORIGIN_REASON_HEADER,
   REDRIVE_COUNT_HEADER,
 } from "@egress/rmq/ControlPlane.ts";
-import type { Consumer, RmqService, Settlement } from "@egress/rmq/Client.ts";
+import type { Consumer, DeliveryInfo, RmqService, Settlement } from "@egress/rmq/Client.ts";
 import type { Semaphore } from "effect/Semaphore";
 
 /**
@@ -80,13 +81,19 @@ export const makeRedrive = (opts: RedriveOptions) => {
   /** Marks a lap of this pass, local to it — ORIGIN_QUEUE_HEADER/ORIGIN_REASON_HEADER (ControlPlane.ts) are the ones shared with daemon.ts's own dead-lettering. */
   const ORIGIN_PASS_PROPERTY = "x-egress-redrive-pass";
 
-  /** The idempotency key as a header, or `undefined` — a republish must carry it when the original delivery did, and nothing extra when it did not. */
-  const idempotencyHeader = (key: O.Option<string>): Record<string, string> | undefined =>
-    O.match(key, { onNone: () => undefined, onSome: (v) => ({ [IDEMPOTENCY_KEY_HEADER]: v }) });
+  /**
+   * The delivery's own `message_id`, which is its idempotency key: a republish
+   * that let `send` invent a new one would give the third party no way to
+   * recognise a replay as a request it may already have answered.
+   */
+  const sameId = (delivery: DeliveryInfo) => O.getOrUndefined(delivery.messageId);
 
   const redrivePass = Effect.gen(function* () {
     const conn = opts.rmq;
-    const into = yield* conn.publisherToQueue(opts.workQueue);
+    const into = yield* conn.publisherToQueue(opts.workQueue, {
+      contentType: WORK_CONTENT_TYPE,
+      type: WORK_MESSAGE_TYPE,
+    });
     const back = yield* conn.publisherToQueue(opts.deadQueue);
     const toParked = yield* conn.publisherToQueue(opts.parkedQueue);
 
@@ -148,10 +155,12 @@ export const makeRedrive = (opts: RedriveOptions) => {
         try {
           await runInContext(
             conn.send(back, body, {
-              [ORIGIN_QUEUE_HEADER]: originQueue,
-              [ORIGIN_REASON_HEADER]: originReason,
-              [ORIGIN_PASS_PROPERTY]: passId,
-              ...idempotencyHeader(delivery.idempotencyKey),
+              messageId: sameId(delivery),
+              headers: {
+                [ORIGIN_QUEUE_HEADER]: originQueue,
+                [ORIGIN_REASON_HEADER]: originReason,
+                [ORIGIN_PASS_PROPERTY]: passId,
+              },
             }),
           );
           return "accept";
@@ -199,10 +208,11 @@ export const makeRedrive = (opts: RedriveOptions) => {
         // fresh outage, and starting it with the prior outage's call count
         // would dead-letter the message on its first failure this time round.
         const send = conn.send(decision.destination === "work" ? into : toParked, body, {
-          ...idempotencyHeader(delivery.idempotencyKey),
-          ...(decision.destination === "work"
-            ? { [REDRIVE_COUNT_HEADER]: String(decision.count) }
-            : {}),
+          messageId: sameId(delivery),
+          headers:
+            decision.destination === "work"
+              ? { [REDRIVE_COUNT_HEADER]: String(decision.count) }
+              : {},
         });
         await runInContext(
           O.map(delivery.parent, (span) =>
