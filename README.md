@@ -1,5 +1,32 @@
 # Per-API egress circuit breaker events
 
+Fourth and last step of the series. Articles 1–3 stop a fleet of consumers
+hammering one flaky third party with nothing but RabbitMQ and Prometheus:
+`article/03-rabbitmq-coordination` (cockatiel, coordinated through the
+broker) and `article/02-rabbitmq-only-breaker` (the breaker held by the
+broker) both lose no work, send one probe at a time, redrive what was
+dead-lettered, give on-call one fleet verdict, and back off on a `429`. They
+do it in about 2,200 lines.
+
+This article is what the design becomes at platform level, and it costs about
+four times the code and 19 containers: Envoy for egress, two aggregators with
+a lease in Redis, and a published event stream. It is worth building only when
+you need something articles 1–3 cannot give:
+
+- **other systems act on the verdict**: a producer that stops accepting work,
+  a status page, billing. They need a gapless per-API event sequence, not a
+  Prometheus rule;
+- **you can see the third party's hosts**, so `DEGRADED` (some hosts ejected)
+  means something. Behind one load-balanced address it doesn't: see
+  [what-if.md](docs/what-if.md#what-if-the-flaky-api-is-behind-a-load-balancer);
+- **many services call many APIs through one egress path**, so outlier
+  detection, retry budgets and concurrency limits belong in a shared proxy
+  rather than in each service;
+- **tens to thousands of APIs**, each needing its own breaker and a console
+  (see [measurements.md](docs/measurements.md#at-a-size-nobody-runs-it-at)).
+
+If none of those applies, stop at article 3.
+
 Services call third-party APIs through a shared egress path. When one of those
 third parties degrades, everything downstream needs to be **told** — per API,
 as discrete events, reliably enough to act on.

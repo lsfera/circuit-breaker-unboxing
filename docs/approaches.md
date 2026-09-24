@@ -96,6 +96,12 @@ shape, five daemons against an upstream failing 45% of the time agree with each
 other 17% of the time and send 370 probes in five minutes at one that is fully
 down. There is also nothing to publish from.
 
+Those two numbers are for a library on its own (article 2). Article 3 keeps
+the library and lets RabbitMQ coordinate it: a one-token probe permit brings
+peak probes in flight to 1, and a Prometheus rule over the replicas' gauges
+gives on-call one fleet verdict. What it still cannot do is publish that
+verdict as events other systems consume, which is where this design starts.
+
 **Bulkhead.** Cap the concurrency any one dependency may consume, so a slow
 third party cannot exhaust the workers a healthy one needs.
 
@@ -257,7 +263,7 @@ The column that matters is the third one.
 | Timeout | unbounded waits | load — may increase it | yes, 2s |
 | Retry | transient failures | multiplies load in an outage | yes, budget held by the broker |
 | Backoff / jitter | retry bursts | still retrying blindly | at the breaker, not the call |
-| Breaker library | one process calling a dead API | agreement, publishing, `DEGRADED` | no — [why](breaker-library.md) |
+| Breaker library | one process calling a dead API; with the broker coordinating, agreement too (article 3) | publishing, `DEGRADED` | no — [why](breaker-library.md) |
 | Bulkhead | your workers | the upstream sees *N × k* | prefetch does this per channel |
 | Local rate limit | your outbound rate | picking the number | no |
 | Prefetch ceiling | how much is in flight | whether it should be | yes |
