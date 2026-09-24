@@ -277,6 +277,18 @@ exits instead of scheduling another attempt. The restart policy brings it back,
 but a server-initiated close during the rebuild window is a restart, not a
 reconnect.
 
+**Fixed 2026-09-24** (article 4). amqplib 2.0.1 binds its own `error` listener
+only after `setup` resolves, and emits `error` for a missed heartbeat, a socket
+error or a fatal close, though not for a broker's `CONNECTION_FORCED`. The
+client's setup hook now adds a listener first, so the replay's pending calls
+reject, `connect-failed` fires, and recovery schedules another attempt.
+`test/integration/ReplayClose.test.ts` reproduces it: the broker closes every
+connection, then suspends the ones that reopen 15 ms in, so the replay stalls
+and the 1 s heartbeat fails inside `setup`. Without the listener the test fails
+with `Unexpected close` thrown uncaught and the consuming connection never
+returns. With it, the connection logs the error, fails that attempt, and
+reconnects with all 400 topology entries restored.
+
 ### A silent, deterministic reconnect, and a fiber `launchWithRmq` still couldn't see
 
 Added 2026-09-14, chasing the same symptom three ways: a daemon that looked
