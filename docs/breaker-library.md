@@ -1,8 +1,14 @@
 # A breaker library in every service
 
-Resilience4j, Polly, opossum, gobreaker. The first answer, the mature answer,
-and the one this repository is implicitly arguing against — so it deserves more
-than the paragraph it gets in the README's comparison table.
+Resilience4j, Polly, opossum, gobreaker. The first answer, and the mature one.
+This page measures a library *on its own*, which is article 2 of the series.
+Article 3 keeps the library and lets RabbitMQ coordinate it, and that answers
+the first two pitfalls below without anything this repository adds: a
+one-token probe permit takes the fleet's probes in flight to one, and a
+Prometheus rule over the breakers' gauges gives on-call one verdict. For a
+fleet of consumers calling a third party, that is where to stop. What it
+cannot do is pitfalls 3, 4 and 6, and those are this article's reason to
+exist.
 
 This document takes it seriously: what it is, what it gets right, and where it
 runs out **in this system's shape** — three Envoy replicas, five competing
@@ -245,7 +251,9 @@ there is no channel.
 
 ## Where it is still the right answer
 
-Being fair to it, because most systems are not this one:
+Being fair to it, because most systems are not this one. With article 3's
+coordination through the broker, add a fleet of consumers whose verdict only
+on-call needs:
 
 - **One process calls the dependency.** No fleet, no aggregation problem.
 - **The dependency is internal and already meshed.** Something else is already
@@ -273,7 +281,7 @@ work queue all act on it.
 | Survives restart | no | checkpointed, fenced |
 | Cross-service learning | none | every subscriber, same stream |
 | Event contract | build per service, per language | gapless sequence per API |
-| Right when | one caller, private verdict | a fleet, and the verdict is a fact |
+| Right when | one caller, private verdict; with article 3's broker coordination, a consumer fleet | many services, many APIs, and the verdict is a fact others act on |
 
 The numbers in this document come from a five-minute simulation of this
 system's fleet shape with this system's timing parameters. The method, and
