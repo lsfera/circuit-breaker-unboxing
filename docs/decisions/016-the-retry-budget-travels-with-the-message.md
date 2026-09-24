@@ -48,7 +48,7 @@ requeue.
 
 ## What was chosen
 
-A failed call (anything other than a 2xx or a 429) is retried by
+A failed call (a 5xx, a 408, or no response at all) is retried by
 **republishing** the body — never by `requeue` — carrying
 the idempotency key (since 2026-09-24 the AMQP `message_id`, see ADR 018's last
 amendment) and `x-egress-attempts` forward, incremented, plus `x-egress-redrive-count`

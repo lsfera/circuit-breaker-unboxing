@@ -373,6 +373,16 @@ fresh outage — three attempts per outage, not three ever, up to
 again. Measured, pinned by a test, and written up in
 [docs/decisions/016-the-retry-budget-travels-with-the-message.md](decisions/016-the-retry-budget-travels-with-the-message.md).
 
+**A refused request is parked, not retried.** Only a 5xx, a 408 or no
+response at all spends the budget. A 429 is released uncounted, and any other
+4xx is the third party refusing this request: retrying or redriving it sends
+the same request for the same answer. So it goes straight to
+`<apiId>.work.parked`, stamped `x-egress-origin-reason: refused-<status>`, and
+counts as `outcome="refused"` in `egress_daemon_calls_total`. Until 2026-09-24
+a 400 was a failure like any other: three calls, dead-lettered, then redriven
+up to five times, about 15 calls for a request the third party had already
+refused.
+
 **Every queue in the fleet dead-letters to that one canonical queue** — the
 work queue, both SAC election queues, and each daemon's own control queue.
 The dead-letter queue itself is the only exception, because a queue that

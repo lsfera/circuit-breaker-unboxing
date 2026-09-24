@@ -216,6 +216,7 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   /** Confirmed publishers the retry path needs, alive for the daemon's whole life — same pattern as `trigger`/`redriveTrigger` below. */
   const workPublisher = yield* control.publisherToQueue(workQueue, WORK_FORMAT);
   const deadPublisher = yield* control.publisherToQueue(deadQueue);
+  const parkedPublisher = yield* control.publisherToQueue(parkedQueue);
 
   /**
    * Held before releasing a 429 back to the broker. Holding the delivery
@@ -254,7 +255,7 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
    * `Attempts.nextAttempt` is the decision; this is only the shell around it.
    */
   const attempt = async (body: string, delivery: DeliveryInfo, key: string): Promise<Settlement> => {
-    let outcome: Attempts.CallOutcome;
+    let status: number | "error";
     inFlight++;
     try {
       const res = await fetch(`${cfg.egressAddr}${cfg.apiPath}`, {
@@ -264,14 +265,15 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
       // Drain the body even though nothing wants it: an unconsumed response holds
       // its connection out of the pool, which at this rate leaks sockets.
       await res.text().catch(() => {});
-      outcome = res.status === 429 ? "shed" : res.ok ? "ok" : "failed";
+      status = res.status;
     } catch {
       // Connection refused or timeout is the expected shape of an outage, not an
       // error to report: the aggregator judges the API's health from Envoy's view.
-      outcome = "failed";
+      status = "error";
     } finally {
       inFlight--;
     }
+    const outcome = Attempts.classify(status);
 
     // Headers are only materialized when the call failed: the success path runs thousands of times a second.
     const decision = Attempts.nextAttempt(
@@ -296,6 +298,27 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
           SHED_BACKOFF_MIN_MS + Math.random() * (SHED_BACKOFF_MAX_MS - SHED_BACKOFF_MIN_MS);
         await new Promise((resolve) => setTimeout(resolve, jitter));
         return "release";
+      },
+
+      park: async (): Promise<Settlement> => {
+        // The third party refused this request (a 4xx other than 408 and 429):
+        // retrying or redriving it sends the same request for the same answer.
+        // Parked with the status, for a human; left where it is if even that fails.
+        counts.refused++;
+        try {
+          await runInContext(
+            control.send(parkedPublisher, body, {
+              messageId: key,
+              headers: {
+                [ORIGIN_QUEUE_HEADER]: workQueue,
+                [ORIGIN_REASON_HEADER]: `refused-${status}`,
+              },
+            }),
+          );
+          return "accept";
+        } catch {
+          return "requeue";
+        }
       },
 
       republish: async (decision): Promise<Settlement> => {
@@ -674,6 +697,8 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
     // A 429 — Envoy's adaptive-concurrency filter shedding before the third party
     // was reached, or the third party's own rate limit: backpressure, not a failure.
     ["shed", Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "shed" })],
+    // A 4xx other than 408 and 429: the third party refusing the request, parked unretried.
+    ["refused", Metric.withAttributes(Telemetry.calls, { ...attrs, outcome: "refused" })],
     ["probed", Metric.withAttributes(Telemetry.probes, attrs)],
     ["undecodable", Metric.withAttributes(Telemetry.undecodable, attrs)],
     ["gaps", Metric.withAttributes(Telemetry.controlGaps, attrs)],

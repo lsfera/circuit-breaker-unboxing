@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { nextAttempt } from "../src/Attempts.ts";
+import { classify, nextAttempt } from "../src/Attempts.ts";
 import { WORK_DELIVERY_LIMIT } from "@egress/rmq/ControlPlane.ts";
 
 /**
@@ -67,4 +67,23 @@ test("a header that doesn't parse is treated as zero, not trusted", () => {
     destination: "work",
     attempts: 1,
   });
+});
+
+test("statuses are sorted: 2xx ok, 429 shed, other 4xx refused, 408 and 5xx and no response failed", () => {
+  assert.equal(classify(200), "ok");
+  assert.equal(classify(204), "ok");
+  assert.equal(classify(429), "shed");
+  assert.equal(classify(400), "refused");
+  assert.equal(classify(404), "refused");
+  assert.equal(classify(409), "refused");
+  assert.equal(classify(408), "failed", "a timeout on the third party's side is worth another try");
+  assert.equal(classify(500), "failed");
+  assert.equal(classify(503), "failed");
+  assert.equal(classify(504), "failed");
+  assert.equal(classify("error"), "failed");
+});
+
+test("a refused call is parked, never retried, whatever the attempts header says", () => {
+  assert.deepEqual(nextAttempt("refused", undefined), { _tag: "park" });
+  assert.deepEqual(nextAttempt("refused", "2"), { _tag: "park" });
 });

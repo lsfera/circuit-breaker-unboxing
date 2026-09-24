@@ -17,6 +17,7 @@ type Counts = {
   failed: number;
   /** Rejected by Envoy's adaptive-concurrency filter (429) before reaching the third party — backpressure, not a call failure. */
   shed: number;
+  refused: number;
   probed: number;
   undecodable: number;
   stale: number;
@@ -32,6 +33,7 @@ export const zero = (): Counts => ({
   ok: 0,
   failed: 0,
   shed: 0,
+  refused: 0,
   probed: 0,
   undecodable: 0,
   stale: 0,
@@ -52,6 +54,7 @@ type Snapshot = {
   readonly ok: number;
   readonly failed: number;
   readonly shed: number;
+  readonly refused: number;
   readonly probed: number;
   readonly undecodable: number;
   readonly stale: number;
@@ -63,6 +66,7 @@ export const nothing: Snapshot = {
   ok: 0,
   failed: 0,
   shed: 0,
+  refused: 0,
   probed: 0,
   undecodable: 0,
   stale: 0,
@@ -74,6 +78,7 @@ export const snapshot = (counts: Counts, contract: ContractState): Snapshot => (
   ok: counts.ok,
   failed: counts.failed,
   shed: counts.shed,
+  refused: counts.refused,
   probed: counts.probed,
   undecodable: counts.undecodable,
   stale: counts.stale,
@@ -86,6 +91,7 @@ type Delta = {
   readonly ok: number;
   readonly failed: number;
   readonly shed: number;
+  readonly refused: number;
   readonly probed: number;
   readonly undecodable: number;
   readonly stale: number;
@@ -97,6 +103,7 @@ export const since = (published: Snapshot, current: Snapshot): Delta => ({
   ok: current.ok - published.ok,
   failed: current.failed - published.failed,
   shed: current.shed - published.shed,
+  refused: current.refused - published.refused,
   probed: current.probed - published.probed,
   undecodable: current.undecodable - published.undecodable,
   stale: current.stale - published.stale,
