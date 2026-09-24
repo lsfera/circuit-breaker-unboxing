@@ -1,14 +1,21 @@
-# Every dead letter earned it, and has a way back
+# RabbitMQ does the coordinating
 
 A fleet of competing consumers, each with its own
-[cockatiel](https://github.com/connor4312/cockatiel) breaker and a shared
-probe permit. Fourth step of the series, built on `article/03-probe-permit`.
+[cockatiel](https://github.com/connor4312/cockatiel) breaker. Third step of
+the series, built on `article/02-in-process-breaker`.
 
-Two dead-letter problems until now: a message could be dead-lettered
-without the third party ever seeing it (1,975 in one 15s outage in
-article 3), and nothing brought it back. This branch fixes both: only real
-calls count toward the delivery limit, and one elected replica redrives
-the rest.
+Article 2 left three problems that need the replicas to coordinate:
+
+- one replica's successful half-open probe can burst `maxInFlight` calls
+  at a third party that has been back for milliseconds, on every replica
+  at once;
+- a message can be dead-lettered without the third party ever seeing it
+  (1,975 in one 15s outage);
+- nothing brings dead letters back.
+
+None of them needs new infrastructure. RabbitMQ already has the pieces: a
+one-message queue for a token, a settlement that doesn't count toward the
+delivery limit, and a single-active-consumer election.
 
 ```mermaid
 flowchart LR
@@ -43,14 +50,14 @@ flowchart LR
   dead -->|"redrive pass"| queue
   dead -.->|"MAX_REDRIVES exceeded"| parked
   classDef new fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#1c1917
-  class dead,parked,rtrigger new
-  linkStyle 10,11,12,13,14,15,16 stroke:#d97706,stroke-width:3px
+  class permit,dead,parked,rtrigger new
+  linkStyle 4,5,6,10,11,12,13,14,15,16 stroke:#d97706,stroke-width:3px
 ```
 
 <sub>Amber: new or changed on this branch.</sub>
 
-Breakers share nothing. Every replica publishes to `redrive-trigger`;
-RabbitMQ delivers to one.
+Breakers share nothing. Only a half-open breaker touches the permit. Every
+replica publishes to `redrive-trigger`; RabbitMQ delivers to one.
 
 30s of `503`s then 10s of `422`s against 5 replicas, recorded 2026-09-24
 with `infra/capture-incident.mjs` (5.79× real time,
@@ -58,24 +65,45 @@ with `infra/capture-incident.mjs` (5.79× real time,
 
 ![Grafana during a 30-second sustained outage: all five breakers open, the work-queue depth climbs continuously while the dead-letter queue stays flat at zero, then the work queue drains once the third party recovers.](docs/media/dead-letter-redrive-incident.gif)
 
-In earlier recordings the dead-letter panel moved during an outage; here it
-stays at 0 through outage and recovery. The price is backlog: 6,920 at
-peak. It moves only for the `422`s — 1,985 in 10s, each refused on its
-first delivery.
+In article 2's recording the dead-letter panel moved during an outage; here
+it stays at 0 through the outage and the recovery. The price is backlog:
+6,920 at peak. It moves only for the `422`s — 1,985 in 10s, each refused on
+its first delivery. The permit changes nothing a dashboard shows; it was
+checked separately (below).
 
-## Counted attempts
+## The permit: a one-token queue
 
-`decide()` now *releases* an `open` outcome (breaker turned the message
-away, no call made) instead of requeuing it. RabbitMQ 4.3 doesn't count a
-release toward `x-delivery-limit` (3); it does count a requeue, so three
-deliveries onto open breakers used to dead-letter a message the third
-party never saw. `failed` still requeues — a real call spends the budget.
-`master`'s `Attempts.ts` draws the same line.
+A queue with `x-max-length: 1` and `x-overflow: reject-publish`. Every
+replica seeds a token at startup; RabbitMQ keeps the first and *nacks* the
+rest, which `seedPermit` treats as success. (An earlier version assumed
+the rejection was silent and crash-looped four replicas on boot.)
+
+A half-open replica does a non-blocking `get` first:
+
+- **Token** → make the real call, then `nack` the token back whatever the
+  result.
+- **Empty** → fail at once with `Breaker.NoPermit`, no network call;
+  cockatiel treats it as a failed probe and backs off.
+
+**Measured:** 20 concurrent half-open probes against the live broker —
+exactly one reached a real call every time, the other 19 failed instantly.
+
+A single-active-consumer queue doesn't fit here: it hands over on
+disconnect, not when a replica's backoff elapses.
+
+## Counted attempts: release, don't requeue
+
+`decide()` *releases* an `open` outcome (breaker open or permit lost, no
+call made). RabbitMQ 4.3 doesn't count a release toward `x-delivery-limit`
+(3); it does count a requeue, so three deliveries onto open breakers used
+to dead-letter a message the third party never saw. `failed` still
+requeues — a real call spends the budget. `master`'s `Attempts.ts` draws
+the same line.
 
 **Measured:** 1,785 dead-lettered in a 15s outage before; zero in a 40s
 outage after. The work queue grows instead (6,800 at 40s, still climbing).
 
-## The redrive
+## The redrive: single-active-consumer
 
 `Redrive.ts`, ported from `master`:
 
@@ -91,24 +119,28 @@ outage after. The work queue grows instead (6,800 at 40s, still climbing).
   ADR 016 fixes the same stall the same way.
 - **Idempotency:** the republish keeps the original `message_id`.
 
-## The permit and the breaker
+## The breaker
 
-Unchanged from article 3 except the `open` outcome above. One token in a
-queue with `x-max-length: 1` and `reject-publish`; a half-open replica
-probes only if it `get`s it, and hands it back after. Breaker: 5
-consecutive failures trip it, half-open after 1s–30s exponential backoff.
-`classify` (`Breaker.ts`) gives four outcomes: `ok` accept, `client_error`
-(4xx except 408/429) dead-letter at once, `failed` requeue, `open` release
-after a 100–400ms hold.
+As in article 2: 5 consecutive failures trip it, half-open after 1s–30s
+exponential backoff. `classify` (`Breaker.ts`) gives four outcomes: `ok`
+accept, `client_error` (4xx except 408/429) dead-letter at once, `failed`
+requeue, `open` release after a 100–400ms hold. A 4xx that is really ours
+(401, 403, 404) dead-letters every message it touches; the `status` label
+on `egress_consumer_calls_total` shows it.
 
 ## What this still doesn't fix
 
-- **A long outage grows the work queue without bound.** The delivery limit
-  used to cap it by accident.
+- **The five breakers still don't agree.** The permit stops the recovery
+  burst, not independent tripping.
 - **Redrive waits on the elected replica's breaker**, up to 30s after the
   rest of the fleet has closed. Nothing knows what the fleet thinks.
+- **A long outage grows the work queue without bound.** The delivery limit
+  used to cap it by accident.
+- **Losing the permit race grows backoff** like a failed probe — cockatiel
+  can't tell them apart.
+- **The permit is one more dependency:** if its token is lost, half-open
+  probes fail until a restart reseeds it.
 - **A trigger arriving mid-pass is dropped.**
-- **Losing the permit race grows backoff** like a failed probe.
 
 ## Running it
 

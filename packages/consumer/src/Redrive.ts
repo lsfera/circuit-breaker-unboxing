@@ -56,7 +56,7 @@ export type RedriveOptions = {
 
 /**
  * Drains `<api>.work.dead` with `rmq.get` — a non-blocking single fetch
- * already used for article 3's probe permit, and a natural fit here too:
+ * already used for the probe permit, and a natural fit here too:
  * "replay what's there, stop when it's empty" needs no idle timer the way a
  * long-lived `consume` subscription would.
  *

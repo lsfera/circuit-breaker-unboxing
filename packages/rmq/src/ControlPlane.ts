@@ -1,7 +1,7 @@
 /**
  * Naming conventions for the work-queue shape shared by the producer and the competing-consumer fleet that
  * drains it: a durable work queue with a dead-letter destination, the broker's own delivery-limit budget,
- * the idempotency-key convention a caller and a third party agree on, and, as of article 4, the redrive-trigger
+ * the idempotency-key convention a caller and a third party agree on, and, as of article 3, the redrive-trigger
  * and parked-queue naming `Redrive.ts` and `consumer.ts` use to recover `<api>.work.dead`.
  */
 
@@ -65,7 +65,7 @@ const deadLetterArgs = (apiId: string): Record<string, unknown> => ({
 const workQueueArgs = deadLetterArgs;
 
 /**
- * Article 4's redrive election. `x-single-active-consumer` means the broker delivers to one bound consumer
+ * Article 3's redrive election. `x-single-active-consumer` means the broker delivers to one bound consumer
  * and holds the rest as backups, promoting automatically if the active one disconnects — no leader-election
  * code of this project's own. Nothing is ever published here but the trigger itself (see `consumer.ts`).
  */

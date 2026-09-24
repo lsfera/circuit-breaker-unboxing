@@ -1,7 +1,7 @@
 // Drives one incident against the fleet and reports what actually happened —
 // including whether five independent, in-process breakers agree with each
 // other about the same third party (they share nothing, see
-// packages/consumer/src/Breaker.ts) and, since article 4, whether the
+// packages/consumer/src/Breaker.ts) and, since article 3, whether the
 // messages this incident dead-lettered actually come back once the elected
 // redriver's own breaker closes (packages/consumer/src/Redrive.ts) —
 // measured, not asserted, same as everything else here.

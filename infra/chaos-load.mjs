@@ -16,7 +16,7 @@
 //
 // Correctness bar, adjusted from this series' own findings rather than
 // copied from master's harness unchanged: master's bar was "no message
-// lost, dead-letter queue empty once the scenario drains." Article 4's own
+// lost, dead-letter queue empty once the scenario drains." Article 3's own
 // report showed redrive can legitimately stall for tens of seconds with a
 // harmless backlog sitting in work.dead until an unrelated breaker
 // transition fires the next trigger — so an empty dead-letter queue is not
