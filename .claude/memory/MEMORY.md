@@ -14,4 +14,4 @@
 - [Incident-report limits-grid gotcha](incident-report-limits-grid-gotcha.md) — ol.limits li needs exactly one child div; a sibling badge breaks the grid, bit twice.
 - [RabbitMQ reject-publish nacks](rabbitmq-reject-publish-nacks.md) — reject-publish nacks the loser; x-max-length counts only ready msgs; cockatiel half-opens inside execute() (permit never gated 03/04 until fixed 09-24).
 - [Chaos-test new components](chaos-test-new-components.md) — every new article-series component needs fault-injection-under-load; also holds the 2026-09-19 ADR-compliance pass (kill-broker fault, redrive sweep, fleet-known-replicas gauge).
-- [Article series branches](article-series-branches.md) — 01–03 plus 02-rabbitmq-only after the 09-23/24 merges; aggregator and rate breaker dropped; cherry-pick forward to port.
+- [Article series branches](article-series-branches.md) — 01–03 plus 02-rabbitmq-only, then 04 = master (platform level, entry criteria); rate breaker dropped; cherry-pick forward to port.
