@@ -147,11 +147,11 @@ the runs behind the article are kept in `docs/runs/`).
 
 ![Grafana mid-outage: five breakers open, wake tokens in the delay chain, work queue filling, dead-letter queue flat](docs/media/2-mid-outage.png)
 
-The dashboard 12 seconds into a total outage
+The dashboard 12 seconds into a 24s total outage, recorded 2026-09-24
 ([recording](docs/media/incident.webm)): the consumer count on the work queue
 is the fleet's state, and the wake tokens in the delay chain are the open
-breakers. The dead-letter line is flat, but not at zero: it is what earlier
-experiments left there, and that it does not move is the point.
+breakers. The dead-letter line stays at zero through the outage; every
+breaker had closed 20s after restore.
 
 ## What this still doesn't fix
 
