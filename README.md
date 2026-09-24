@@ -684,10 +684,14 @@ general caveat — where it has been measured, the number is here.
   is [an assertion now, not an anecdote](docs/measurements.md#chaos-on-demand-rather-than-by-hand),
   and AOF plus a named volume means a restart no longer starts the next leader
   from nothing. What is still prototype is *replication*. Losing that one
-  instance costs the checkpoints — a new leader resumes from nothing rather
-  than from where the last one stopped — but no longer costs correctness,
-  because the fencing token carries an epoch and a coordinator that lost its
-  state cannot hand a stale leader a token that outranks the live one. A real
+  instance costs the checkpoints: a new leader resumes from nothing rather
+  than from where the last one stopped, so each API's sequence starts over and
+  its half-open backoff resets. It no longer costs fencing, because the token
+  carries an epoch and a coordinator that lost its state cannot hand a stale
+  leader a token that outranks the live one. The daemons follow the new epoch
+  (events carry the lease, see [high-availability.md](docs/high-availability.md)),
+  but any other subscriber checking the sequence sees the restart as a run of
+  duplicates until it passes the old high-water mark. A real
   deployment wants Redis with replication, or a different backing store
   entirely (etcd, a Postgres advisory lock) behind the unchanged
   `LeaderElection`/`CheckpointStore` interfaces — those interfaces, not this
