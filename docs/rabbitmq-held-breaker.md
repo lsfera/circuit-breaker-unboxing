@@ -191,36 +191,42 @@ gauge, scraped every two seconds, noticing. It is a sanity check, not a proof.
 
 ## The incident on screen
 
-A 12-second total outage against the running stack, recorded from the
-Grafana dashboard, at the compose producer's ordinary 200/s. Two panels were
-added for this: the broker's consumer count on the work queue, which now *is*
-the fleet's state, and the wake tokens sitting in the delay chain, one line per
-level. The dead-letter line is flat, but not at zero: it is the ~4,500 messages
-that earlier experiments left there, and that it does not move is the point.
+A 24-second total outage against the running stack, recorded from the Grafana
+dashboard on 2026-09-24, at the compose producer's ordinary 200/s. The
+dead-letter and parked queues were emptied first, so both lines start at zero.
 
-The [recording](media/incident.webm) is 43 seconds, start to finish.
+Two panels were added for the breaker itself: the broker's consumer count on the
+work queue, which now *is* the fleet's state, and the wake tokens sitting in the
+delay chain, one line per level. The later additions have their own panels:
+- the fleet view on top (a Prometheus rule, open while half the replicas are);
+- parked-queue depth and redrives;
+- probe-permit races lost.
 
-**1 · Steady.** Five closed breakers, five consumers, no tokens.
+The [recording](media/incident.webm) runs the whole incident, start to finish.
+
+**1 · Steady.** Five closed breakers, five consumers, no tokens, fleet closed.
 
 ![steady state](media/1-steady.png)
 
-**2 · The outage begins.** All five open within two milliseconds of each other
-(the replicas' own logs), the consumer count on the work queue falls to zero,
-and the tokens appear in the delay chain.
+**2 · The outage begins.** All five open within a millisecond of each other
+(the replicas' own logs). The fleet view turns open, the consumer count on the
+work queue falls to zero, and five tokens appear in the delay chain. While the
+holds are still one or two seconds, replicas wake together and most lose the
+race for the probe permit: that is the bump in the bottom-right panel. A lost
+race holds again at the same length, so it does not add to the backoff.
 
 ![the outage begins](media/2-mid-outage.png)
 
-**3 · The third party is restored.** The backlog is about 2,200 messages, held in
+**3 · The third party is restored.** The backlog is about 4,100 messages, held in
 the queue, not spinning through it. No consumers. Tokens are still in flight,
-because the holds have grown to 5–7 s; the replicas do not yet know.
+because the holds have grown to 8–15 s; the replicas do not yet know.
 
 ![restored, replicas still holding](media/3-restored.png)
 
-**4 · Recovered.** The breakers came back at different moments. Three closed
-within two seconds of the restore, one at 10 s, and the last at 14 s, from a 15 s
-hold. The backlog drained as they did, and no dead letters appeared. Each step in
-the tokens panel is a replica's hold ending. (The times are from the replicas'
-logs.)
+**4 · Recovered.** The breakers came back at different moments: 1, 3, 3, 7 and
+10 s after the restore, as each hold ended (the replicas' logs). The fleet view
+closed once three had. The backlog drained as they did. No dead letters appeared,
+so there was nothing to redrive or park.
 
 ![recovered](media/4-recovered.png)
 

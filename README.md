@@ -165,13 +165,20 @@ the runs behind the article are kept in `docs/runs/`).
 `infra/capture-incident.mjs` records the dashboard through an incident (it needs
 `playwright-core`, which this repo does not depend on).
 
-![Grafana mid-outage: five breakers open, wake tokens in the delay chain, work queue filling, dead-letter queue flat](docs/media/2-mid-outage.png)
+![Grafana mid-outage: fleet open, five breakers open, wake tokens in the delay chain, work queue filling, dead-letter queue flat, probe-permit races lost](docs/media/2-mid-outage.png)
 
 The dashboard 12 seconds into a 24s total outage, recorded 2026-09-24
-([recording](docs/media/incident.webm)): the consumer count on the work queue
-is the fleet's state, and the wake tokens in the delay chain are the open
-breakers. The dead-letter line stays at zero through the outage; every
-breaker had closed 20s after restore.
+([recording](docs/media/incident.webm)):
+- The fleet view flips to open at the first scrape.
+- The consumer count on the work queue is the fleet's state, and the wake
+  tokens in the delay chain are the open breakers.
+- The permit panel shows races lost while the holds are still 1–2s.
+- The dead-letter line stays at zero through the outage.
+
+![Grafana after recovery: every breaker closed, backlog drained, fleet view closed again](docs/media/4-recovered.png)
+
+After the restore, every breaker had closed within 10s (1 to 10s, by the
+replicas' logs). The fleet view closed once three of the five had.
 
 ## Shared through the broker
 
