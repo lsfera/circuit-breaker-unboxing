@@ -1,22 +1,16 @@
 import { Effect, Match, Metric, Option as O, Ref } from "effect";
 import { setTimeout as sleep } from "node:timers/promises";
-import { randomUUID } from "node:crypto";
 import type { HttpClient } from "effect/unstable/http";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
-  CONTROL_CONTENT_TYPE,
-  CONTROL_EXCHANGE,
-  CONTROL_MESSAGE_TYPE,
   deadLetterQueueFor,
   deadLetterQueueOptions,
   decodeWorkMessage,
-  encodeControlEvent,
   parkedQueueFor,
   parkedQueueOptions,
   readsWorkFormat,
   redriveTriggerQueueFor,
   redriveTriggerQueueOptions,
-  routingKeyFor,
   workQueueFor,
   workQueueOptions,
 } from "@egress/rmq/ControlPlane.ts";
@@ -29,12 +23,9 @@ import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
 
 /**
  * One competing-consumer daemon with its own in-process circuit breaker, plus the fleet-wide probe permit
- * (both Breaker.ts). Its breaker's decision stays entirely private to this process. A second, independent
- * channel — every transition also goes out on `circuit.control` for `@egress/aggregator` to fold into one
- * published verdict. Publishing that and acting on this replica's own breaker are unrelated; see README.md
- * for why those are kept as different problems.
+ * (both Breaker.ts). Its breaker's decision stays entirely private to this process.
  *
- * A third, unrelated concern on top: `<api>.work.dead` used to be a one-way trip. RabbitMQ's
+ * A second, unrelated concern on top: `<api>.work.dead` used to be a one-way trip. RabbitMQ's
  * `x-single-active-consumer` elects exactly one replica per API to redrive it — see Redrive.ts — gated on
  * that one elected replica's own breaker, the same local-view tradeoff the probe permit already made. A pass
  * starts either on a transition into Closed or on a fixed clock (`REDRIVE_SWEEP_MS`), since a message can
@@ -102,15 +93,6 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   // regardless of how many replicas race this on startup — see Breaker.ts's module doc.
   yield* Breaker.seedPermit(cfg.apiId);
 
-  // This replica's identity on `circuit.control` only — an AMQP event has no scrape IP to reuse.
-  const instance = randomUUID();
-  // Durable: a control-plane exchange should survive a broker restart like every queue here already does.
-  yield* rmq.declareTopicExchange(CONTROL_EXCHANGE, { durable: true });
-  const controlPub = yield* rmq.publisherToExchange(CONTROL_EXCHANGE, routingKeyFor(cfg.apiId), {
-    contentType: CONTROL_CONTENT_TYPE,
-    type: CONTROL_MESSAGE_TYPE,
-  });
-
   // Recovering `<api>.work.dead`. `parkedQueue` needs declaring even on the four replicas that will never
   // redrive into it — every process that might touch a queue has to agree on its arguments.
   yield* rmq.declareQueue(parkedQueueFor(cfg.apiId), parkedQueueOptions());
@@ -162,23 +144,6 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
 
   breaker.onStateChange((state: CircuitState) => {
     runInContext(Metric.update(Telemetry.breakerState, Breaker.STATE_CODE[state]));
-    // Off the hot path — transitions are rare — so a fire-and-forget publish costs nothing here. Logged and
-    // dropped on failure rather than retried: notification-only on purpose, see README.md.
-    runInContext(
-      rmq.send(
-        controlPub,
-        encodeControlEvent({
-          apiId: cfg.apiId,
-          instance,
-          state: Breaker.STATE_NAME[state],
-          at: Date.now(),
-        }),
-      ),
-    ).catch((err: unknown) => {
-      runInContext(
-        Effect.logWarning(`${cfg.apiId}/consumer: circuit.control publish failed`, err),
-      ).catch(() => {});
-    });
   });
   breaker.onBreak(() => {
     runInContext(Metric.update(Telemetry.breakerTrips, 1));

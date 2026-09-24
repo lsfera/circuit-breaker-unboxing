@@ -188,24 +188,6 @@ importers:
         specifier: ^7.0.2
         version: 7.0.2
 
-  packages/aggregator:
-    dependencies:
-      '@effect/platform-node':
-        specifier: 'catalog:'
-        version: 4.0.0-rc.116(effect@4.0.0-rc.116)(redis@6.2.1(@opentelemetry/api@1.9.1))
-      '@egress/config':
-        specifier: workspace:*
-        version: link:../config
-      '@egress/rmq':
-        specifier: workspace:*
-        version: link:../rmq
-      '@egress/tracing':
-        specifier: workspace:*
-        version: link:../tracing
-      effect:
-        specifier: 'catalog:'
-        version: 4.0.0-rc.116
-
   packages/config:
     dependencies:
       effect:

@@ -1,9 +1,7 @@
 # One producer, one broker, a fleet of competing-consumer daemons — each with
-# its own in-process circuit breaker (cockatiel), private to that replica —
-# plus a single aggregator that folds their transitions into one published
-# verdict. The verdict is notification-only: no consumer reads it back, and
-# each replica's own breaker still decides for itself exactly as before. See
-# README.md.
+# its own in-process circuit breaker (cockatiel), private to that replica.
+# No coordination between them anywhere in this file — that is the point of
+# this branch. See README.md.
 #
 # Every service also joins the host devcontainer's own external network so it
 # can be reached directly by service name from outside this compose project.
@@ -94,13 +92,11 @@ services:
 
   # One service, scaled — `docker compose up -d --scale rmq-consumer=N` is
   # the whole of resizing the fleet. Every replica is anonymous: there is no
-  # hash-space position, no floor, no election, and its in-process circuit
-  # breaker (packages/consumer/src/Breaker.ts) still decides entirely for
-  # itself — the `aggregator` service below only listens to what each
-  # replica publishes, it never talks back. Prometheus tells replicas apart
-  # by the IP DNS hands back for the service name (see
-  # infra/monitoring/prometheus.yml); `circuit.control` events carry their
-  # own random instance id instead, since an AMQP event has no IP to reuse.
+  # hash-space position, no floor, no election, and now an in-process circuit
+  # breaker (packages/consumer/src/Breaker.ts) that is entirely this
+  # replica's own — nothing here coordinates the fleet's breakers with each
+  # other. Prometheus tells replicas apart by the IP DNS hands back for the
+  # service name (see infra/monitoring/prometheus.yml).
   rmq-consumer:
     <<: *rmq-node
     command: node packages/consumer/src/main.ts
@@ -121,26 +117,6 @@ services:
     deploy:
       replicas: 5
       <<: *limits-daemon
-    depends_on: *rmq-depends
-
-  # Folds every replica's own breaker transitions (published to
-  # circuit.control, off the hot path — see consumer.ts's onStateChange) into
-  # one published verdict per apiId. Deliberately not scaled: a single
-  # instance, no leader election, no persistence — a real, named SPOF this
-  # branch doesn't hide. Never in the request path: no rmq-consumer service
-  # reads anything this one publishes. See README.md.
-  aggregator:
-    <<: *rmq-node
-    command: node packages/aggregator/src/main.ts
-    environment:
-      RMQ: rabbitmq:5672
-      METRICS_PORT: "9464"
-      # Half the known fleet reporting open/half_open before the published
-      # verdict itself opens; a replica unheard-from for a minute stops
-      # counting toward that fraction (see Verdict.ts's prune).
-      VERDICT_THRESHOLD: "0.5"
-      STALENESS_MS: "60000"
-    deploy: *limits-small
     depends_on: *rmq-depends
 
   # Scrapes RabbitMQ's own Prometheus plugin and both fleets' /metrics. See

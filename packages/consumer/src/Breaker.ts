@@ -9,14 +9,12 @@ import {
 import type { CircuitBreakerPolicy } from "cockatiel";
 import { Effect, Match, Option as O, Predicate } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
-import type { ReplicaState } from "@egress/rmq/ControlPlane.ts";
 import { isCallStatus } from "./Upstream.ts";
 import type { CallStatus } from "./Upstream.ts";
 
 /**
  * One breaker per process, shared across every message — recreating it per call would never accumulate a
- * failure count. Each replica's state is entirely private; the fleet-wide verdict is a separate channel
- * (`circuit.control`, see `consumer.ts`), not this breaker's own decision.
+ * failure count. Each replica's state is entirely private; see README.md.
  */
 
 export type BreakerConfig = {
@@ -74,17 +72,6 @@ export const STATE_CODE: Record<CircuitState, number> = {
 
 /** What every breaker starts as, before its first `onStateChange` fires. */
 export const INITIAL_STATE_CODE: number = STATE_CODE[CircuitState.Closed];
-
-/**
- * The wire form of a state for the `circuit.control` event `onStateChange` publishes — named, not
- * `STATE_CODE`'s number, since JSON with a named state reads without cross-referencing this file.
- */
-export const STATE_NAME: Record<CircuitState, ReplicaState> = {
-  [CircuitState.Closed]: "closed",
-  [CircuitState.Open]: "open",
-  [CircuitState.HalfOpen]: "half_open",
-  [CircuitState.Isolated]: "isolated",
-};
 
 export { isBrokenCircuitError };
 

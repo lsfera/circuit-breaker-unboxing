@@ -1,8 +1,8 @@
 /**
  * Naming conventions for the work-queue shape shared by the producer and the competing-consumer fleet that
- * drains it, plus the `circuit.control` exchange every replica's breaker transitions go out on and, as of
- * article 5, the redrive-trigger and parked-queue naming `Redrive.ts` and `consumer.ts` use to recover
- * `<api>.work.dead`.
+ * drains it: a durable work queue with a dead-letter destination, the broker's own delivery-limit budget,
+ * the idempotency-key convention a caller and a third party agree on, and, as of article 4, the redrive-trigger
+ * and parked-queue naming `Redrive.ts` and `consumer.ts` use to recover `<api>.work.dead`.
  */
 
 import { Option as O, Schema } from "effect";
@@ -12,16 +12,6 @@ export const IDEMPOTENCY_KEY_HTTP_HEADER = "x-idempotency-key";
 
 /** A work message's identity, stable for its life. `n` alone would collide across producer restarts. */
 export const workMessageId = (run: string, n: number): string => `${run}:${n}`;
-
-/**
- * Every replica's breaker transitions go out here, `@egress/aggregator` the only subscriber. Topic, not
- * fanout, so a binding can one day filter by the `apiId` the routing key carries. Every declarer must pass
- * `{ durable: true }` — a redeclare that disagrees with the broker is a connection-closing `406`, not a warning.
- */
-export const CONTROL_EXCHANGE = "circuit.control";
-
-/** One routing key per API — `circuit.*` binds every one a deployment runs. */
-export const routingKeyFor = (apiId: string): string => `circuit.${apiId}`;
 
 /** What a work message says, declared once so encoder and decoder can't drift. Unknown fields are ignored. */
 export const WorkMessage = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
@@ -59,31 +49,6 @@ const WorkMessageJson = Schema.fromJsonString(WorkMessage);
 export const encodeWorkMessage = Schema.encodeSync(WorkMessageJson);
 export const decodeWorkMessage = Schema.decodeUnknownOption(WorkMessageJson);
 
-/** A replica's breaker state as `circuit.control` carries it — cockatiel's four, in snake case. */
-export const ReplicaState = Schema.Literals(["closed", "open", "half_open", "isolated"]);
-export type ReplicaState = typeof ReplicaState.Type;
-
-/** One breaker transition on `circuit.control`, declared once so encoder and decoder can't drift. Unknown fields are ignored. */
-export const ControlEvent = Schema.Struct({
-  apiId: Schema.String,
-  instance: Schema.String,
-  state: ReplicaState,
-  /** Epoch milliseconds, the replica's own clock. */
-  at: Schema.Int,
-});
-export type ControlEvent = typeof ControlEvent.Type;
-
-export const CONTROL_CONTENT_TYPE = "application/json";
-
-/** The AMQP `type` of a breaker transition. The aggregator declines any other type. */
-export const CONTROL_MESSAGE_TYPE = "egress.circuit.transition";
-
-export const readsControlFormat = readsFormat(CONTROL_CONTENT_TYPE, CONTROL_MESSAGE_TYPE);
-
-const ControlEventJson = Schema.fromJsonString(ControlEvent);
-export const encodeControlEvent = Schema.encodeSync(ControlEventJson);
-export const decodeControlEvent = Schema.decodeUnknownOption(ControlEventJson);
-
 /** The primary competing-consumer work queue daemons drain. */
 export const workQueueFor = (apiId: string): string => `${apiId}.work`;
 
@@ -100,7 +65,7 @@ const deadLetterArgs = (apiId: string): Record<string, unknown> => ({
 const workQueueArgs = deadLetterArgs;
 
 /**
- * Article 5's redrive election. `x-single-active-consumer` means the broker delivers to one bound consumer
+ * Article 4's redrive election. `x-single-active-consumer` means the broker delivers to one bound consumer
  * and holds the rest as backups, promoting automatically if the active one disconnects — no leader-election
  * code of this project's own. Nothing is ever published here but the trigger itself (see `consumer.ts`).
  */

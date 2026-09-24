@@ -2,9 +2,7 @@ import { Metric } from "effect";
 
 /**
  * Everything this fleet exposes to Prometheus. `breakerState` is a gauge per replica; the scrape's `instance`
- * label makes it one line per breaker on the dashboard, and nothing here aggregates them: `@egress/aggregator`
- * does that from a different signal entirely (`circuit.control`, see `consumer.ts`'s `onStateChange`), off
- * this process and off the hot path.
+ * label makes it one line per breaker on the dashboard.
  */
 
 export const calls = Metric.counter("egress_consumer_calls_total", {
@@ -20,7 +18,7 @@ export const inFlight = Metric.gauge("egress_consumer_in_flight", {
 });
 
 export const breakerState = Metric.gauge("egress_consumer_breaker_state", {
-  description: "This replica's own breaker state (0=closed 1=open 2=half-open). Every transition also reaches `@egress/aggregator` over circuit.control, which folds them into one fleet-wide verdict — see that package's own metrics for the aggregate view.",
+  description: "This replica's own breaker state (0=closed 1=open 2=half-open). Compare across instances — nothing here makes them agree.",
 });
 
 export const breakerTrips = Metric.counter("egress_consumer_breaker_trips_total", {

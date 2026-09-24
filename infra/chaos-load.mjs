@@ -1,7 +1,7 @@
 // Chaos under load: process and flaky-service faults, injected one at a time
 // against a live fleet under sustained traffic, each judged first on
 // correctness (no confirmed message ever goes missing) and only then on
-// whether the breakers/aggregator behaved the way the reports in this
+// whether the breakers behaved the way the reports in this
 // series claim they do.
 //
 //   node infra/chaos-load.mjs --list
@@ -16,7 +16,7 @@
 //
 // Correctness bar, adjusted from this series' own findings rather than
 // copied from master's harness unchanged: master's bar was "no message
-// lost, dead-letter queue empty once the scenario drains." Article 5's own
+// lost, dead-letter queue empty once the scenario drains." Article 4's own
 // report showed redrive can legitimately stall for tens of seconds with a
 // harmless backlog sitting in work.dead until an unrelated breaker
 // transition fires the next trigger — so an empty dead-letter queue is not
@@ -60,7 +60,7 @@ const auth = "Basic " + Buffer.from("guest:guest").toString("base64");
 
 // ---- reading the stack ------------------------------------------------
 
-// `undefined` on any failure, matching `breakerStates`/`fleetVerdict` below —
+// `undefined` on any failure, matching `breakerStates` below —
 // a `kill-broker` fault means this endpoint is briefly unreachable by
 // design, not a harness bug, and the settle loop below already treats
 // "no fresh answer this tick" as "not settled yet."
@@ -97,15 +97,6 @@ const breakerStates = async () => {
   const body = await res.json();
   if (body.status !== "success") return undefined;
   return body.data.result.map((r) => ({ instance: r.metric.instance, state: Number(r.value[1]) }));
-};
-
-const fleetVerdict = async () => {
-  const query = encodeURIComponent(`egress_fleet_verdict_state{apiId="${API_ID}"}`);
-  const res = await fetch(`${PROMETHEUS}/api/v1/query?query=${query}`).catch(() => undefined);
-  if (!res || !res.ok) return undefined;
-  const body = await res.json();
-  if (body.status !== "success" || body.data.result.length === 0) return undefined;
-  return Number(body.data.result[0].value[1]);
 };
 
 const setFailure = (rate, mode) =>
@@ -185,15 +176,6 @@ const FAULTS = {
     async run() {
       const names = await dockerNames(`${PROJECT}-rmq-consumer-`);
       if (names.length === 0) throw new Error("no rmq-consumer containers found");
-      console.log(`    killing ${names.join(", ")}`);
-      await Promise.all(names.map(dockerKillAndRestart));
-    },
-  },
-  "kill-aggregator": {
-    description: "SIGKILLs the aggregator, then explicitly restarts it — the already-named SPOF (article 4)",
-    async run() {
-      const names = await dockerNames(`${PROJECT}-aggregator-`);
-      if (names.length === 0) throw new Error("no aggregator container found");
       console.log(`    killing ${names.join(", ")}`);
       await Promise.all(names.map(dockerKillAndRestart));
     },
@@ -280,16 +262,11 @@ const runOneFault = async (name) => {
   // `work` is defined.
   let work;
   let breakersClosed = false;
-  let verdictClosed = false;
   let sawOpenBreaker = false;
-  let sawOpenVerdict = false;
   while (Date.now() - settleStart < SETTLE_TIMEOUT_MS) {
     const states = await breakerStates();
-    const verdict = await fleetVerdict();
     if (states?.some((s) => s.state === 1)) sawOpenBreaker = true;
-    if (verdict === 1) sawOpenVerdict = true;
     breakersClosed = states !== undefined && states.length > 0 && states.every((s) => s.state === 0);
-    verdictClosed = verdict === 0;
     work = (await queueDepth(WORK)) ?? work;
     if (work?.total === 0 && breakersClosed) break;
     await sleep(1000);
@@ -333,8 +310,6 @@ const runOneFault = async (name) => {
     settledWithinTimeout: work.total === 0 && breakersClosed,
     settleMs,
     sawOpenBreaker,
-    sawOpenVerdict,
-    verdictClosed,
   };
 
   console.log(
@@ -343,8 +318,7 @@ const runOneFault = async (name) => {
   );
   console.log(
     `  settled ${result.settledWithinTimeout ? "within" : "NOT within"} ${SETTLE_TIMEOUT_MS}ms ` +
-      `(${(settleMs / 1000).toFixed(1)}s) — breaker open seen: ${sawOpenBreaker}, verdict open seen: ${sawOpenVerdict}, ` +
-      `verdict closed at end: ${verdictClosed}`,
+      `(${(settleMs / 1000).toFixed(1)}s) — breaker open seen: ${sawOpenBreaker}`,
   );
   if (!pass) {
     console.error(

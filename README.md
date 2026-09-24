@@ -2,13 +2,12 @@
 
 One producer, one broker, a fleet of competing-consumer daemons, each with
 its own [cockatiel](https://github.com/connor4312/cockatiel) circuit
-breaker, a shared probe permit, and a single aggregator publishing one
-fleet-wide verdict. This is the fifth step in a circuit-breaker article
-series, built on `article/04-fleet-verdict`.
+breaker and a shared probe permit. This is the fourth step in a
+circuit-breaker article series, built on `article/03-probe-permit`.
 
 Every article since the first has named two problems with dead letters. A
 message could be dead-lettered without the third party ever seeing it —
-1,975 in one 15s outage in article 3, 1,777 in article 4 — and once
+1,975 in one 15s outage in article 3 — and once
 dead-lettered it stayed there after the third party recovered. This branch
 fixes both: only real attempts count toward the delivery limit, and one
 elected replica redrives what's left.
@@ -17,8 +16,6 @@ elected replica redrives what's left.
 flowchart LR
   producer["Producer"] --> queue[("payments-provider.work")]
   permit[("probe-permit\n(1 token)")]
-  control[["circuit.control"]]
-  aggregator["aggregator\n(one verdict)"]
   dead[("work.dead")]
   parked[("work.parked")]
   rtrigger[["redrive-trigger\n(SAC)"]]
@@ -40,11 +37,6 @@ flowchart LR
   b1 --> api[("Third-party API\n(flaky-upstream)")]
   b2 --> api
   b3 --> api
-  b1 -.->|"onStateChange"| control
-  b2 -.->|"onStateChange"| control
-  b3 -.->|"onStateChange"| control
-  control --> aggregator
-  aggregator -.->|"verdict"| prom[("Prometheus")]
   queue -.->|"exhausts delivery limit\n(real calls only)"| dead
   b1 -.->|"onReset"| rtrigger
   b2 -.->|"onReset"| rtrigger
@@ -54,29 +46,31 @@ flowchart LR
   dead -.->|"MAX_REDRIVES exceeded"| parked
   classDef new fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#1c1917
   class dead,parked,rtrigger new
-  linkStyle 15,16,17,18,19,20,21 stroke:#d97706,stroke-width:3px
+  linkStyle 10,11,12,13,14,15,16 stroke:#d97706,stroke-width:3px
 ```
 
 <sub>Amber: new or changed on this branch.</sub>
 
 Each replica's breaker is its own instance; nothing connects the subgraphs.
-`circuit.control` and `redrive-trigger` are both one-way fan-ins: every
-replica publishes, but only the aggregator reads the first, and RabbitMQ
-delivers the second to exactly one replica at a time.
+`redrive-trigger` is a one-way fan-in: every replica publishes to it, and
+RabbitMQ delivers to exactly one replica at a time.
 
-`infra/incident.mjs` with every call failing for 30s against 5 replicas,
-recorded 2026-09-19 (4.21× real time, also as
+`infra/capture-incident.mjs` with every call failing for 30s against 5
+replicas, then 10s of `422`s, recorded 2026-09-24 (5.79× real time, also as
 [video](docs/media/dead-letter-redrive-incident.webm)): the work queue
 climbs the whole outage while the dead-letter queue never leaves zero →
-third party restored → the work queue drains as replicas close.
+third party restored → the work queue drains as replicas close → `422`s
+dead-letter at once.
 
-![Grafana during a 30-second sustained outage: the work-queue depth climbs continuously while the dead-letter queue stays flat at zero, then the work queue drains once the third party recovers.](docs/media/dead-letter-redrive-incident.gif)
+![Grafana during a 30-second sustained outage: all five breakers open, the work-queue depth climbs continuously while the dead-letter queue stays flat at zero, then the work queue drains once the third party recovers.](docs/media/dead-letter-redrive-incident.gif)
 
 In every earlier article's recording the dead-letter panel was the one that
-moved during an outage. Here it's the one that doesn't. The recorded run:
-0 dead-lettered across the 30s outage, a peak backlog of 4,280 — the cost of
-that zero — all five breakers open at peak, and 61% breaker agreement,
-inside the 52–73% range every article has measured.
+moved during an outage. Here it's the one that doesn't. Read from
+Prometheus for the recorded run: 0 dead-lettered across the outage and the
+recovery, a peak backlog of 6,920 — the cost of that zero — and all five
+breakers open. The dead-letter queue moves only in the `422` phase at the
+end: 1,985 in 10s, each a request the third party refused, dead-lettered on
+its first delivery.
 
 ## Counted attempts
 
@@ -115,7 +109,7 @@ queue and an uncounted release for as long as the breaker stays open.
   and only then acks the original — a crash in between duplicates rather
   than loses. A pass stops at 200 messages.
 - **Gate.** The elected replica's own breaker must be closed — `master`'s
-  choice. Gating on the aggregator's verdict is an option not taken here.
+  choice, and the only view of the third party a replica has here.
 - **Triggers.** On `onReset`, once at startup, and every 30s while closed
   (`REDRIVE_SWEEP_MS`). The sweep was added after measuring the stall
   without it: `work.dead` fell from ~1,480 to 1,225 after recovery, then sat
@@ -129,27 +123,6 @@ queue and an uncounted release for as long as the breaker stays open.
 Left out of the port: `master`'s origin-queue attribution, which separates
 real work from malformed trigger messages in a shared dead-letter queue.
 Here only real work reaches `work.dead`.
-
-## The aggregator
-
-Protecting the request path and telling the rest of the system about an
-outage are different problems (`master`'s design essay). Sharing breaker
-state *before* deciding whether to call puts a network round trip and a
-shared failure domain in the hot path. So the aggregator reads events each
-replica publishes *after* deciding, and never writes back into a breaker.
-
-`packages/aggregator` is single-instance, no persistence:
-
-- Binds one queue to `circuit.control` with `circuit.*`, covering every API.
-- Keeps the latest `{state, at}` per instance, pruning any not heard from
-  in `STALENESS_MS` (60s) so a dead replica's vote expires.
-- `openFraction` is the share `open` or `half_open`; the verdict is `open`
-  at `VERDICT_THRESHOLD` (0.5) or above. Both are pure functions in
-  `Verdict.ts`, unit-tested without a broker.
-- Exports `egress_fleet_verdict_state`, `egress_fleet_open_fraction` and
-  `egress_fleet_known_replicas`, and logs every verdict change.
-
-A restart starts from an empty registry, refilled as replicas transition.
 
 ## The permit
 
@@ -192,29 +165,14 @@ One cockatiel `CircuitBreakerPolicy` per process, reused for its whole life
 **A permanent outage grows the work queue without bound.** This branch's
 own trade: `x-delivery-limit` used to move turned-away messages to
 `work.dead` after three tries, an accidental cap on backlog. Now nothing
-does — 4,280 backlogged after 30s in the recorded run, still climbing.
+does — 6,920 backlogged after 30s in the recorded run, still climbing.
 
 **A trigger arriving mid-pass is dropped, not queued.**
 
 **Redrive waits on the elected replica, not the fleet.** If it's the last
 to close, every dead letter waits on its backoff — up to 30s after the
-third party is healthy, while the rest of the fleet and the verdict already
-say `closed`.
-
-**The verdict's denominator is replicas that have transitioned, not the
-fleet.** A replica that never left `closed` never publishes. Measured: the
-verdict opened on the first two of five to trip (2/2 = 100%).
-`egress_fleet_known_replicas` and a warning on each stale-replica drop make
-this visible (`master`'s ADR 009 approach), not fixed.
-
-**The verdict gates nothing.** Its only reader is Grafana.
-
-**The aggregator is a single point of failure.** If it's down, breakers
-still protect each replica, but there is no verdict, and it restarts empty.
-
-**A failed `circuit.control` publish is lost.** Logged, not retried.
-
-**Staleness (60s) and threshold (50%) are guesses**, not tuned values.
+third party is healthy, while the rest of the fleet already says `closed`.
+Nothing outside one process knows what the fleet as a whole thinks.
 
 **Losing the permit race grows a replica's backoff** just as a failed probe
 would; cockatiel can't tell them apart.
@@ -270,8 +228,6 @@ reports:
   counts from `flaky-upstream`'s audit trail;
 - breaker agreement: the share of ticks where every replica's
   `egress_consumer_breaker_state` matched, and the peak number open;
-- verdict lag behind the first replica to trip (a negative lag is a
-  polling artifact, not foresight);
 - after the drain, how many dead letters were redriven, parked, or still
   dead when `REDRIVE_WAIT_MS` (40s) runs out;
 - then, unless `STATUS` is set, a short 422 phase: the third party refuses
@@ -294,7 +250,7 @@ The producer never reacts to anything. Combine with
 
 `infra/chaos-load.mjs` injects process and flaky-service faults under
 sustained load, and judges first whether any confirmed message went
-missing, then whether the breakers and aggregator behaved.
+missing, then whether the breakers behaved.
 
 ```bash
 node infra/chaos-load.mjs --list
@@ -307,7 +263,7 @@ Load comes from one forked publisher (`infra/chaos-publisher.mjs`); the
 compose producer is stopped for the run. Correctness is per message: every
 confirmed message must be in `flaky-upstream`'s processed set or still in
 `work`, `work.dead` or `work.parked`, or the run stops. Faults:
-`kill-one-consumer`, `kill-all-consumers`, `kill-aggregator`, `kill-broker`
+`kill-one-consumer`, `kill-all-consumers`, `kill-broker`
 (SIGKILLs RabbitMQ, the fault `master`'s ADR 016 was decided from) and
 `flaky-storm` (`error` → `hang` → `reset` → healthy under one spike).
 
@@ -333,7 +289,6 @@ packages/
   rmq-producer/  steady load onto <apiId>.work, message_id as idempotency key
   consumer/      the fleet: Breaker.ts (breaker + permit), Redrive.ts,
                  Upstream.ts (the HTTP call), consumer.ts (wiring, and decide())
-  aggregator/    one verdict per apiId: Verdict.ts (pure), aggregator.ts (wiring)
   tracing/       /metrics route; OpenTelemetry, off unless OTEL_EXPORTER_OTLP_ENDPOINT is set
 infra/
   flaky-upstream.mjs   the fake third party, with an audit trail

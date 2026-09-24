@@ -15,9 +15,7 @@ import { runConsumer } from "./consumer.ts";
  *   node src/main.ts
  *
  * One address, no replica names — a client of whatever the third party exposes. Each process gets its own
- * in-process circuit breaker (Breaker.ts) that still decides entirely for itself; it also publishes every
- * transition to `circuit.control` for `@egress/aggregator` to fold into one verdict — see consumer.ts's own
- * module doc for why that's a second, independent channel.
+ * in-process circuit breaker (Breaker.ts); nothing yet makes five replicas' breakers agree with each other.
  */
 
 const flags = {
