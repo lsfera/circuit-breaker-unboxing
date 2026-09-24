@@ -5,7 +5,10 @@ wrapping its calls to the third party in its own circuit breaker. Where
 `article/02-in-process-breaker` keeps the breaker in memory with
 [cockatiel](https://github.com/connor4312/cockatiel), here **no breaker state is
 in the process**: "open" is a consumer that isn't consuming, and the timer that
-ends it is a message the broker holds. The full write-up is
+ends it is a message the broker holds. The idea is inspired by
+[NServiceBus's delayed delivery on RabbitMQ](https://docs.particular.net/transports/rabbitmq/delayed-delivery),
+which builds any delay out of queue TTLs and dead-lettering; here the delayed
+message is the breaker's wake-up. The full write-up is
 [docs/rabbitmq-held-breaker.md](docs/rabbitmq-held-breaker.md).
 
 Four things are added on top, the same four
@@ -92,8 +95,9 @@ fact about the broker rather than a variable:
   before requeueing, and every rejection spent one of the message's three
   delivery attempts (see *Measured* below).
 - **The hold is a message.** `packages/rmq/src/DelayedDelivery.ts` is the
-  NServiceBus-style delay chain
-  ([Particular's delayed delivery](https://docs.particular.net/transports/rabbitmq/delayed-delivery)):
+  delay chain borrowed from NServiceBus
+  ([Particular's delayed delivery](https://docs.particular.net/transports/rabbitmq/delayed-delivery)),
+  with 17 levels instead of 28:
   a queue per bit, level *n* with a TTL of exactly 2<sup>n</sup> seconds,
   dead-lettering into level *n−1*; a delay is its binary digits in the routing
   key, and each level either holds the message for its bit or passes it down.
