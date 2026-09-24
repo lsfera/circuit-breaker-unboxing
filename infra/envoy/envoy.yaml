@@ -111,17 +111,20 @@ static_resources:
                         - match: { prefix: "/payments" }
                           route:
                             cluster: payments-provider
-                            timeout: 5s
+                            # Under the daemon's own 2s, so Envoy gives up
+                            # (504) before the caller does: the other way
+                            # round, Envoy kept retrying a request the daemon
+                            # had already counted as failed and republished.
+                            timeout: 1.8s
                             retry_policy: &retry_policy
-                              # No retry_budget here, and with several
-                              # endpoints per cluster that now matters: a
-                              # retry lands on a *different* host, so it is
-                              # genuine failover rather than the same dying
-                              # host hit three times. A budget capping
-                              # concurrent retries as a fraction of active
-                              # requests is still the better shape at real
-                              # fleet size - see the README.
-                              retry_on: 5xx,reset,connect-failure
+                              # Only failures that never reached the third
+                              # party: a connection refused or a stream the
+                              # host refused. A 5xx is the daemon's to retry,
+                              # against its per-message budget
+                              # (x-egress-attempts); retrying it here too made
+                              # every attempt up to three calls, at exactly
+                              # the moment the third party was failing.
+                              retry_on: connect-failure,refused-stream
                               num_retries: 2
                               retry_back_off:
                                 base_interval: 0.05s
@@ -129,12 +132,12 @@ static_resources:
                         - match: { prefix: "/shipping" }
                           route:
                             cluster: shipping-rates
-                            timeout: 5s
+                            timeout: 1.8s
                             retry_policy: *retry_policy
                         - match: { prefix: "/tax" }
                           route:
                             cluster: tax-calc
-                            timeout: 5s
+                            timeout: 1.8s
                             retry_policy: *retry_policy
                 http_filters:
                   # Layer 4 (see README) - infers a concurrency limit from

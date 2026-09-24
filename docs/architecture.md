@@ -29,7 +29,12 @@ problems that get given one name:
 - **`retry_budget`** — caps concurrent retries as a fraction of active requests.
   Without it, outlier ejection plus retries amplifies load onto whatever hosts
   are left. Not in `infra/envoy/envoy.yaml`, which uses the older `max_retries`
-  threshold; a budget is the better shape at real fleet size.
+  threshold, and there it matters less: the route retries only failures that
+  never reached the third party (`connect-failure`, `refused-stream`). A 5xx is
+  the daemon's to retry against its per-message budget, and the route's 1.8s
+  timeout is under the daemon's 2s, so Envoy gives up before its caller does.
+  Retrying 5xx here too, with a 5s timeout, made every daemon attempt up to
+  three calls and kept retrying requests the daemon had already abandoned.
 - **`adaptive_concurrency` filter** — infers a concurrency limit from observed
   latency (a gradient controller against a periodically recalculated minimum
   RTT) instead of a hand-picked static number. It sits in the shared
