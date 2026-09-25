@@ -222,7 +222,8 @@ packages/
   config/      @egress/config — settings declared once, decoded at boot
   rmq/         @egress/rmq — Effect wrapper over amqplib, plus the generic
                work-queue naming/options a producer and a consumer fleet share
-  rmq-producer/  the load: a steady stream onto <apiId>.work, never backing off
+  rmq-producer/  the load: a steady stream onto <apiId>.work in confirmed batches,
+                 never backing off
   consumer/    the competing-consumer fleet, each with its own in-process
                breaker (src/Breaker.ts)
   tracing/     the /metrics HTTP route every process serves; OpenTelemetry

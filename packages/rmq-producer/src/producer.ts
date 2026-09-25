@@ -39,39 +39,47 @@ export const runProducer = Effect.fnUntraced(function* (cfg: ProducerConfig) {
   // own it would reissue the idempotency key of different work after a restart.
   const run = randomUUID().slice(0, 8);
   let sent = 0;
+  // A failed batch is skipped, not fatal: one nack or a publish channel closing under
+  // an unconfirmed batch would otherwise end the loop and the process. Logged on the
+  // edges only; `lost` still ends the process.
+  let failing = false;
 
   yield* Effect.log(`${cfg.apiId}/producer: up — ${cfg.ratePerSecond}/s onto ${queue}`);
 
   yield* Effect.gen(function* () {
-    // Concurrent, because `send` waits for the broker's confirm and a sequential batch would pay that round trip per
-    // message inside the tick; AMQP pipelines confirms, and the messages are independent units of work.
-    // `messageId` is stamped once here and is the idempotency key the consumer sends: a redelivery is the same
-    // message with the same id.
+    // One batch per tick: published back to back on the confirm channel and confirmed together, one round trip
+    // for the tick rather than one per message. `messageId` is stamped once here and is the idempotency key the
+    // consumer sends: a redelivery is the same message with the same id.
     const batch = Array.from({ length: perTick }, () => {
       const n = sent++;
       return { body: encodeWorkMessage({ apiId: cfg.apiId, n }), messageId: workMessageId(run, n) };
     });
-    yield* Effect.forEach(
-      batch,
-      ({ body, messageId }) =>
-        // The root of every trace: the sampler decides here alone (`@egress/rmq` stamps a traceparent only when a span
-        // is active and downstream spans are ParentBased), so a message is followed the whole way or not at all.
-        rmq.send(publisher, body, { messageId }).pipe(
-          Effect.withSpan("work.publish", {
-            attributes: {
-              "messaging.system": "rabbitmq",
-              "messaging.operation.name": "publish",
-              "messaging.destination.name": queue,
-              "egress.api_id": cfg.apiId,
-            },
-          }),
-        ),
-      { concurrency: "unbounded", discard: true },
+    const published = yield* rmq.sendBatch(publisher, batch).pipe(
+      // The root of every trace: the sampler decides here alone (`@egress/rmq` stamps a traceparent only when a span
+      // is active and downstream spans are ParentBased), so a tick's messages are followed the whole way or not at all.
+      Effect.withSpan("work.publish", {
+        attributes: {
+          "messaging.system": "rabbitmq",
+          "messaging.operation.name": "publish",
+          "messaging.destination.name": queue,
+          "messaging.batch.message_count": batch.length,
+          "egress.api_id": cfg.apiId,
+        },
+      }),
+      Effect.as(true),
+      Effect.catch((error) =>
+        failing
+          ? Effect.succeed(false)
+          : Effect.as(Effect.logWarning(`${cfg.apiId}/producer: publishing failed, still trying — ${error.message}`), false),
+      ),
     );
+    yield* published && failing ? Effect.log(`${cfg.apiId}/producer: publishing again`) : Effect.void;
+    failing = !published;
     // Publish rate is read from RabbitMQ's own metrics, not republished here.
-    if (sent % (cfg.ratePerSecond * 10) < perTick) {
-      yield* Effect.log(`${cfg.apiId}/producer: ${sent} messages published`);
-    }
+    yield* Effect.when(
+      Effect.log(`${cfg.apiId}/producer: ${sent} messages published`),
+      Effect.sync(() => sent % (cfg.ratePerSecond * 10) < perTick),
+    );
     // `fixed`, not `spaced`: spaced waits after each batch, so the period becomes 100ms plus the broker's confirm
     // time and the producer would quietly back off exactly when the queue is deepest. `fixed` keeps the cadence and
     // skips a tick that overruns.
