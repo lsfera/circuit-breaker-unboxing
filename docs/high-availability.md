@@ -76,6 +76,9 @@ delivery that fails its retries is appended to a per-API outbox in Redis
 (`Outbox.ts`), and the leader drains it:
 
 - **only the leader drains**, or every event would be delivered twice;
+- **nothing overtakes it**: deliveries for one API run one after another, and
+  while the outbox holds anything for that API a new event is appended behind
+  it rather than posted. Posting it directly would deliver 8 before a stuck 7;
 - **in order, stopping at the first failure**, since skipping a stuck event
   manufactures a gap;
 - **committed only after delivery**, by position: `peek` returns where its

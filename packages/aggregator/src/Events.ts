@@ -2,6 +2,7 @@ import {
   Array as Arr,
   Context,
   DateTime,
+  Deferred,
   Duration,
   Effect,
   Layer,
@@ -166,13 +167,48 @@ export const makeWebhookSink = Effect.fnUntraced(function* (url: string): Effect
         Effect.timeout(Duration.seconds(2)),
       );
 
-    const deliver = (event: CircuitEvent) => {
+    /**
+     * Everything that reaches the subscriber for one API goes through here, in the
+     * order it was registered: each delivery waits for the one before it. Forked
+     * POSTs used to race, and an event posted while an earlier one sat in the
+     * outbox overtook it.
+     */
+    const tails = new Map<string, Effect.Effect<void>>();
+    const inOrder = <A, E>(apiId: string, effect: Effect.Effect<A, E>): Effect.Effect<A, E> => {
+      const done = Deferred.makeUnsafe<void>();
+      const previous = tails.get(apiId) ?? Effect.void;
+      tails.set(apiId, Deferred.await(done));
+      return previous.pipe(Effect.andThen(effect), Effect.ensuring(Deferred.succeed(done, undefined)));
+    };
+
+    const keep = (event: CircuitEvent) => {
+      const apiId = event.data.apiId;
+      return outbox.append(event).pipe(
+        Effect.flatMap((dropped) =>
+          dropped > 0
+            ? Effect.all([
+                Metric.update(Metric.withAttributes(Telemetry.outboxDropped, { apiId }), dropped),
+                Effect.logWarning(
+                  `outbox for ${apiId} is full — dropped ${dropped} of the oldest ` +
+                    `undelivered events; the subscriber will see a gap`,
+                ),
+              ], { discard: true })
+            : Effect.void,
+        ),
+        // An unreachable outbox loses the event, counted; never a failed tick.
+        Effect.catchCause((cause) =>
+          Effect.logWarning(`could not persist an undelivered event for ${apiId}`, cause),
+        ),
+      );
+    };
+
+    const send = (event: CircuitEvent) => {
       const apiId = event.data.apiId;
       const attempt = post(event).pipe(
         Effect.retry(DELIVERY_RETRY),
         Effect.tapError(() => Metric.update(Metric.withAttributes(Telemetry.webhookFailed, { apiId }), 1)),
       );
-      return Effect.timed(attempt).pipe(
+      const direct = Effect.timed(attempt).pipe(
         Effect.tap(([duration]) =>
           Metric.update(
             Metric.withAttributes(Telemetry.webhookDeliveryDuration, { apiId }),
@@ -195,34 +231,21 @@ export const makeWebhookSink = Effect.fnUntraced(function* (url: string): Effect
                 ].slice(-DEAD_LETTER_BUFFER),
               ),
               Metric.update(Metric.withAttributes(Telemetry.webhookDeadLettered, { apiId }), 1),
-              outbox.append(event).pipe(
-                Effect.flatMap((dropped) =>
-                  dropped > 0
-                    ? Effect.all([
-                        Metric.update(
-                          Metric.withAttributes(Telemetry.outboxDropped, { apiId }),
-                          dropped,
-                        ),
-                        Effect.logWarning(
-                          `outbox for ${apiId} is full — dropped ${dropped} of the oldest ` +
-                            `undelivered events; the subscriber will see a gap`,
-                        ),
-                      ], { discard: true })
-                    : Effect.void,
-                ),
-                // An unreachable outbox loses the event, counted; never a failed tick.
-                Effect.catchCause((cause) =>
-                  Effect.logWarning(`could not persist an undelivered event for ${apiId}`, cause),
-                ),
-              ),
+              keep(event),
             ],
             { discard: true },
           ),
         ),
-        Effect.forkChild,
-        Effect.asVoid,
+      );
+      // Behind anything already waiting in the outbox, or it would arrive first.
+      return outbox.depth(apiId).pipe(
+        Effect.orElseSucceed(() => 0),
+        Effect.flatMap((waiting) => (waiting > 0 ? keep(event) : direct)),
       );
     };
+
+    const deliver = (event: CircuitEvent) =>
+      Effect.suspend(() => Effect.forkChild(inOrder(event.data.apiId, send(event)))).pipe(Effect.asVoid);
 
     /**
      * Oldest first per API, stopping at the first failure: delivering 8 while 7
@@ -288,7 +311,11 @@ export const makeWebhookSink = Effect.fnUntraced(function* (url: string): Effect
 
     const drainPass = Effect.gen(function* () {
       const apis = yield* outbox.apis;
-      const replayed = Arr.reduce(yield* Effect.forEach(apis, drainApi), 0, (a, b) => a + b);
+      const replayed = Arr.reduce(
+        yield* Effect.forEach(apis, (apiId) => inOrder(apiId, drainApi(apiId))),
+        0,
+        (a, b) => a + b,
+      );
       yield* replayed > 0
         ? Effect.logInfo(`replayed ${replayed} event(s) from the outbox`)
         : Effect.void;
