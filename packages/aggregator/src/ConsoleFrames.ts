@@ -215,9 +215,6 @@ export const makeAttention = Effect.fnUntraced(function* (
       Metric.update(Telemetry.consoleAttentionStreams, n),
     );
 
-  const liveTail = (subscription: PubSub.Subscription<PatchEntry>) =>
-    Stream.fromSubscription(subscription).pipe(Stream.map((entry) => entry.bytes));
-
   const connect = (lastEventId: O.Option<number>): Stream.Stream<Uint8Array> =>
     Stream.unwrap(
       Effect.gen(function* () {
@@ -239,17 +236,23 @@ export const makeAttention = Effect.fnUntraced(function* (
             after <= snap.revision,
         );
 
-        const prefix: Stream.Stream<Uint8Array> = O.match(resumeFrom, {
-          onSome: (after) =>
-            Stream.fromIterable(buffered.filter((p) => p.revision > after).map((p) => p.bytes)),
-          onNone: () =>
-            Stream.concat(
-              Stream.succeed(snap.encodedSnapshot),
-              Stream.fromIterable(buffered.filter((p) => p.revision > snap.revision).map((p) => p.bytes)),
-            ),
+        // The live tail is filtered too: the tick sets `current` before it publishes the
+        // patch, so a connection landing between the two reads revision N in the snapshot
+        // and then gets patch N again from the tail. Each revision goes out once.
+        const after = O.getOrElse(resumeFrom, () => snap.revision);
+        const newer = (entry: PatchEntry) => entry.revision > after;
+        const snapshot = O.match(resumeFrom, {
+          onSome: () => Stream.empty,
+          onNone: () => Stream.succeed(snap.encodedSnapshot),
         });
 
-        return Stream.concat(prefix, liveTail(subscription));
+        return Stream.concat(
+          snapshot,
+          Stream.concat(Stream.fromIterable(buffered), Stream.fromSubscription(subscription)).pipe(
+            Stream.filter(newer),
+            Stream.map((entry) => entry.bytes),
+          ),
+        );
       }),
     ).pipe(Stream.onStart(track(1)), Stream.ensuring(track(-1)));
 
