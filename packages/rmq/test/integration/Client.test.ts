@@ -646,7 +646,7 @@ test("get is a non-blocking fetch: empty returns None, and an unsettled message 
   await run(
     Effect.gen(function* () {
       const rmq = yield* Rmq;
-      // The probe permit's shape (packages/consumer/src/Permit.ts): at most one
+      // The probe permit's shape (packages/rmq-consumer/src/Permit.ts): at most one
       // ready token — `get` doesn't need that to behave, but it is the
       // real caller.
       yield* rmq.declareQueue(queue, {

@@ -79,12 +79,12 @@ services:
     deploy: *limits-producer
 
   # One service, scaled: `docker compose up -d --scale rmq-consumer=N` is the whole of resizing the fleet. Every
-  # replica is anonymous and runs its own circuit breaker (packages/consumer/src/Breaker.ts) whose open state is a
+  # replica is anonymous and runs its own circuit breaker (packages/rmq-consumer/src/Breaker.ts) whose open state is a
   # token in RabbitMQ's delay chain; nothing coordinates the fleet's breakers. Prometheus tells replicas apart by the
   # IP DNS hands back for the service name (see infra/monitoring/prometheus.yml).
   rmq-consumer:
     <<: *rmq-node
-    command: node packages/consumer/src/main.ts
+    command: node packages/rmq-consumer/src/main.ts
     environment:
       <<: *rmq-node-env
       # One address, the fake third party directly: the address a real client of a real third party would be given.

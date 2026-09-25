@@ -64,7 +64,7 @@ flowchart LR
 
 ## The breaker
 
-`packages/consumer/src/Breaker.ts` is a three-phase machine, and each phase is a
+`packages/rmq-consumer/src/Breaker.ts` is a three-phase machine, and each phase is a
 fact about the broker rather than a variable:
 
 | phase | in the broker | leaves when |
@@ -211,7 +211,7 @@ puts on top of cockatiel. Neither needs new infrastructure.
 
 ### One probe at a time: the permit
 
-`packages/consumer/src/Permit.ts`: a queue with `x-max-length: 1` and
+`packages/rmq-consumer/src/Permit.ts`: a queue with `x-max-length: 1` and
 `x-overflow: reject-publish`. Every replica seeds a token at startup; RabbitMQ
 keeps one and nacks the rest, which counts as success. A half-open replica's
 probe message is delivered as before, but the call needs the token: a
@@ -248,7 +248,7 @@ for 90 s:
 
 ### A way back from `work.dead`: the redrive
 
-`packages/consumer/src/Redrive.ts`, ported from article 3:
+`packages/rmq-consumer/src/Redrive.ts`, ported from article 3:
 
 - **Election**: a `redrive-trigger` queue with `x-single-active-consumer`.
   RabbitMQ delivers to one replica and promotes another if it goes.
@@ -477,11 +477,11 @@ packages/
                and DelayedDelivery.ts: the delay chain a breaker's hold is made of
   rmq-producer/  the load: a steady stream onto <apiId>.work in confirmed batches,
                  never backing off
-  consumer/    the competing-consumer fleet, each with its own breaker whose
-               state is the broker's (src/Breaker.ts), the fleet's one probe
-               permit (src/Permit.ts), the dead-letter redrive
-               (src/Redrive.ts) and the concurrency limit learned from 429s
-               (src/Limiter.ts), wired together in src/consumer.ts
+  rmq-consumer/  the competing-consumer fleet, each with its own breaker whose
+                 state is the broker's (src/Breaker.ts), the fleet's one probe
+                 permit (src/Permit.ts), the dead-letter redrive
+                 (src/Redrive.ts) and the concurrency limit learned from 429s
+                 (src/Limiter.ts), wired together in src/consumer.ts
   tracing/     the /metrics HTTP route every process serves; OpenTelemetry
                tracing is wired but off unless OTEL_EXPORTER_OTLP_ENDPOINT is set
 infra/
