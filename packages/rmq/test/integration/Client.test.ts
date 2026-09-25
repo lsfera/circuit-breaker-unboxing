@@ -152,6 +152,43 @@ test("a publish to a queue that does not exist fails as unroutable instead of va
   assert.equal(Exit.isFailure(exit) && exit.cause.reasons.some((r) => r._tag === "Fail" && r.error instanceof RmqError && isUnroutable(r.error)), true);
 });
 
+test("sendBatch delivers every message in order, each with its own message id", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const queue = `batch.${Date.now()}`;
+  const seen: Array<{ body: string; messageId: O.Option<string> }> = [];
+  const messages = Array.from({ length: 50 }, (_, n) => ({ body: `m${n}`, messageId: `run:${n}` }));
+
+  await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(queue);
+      yield* rmq.consume(queue, (body, d) => void seen.push({ body, messageId: d.messageId }));
+      yield* rmq.sendBatch(yield* rmq.publisherToQueue(queue), messages);
+      yield* waitFor(() => seen.length >= messages.length);
+    }),
+  );
+
+  assert.deepEqual(
+    seen,
+    messages.map(({ body, messageId }) => ({ body, messageId: O.some(messageId) })),
+  );
+});
+
+test("a batch to a queue that does not exist fails as unroutable", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const exit = await run(
+    Effect.gen(function* () {
+      const rmq = yield* Rmq;
+      const pub = yield* rmq.publisherToQueue(`nobody.home.${Date.now()}`);
+      return yield* Effect.exit(rmq.sendBatch(pub, [{ body: "a" }, { body: "b" }]));
+    }),
+  );
+
+  assert.equal(Exit.isFailure(exit) && exit.cause.reasons.some((r) => r._tag === "Fail" && r.error instanceof RmqError && isUnroutable(r.error)), true);
+});
+
 test("a publish to an existing queue, and to a topic with no bindings, still succeeds", async (t) => {
   if (skipIfNoDocker(t)) return;
 

@@ -475,7 +475,8 @@ packages/
   rmq/         @egress/rmq — Effect wrapper over amqplib, the generic
                work-queue naming/options a producer and a consumer fleet share,
                and DelayedDelivery.ts: the delay chain a breaker's hold is made of
-  rmq-producer/  the load: a steady stream onto <apiId>.work, never backing off
+  rmq-producer/  the load: a steady stream onto <apiId>.work in confirmed batches,
+                 never backing off
   consumer/    the competing-consumer fleet, each with its own breaker whose
                state is the broker's (src/Breaker.ts), the fleet's one probe
                permit (src/Permit.ts), the dead-letter redrive
