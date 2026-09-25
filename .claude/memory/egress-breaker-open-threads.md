@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: d23c6dbd-5c0e-471a-a8fc-5ed6afc8c7c7
-  modified: 2026-09-25T11:32:36.180Z
+  modified: 2026-09-25T14:32:33.431Z
 ---
 
 As of 2026-09-13. Verify against `git log` and the ADRs before acting.
@@ -74,9 +74,10 @@ As of 2026-09-13. Verify against `git log` and the ADRs before acting.
   (one commit each, up to 8061161dbf), plus a redrive bug the review
   surfaced (1bce156431: capped passes closed their channel before the
   confirms arrived and replayed work several times). 02/03 redrive with
-  `get`, so they don't have it. Still open: the aggregator's own
-  subscriber-integrity `record` in Http.ts ranks by sequence only (the same
-  lease blindness fixed in the subscriber and Contract); and the user's
+  `get`, so they don't have it. Http.ts `record` made lease-aware too
+  (c0b27027a2). `sendBatch` and the Trace.ts tests were backported to
+  01, 02-in-process, 02-rabbitmq-only and 03 (local commits, not pushed).
+  Still open: the user's
   "native prometheus rabbitmq monitor" request is waiting on which
   difference from 03 they meant.
 
