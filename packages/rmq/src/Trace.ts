@@ -17,10 +17,7 @@ export const traceparent: Effect.Effect<O.Option<string>> = Effect.map(
 );
 
 /** `None` for anything unparseable: a bad header loses a trace, never a message. */
-export const parentFrom = (header: string | undefined): O.Option<Tracer.ExternalSpan> => {
-  if (header === undefined) return O.none();
-  const match = TRACEPARENT_RE.exec(header);
-  if (match === null) return O.none();
-  return O.some(Tracer.externalSpan({ traceId: match[1]!, spanId: match[2]! }));
-};
-
+export const parentFrom = (header: string): O.Option<Tracer.ExternalSpan> =>
+  O.map(O.fromNullOr(TRACEPARENT_RE.exec(header)), ([, traceId = "", spanId = ""]) =>
+    Tracer.externalSpan({ traceId, spanId }),
+  );
