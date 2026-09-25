@@ -88,18 +88,26 @@ const run = (settings: Settings) => {
     catch: (cause) => new Error(`GET /api/subscriber failed: ${String(cause)}`),
   }).pipe(Effect.flatMap(decodeSubscriber));
 
+  /** A refusal is a failure too: a 400 here means the incident this demo narrates never started. */
+  const post = (url: string, body: unknown) =>
+    Effect.tryPromise({
+      try: () =>
+        fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+      catch: (cause) => new Error(`POST ${url} failed: ${String(cause)}`),
+    }).pipe(
+      Effect.filterOrFail(
+        (res) => res.ok,
+        (res) => new Error(`POST ${url} answered ${res.status}`),
+      ),
+      Effect.asVoid,
+    );
+
   const setFailureRate = (apiId: string, rate: number) => {
-    if (FAILURE_MODE === "sim") {
-      return Effect.tryPromise({
-        try: () =>
-          fetch(`${ORIGIN}/api/failure`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ apiId, rate }),
-          }),
-        catch: (cause) => new Error(`POST /api/failure failed: ${String(cause)}`),
-      });
-    }
+    if (FAILURE_MODE === "sim") return post(`${ORIGIN}/api/failure`, { apiId, rate });
     const ports = UPSTREAM_PORTS[apiId];
     if (ports === undefined) {
       return Effect.fail(
@@ -108,22 +116,7 @@ const run = (settings: Settings) => {
         ),
       );
     }
-    return Effect.forEach(
-      ports,
-      (port) => {
-        const url = `${FLAKY_UPSTREAM}:${port}/__fail`;
-        return Effect.tryPromise({
-          try: () =>
-            fetch(url, {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ rate }),
-            }),
-          catch: (cause) => new Error(`POST ${url} failed: ${String(cause)}`),
-        });
-      },
-      { discard: true },
-    );
+    return Effect.forEach(ports, (port) => post(`${FLAKY_UPSTREAM}:${port}/__fail`, { rate }), { discard: true });
   };
 
   /** `null`: no series, i.e. no daemons for this API, as opposed to zero. */

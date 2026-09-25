@@ -1,4 +1,4 @@
-import { Array as Arr, Clock, Effect, Layer, Metric, Option as O, Result } from "effect";
+import { Array as Arr, Clock, Data, Effect, Layer, Metric, Option as O, Result } from "effect";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import { dirname, join } from "node:path";
@@ -15,6 +15,12 @@ import type { ApiSpec } from "./FleetSource.ts";
  * - One sink per aggregator: a sink cluster with two endpoints load-balances the
  *   stream, and each aggregator computes a quorum from a partial fleet.
  */
+
+/** The gRPC sink could not listen: without it no replica can report, so startup fails. */
+export class MetricsSinkUnavailable extends Data.TaggedError("MetricsSinkUnavailable")<{
+  readonly port: number;
+  readonly cause: string;
+}> {}
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PROTO_DIR = join(HERE, "..", "proto");
@@ -128,16 +134,16 @@ export const EnvoyPushFleetLayer = (
         },
       });
 
-      yield* Effect.promise(
-        () =>
+      // A port already taken is a configuration error to report, not a defect.
+      yield* Effect.tryPromise({
+        try: () =>
           new Promise<void>((resolve, reject) => {
-            server.bindAsync(
-              `0.0.0.0:${port}`,
-              grpc.ServerCredentials.createInsecure(),
-              (err) => (err ? reject(err) : resolve()),
+            server.bindAsync(`0.0.0.0:${port}`, grpc.ServerCredentials.createInsecure(), (err) =>
+              err ? reject(err) : resolve(),
             );
           }),
-      );
+        catch: (cause) => new MetricsSinkUnavailable({ port, cause: String(cause) }),
+      });
 
       yield* Effect.logInfo(`envoy metrics sink listening on 0.0.0.0:${port}`);
 
