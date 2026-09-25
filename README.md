@@ -419,7 +419,7 @@ packages/
                  options and wire schemas shared by every process
                  (ControlPlane.ts)
   rmq-producer/  steady load onto <apiId>.work in confirmed batches, message_id as idempotency key
-  consumer/      the fleet: Breaker.ts (breaker + permit),
+  rmq-consumer/  the fleet: Breaker.ts (breaker + permit),
                  Limiter.ts (the concurrency limit learned from 429s), Redrive.ts,
                  Upstream.ts (the HTTP call), consumer.ts (wiring, and decide())
   tracing/       /metrics route; OpenTelemetry, off unless OTEL_EXPORTER_OTLP_ENDPOINT is set

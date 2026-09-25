@@ -29,7 +29,7 @@ RUN npm install --global "$(node -p 'require("./package.json").packageManager')"
 # missing here installs none of its dependencies, and the failure surfaces as
 # ERR_MODULE_NOT_FOUND at runtime rather than as a build error. Adding
 # @egress/tracing is exactly how that was learned.
-COPY packages/consumer/package.json packages/consumer/
+COPY packages/rmq-consumer/package.json packages/rmq-consumer/
 COPY packages/config/package.json packages/config/
 COPY packages/rmq/package.json packages/rmq/
 COPY packages/rmq-producer/package.json packages/rmq-producer/
@@ -71,4 +71,4 @@ USER node
 # Overridden per service in docker-compose.yml. The default is the consumer
 # because a container started with no arguments should do the thing this repo
 # is named after: pull work off the queue and call the third party.
-CMD ["node", "packages/consumer/src/main.ts"]
+CMD ["node", "packages/rmq-consumer/src/main.ts"]

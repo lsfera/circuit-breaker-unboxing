@@ -1,5 +1,5 @@
 {
-  "name": "@egress/consumer",
+  "name": "@egress/rmq-consumer",
   "private": true,
   "type": "module",
   "description": "The competing-consumer fleet: pulls off <apiId>.work and calls the third party through an in-process circuit breaker (cockatiel). Each replica's breaker is independent; a shared probe-permit queue only keeps their half-open probes from bursting together — it doesn't make them agree.",

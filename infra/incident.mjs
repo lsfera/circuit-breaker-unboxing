@@ -1,8 +1,8 @@
 // Drives one incident against the fleet and reports what actually happened —
 // including whether five independent, in-process breakers agree with each
 // other about the same third party (they share nothing, see
-// packages/consumer/src/Breaker.ts), since article 3, whether the messages
-// this incident dead-lettered actually come back (packages/consumer/src/
+// packages/rmq-consumer/src/Breaker.ts), since article 3, whether the messages
+// this incident dead-lettered actually come back (packages/rmq-consumer/src/
 // Redrive.ts), and since article 3, how long the fleet as a whole took to
 // read open (infra/monitoring/rules.yml) after the first replica noticed —
 // measured, not asserted, same as everything else here.

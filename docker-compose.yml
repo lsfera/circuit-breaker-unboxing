@@ -93,13 +93,13 @@ services:
   # One service, scaled — `docker compose up -d --scale rmq-consumer=N` is
   # the whole of resizing the fleet. Every replica is anonymous: there is no
   # hash-space position, no floor, no election, and now an in-process circuit
-  # breaker (packages/consumer/src/Breaker.ts) that is entirely this
+  # breaker (packages/rmq-consumer/src/Breaker.ts) that is entirely this
   # replica's own — nothing here coordinates the fleet's breakers with each
   # other. Prometheus tells replicas apart by the IP DNS hands back for the
   # service name (see infra/monitoring/prometheus.yml).
   rmq-consumer:
     <<: *rmq-node
-    command: node packages/consumer/src/main.ts
+    command: node packages/rmq-consumer/src/main.ts
     environment:
       <<: *rmq-node-env
       # One address, the fake third party directly — no proxy, no LB we
