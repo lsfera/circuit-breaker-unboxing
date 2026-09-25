@@ -1,38 +1,15 @@
 /**
- * What this stack costs, measured automatically, inside an envelope that makes
- * two runs comparable.
+ * What this stack costs, inside a declared envelope (ADR 014).
  *
- *   node infra/instrument.mjs                  # the demo scenario, the default
+ *   node infra/instrument.mjs                  # the demo scenario
  *   node infra/instrument.mjs idle --seconds=60
  *   node infra/instrument.mjs chaos:leader
- *   node infra/instrument.mjs demo --baseline history/runs/baseline-demo-2026-09-12.json
+ *   node infra/instrument.mjs demo --baseline docs/runs/baseline-demo-2026-09-12.json
  *
- * Every resource number this repo has published so far came from a human
- * reading `docker stats` on one machine, on a stack with no limits on it. Both
- * halves of that are the problem. The reading is a moment rather than a run,
- * and an unbounded container is sized by whatever the host had spare — so the
- * same scenario on a 16-core workstation and a 4-core laptop produce numbers
- * that cannot be compared, and neither of them is wrong.
- *
- * So two things here, and the second is what makes the first mean anything:
- *
- * 1. **Instrumentation.** Docker's own stats stream, one sample per second per
- *    container, over the Engine API rather than the CLI — the API carries the
- *    cgroup counters `docker stats` formats away, including the one that says
- *    whether the measurement is trustworthy at all (`throttling_data`).
- * 2. **An envelope.** Every service in docker-compose.yml declares
- *    `deploy.resources.limits`, and this refuses to produce a record from a
- *    stack that does not. A number measured against an unbounded container is
- *    a number about the host.
- *
- * It exits non-zero when the run was not repeatable — a service without
- * limits, a container the kernel throttled past its budget, an OOM kill, or a
- * scenario that failed — because those are the conditions under which the
- * numbers it printed should not be quoted. Records land in history/runs/.
- *
- * Runs from the devcontainer against `docker compose up -d`: it needs the
- * Docker socket and it reaches the stack by service name, exactly like
- * infra/chaos.mjs.
+ * Samples Docker's stats stream per container per second over the Engine API
+ * (which carries `throttling_data`), and exits non-zero when the run should not
+ * be quoted: a service without limits, throttling past budget, an OOM kill, or a
+ * failed scenario. Records land in docs/runs/. Needs the Docker socket.
  */
 
 import http from "node:http";
@@ -43,13 +20,7 @@ import { dirname, basename } from "node:path";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const args = process.argv.slice(2);
-/**
- * `--name=value` and `--name value` both, because the second is what anyone
- * types and silently taking `true` for the path they meant crashes after the
- * run rather than before it — three minutes of stack time already paid for. A
- * boolean default marks the flags that take no value, so a scenario name
- * standing after one is not eaten as its argument.
- */
+/** Both `--name=value` and `--name value`; boolean defaults mark flags that take no value. */
 const flag = (name, fallback) => {
   const at = args.findIndex((a) => a === `--${name}` || a.startsWith(`--${name}=`));
   if (at < 0) return fallback;
@@ -64,46 +35,19 @@ const SECONDS = Number(flag("seconds", 45));
 const PROJECT = flag("project", process.env.COMPOSE_PROJECT_NAME ?? "workspace");
 const PROMETHEUS = flag("prometheus", "http://prometheus:9090");
 const BASELINE = flag("baseline", null);
-/**
- * How much CPU throttling a run may contain and still be worth quoting, as a
- * percentage of the container's scheduling periods.
- *
- * Not zero, and that took a measurement to accept. The cgroup quota is
- * enforced per 100ms period, so a container whose busiest *second* is 0.23
- * cpus can still exceed a 0.5 cpu quota inside one of those periods — the
- * traffic generator did, five times in 428, against a ceiling more than twice
- * its measured peak. Sub-second bursts are what a quota clips first, and no
- * headroom short of "no limit at all" removes them entirely.
- *
- * So the question is not whether the kernel ever intervened but whether it
- * intervened enough to be what the numbers are about. Under a percent, with
- * the scenario still passing, it is not.
- */
+/** % of scheduling periods throttled. Not zero: a quota is per 100 ms, so sub-second bursts are clipped at any headroom. */
 const THROTTLE_BUDGET = Number(flag("throttle-budget", 1));
-/**
- * Below this many observed periods, a throttle share is noise rather than
- * signal and is not flagged as a budget violation, whatever the percentage.
- *
- * `throttledOf` is the number of CFS periods the container was even
- * scheduled in during the window; a near-idle service (alertmanager in the
- * demo scenario, say) can have only one or two, so a single throttle inside
- * a tiny burst reads as 100% throttled. At the default 100ms period, 20
- * periods is 2 seconds of runnable time — enough that a percentage over it
- * says something about sustained pressure rather than one unlucky period.
- */
+/** A near-idle container's one throttled period is not 100% pressure; 20 periods is 2 s runnable. */
 const MIN_THROTTLE_PERIODS = Number(flag("min-throttle-periods", 20));
 /** The one way to get a record out of an unbounded stack: how the limits in
  *  docker-compose.yml were sized in the first place. It stamps the record. */
 const ALLOW_UNLIMITED = flag("allow-unlimited", false) === true;
 const OUT = flag(
   "out",
-  `history/runs/${SCENARIO.replace(":", "-")}-${new Date().toISOString().replace(/[:.]/g, "-")}.json`,
+  `docs/runs/${SCENARIO.replace(":", "-")}-${new Date().toISOString().replace(/[:.]/g, "-")}.json`,
 );
 
-// ---------------------------------------------------------------------------
-// The Engine API, over the socket. No dependency, and it carries more than the
-// CLI prints.
-// ---------------------------------------------------------------------------
+// The Engine API over the socket.
 
 const SOCKET = process.env.DOCKER_HOST?.startsWith("unix://")
   ? process.env.DOCKER_HOST.slice("unix://".length)
@@ -127,15 +71,7 @@ const api = (path) =>
       .on("error", reject);
   });
 
-/**
- * Docker's stats stream: newline-delimited JSON, one object per second, pushed
- * rather than polled. Polling `docker stats --no-stream` in a loop costs a
- * process per sample and still samples on *our* clock; this samples on the
- * engine's, and the object carries the timestamp it was taken at.
- */
-/** Every open stats stream, so the process can end when the run does — Docker
- *  streams until the client hangs up, and an unclosed one keeps node's event
- *  loop alive long after the report has been printed. */
+/** Open stats streams, closed when the run ends: Docker streams until the client hangs up. */
 const streams = [];
 
 const streamStats = (id, onSample) => {
@@ -200,20 +136,8 @@ const limitsOf = async (id) => {
 // One accumulator per container.
 // ---------------------------------------------------------------------------
 
-/**
- * CPU as cores, from the cumulative counter and the sample's own wall clock —
- * not from Docker's `system_cpu_usage` ratio, which is scaled by the number of
- * CPUs the *host* has and therefore reports a different number for identical
- * work on a bigger machine. Cores used is the unit a limit is written in, so
- * it is the unit the measurement has to be in for the two to be comparable.
- */
-/**
- * Summing each container's peak overstates the stack badly: the daemon that
- * runs the redrive and the broker that feeds it do not peak in the same
- * second. Samples are bucketed by the second they were taken in, so the
- * stack's own peak is a real instant rather than an arithmetic one — and that
- * is the number that answers "what machine does this fit on".
- */
+// Cores, not Docker's host-scaled ratio. Bucketed by second: summed per-container
+// peaks overstate the stack, whose busiest second is a real instant.
 const timeline = new Map();
 const intoTimeline = (at, cpus, memory) => {
   const bucket = Math.floor(at / 1000);
@@ -244,11 +168,7 @@ const track = (name, service) => ({
     this.memoryLimit = sample.memory_stats?.limit ?? this.memoryLimit;
     this.peakMemory = Math.max(this.peakMemory, memory);
 
-    // The cgroup's throttle counters are cumulative since the container
-    // started, so what this run did is the difference against the first sample
-    // taken. Nothing else here says whether the envelope distorted the
-    // measurement, and an unnoticed throttle makes every number below a
-    // property of the limit rather than of the work.
+    // Cumulative since start, so this run is the difference from the first sample.
     const throttle = sample.cpu_stats?.throttling_data;
     if (throttle) {
       this.throttleBase ??= { periods: throttle.periods, throttled: throttle.throttled_periods, nanos: throttle.throttled_time };
@@ -277,10 +197,7 @@ const track = (name, service) => ({
   },
 });
 
-// ---------------------------------------------------------------------------
-// Scenarios. Each one is a child process this waits on, so what is being
-// measured is a thing that already exists rather than a re-implementation.
-// ---------------------------------------------------------------------------
+// Scenarios: each is a child process this waits on.
 
 const run = (command, argv, env) =>
   new Promise((resolve) => {
@@ -310,11 +227,7 @@ const SCENARIOS = {
   "chaos:prober": () => run("node", ["infra/chaos.mjs", "prober"], {}),
 };
 
-// ---------------------------------------------------------------------------
-// The domain side of the same run. Container CPU says what it cost; these say
-// what it was doing while it cost that, which is the half that makes a number
-// worth keeping.
-// ---------------------------------------------------------------------------
+// What the system was doing while it cost that.
 
 const promRange = async (query, startMs, endMs) => {
   const url =
@@ -402,10 +315,7 @@ const main = async () => {
   };
   found.forEach(attach);
 
-  // Containers that appear during the run — the one-shot demo container, a
-  // replacement for one a chaos scenario killed — are instrumented too. This
-  // is the difference between measuring the stack and measuring a list of
-  // containers written down before it started.
+  // Containers that appear mid-run are instrumented too.
   const rescan = setInterval(() => {
     containers().then((cs) => cs.forEach(attach)).catch(() => {});
   }, 5000);
@@ -548,21 +458,9 @@ const main = async () => {
   console.log("\nevery container stayed inside its declared limits");
 };
 
-/**
- * Two records of the same scenario, side by side. This is what the envelope
- * buys: on a different machine the absolute numbers still move — a faster core
- * does the same work in less CPU time — but the shape has to hold, and a
- * service that has doubled is a regression rather than a different laptop.
- */
+/** Two records compared by shape: a service that doubled is a regression, not a different laptop. */
 
-/**
- * Folded by service, not by container. `rmq-daemon` is five containers and
- * comparing them positionally compares nothing: which replica runs the redrive
- * is the broker's choice and differs between runs, so replica 1 against
- * replica 1 reports a 75% swing on two runs that were identical. The fleet's
- * busiest replica against the other run's busiest replica is the comparison
- * that means something.
- */
+/** Folded by service: which daemon replica runs the redrive differs between runs. */
 const byService = (services) => {
   const folded = new Map();
   for (const s of services) {

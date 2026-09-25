@@ -21,6 +21,7 @@ History:
 - 2026-09-24: the aggregator was dropped from articles 1–3; it returns only as article 4 (master), the platform-level design.
 - 2026-09-24: 04 was renamed 04-429-backpressure, then merged into 03.
 - 2026-09-24: the failure-rate breaker (EitherBreaker) was dropped. It cost 7,000–9,000 good calls to avoid ~750 bad ones, and its table now opens the shedding article.
+- 2026-09-25: 04's documentation was shrunk at the user's request: README ~2k words; architecture, high-availability and measurements kept; ADRs cut to one page each; `history/`, the runbooks, the Jekyll site and the other docs deleted; source comments cut to invariants and gotchas. Anything a memory note cites under `history/` or `docs/` that no longer exists is in git at ffdd0b979. Run records now go to `docs/runs/` (ignored except baselines).
 
 The user prefers fewer, denser articles and lean READMEs.
 

@@ -2,18 +2,8 @@ import { Config, Option as O, Schema } from "effect";
 import { Flag } from "effect/unstable/cli";
 import manifest from "../../../package.json" with { type: "json" };
 
-/**
- * The settings more than one process here takes, declared once: one
- * declaration, decoded at boot, and a value the process cannot use stops it
- * before it opens a socket. See
- * docs/decisions/008-configuration-is-a-boundary.md.
- */
+/** Settings shared by several processes, decoded at boot (ADR 008). */
 
-/**
- * What every entry point reports for `--version`. One repo built into one
- * image, so the number belongs to the manifest that names it rather than to
- * five string literals that have to be remembered together.
- */
 export const VERSION: string = manifest.version;
 
 /**
@@ -22,11 +12,7 @@ export const VERSION: string = manifest.version;
  */
 export const PositiveInt = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)));
 
-/**
- * A port as a *schema*, for the template parser below. `Config.Port` is the
- * config reader, not the schema it reads with — the runtime stopped exporting
- * the latter — and this package is where "what a port is" belongs anyway.
- */
+/** `Config.Port` is a reader; this version exports no port schema. */
 const Port = Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 1, maximum: 65535 })));
 
 /** `host:port`, both halves required — a bare host is rejected rather than given a default port. */
@@ -42,11 +28,6 @@ export const brokerAddress = (name: string): Config.Config<BrokerAddress> =>
 
 const decodeBroker = Schema.decodeUnknownOption(BrokerAddress);
 
-/**
- * The flag side of the same address, undecorated: the aggregator makes it
- * optional and everything else falls back to `RMQ`. Composing one declaration
- * is what keeps "what an address is" from being restated per entry point.
- */
 export const rmqFlag = Flag.String("rmq").pipe(
   Flag.filterMap(
     (raw) => O.map(decodeBroker(raw), ([host, , port]) => ({ host, port })),

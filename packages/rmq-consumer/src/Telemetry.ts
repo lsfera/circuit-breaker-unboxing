@@ -1,18 +1,9 @@
 import { Metric } from "effect";
 
 /**
- * Everything the daemon fleet exposes to Prometheus — the peer of
- * @egress/aggregator's Telemetry.ts, deliberately the same shape.
- *
- * `egress_daemon_target_fraction` against `rabbitmq_detailed_queue_consumers`
- * (the broker's own count of consumers on `<api>.work`) is the pair that makes
- * a daemon which has gone deaf to the control plane obvious; on its own, that
- * failure looks exactly like a circuit that has not moved. The daemon used to
- * publish its own view of that second half as `egress_daemon_self_active`, but
- * the broker already knows who is consuming — see docs/operations.md.
- *
- * Published by a flush loop in daemon.ts rather than at each call site — see
- * Tally.ts.
+ * The daemons' metrics, flushed by daemon.ts. `egress_daemon_target_fraction`
+ * against the broker's `rabbitmq_detailed_queue_consumers` is what exposes a
+ * deaf daemon.
  */
 
 export const circuitState = Metric.gauge("egress_daemon_circuit_state", {
@@ -52,16 +43,7 @@ export const probes = Metric.counter("egress_daemon_probes_total", {
   description: "HALF_OPEN probes this daemon was elected to run by the broker.",
 });
 
-/**
- * The delivery contract, checked on the AMQP transport by a different family
- * of processes than the one that checks it over HTTP.
- *
- * `/api/subscriber` proves the aggregator's webhook stream is gapless; these
- * two prove the same thing for `circuit.control`, from five independent
- * consumers. A sequence that repeats or skips here is the same class of bug
- * — and, notably, exactly what a leader that resumed from a stale in-memory
- * sequence would look like from the outside.
- */
+/** The delivery contract on `circuit.control`; a stale resumed leader shows here. */
 export const controlGaps = Metric.counter("egress_daemon_control_gaps_total", {
   description: "Sequence gaps observed in the state_changed stream on circuit.control.",
 });

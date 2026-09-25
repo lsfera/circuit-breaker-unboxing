@@ -2,14 +2,9 @@ node_modules/
 .pnpm-store/
 .DS_Store
 *.log
-_site/
-docs/_site/
-docs/.bundle/
-docs/vendor/
-docs/assets/vendor/
 
 # Instrumentation records (infra/instrument.mjs). One run each, so they
 # accumulate; the baselines the documentation quotes are kept, the rest are
 # yours to delete.
-history/runs/*.json
-!history/runs/baseline-*.json
+docs/runs/*.json
+!docs/runs/baseline-*.json

@@ -2,33 +2,18 @@ import { Match, Predicate } from "effect";
 import { WORK_DELIVERY_LIMIT } from "@egress/rmq/ControlPlane.ts";
 
 /**
- * What to do about one call to the third party, with no broker and no fetch
- * in it — the decision half of the daemon's work handler, pulled out for the
- * same reason DaemonState.ts's `reduce` is: it is the one part worth testing
- * without a broker.
- *
- * A failed call is retried by *republishing* a new message, never by
- * `requeue`, so the attempt count can travel with it: a broker requeue hands
- * back the original message with no way to add a header. `ATTEMPTS_HEADER`
- * (ControlPlane.ts) bounds it at `WORK_DELIVERY_LIMIT` attempts. The
- * idempotency key needs nothing of this: it is the `message_id`, which a
- * requeue and a republish both carry. See ADR 016.
+ * The pure decision about one call. A failure is republished with
+ * `ATTEMPTS_HEADER` + 1, never requeued, since a requeue cannot carry a header
+ * (ADR 016); the key is the `message_id`, which both carry.
  */
 
 /** What the call itself did, already reduced from an HTTP status or a thrown error. */
 export type CallOutcome = "ok" | "shed" | "refused" | "failed";
 
-/**
- * 4xx statuses that say "try again", unlike the rest of the 4xx range: a
- * timeout on the third party's side, and a 429, which is backpressure.
- */
+/** 4xx that mean "try again": a timeout, and backpressure. */
 const TRY_AGAIN = new Set([408, 429]);
 
-/**
- * An HTTP status, or `"error"` when no response came back (refused, reset,
- * timed out). A 4xx other than 408 and 429 is the third party refusing this
- * request: retrying it sends the same request and gets the same answer.
- */
+/** Another 4xx is a refusal: retrying sends the same request for the same answer. */
 export const classify = (status: number | "error"): CallOutcome =>
   Match.value(status).pipe(
     Match.when(Predicate.isString, (): CallOutcome => "failed"),
@@ -50,13 +35,7 @@ export type AttemptDecision =
       readonly attempts: number;
     };
 
-/**
- * `attemptsHeader` is `delivery.properties[ATTEMPTS_HEADER]` as the broker
- * hands it back: absent on a message never retried this way, a digit string
- * otherwise. Anything that doesn't parse — there is no way to publish one
- * except this function — is treated as 0 rather than trusted, the same
- * stance `Redrive.ts`'s `nextRedrive` takes on its own count header.
- */
+/** An unparseable header counts as 0 rather than being trusted. */
 export const nextAttempt = (
   outcome: CallOutcome,
   attemptsHeader: string | undefined,

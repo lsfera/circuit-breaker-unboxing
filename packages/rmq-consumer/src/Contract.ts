@@ -2,23 +2,10 @@ import { Match, Option as O } from "effect";
 import { classifySequence, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
 import type { EventType } from "@egress/domain/Model.ts";
 
-/**
- * The delivery contract, observed from the consumer's side of the broker.
- *
- * `/api/subscriber` checks the same property over HTTP from inside the
- * publishing process; this checks it over AMQP from five processes the
- * publisher does not control. The vantage points are what make the two
- * independent — the rule itself is `classifySequence`, shared, because two
- * observers of one guarantee disagreeing about what a violation is would make
- * both readings worthless rather than corroborating.
- */
+/** The delivery contract, observed over AMQP; the rule is the shared `classifySequence`. */
 
 export type ContractState = {
-  /**
-   * `None` until the first `state_changed` arrives. A daemon that starts
-   * mid-incident legitimately joins the sequence part-way through, and
-   * calling that a gap would make the metric lie on every restart.
-   */
+  /** `None` until the first `state_changed`: joining mid-incident is not a gap. */
   readonly lastSequence: O.Option<number>;
   readonly gaps: number;
   readonly duplicates: number;

@@ -8,23 +8,12 @@ import * as Telemetry from "./Telemetry.ts";
 import type { ApiSpec } from "./FleetSource.ts";
 
 /**
- * Envoy pushing its stats here, instead of this process polling admin ports.
- * Same `FleetSource`, same `parseStats`, same `ReplicaReport`; only the
- * transport differs.
+ * Envoy pushes its stats here; same `parseStats` and `ReplicaReport` as polling.
  *
- * Three things to know before changing it:
- *
- * - No build step. `@grpc/proto-loader` reads the partial schemas in `proto/`
- *   at runtime, and protobuf addresses fields by number, so Envoy's messages
- *   decode without vendoring its api tree.
- * - Only the *first* message on a stream carries the node identifier, so it is
- *   remembered per call. Reading it per message loses every replica's identity.
- * - Push does not fan out. A sink names one gRPC cluster, and pointing that at
- *   two aggregators load-balances the stream, giving each a partial fleet to
- *   compute a quorum from. Hence one sink per aggregator in the Envoy config.
- *
- * A replica leaving is counted and logged rather than silent — see
- * docs/decisions/009-what-the-quorum-is-a-quorum-of.md.
+ * - `@grpc/proto-loader` reads the partial schemas in `proto/` at runtime.
+ * - Only a stream's first message carries the node id; it is remembered per call.
+ * - One sink per aggregator: a sink cluster with two endpoints load-balances the
+ *   stream, and each aggregator computes a quorum from a partial fleet.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -43,12 +32,7 @@ type StreamMetricsMessage = {
   readonly envoy_metrics?: ReadonlyArray<MetricFamily>;
 };
 
-/**
- * With `emit_tags_as_labels` off, each family name is the full dotted stat name,
- * exactly as the admin endpoint reports it — which is what lets `parseStats` be
- * shared. Turning that option on shortens the names and the shared regex then
- * matches nothing at all.
- */
+/** With `emit_tags_as_labels` on, names shorten and the shared parser matches nothing. */
 const flatten = (families: ReadonlyArray<MetricFamily>) => ({
   // A family with no name, and an entry that is neither a counter nor a gauge,
   // are both absences rather than zeroes — `filterMap` drops them where the
@@ -87,11 +71,7 @@ export const EnvoyPushFleetLayer = (
     FleetSource,
     Effect.gen(function* () {
       const known = new Set(specs.map((s) => s.apiId));
-      /**
-       * A plain Map, not a Ref: writes happen in a gRPC socket callback with no
-       * fiber to run an Effect in, reads happen in `poll` on the loop's fiber, and
-       * the shared state is last-write-wins.
-       */
+      // A Map: written from a gRPC callback with no fiber; last write wins.
       const latest = new Map<string, Snapshot>();
 
       /** Pushes discarded for want of a node id; `poll` reads and zeroes it in one step. */
@@ -134,11 +114,7 @@ export const EnvoyPushFleetLayer = (
               anonymous++;
               return;
             }
-            // `Date.now()` rather than the Effect clock, because this is not
-            // running on a fiber. `poll` compares it against the loop's clock,
-            // which is the same wall clock in every configuration this layer
-            // is used in — it receives from a real Envoy or it receives
-            // nothing.
+            // `Date.now()`: no fiber here, and this layer only ever runs on wall time.
             latest.set(replicaId, {
               stats: flatten(message.envoy_metrics ?? []).stats,
               receivedAt: Date.now(),

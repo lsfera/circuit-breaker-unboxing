@@ -1,22 +1,8 @@
 import { Metric } from "effect";
 
-/**
- * All metrics the demo emits, in one place. Every metric is plain `effect`
- * Metric — no separate client, no separate port. `PrometheusMetrics.layerHttp`
- * in main.ts reads this same in-process registry and formats it; there is
- * nothing here to keep in sync by hand.
- *
- * Per-API series use `Metric.withAttributes(metric, { apiId })` at the call
- * site rather than baking `apiId` in up front, because the API set is not
- * known until the fleet reports it.
- */
+/** Every metric, in effect's in-process registry; per-API series add `apiId` at the call site. */
 
-/**
- * 0=CLOSED 1=DEGRADED 2=OPEN 3=HALF_OPEN — a stepped line per API in
- * Grafana. Re-exported rather than defined here: @egress/rmq-consumer's
- * daemons publish their own view of the same state, and the two lines are
- * only comparable if they share one encoding.
- */
+/** 0=CLOSED 1=DEGRADED 2=OPEN 3=HALF_OPEN, shared with the daemons' gauge. */
 export { STATE_CODE } from "@egress/domain/Model.ts";
 
 export const circuitState = Metric.gauge("egress_circuit_state", {
@@ -34,12 +20,7 @@ export const circuitTotalEndpoints = Metric.gauge(
   { description: "Total endpoint count per API." },
 );
 
-/**
- * Fleet-wide sum of `outlier_detection.ejections_active`, the one Envoy
- * signal that says "a host was ejected" as opposed to "membership changed".
- * Not an input to the breaker — see ApiSnapshot's note — but the first thing
- * worth looking at when a DEGRADED is unexplained.
- */
+/** Not a breaker input; the first thing to check when a DEGRADED is unexplained. */
 export const circuitEjectionsActive = Metric.gauge("egress_circuit_ejections_active", {
   description: "Ejected hosts summed across every reporting replica, per API.",
 });
@@ -49,12 +30,7 @@ export const circuitReportingReplicas = Metric.gauge(
   { description: "Replicas currently reporting for this API (within replicaTimeoutMs)." },
 );
 
-/**
- * Replicas that stopped contributing to the fleet's verdict, by how they went.
- * The gauge above is the denominator every quorum is a fraction of, and it must
- * not move in silence — a fraction over a smaller denominator is a weaker claim
- * wearing the same number. Counted on the departure, not per failed poll.
- */
+/** The quorum's denominator must not shrink silently (ADR 009). Counted per departure. */
 export const replicasLost = Metric.counter("egress_fleet_replica_lost_total", {
   description:
     "Replicas that stopped contributing to a fleet quorum, by reason (no-node-id, went-quiet, unreachable).",
@@ -82,30 +58,14 @@ export const isLeader = Metric.gauge("egress_aggregator_is_leader", {
     "1 if this aggregator instance currently holds the publishing lease, 0 otherwise.",
 });
 
-/**
- * 1 if this instance's control-plane sink can currently deliver, 0 otherwise.
- * Updated every tick regardless of leadership, so a standby's reading is
- * visible too — the question this answers is "why hasn't this instance tried
- * to lead", which `isLeader` alone cannot say: a standby that is not ready is
- * indistinguishable from one that simply lost the acquire race.
- */
+/** Every tick, leader or not: tells a standby that is not ready from one that lost the race. */
 export const controlPlaneReady = Metric.gauge("egress_aggregator_control_plane_ready", {
   description:
     "1 if this instance's control-plane sink can currently deliver, 0 otherwise. " +
     "A leader that drops to 0 steps down instead of publishing into nothing.",
 });
 
-/**
- * The liveness signal for the control loop itself, incremented every tick by
- * every instance whether or not it leads.
- *
- * There was no such signal, and its absence is what made the failure it now
- * detects invisible: when the loop died, `/metrics` kept serving the last
- * values it had, `egress_aggregator_is_leader` stayed pinned at 1, and every
- * gauge simply stopped moving — which looks exactly like a quiet system.
- * `rate(egress_aggregator_ticks_total[1m]) == 0` is the alert that says
- * otherwise.
- */
+/** A dead loop leaves every gauge frozen at its last value; a zero rate is what says so. */
 export const ticks = Metric.counter("egress_aggregator_ticks_total", {
   description: "Control-loop iterations, by instance. Zero rate means the loop is gone.",
 });
@@ -146,17 +106,7 @@ export const webhookDeliveryDuration = Metric.timer(
   { description: "Latency of successful deliveries, including any retries." },
 );
 
-/**
- * The durable outbox (Outbox.ts), which is where an event goes when the
- * subscriber will not take it.
- *
- * Depth is the one to alert on: it is zero in the healthy case, and a value
- * that stays non-zero is a subscriber that has stopped taking events while
- * everything else looks fine. `dropped_total` moving at all means the bound
- * was hit and a subscriber has permanently missed events — the gap it will
- * see is deliberate, and this is where it becomes visible from the publisher's
- * side too.
- */
+/** Depth is the alert: zero when healthy. `dropped_total` moving means a subscriber has a permanent gap. */
 export const outboxDepth = Metric.gauge("egress_webhook_outbox_depth", {
   description: "Events waiting in the durable outbox for a subscriber that is not taking them, by API.",
 });
@@ -169,12 +119,7 @@ export const outboxDropped = Metric.counter("egress_webhook_outbox_dropped_total
   description: "Oldest events discarded because the outbox hit its per-API bound, by API.",
 });
 
-/**
- * These three read the delivery contract from OUTSIDE the process — the same
- * boundary Http.ts's `Integrity` tracker checks — so a gap or duplicate here
- * is a real, observable break of the per-API sequence guarantee, not a
- * simulated one.
- */
+/** The delivery contract read from outside the process (Http.ts). */
 export const subscriberReceived = Metric.counter(
   "egress_subscriber_events_received_total",
   { description: "Events the demo subscriber endpoint has received." },
@@ -189,39 +134,20 @@ export const subscriberDuplicates = Metric.counter(
   { description: "Non-snapshot events delivered with a repeated sequence, by API." },
 );
 
-/**
- * Consoles connected to `/api/stream` on this instance. What the frame below
- * is being built for; zero means it is not being built at all.
- */
 export const consoleStreams = Metric.gauge("egress_console_streams", {
   description: "Browsers connected to /api/stream on this instance.",
 });
 
-/**
- * State frames built for the console. Once per 400ms while anyone is watching,
- * however many are — so its rate is 2.5/s or 0, and a rate that rises with
- * `egress_console_streams` means frames are being built per connection again,
- * which is the thing ConsoleFrames.ts exists to prevent.
- */
+/** 2.5/s or 0; a rate rising with `egress_console_streams` means frames are built per connection again. */
 export const consoleFramesBuilt = Metric.counter("egress_console_frames_built_total", {
   description: "State frames built for the console, once per interval while any console is connected.",
 });
 
-/**
- * Consoles connected to the attention view (docs/decisions/015, step 3),
- * separate from `egress_console_streams` because the two pipelines have
- * different costs — the point of measuring them apart.
- */
 export const consoleAttentionStreams = Metric.gauge("egress_console_attention_streams", {
   description: "Browsers connected to the attention view on this instance.",
 });
 
-/**
- * Patches (or the bootstrap snapshot) actually published for the attention
- * view — only on a tick where something changed, unlike
- * `egress_console_frames_built_total`, which runs every interval regardless.
- * A quiet fleet keeps this flat.
- */
+/** Only when something changed; flat for a quiet fleet. */
 export const consoleAttentionBuilt = Metric.counter("egress_console_attention_built_total", {
   description: "Attention-view patches published, once per interval something in the view changed.",
 });

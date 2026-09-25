@@ -16,21 +16,10 @@ import * as Telemetry from "./Telemetry.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-/**
- * How many gap descriptions to keep. Same reasoning as the sinks' dead-letter
- * buffers: this is a diagnostic list in a long-running process, and the exact
- * count is a Prometheus counter (`egress_subscriber_gaps_total`).
- */
+/** A diagnostic list; the exact count is `egress_subscriber_gaps_total`. */
 const GAP_BUFFER = 100;
 
-/**
- * Delivery integrity as seen from OUTSIDE the process. The webhook sink posts
- * here over real HTTP, so this measures the contract rather than an in-process
- * function call: per-API sequences must be gapless and non-repeating.
- *
- * Snapshots deliberately republish the current sequence, so only
- * state_changed events carry that guarantee.
- */
+/** The delivery contract checked from outside the process: the webhook sink posts here over real HTTP. */
 type Integrity = {
   readonly received: number;
   readonly snapshots: number;
@@ -78,12 +67,7 @@ export const record = (self: Integrity, event: CircuitEvent): Integrity => {
   );
 };
 
-/**
- * `/api/failure`'s body. `rate` is a probability, and it is bounded here for
- * the reason every other bound in this repo exists: `setFailureRate(47)` is
- * `Math.random() < 47`, which is "always", and `-1` is "never" — two silent
- * settings that look like a typo and behave like a decision.
- */
+/** `rate` is bounded: 47 would mean "always" and -1 "never", both silently. */
 const FailureRequest = Schema.Struct({
   apiId: Schema.NonEmptyString,
   rate: Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
@@ -98,11 +82,8 @@ export const HttpLive = HttpRouter.use((router) =>
     const ha = yield* HaSettings;
     const integrity = yield* Ref.make(emptyIntegrity);
 
-    // Register every per-API counter at zero before anything has happened to
-    // it. An `effect` counter has no series until its first update, so
-    // without this the dashboard's delivery-contract tiles read "No data"
-    // rather than 0 — and a tile whose whole job is to sit at zero through
-    // an incident is worse than useless when zero looks like broken.
+    // Zeroed at startup: a counter has no series until its first update, and a
+    // tile meant to sit at zero must not read "No data".
     yield* fleet.specs.pipe(
       Effect.flatMap((specs) =>
         Effect.forEach(
@@ -116,18 +97,9 @@ export const HttpLive = HttpRouter.use((router) =>
                 Metric.update(Metric.withAttributes(Telemetry.webhookDelivered, { apiId }), 0),
                 Metric.update(Metric.withAttributes(Telemetry.webhookFailed, { apiId }), 0),
                 Metric.update(Metric.withAttributes(Telemetry.webhookDeadLettered, { apiId }), 0),
-                // The outbox metrics belong in this list more than any of the
-                // others: depth is zero in every healthy minute this system
-                // will ever have, so without a series at zero the panel that
-                // is supposed to show "nothing is stuck" shows "no data",
-                // which is what a broken exporter looks like.
                 Metric.update(Metric.withAttributes(Telemetry.outboxDepth, { apiId }), 0),
                 Metric.update(Metric.withAttributes(Telemetry.outboxReplayed, { apiId }), 0),
                 Metric.update(Metric.withAttributes(Telemetry.outboxDropped, { apiId }), 0),
-                // Per-API, and the least likely of the lot to fire: a fencing
-                // conflict means two instances believed they held the lease.
-                // A panel that has never had a series cannot show that it has
-                // stayed at zero, which is the whole claim being made.
                 Metric.update(Metric.withAttributes(Telemetry.fencingConflicts, { apiId }), 0),
               ],
               { discard: true },
@@ -137,17 +109,7 @@ export const HttpLive = HttpRouter.use((router) =>
       ),
     );
 
-    /**
-     * The same rule for the counters that have no apiId, so they are registered
-     * once rather than per API.
-     *
-     * `replicasLost` is enumerated by reason on purpose: the runbook documents
-     * four ways a replica leaves the quorum, and a dashboard that only grows a
-     * series when one of them happens cannot show the other three staying at
-     * zero. Both of these are named directly by alerts in
-     * infra/monitoring/alerts.yml, which is where "no series" stops being a
-     * cosmetic problem.
-     */
+    // The same for counters with no apiId; alerts name both directly.
     yield* Effect.all(
       [
         Metric.update(Telemetry.coordinationErrors, 0),
@@ -167,10 +129,7 @@ export const HttpLive = HttpRouter.use((router) =>
       const specs = yield* fleet.specs;
       const dead = yield* sink.deadLetters;
       const i = yield* Ref.get(integrity);
-      // A standby polls nothing, so it has no APIs to show. Without saying
-      // so, its console is an empty page that looks exactly like a broken
-      // one — which is a bad thing to be looking at during a failover demo,
-      // when the empty page is the correct behaviour.
+      // A standby polls nothing; say so rather than show an empty page.
       const isLeader = yield* agg.isLeader;
       return {
         apis,
@@ -195,11 +154,8 @@ export const HttpLive = HttpRouter.use((router) =>
     );
 
     const consoleFrames = yield* ConsoleFrames.make(stateFrame, "400 millis");
-    // The attention view (docs/decisions/015, steps 3–4): counts plus the
-    // worst 50 APIs, as a snapshot-then-patches stream rather than the whole
-    // fleet every 400ms. Built from the same snapshots as `stateFrame`, on
-    // its own schedule and its own shared broadcast — a console that asks
-    // for it does not also pay for the full-frame build.
+    // The attention view (ADR 015): its own schedule and broadcast, so it does
+    // not pay for the full-frame build.
     const attention = yield* ConsoleFrames.makeAttention(agg.snapshots, "400 millis");
 
     const sseHeaders = {
@@ -215,14 +171,7 @@ export const HttpLive = HttpRouter.use((router) =>
      *  changed — does not read as an idle connection to a load balancer. */
     const keepAlive = Stream.map(Stream.tick("15 seconds"), () => ConsoleFrames.KEEP_ALIVE);
 
-    /**
-     * `Last-Event-ID`, parsed. Anything that is not a non-negative integer —
-     * absent, malformed, a value from before this process last restarted and
-     * its revisions reset — is treated as "no usable resume point" rather
-     * than an error: `ConsoleFrames.makeAttention` responds to `O.none()`
-     * with a fresh snapshot, which is the correct fallback for all of these,
-     * not just a genuinely absent header.
-     */
+    /** Anything but a non-negative integer means "no resume point", answered with a snapshot. */
     const lastEventIdOf = (request: HttpServerRequest.HttpServerRequest): O.Option<number> =>
       O.filter(
         O.map(O.fromUndefinedOr(request.headers["last-event-id"]), Number),
@@ -230,17 +179,8 @@ export const HttpLive = HttpRouter.use((router) =>
       );
 
     /**
-     * gzip on the SSE bytes, flushed after every event rather than buffered —
-     * `node:zlib`'s own streaming compression, the same primitive
-     * `@effect/platform-node`'s `NodeHttpCompression` uses, applied by hand
-     * rather than through `HttpMiddleware.compression`: that middleware skips
-     * a response carrying `Cache-Control: no-transform`, which this route
-     * sets deliberately (below) so a proxy does not buffer or re-encode an
-     * SSE stream it does not know is one. docs/decisions/015 step 5, last
-     * because compression multiplies whatever the earlier steps send —
-     * applied to today's full frames it saves 20x and leaves problems 2–4
-     * untouched; applied after the attention view and patches it is the
-     * 360x row.
+     * gzip flushed per event, by hand: `HttpMiddleware.compression` skips
+     * `Cache-Control: no-transform`, which this route sets so proxies do not buffer it.
      */
     const gzip = (bytes: Stream.Stream<Uint8Array>) =>
       bytes.pipe(NodeStream.pipeThroughSimple(() => Zlib.createGzip({ flush: Zlib.constants.Z_SYNC_FLUSH })));
@@ -248,13 +188,8 @@ export const HttpLive = HttpRouter.use((router) =>
     const acceptsGzip = (request: HttpServerRequest.HttpServerRequest): boolean =>
       (request.headers["accept-encoding"] ?? "").includes("gzip");
 
-    // The console. Default view: the shared full-frame state channel,
-    // unchanged, merged with the tape — what today's public/index.html
-    // still reads. `?view=attention` opts into the view a person can use at
-    // a thousand APIs (docs/decisions/015 step 3): a snapshot or resumed
-    // patches (step 4), gzipped when the client accepts it (step 5). Both
-    // end with the request scope, so a client that disconnects needs no
-    // tear-down of ours.
+    // Default: the full frame plus the tape. `?view=attention`: snapshot or
+    // resumed patches, gzipped when accepted. Both end with the request scope.
     yield* router.add("GET", "/api/stream", () =>
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest;
@@ -280,13 +215,8 @@ export const HttpLive = HttpRouter.use((router) =>
       }),
     );
 
-    // The tape alone, for anything that is not a person looking at a console.
-    // subscriber.ts used to read /api/stream and discard every state frame —
-    // 2.77 MB/s at a thousand APIs, thrown away by the one client whose job is
-    // reporting gaps, reading from a bus that drops the oldest events for a
-    // reader that falls behind. The keep-alive is what the state frames used to
-    // provide by accident: without it a quiet hour is an idle connection, and
-    // an idle connection is one a load balancer closes.
+    // The tape alone, for machines. The keep-alive stops a load balancer
+    // closing a connection that is idle through a quiet hour.
     yield* router.add(
       "GET",
       "/api/events/stream",
@@ -301,13 +231,8 @@ export const HttpLive = HttpRouter.use((router) =>
     yield* router.add("GET", "/api/state", stateFrame.pipe(Effect.map((f) => HttpServerResponse.jsonUnsafe(f))));
 
     /**
-     * Liveness is "is the control loop still running" — a dead loop leaves a
-     * process serving 200s with every gauge frozen, which reads as a quiet system.
-     *
-     * Readiness is "can this instance serve requests", and emphatically not
-     * leadership: a standby serves the same read-only API and is one lease away
-     * from leading, so marking it unready would empty the rotation during a
-     * rolling deploy. It waits for one completed pass, no more.
+     * Liveness: the control loop is still ticking. Readiness: one pass completed —
+     * not leadership, or a rolling deploy would empty the rotation of standbys.
      */
     const health = Effect.gen(function* () {
       const [now, last, leader] = yield* Effect.all([
@@ -351,12 +276,7 @@ export const HttpLive = HttpRouter.use((router) =>
       ),
     );
 
-    // Same in-process Metric registry the Aggregator and EventSink update —
-    // nothing here is scraped or pushed separately. Point Prometheus (or the
-    // docker-compose monitoring stack) at this path in either sim or real-Envoy
-    // mode; it works identically since it reads the registry, not the fleet.
-    // Logging disabled for this route alone: Prometheus scrapes every 2s, so
-    // an access log line per scrape buries every log that says something.
+    // Not access-logged: a line per 2s scrape buries everything else.
     yield* router.add(
       "GET",
       "/metrics",
@@ -405,28 +325,13 @@ export const HttpLive = HttpRouter.use((router) =>
     // The demo's downstream consumer. In production this is your broker.
     yield* router.add("POST", "/subscriber/webhook", () =>
       Effect.gen(function* () {
-        // Decoded, not cast. This endpoint is the delivery-contract check, and
-        // it was trusting its input: an event whose `sequence` was absent or
-        // not a number sailed past `as CircuitEvent` into `record`, where
-        // `undefined <= n` and `undefined > n + 1` are both false — so it
-        // counted as an ordinary next event and wrote `undefined` into the
-        // per-API high-water mark. The one endpoint whose readings are quoted
-        // as proof of the contract was the one not applying it.
+        // Decoded, not cast: an undefined sequence compared false both ways and
+        // passed as "next".
         const event = yield* HttpServerRequest.schemaBodyJson(CircuitEvent);
         const apiId = event.data.apiId;
 
-        // Only APIs this aggregator actually serves. `apiId` is an unconstrained
-        // string on an endpoint published to the host, and every distinct value
-        // that reaches `record` costs a permanent entry in the per-API
-        // high-water map *and* two Prometheus series — measured at 2000 ids:
-        // 37 series became 4037 and /metrics went to 240KB, scraped every two
-        // seconds. The heap barely moved; the cardinality is what does the
-        // damage, and unlike the heap it outlives a restart because Prometheus
-        // has already stored it.
-        //
-        // Nothing legitimate is turned away: published apiIds come from Envoy
-        // cluster names filtered against these same specs, so the set this
-        // checks is the set that can be published.
+        // Served APIs only: each unknown apiId costs two Prometheus series for
+        // good (2,000 ids took /metrics from 37 series to 4,037).
         const served = yield* fleet.specs.pipe(
           Effect.map((specs) => specs.some((spec) => spec.apiId === apiId)),
         );

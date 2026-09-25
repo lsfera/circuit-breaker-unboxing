@@ -2,7 +2,7 @@ global:
   scrape_interval: 2s # fast enough that a demo incident shows up within a tick or two
 
 # Alerting on "the thing that should be moving has stopped" — see alerts.yml
-# for why each rule exists, and docs/runbooks/ for what to do about each one.
+# for why each rule exists and what to check.
 rule_files:
   - /etc/prometheus/alerts.yml
 

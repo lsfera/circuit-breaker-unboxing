@@ -1,31 +1,25 @@
 # Decision records
 
-One per decision that was hard enough to be worth arguing with later. Each
-states what was chosen, what it was chosen over, and — the part that makes them
-worth keeping — the measurement it rests on, so a reader can disagree with the
-evidence rather than with the conclusion.
-
-Several have dated amendments below their original text. The text is not
-rewritten when a decision changes: what the decision was, and why it stopped
-being right, are both the record.
+One per decision worth arguing with later: what was chosen, over what, and the
+measurement it rests on.
 
 | | Decision | Rests on |
 | --- | --- | --- |
-| 001 | [Which AMQP client the daemon fleet uses](001-amqp-client.md) | a bounded spike against both clients, same broker |
-| 002 | [The aggregator's `OPEN` is observational, not authoritative](002-enforcement-authority.md) | who is still serving requests when the control plane is down |
-| 003 | [Distributed tracing: available, deliberately not wired](003-tracing.md) | what a span would have shown that a metric did not |
-| 004 | [Down to AMQP 0-9-1, on amqplib](004-downgrade-to-amqp-0-9-1.md) | the two client bugs that survived every workaround |
-| 005 | [The client recovers its own connection](005-connection-recovery.md) | a probe showing a forked defect does not end `Layer.launch` |
-| 006 | [How absence, failure and identity are represented](006-representing-absence.md) | the bugs each sentinel produced before it was removed |
-| 007 | [One declaration per message, read at both ends](007-message-contracts.md) | a malformed POST that disabled gap detection for an API |
-| 008 | [Configuration is a boundary too](008-configuration-is-a-boundary.md) | `process.env` reads that bypassed every validated setting |
-| 009 | [What the quorum is a quorum of](009-what-the-quorum-is-a-quorum-of.md) | three ways a replica left the denominator in silence |
-| 010 | [A proxy that fails on its own behalf](010-a-proxy-that-fails-on-its-own-behalf.md) | every error the proxy served that it made itself |
-| 011 | [The concurrency ceiling belongs to the broker](011-the-ceiling-belongs-to-the-broker.md) | an in-process gate that was the buffer it denied being |
-| 012 | [Durable workflows: evaluated, deliberately not adopted](012-durable-workflows.md) | what Temporal would have replaced, and what it would not |
-| 013 | [The target as a fraction, not a count](013-the-target-as-a-fraction.md) | 5,000 simulated fleets, then a real one: ±60% at five daemons, ±16% at a hundred |
-| 014 | [Every service declares what it may use](014-the-measurement-envelope.md) | the same demo run with and without limits: every garbage-collected process a third smaller |
-| 015 | [The console at a thousand APIs](015-the-console-at-a-thousand-apis.md) — *steps 1–5 built; the ADR's own bandwidth targets not yet re-measured against the finished build* | a recorded stream replayed through five encodings; a hundred consoles took up to a fifth of the control loop's cadence, and after sharing the frame take none of it |
-| 016 | [The retry budget travels with the message](016-the-retry-budget-travels-with-the-message.md) | a kill-broker audit — 0 lost, 18 duplicate calls under a producer-assigned key — and the sweep's first pass against a 22,246-message backlog |
-| 017 | [A heartbeat off the delivery channel](017-a-heartbeat-off-the-delivery-channel.md) — *the delivery channel's own heartbeat was later removed entirely, replaced by a tuned protocol heartbeat* | a live split-brain window shrunk from unbounded to 0s, then the same 0s achieved with far less code once a tuned AMQP heartbeat proved to detect the fault as fast as the bespoke one |
-| 018 | [Control flow as expressions: `Match`, `Option`, and one codec](018-control-flow-as-expressions.md) — *in progress: `Client.ts`, `Trace.ts`, the work message and its content type only* | the integration suite against a real broker, 19 of 19 before and after |
+| 001 | [Which AMQP client](001-amqp-client.md) — *superseded by 004* | a spike against both clients |
+| 002 | [The aggregator's `OPEN` is observational](002-enforcement-authority.md) | who still serves requests when the control plane is down |
+| 003 | [Distributed tracing, tail-sampled](003-tracing.md) | what a span shows that a metric does not |
+| 004 | [Down to AMQP 0-9-1, on amqplib](004-downgrade-to-amqp-0-9-1.md) | the stall that did not reproduce |
+| 005 | [The client recovers its own connection](005-connection-recovery.md) | a broker restart with every container staying up |
+| 006 | [Absence, failure and identity](006-representing-absence.md) | a lease token that was not fenced; an outbox that sent twice |
+| 007 | [One declaration per message](007-message-contracts.md) | three probes from one malformed trigger |
+| 008 | [Configuration is a boundary](008-configuration-is-a-boundary.md) | a typo that idled the whole fleet |
+| 009 | [What the quorum is a quorum of](009-what-the-quorum-is-a-quorum-of.md) | three silent ways a replica left |
+| 010 | [A proxy that fails on its own behalf](010-a-proxy-that-fails-on-its-own-behalf.md) | 22,226 dead letters with the circuit closed |
+| 011 | [The concurrency ceiling belongs to the broker](011-the-ceiling-belongs-to-the-broker.md) | 340 messages parked in a JS array |
+| 012 | [Durable workflows: not adopted](012-durable-workflows.md) | one call per message |
+| 013 | [The target as a fraction](013-the-target-as-a-fraction.md) | 5,000 simulated fleets |
+| 014 | [Every service declares what it may use](014-the-measurement-envelope.md) | the same run with and without limits |
+| 015 | [The console at a thousand APIs](015-the-console-at-a-thousand-apis.md) | a recorded stream through five encodings |
+| 016 | [The retry budget travels with the message](016-the-retry-budget-travels-with-the-message.md) | 1,570 messages dropped by the dead-letter queue's default limit |
+| 017 | [Detecting a lost control plane inside the lease](017-a-heartbeat-off-the-delivery-channel.md) | two-leader window from 4 s to 0 s |
+| 018 | [Control flow as expressions; the message says what it is](018-control-flow-as-expressions.md) | the broker suite before and after |

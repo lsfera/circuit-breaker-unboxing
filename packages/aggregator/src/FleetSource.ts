@@ -11,12 +11,7 @@ export type ApiSpec = {
   readonly failureRate: number;
 };
 
-/**
- * Where replica reports come from. The simulated and Envoy-backed layers are
- * interchangeable because both produce ReplicaReport — swapping ingestion for
- * the push-based MetricsService sink later means writing one more Layer and
- * changing nothing else.
- */
+/** Where replica reports come from: simulated, polled, or pushed — all produce `ReplicaReport`. */
 export class FleetSource extends Context.Service<
   FleetSource,
   {
@@ -65,14 +60,8 @@ type ReplicaSim = {
 };
 
 /**
- * Runs the same outlier-detection algorithm Envoy does — consecutive 5xx,
- * ejection backoff proportional to how many times a host has already been
- * ejected, capped by max_ejection_time, and active health checks that un-eject
- * a host as soon as it proves healthy — against each replica's OWN sample.
- *
- * That independent sampling is the point: at a partial failure rate, replicas
- * legitimately disagree about which hosts are bad. Publishing straight from a
- * replica would emit that disagreement to subscribers as flapping.
+ * Envoy's outlier detection, simulated against each replica's own sample, so
+ * replicas disagree at a partial failure rate the way real ones do.
  */
 const stepReplica = (
   replica: ReplicaSim,
@@ -241,13 +230,8 @@ const PATTERN = new RegExp(
 type EnvoyReplica = { readonly replicaId: string; readonly adminUrl: string };
 
 /**
- * What one replica's stats say, and which clusters it did not say enough about.
- *
- * `membership_healthy` and `membership_total` are the only two stats a vote is
- * computed from, and neither may be defaulted: `{ healthy: 0, total: 6 }` is how
- * Envoy says *every host is gone*, so a missing gauge would decode as the most
- * consequential reading in the domain. A cluster missing either is not reported
- * at all — the replica abstains, which the quorum already handles and 009 counts.
+ * The membership pair is never defaulted: `{ healthy: 0, total: 6 }` means every
+ * host is gone. A cluster missing either is not reported; the replica abstains.
  */
 type ParsedStats = {
   readonly reports: ReadonlyArray<ReplicaReport>;
@@ -296,12 +280,7 @@ export const parseStats = (
             apiId,
             healthy,
             total,
-            // These four keep their zero default, and it is safe where the two
-            // above were not: `ejectionsActive` is surfaced rather than voted
-            // on, and the overflow counters are edge-detected as a delta, so a
-            // zero reads as "nothing new" instead of as a state. They cannot
-            // reach here without the membership pair anyway, which is the point
-            // of the guard.
+            // Zero is safe for these: not voted on, or edge-detected.
             ejectionsActive: s["outlier_detection.ejections_active"] ?? 0,
             overflowTotal:
               (s["upstream_rq_pending_overflow"] ?? 0) +
@@ -341,11 +320,7 @@ export const makeIncompleteReporter = () => {
     );
 };
 
-/**
- * Polls each replica's admin /stats. Polling is the prototype's ingestion path
- * because it needs no proto codegen; production should use the push-based
- * envoy.service.metrics.v3.MetricsService sink, which produces the same reports.
- */
+/** Polls each replica's admin /stats. Compose uses the push source instead. */
 export const EnvoyFleetLayer = (
   replicas: ReadonlyArray<EnvoyReplica>,
   specs: ReadonlyArray<ApiSpec>,
@@ -411,19 +386,8 @@ export const EnvoyFleetLayer = (
           return parsed.reports as ReplicaReport[];
         },
         Effect.timeout("2 seconds"),
-        // One unreachable replica must not fail the whole poll — the quorum
-        // rule already tolerates a missing replica.
-        //
-        // `Effect.catch`, not `catchCause`: the expected failures here are a
-        // replica being unreachable and the poll timing out, and both mean
-        // "no report from this one". A *defect* means a bug — a parser that
-        // throws on a stat it did not expect, say — and disguising that as
-        // an unreachable replica would turn a crash into a fleet that
-        // quietly reports fewer members, which is far harder to notice.
-        //
-        // Tolerated, but no longer unremarked: the poll continues without
-        // this replica, and `departed` says so once so the shrinking
-        // denominator is visible rather than merely survivable.
+        // An unreachable replica abstains, and `departed` says so once. `catch`,
+        // not `catchCause`: a parser defect must not pass as a missing replica.
         (effect, replica) =>
           Effect.catch(effect, (cause) => Effect.as(departed(replica, cause), [] as ReplicaReport[])),
       );

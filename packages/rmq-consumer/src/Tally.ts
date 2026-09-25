@@ -2,13 +2,9 @@ import type { ContractState } from "./Contract.ts";
 import type { EventType } from "@egress/domain/Model.ts";
 
 /**
- * Counting for the metrics registry: plain numbers on the hot path, flushed
- * as deltas once a second.
- *
- * The invariant is `snapshot`. Take one reading, derive both the delta and the
- * new high-water mark from it, and publishing may then suspend freely.
- * Re-reading the counters after a suspension marks as published whatever
- * arrived during it.
+ * Plain numbers on the hot path, flushed as deltas once a second. Take one
+ * `snapshot` and derive delta and high-water mark from it: re-reading after a
+ * suspension marks as published what arrived during it.
  */
 
 /** Bumped from AMQP callbacks and the egress call, which have no fiber to run an Effect in. */
@@ -24,11 +20,7 @@ type Counts = {
   discardedFormat: number;
   discardedMalformed: number;
   discardedKeyless: number;
-  /**
-   * Control-plane events by CloudEvents type — read directly by the heartbeat
-   * log line (its `control=` count), not published as a metric: RabbitMQ's own
-   * per-queue publish count already covers what a fleet-wide counter would.
-   */
+  /** For the heartbeat log line only; RabbitMQ already counts publishes per queue. */
   readonly byType: Map<EventType, number>;
 };
 
@@ -50,12 +42,6 @@ export const observed = (counts: Counts, type: EventType): void => {
   counts.byType.set(type, (counts.byType.get(type) ?? 0) + 1);
 };
 
-/**
- * One reading of everything published as a metric, immutable afterwards.
- * `gaps`/`duplicates` come from `ContractState` because `observe` derives them
- * rather than the daemon incrementing them. `byType` stays on `Counts` only —
- * nothing here feeds a per-type metric any more, see the comment on `Counts`.
- */
 type Snapshot = {
   readonly ok: number;
   readonly failed: number;

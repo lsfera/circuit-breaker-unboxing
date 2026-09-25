@@ -279,7 +279,7 @@ services:
       node packages/aggregator/src/main.ts --source=envoy-push --push-port=9900 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-2
     ports: ["8089:8088"]
 
-  # The scenario from docs/rmq-control-plane.md, running for real: a producer
+  # The scenario from docs/architecture.md, running for real: a producer
   # flooding payments-provider.work, and five competing consumers draining it
   # through the egress listener, one third-party call per message.
   #

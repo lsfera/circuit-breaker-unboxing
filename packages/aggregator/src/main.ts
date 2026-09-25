@@ -1,7 +1,4 @@
-// `Config` is aliased to `Flags` because @egress/domain also exports a `Config`
-// (the breaker's tuning knobs) and both belong in this file. `Flags` is also
-// the honest name here: this process is configured by argv, not the
-// environment — see the provider at the bottom of the settings block.
+// `Config` as `Flags`: @egress/domain exports the breaker's `Config` too.
 import { Data, Deferred, Effect, Layer, Option as O, Schema } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { HttpRouter } from "effect/unstable/http";
@@ -23,12 +20,7 @@ import { Config, defaultConfig } from "@egress/domain/Model.ts";
 import type { ApiSpec } from "./FleetSource.ts";
 import type { RedisLike } from "./Coordination.ts";
 
-/**
- * Every flag this process takes, declared once. A flag this process does not
- * take is refused rather than ignored — `--sorce=envoy-push` stops the process
- * instead of leaving `source` at `sim` and pointing the simulator at real
- * Envoy replicas. See docs/decisions/008-configuration-is-a-boundary.md.
- */
+/** An unknown flag stops the process rather than being ignored (ADR 008). */
 const flags = {
   port: Flag.Int("port").pipe(
     Flag.withDefault(8088),
@@ -91,16 +83,7 @@ const NAMED_APIS: ReadonlyArray<ApiSpec> = [
   { apiId: "tax-calc", endpoints: 3, rps: 120, failureRate: 0 },
 ];
 
-/**
- * `--apis=N` replaces the three named APIs with N synthetic ones, for finding
- * out what this costs at a size nobody has run it at.
- *
- * Synthetic rather than N more real Envoy clusters on purpose: the question is
- * what the *aggregator* costs per API per tick — polling or decoding, stepping
- * N breakers, publishing, checkpointing, and the metric cardinality that comes
- * with it — and standing up two hundred real upstreams to ask it would measure
- * the load generator instead. Only meaningful with `--source=sim`.
- */
+/** `--apis=N`: N synthetic APIs, to measure the aggregator per API rather than a load generator. Sim only. */
 const syntheticApis = (count: number): ReadonlyArray<ApiSpec> =>
   Array.from({ length: count }, (_, i) => ({
     apiId: `synthetic-${String(i).padStart(3, "0")}`,
@@ -109,13 +92,6 @@ const syntheticApis = (count: number): ReadonlyArray<ApiSpec> =>
     failureRate: 0,
   }));
 
-/**
- * The graph is built *from* the flags, so it is built inside an Effect that
- * can fail. Nothing below an unbuilt layer is built, so a flag this process
- * cannot use still stops it before a socket is opened — what changed is that
- * the failure is reported by `runMain` like any other startup failure, rather
- * than by a library module calling `process.exit` while being imported.
- */
 /** Why this process stopped, when it stops itself. */
 class Fatal extends Data.TaggedError("Fatal")<{ readonly reason: string }> {
   override get message(): string {
@@ -125,14 +101,8 @@ class Fatal extends Data.TaggedError("Fatal")<{ readonly reason: string }> {
 
 const aggregator = Command.make("aggregator", flags, (settings) => {
   /**
-   * The two ways this process ends itself, in one place: a control loop that
-   * died, and a control-plane broker it can no longer reach.
-   *
-   * Both used to be `process.exit(1)` — one here, one inside `@egress/rmq`.
-   * The client's is gone (docs/decisions/005-connection-recovery.md) and this
-   * is the other half: a fiber forked into a scope cannot end `Layer.launch`,
-   * measured, so the fatal signal has to reach the fiber that launched. That
-   * is what this is.
+   * A dead control loop or an unreachable broker ends the process through this:
+   * a fiber forked into a scope cannot end `Layer.launch` (ADR 005).
    */
   const fatal = Deferred.makeUnsafe<never, Fatal>();
   const stop = (reason: string) => Effect.asVoid(Deferred.fail(fatal, new Fatal({ reason })));
@@ -140,14 +110,7 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
   const APIS: ReadonlyArray<ApiSpec> =
     settings.apis > 0 ? syntheticApis(settings.apis) : NAMED_APIS;
 
-  /**
-   * Three ingestion layers, one interface. `sim` simulates; `envoy` polls admin
-   * `/stats`; `envoy-push` receives the gRPC sink, so a replica this process was
-   * never told about still reports.
-   *
-   * Their detection latencies are tuned in different files: push is Envoy's
-   * `stats_flush_interval`, poll is `tickMs`.
-   */
+  /** `sim`, `envoy` (polls `/stats`) or `envoy-push` (the gRPC sink, so unknown replicas still report). */
   const FleetLayer =
     settings.source === "sim"
       ? SimFleetLayer(APIS, settings.replicas)
@@ -163,20 +126,11 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
             APIS,
           );
 
-  /**
-   * `--rmq=<host>:<port>` mounts AmqpControlPlaneSink alongside (not instead
-   * of) the webhook sink, so the existing subscriber/delivery-integrity demo
-   * keeps working unchanged while the RabbitMQ daemon fleet in
-   * @egress/rmq-consumer also gets circuit.control events. `--no-webhook`
-   * still drops the webhook side if only the RMQ path is wanted.
-   */
+  /** `--rmq` adds the AMQP sink beside the webhook sink; `--no-webhook` drops the latter. */
   const webhookEnabled = !settings.noWebhook;
   const webhookUrl = `http://127.0.0.1:${settings.port}/subscriber/webhook`;
 
-  // Self-contained regardless of branch: when --rmq is set, this Layer
-  // provides its own Rmq dependency internally (Layer.provide, scoped to just
-  // this sink) rather than threading Rmq through the outer AppLayer graph, so
-  // the two branches below have the same RIn = never shape either way.
+  // Provides its own Rmq, so both branches have RIn = never.
   const SinkLayer = O.match(settings.rmq, {
     onNone: () =>
       webhookEnabled ? Layer.effect(EventSink, makeWebhookSink(webhookUrl)) : NoopSinkLayer,
@@ -189,11 +143,7 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
             ...(webhookEnabled ? [yield* makeWebhookSink(webhookUrl)] : []),
             amqp,
           ];
-          // A control plane this instance can no longer publish to is the same
-          // silent failure a dead control loop is: it keeps serving 200s and
-          // the daemon fleet simply stops hearing about state changes. The
-          // client reports it rather than acting on it, so somebody here has
-          // to be listening.
+          // Otherwise a dead broker is silent: 200s served, the fleet hears nothing.
           const rmq = yield* Rmq;
           yield* Effect.forkScoped(
             Effect.catch(rmq.lost, (error) =>
@@ -207,28 +157,12 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
       ).pipe(Layer.provide(Rmq.layer(broker))),
   });
 
-  /**
-   * Solo by default: one instance that always wins its own lease. That is not
-   * a special case of the HA machinery, it is what running it produces when
-   * there is only one instance — the same InMemoryCoordinationLayer a test
-   * uses to exercise real failover between two instances in one process.
-   * `--ha=redis` swaps this for `RedisCoordinationLayer`, used by
-   * docker-compose.yml's two real `aggregator`/`aggregator-2` instances
-   * against one shared `redis` service — the same coordination logic, now
-   * actually contended over by two processes instead of one.
-   */
+  /** Solo by default (in-memory, always wins its lease); `--ha=redis` for the compose pair. */
   const asRedisLike = (redis: Redis): RedisLike => ({
     eval: (script, { keys, args: evalArgs }) =>
       redis.eval(script, keys.length, ...keys, ...evalArgs) as Promise<string | number | null>,
   });
 
-  /**
-   * The connection is acquired inside the layer's scope rather than built at
-   * module load, so it is closed when the application shuts down instead of
-   * being left to the process exiting. Everything else in this repo that owns
-   * a socket does the same (see @egress/rmq's `makeRmq`); a client constructed
-   * at import time is the one place that quietly did not.
-   */
   const CoordinationLayer =
     settings.ha === "redis"
       ? Layer.unwrap(
@@ -236,14 +170,7 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
             Effect.sync(
               () =>
                 new Redis(settings.redis, {
-                  // Fail fast rather than queue. ioredis defaults to holding
-                  // commands in an offline queue and retrying a request across
-                  // twenty reconnection attempts, which turns "the coordinator
-                  // is unreachable" from an error into a hang — and a tick that
-                  // hangs is a control loop that has stopped without saying so.
-                  // Coordination.ts bounds this too, because the port must not
-                  // depend on which client is behind it; this is the same
-                  // decision made where the client actually is.
+                  // Fail fast: ioredis's default retries turn an outage into a hung tick.
                   maxRetriesPerRequest: 1,
                   enableOfflineQueue: false,
                   connectTimeout: 1000,
@@ -252,10 +179,7 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
             (redis) => Effect.promise(() => redis.quit().then(() => {}, () => {})),
           ).pipe(
             Effect.map((redis) => {
-              // One connection, two stores. The lease and the outbox are the
-              // same kind of state — small, durable, and only interesting to the
-              // instance that holds the lease — so they share a client rather
-              // than opening a second one to the same server.
+              // One connection for the lease and the outbox.
               const like = asRedisLike(redis);
               return Layer.mergeAll(RedisCoordinationLayer(like), RedisOutboxLayer(like));
             }),
@@ -271,11 +195,6 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
     }),
   );
 
-  /**
-   * The dependency graph, declared once. Layer.provideMerge keeps FleetSource,
-   * EventBus and EventSink in the output context because the HTTP routes read
-   * them directly.
-   */
   const AppLayer = HttpLive.pipe(
     Layer.provideMerge(Aggregator.layer),
     // The sink layer sits *above* HaLayer rather than beside it: the webhook
@@ -286,22 +205,10 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
     Layer.provide(Layer.succeed(Config, defaultConfig)),
   );
 
-  /**
-   * The aggregator loop runs as a scoped fiber for the lifetime of the server.
-   * Interruption is structural: when the server layer shuts down, the scope
-   * closes and the loop stops. No interval handle to remember.
-   */
   const AggregatorDaemon = Layer.effectDiscard(
     Effect.gen(function* () {
       const agg = yield* Aggregator;
-      /**
-       * A coordination outage is handled inside the tick and the loop keeps
-       * running. A *defect* is a bug, and the one thing it must not do is end
-       * this fiber quietly: the HTTP server would carry on answering 200 with
-       * whatever the gauges last held, which is indistinguishable from a system
-       * where nothing is happening. Same stance as the daemon fleet's — crash
-       * and let the restart policy do its job, rather than swallow it.
-       */
+      // A defect must end the process, not leave it serving frozen gauges.
       yield* Effect.forkScoped(
         agg.run.pipe(
           Effect.catchDefect((defect) =>

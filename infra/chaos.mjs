@@ -1,25 +1,12 @@
 /**
- * The two adversarial tests this repo has only ever run by hand.
- *
- * Both were done live in earlier sessions, watched in the logs, and written up
- * in the README — which is exactly the kind of proof that rots, because
- * nothing re-runs it. A test a human performs once is a claim with a date on
- * it. This is the same two experiments as assertions with an exit code.
+ * Two failover experiments as assertions with an exit code.
  *
  *   node infra/chaos.mjs leader     # kill the publishing leader mid-incident
- *   node infra/chaos.mjs prober     # kill the daemon the broker elected to probe
+ *   node infra/chaos.mjs prober     # kill the daemon elected to probe
  *   node infra/chaos.mjs all
  *
- * Needs the compose stack up (`docker compose up -d`) and a shell that can
- * reach the services by name and run `docker`. It injects a real upstream
- * failure and kills real containers, so it is not something to point at
- * anything you care about.
- *
- * Both scenarios restore what they broke, including restarting the container
- * they killed — `docker kill` is treated by Docker as a manual stop, so
- * `restart: unless-stopped` will not bring it back on its own. Leaving the
- * stack one instance short after a chaos run would quietly disarm the *next*
- * run of the same test.
+ * Needs the compose stack. Each restores what it broke, including restarting
+ * the killed container: `docker kill` is a manual stop to `unless-stopped`.
  */
 
 import { execFile } from "node:child_process";
@@ -57,10 +44,7 @@ const metrics = async (url) => {
   return res.text();
 };
 
-// Matches the labelled form too. Every gauge read here happens to be
-// unlabelled today, and a `name ` prefix would silently return null the day one
-// of them gains an attribute — which reads as "no leader" rather than as a
-// broken probe.
+// Matches labelled forms too, or a new label reads as "no leader".
 const gauge = (body, name) => {
   const line = body
     .split("\n")
@@ -95,18 +79,8 @@ const waitFor = async (predicate, timeoutMs, label) => {
 };
 
 /**
- * Gaps and duplicates as a *delta across the scenario*, read from *one*
- * instance — and both halves of that were learned the hard way.
- *
- * Absolute counts say nothing on a stack that has been poked at by hand: the
- * first run of this script reported four duplicates that predated it by hours
- * and had to be chased before they could be dismissed. And summing across both
- * instances is worse than useless in a scenario that kills one of them,
- * because the counter is per process and in memory: the second run watched
- * duplicates fall from 4 to 0 and "events delivered" come out at -535, which
- * is not a contract violation, it is a restarted process with fresh counters.
- *
- * So: one instance, the one that stays up, measured before and after.
+ * A delta across the scenario, from the instance that stays up: absolute counts
+ * include history, and a killed process restarts its counters.
  */
 const contract = async (url) => {
   try {
@@ -127,14 +101,7 @@ const promQuery = async (query) => {
   return body.data?.result ?? [];
 };
 
-/**
- * Scenario 1 — kill the publishing leader in the middle of a real incident.
- *
- * The property is not "the standby notices". It is that the *event stream*
- * does not care: the sequence continues from the killed instance's last
- * checkpoint rather than restarting, so a subscriber sees no gap and no
- * duplicate across a hard kill of the process that was publishing.
- */
+/** The sequence continues from the killed leader's checkpoint: no gap, no duplicate. */
 const leaderScenario = async () => {
   console.log("\n== kill the leader mid-incident ==");
   await setFailureRate(0);
@@ -195,23 +162,9 @@ const leaderScenario = async () => {
     "no sequence was published twice across the kill",
     `${contractBefore.duplicates} -> ${contractAfter.duplicates}`,
   );
-  // Deliberately *not* asserting the survivor's gap count across the kill.
-  //
-  // Each aggregator posts to its own `/subscriber/webhook`, so an instance's
-  // view contains only what that instance published. A standby publishes
-  // nothing, so if it ever led before, its high-water mark is stale by exactly
-  // the run of sequences the other instance published — and the first event it
-  // publishes after taking over reads as a jump. Observed here: the survivor
-  // had led up to 114 some time earlier, sat out 115-122, resumed at 123, and
-  // recorded `jumped 114 -> 123`.
-  //
-  // That is a hole in one observer's view, not a gap in delivery, and the check
-  // was flaky by construction: it passed whenever the survivor happened never
-  // to have led, and failed once it had. The question it was trying to ask —
-  // did the failover lose an event — is answered above by the sequence
-  // continuing 122 -> 123 with no duplicate, on the publishing side where the
-  // guarantee actually lives. An external subscriber reading both instances
-  // could answer it from the receiving side; a self-subscriber cannot.
+  // Not asserting the survivor's own gap count: a standby that led earlier has
+  // a stale high-water mark, so its first event after takeover reads as a jump.
+  // The sequence continuing above is the check.
   check(
     contractAfter.duplicates === contractBefore.duplicates,
     "the survivor's own view gained no duplicate across the kill",
@@ -226,15 +179,7 @@ const leaderScenario = async () => {
   console.log(`  kill-to-takeover: ${tookOver}ms (measured from ${new Date(killedAt).toISOString()})`);
 };
 
-/**
- * Scenario 2 — kill the daemon the broker elected to probe.
- *
- * The election is RabbitMQ's, not ours: `x-single-active-consumer` on a
- * dedicated trigger queue. So the property under test is that failover is the
- * broker's problem and it actually solves it — a different daemon runs the
- * next probe, and the circuit still reaches CLOSED with its prober having been
- * killed underneath it.
- */
+/** The broker's single-active-consumer election moves the probe to another daemon. */
 const proberScenario = async () => {
   console.log("\n== kill the elected prober ==");
   await setFailureRate(0);
@@ -276,11 +221,7 @@ const proberScenario = async () => {
   check(elected !== null, "a daemon was elected to probe", proberScenario.elected ?? "");
   if (!proberScenario.elected) return;
 
-  // The fleet is one scaled service discovered by DNS, so Prometheus's own
-  // `instance` label is an IP address and names no container. The daemon
-  // labels its own metrics with its instance id, which it takes from its
-  // hostname — and a container's hostname is its short id, so this is
-  // directly killable.
+  // The daemon label is its hostname, the container's short id.
   const container = String(proberScenario.elected);
   console.log(`  killing ${container}`);
   await exec("docker", ["kill", container]).catch((e) => {

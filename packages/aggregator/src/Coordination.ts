@@ -3,27 +3,15 @@ import { readerFor, ReasonSchema, StateSchema } from "@egress/domain/Model.ts";
 import { randomUUID } from "node:crypto";
 
 /**
- * What makes N aggregator instances safe to run at once: exactly one may publish
- * (LeaderElection), and whoever takes over continues the sequence rather than
- * restarting at zero (CheckpointStore). `Aggregator.ts` is the only caller.
- *
- * The in-memory layer is not a special case — solo mode is one instance that
- * always wins its own lease. `RedisLike` is a one-method port so a real client
- * plugs in without this module depending on one.
+ * Exactly one instance publishes (LeaderElection), and a successor continues the
+ * sequence (CheckpointStore). Solo mode is the in-memory layer: one instance
+ * always winning its own lease.
  */
 
 /**
- * `"<epoch>:<counter>"`. The counter alone is not enough: a coordinator that
- * loses its state starts counting from 1 again, and a paused leader holding a
- * higher token would then out-rank the live one. The epoch is minted when a
- * coordinator finds no state to inherit, so a token from before that is not
- * merely stale, it is unrecognisable.
- */
-/**
- * A fencing token: which coordinator issued it, and how many handoffs had
- * happened when it did. A record rather than the string the coordinator stores,
- * so a counter that cannot be ordered cannot be built — the string form lives at
- * the boundary in `formatToken`/`parseToken`, not in every comparison.
+ * A fencing token, `<epoch>:<counter>` on the wire. The epoch is minted when a
+ * coordinator finds no state to inherit, so a counter restarting at 1 cannot let
+ * a stale leader's higher counter outrank the live one (ADR 006).
  */
 export type LeaseToken = {
   /** Which coordinator minted it. Tokens from different epochs are incomparable. */
@@ -32,18 +20,10 @@ export type LeaseToken = {
   readonly counter: number;
 };
 
-/**
- * Fresh identity for a coordinator that has no state to inherit. A UUID rather
- * than a short random string: an epoch that collides with one it is supposed to
- * be unrecognisable to is a fencing token that fails open.
- */
+/** A UUID: an epoch colliding with an old one is a fencing token that fails open. */
 const newEpoch = (): string => randomUUID();
 
-/**
- * The wire form, declared once rather than split across a parser and a formatter
- * kept in agreement by hand. `Natural` is what makes an unorderable counter
- * impossible to decode.
- */
+/** `Natural` makes an unorderable counter impossible to decode. */
 const LeaseTokenFromString = Schema.TemplateLiteralParser([
   Schema.NonEmptyString,
   ":",
@@ -53,48 +33,29 @@ const LeaseTokenFromString = Schema.TemplateLiteralParser([
 const decodeToken = Schema.decodeUnknownOption(LeaseTokenFromString);
 const encodeToken = Schema.encodeSync(LeaseTokenFromString);
 
-/** The wire form: the coordinator stores a string, so one is produced here and nowhere else. */
 export const formatToken = (token: LeaseToken): string =>
   encodeToken([token.epoch, ":", token.counter] as never);
 
-/**
- * Read a token back off the wire. `None` for anything that is not
- * `<epoch>:<non-negative integer>`.
- */
 export const parseToken = (raw: string): O.Option<LeaseToken> =>
   O.map(decodeToken(raw), ([epoch, , counter]) => ({ epoch, counter }));
 
-/** Two tokens are the same handoff. Records need this said explicitly; strings got it for free. */
+/** Not `===`: on records that is identity. */
 export const sameToken = (a: LeaseToken, b: LeaseToken): boolean =>
   a.epoch === b.epoch && a.counter === b.counter;
 
-/**
- * Is `attempted` superseded by `current`?
- *
- * Total, and the only place the ordering rule lives: a different epoch is
- * incomparable and therefore fenced, and within an epoch the counter decides.
- */
+/** The only place the ordering lives: another epoch is fenced; within one, the counter decides. */
 export const isFenced = (attempted: LeaseToken, current: LeaseToken): boolean =>
   attempted.epoch !== current.epoch || attempted.counter < current.counter;
 
 /**
- * The minimum state needed to resume publishing for one API without
- * replaying history. `replicas`, per-replica votes, and `candidate` are
- * deliberately not carried across a failover — they repopulate from the
- * next few polls, same as any cold start. What must survive is exactly what
- * subscribers depend on staying monotonic (`sequence`) or correct
- * (`openBackoffMs` — resetting this after a failover would let a still-flaky
- * upstream get probed sooner than its real backoff allows).
+ * What must survive a failover: `sequence` (subscribers depend on it) and
+ * `openBackoffMs` (a reset would probe a flaky upstream early). The rest
+ * repopulates from the next polls.
  */
 const CheckpointFromJson = Schema.Struct({
   state: StateSchema,
   reason: ReasonSchema,
-  // Naturals, not numbers, for the reason the published event's sequence is
-  // one: these are read back from a store that outlives the process, and each
-  // is either ordered against another (`sequence`, `changedAt`) or used as a
-  // duration to wait out (`openBackoffMs`). A value that cannot be ordered, or
-  // a negative backoff that makes the next probe immediate and permanent, is
-  // not a checkpoint — it reads as none, and a cold start is already handled.
+  // Naturals: an unorderable value or a negative backoff reads as no checkpoint.
   sequence: Schema.Natural,
   changedAt: Schema.Natural,
   openBackoffMs: Schema.Natural,
@@ -110,22 +71,14 @@ export class CheckpointFenced extends Data.TaggedError("CheckpointFenced")<{
 }> {}
 
 /**
- * The coordinator could not be reached — a *failure*, not a defect. A defect
- * escaping the tick terminates `Effect.repeat`, which ends the control loop for
- * good in a process that stays up and keeps serving 200s.
- *
- * There is one safe reading: an instance that cannot confirm it holds the lease
- * must not behave as leader.
+ * A failure, not a defect: a defect ends the tick loop in a process that keeps
+ * serving 200s. An instance that cannot confirm its lease must not act as leader.
  */
 export class CoordinationUnavailable extends Data.TaggedError("CoordinationUnavailable")<{
   readonly operation: string;
   readonly cause: string;
 }> {}
 
-/**
- * Runtime identity, as opposed to AggregatorConfig's breaker tuning — this is
- * "which process am I," not "how should the state machine behave."
- */
 export type HaSettings = {
   readonly instanceId: string;
   readonly leaseTtlMs: number;
@@ -140,12 +93,7 @@ export const HaSettings = Context.Reference<HaSettings>("@egress/aggregator/Coor
   defaultValue: () => defaultHaSettings,
 });
 
-/**
- * A fencing token strictly increases every time leadership changes hands
- * (never on a mere renewal) — that's what lets CheckpointStore reject writes
- * from an instance that thinks it's still leader but has actually been
- * superseded (e.g. after a long GC pause outlives the lease TTL).
- */
+/** The token increases on every handoff, never on a renewal. */
 export class LeaderElection extends Context.Service<
   LeaderElection,
   {
@@ -161,46 +109,23 @@ export class CheckpointStore extends Context.Service<
   CheckpointStore,
   {
     /**
-     * Rejects with CheckpointFenced unless `token` is the current lease token,
-     * checked against the one counter LeaderElection issues from. Fencing per-key
-     * instead would only stop a stale writer after someone else had written that
-     * exact key, leaving every untouched API open.
+     * Fenced against the one lease counter, not per key: per-key fencing only stops
+     * a stale writer after someone else wrote that same API.
      */
     readonly save: (
       apiId: string,
       token: LeaseToken,
       checkpoint: Checkpoint,
     ) => Effect.Effect<void, CheckpointFenced | CoordinationUnavailable>;
-    /**
-     * Fails rather than returning `None` when the store is unreachable. The
-     * difference matters more than it looks: `None` means "this API has never
-     * been checkpointed", which the aggregator correctly reads as a cold start
-     * — and a cold start resets `sequence` to zero. A blip must never be
-     * allowed to look like a fresh API.
-     */
+    /** Fails when unreachable: `None` means a cold start, which resets the sequence. */
     readonly load: (
       apiId: string,
     ) => Effect.Effect<O.Option<Checkpoint>, CoordinationUnavailable>;
   }
 >()("@egress/aggregator/Coordination/CheckpointStore") {}
 
-// ---------------------------------------------------------------------------
-// In-memory implementation. Not a stub, and not a leftover — it is load
-// bearing three ways:
-//
-//  - It is the *default* runtime path. `pnpm start` passes no `--ha`, so the
-//    console, the sim fleet and everything in the README's quickstart run on
-//    this. Solo is not a special case of the HA machinery; it is what that
-//    machinery does when only one instance is running.
-//  - It is what lets a test run two independent "aggregator instances" against
-//    one shared coordinator, so failover, re-promotion and fencing are
-//    exercised for real without a second process or a container.
-//  - It is the reference the Redis implementation has to match. Two layers,
-//    one set of semantics, and the same tests pointed at both.
-//
-// LeaderElection and CheckpointStore are built together from one shared token
-// Ref for exactly the reason in the CheckpointStore doc comment above.
-// ---------------------------------------------------------------------------
+// The default runtime path, the two-instance test harness, and the reference the
+// Redis layer must match.
 
 type Lock = {
   readonly holderId: string;
@@ -209,10 +134,7 @@ type Lock = {
 };
 
 export const makeInMemoryCoordination = Effect.gen(function* () {
-  // One coordinator, one epoch: an in-memory store cannot lose its state
-  // without the process going with it, so the epoch never rotates here. It
-  // exists so this layer and the Redis one have the same shape rather than
-  // two notions of what a token is.
+  // Never rotates: this store cannot lose its state without the process.
   const epoch = newEpoch();
   const lock = yield* Ref.make<O.Option<Lock>>(O.none());
   const checkpoints = yield* Ref.make(new Map<string, Checkpoint>());
@@ -291,21 +213,7 @@ export const InMemoryCoordinationLayer: Layer.Layer<LeaderElection | CheckpointS
     ),
   );
 
-// ---------------------------------------------------------------------------
-// Redis-backed port, wired by main.ts under `--ha=redis`.
-//
-// `RedisLike` is deliberately the smallest surface any real client (ioredis,
-// node-redis) satisfies with a one-line adapter — one `eval` method. main.ts
-// happens to pin ioredis for the demo deployment, but nothing in this module
-// knows that, so swapping the client is an adapter change and not a rewrite.
-// ---------------------------------------------------------------------------
-
-/**
- * A checkpoint read back is untrusted input, whatever wrote it. Through the
- * same reader the event contract uses, so "malformed" means one thing across
- * this system: anything that does not decode reads as "no checkpoint" — a cold
- * start, which is handled — instead of seeding the breaker with `undefined`.
- */
+/** Untrusted input: anything that does not decode reads as a cold start. */
 const readCheckpoint = readerFor(CheckpointFromJson);
 
 export type RedisLike = {
@@ -317,11 +225,9 @@ export type RedisLike = {
 
 // KEYS: holder, counter, epoch.  ARGV: holderId, ttlMs, candidateEpoch.
 //
-// A coordinator missing *either* the epoch or the counter has lost its state,
-// and adopts the caller's candidate epoch starting from zero. Checking both is
-// deliberate: an epoch that survived while the counter did not would otherwise
-// let the counter restart inside an epoch that stale leaders still recognise,
-// which is the same bug wearing a disguise.
+// Missing either key means lost state: adopt the candidate epoch from zero. An
+// epoch surviving without its counter would restart counting inside an epoch
+// stale leaders still recognise.
 const ACQUIRE_SCRIPT = `
 local epoch = redis.call("GET", KEYS[3])
 local counter = redis.call("GET", KEYS[2])
@@ -350,16 +256,8 @@ end
 return 0
 `;
 
-// Fences against KEYS[1], the *same* token key ACQUIRE_SCRIPT writes to —
-// not a per-API value — so a handoff closes the window for every API at
-// once, including ones the new leader has not published for yet. GET+SET
-// happen inside one script, so there is no read-then-write gap for Redis to
-// interleave a concurrent writer into.
 // KEYS: epoch, counter, checkpoint.  ARGV: attemptedToken, payload.
-//
-// Epoch first, then counter. A token from a previous epoch is not stale, it is
-// unrecognisable — which is what closes the window a counter alone left open
-// when the coordinator lost its state and started issuing from 1 again.
+// Fenced against the lease's own keys, in one script so nothing interleaves.
 const CHECKPOINT_SCRIPT = `
 local epoch = redis.call("GET", KEYS[1])
 local counter = tonumber(redis.call("GET", KEYS[2]) or "0")
@@ -378,13 +276,8 @@ return ARGV[1]
 `;
 
 /**
- * How long a coordination call may take before it counts as unavailable.
- * "Stands down and retries next tick" is only true if the call *returns* — a
- * one-sided partition can leave the client queueing against a connection it
- * never establishes, and the promise never settles.
- *
- * Well under `leaseTtlMs`: a leader must be able to fail a call, notice, and
- * still renew inside its lease.
+ * A one-sided partition leaves the promise unsettled for ever. Well under the
+ * lease TTL, so a leader can fail a call and still renew in time.
  */
 const COORDINATION_TIMEOUT_MS = 1000;
 
@@ -425,10 +318,7 @@ export const RedisCoordinationLayer = (
           ],
           args: [holderId, String(ttlMs), newEpoch()],
         }).pipe(
-          // Parsed at the boundary, once. "-1" is the script's way of saying
-          // someone else holds a live lease; anything else that will not parse
-          // is a coordinator returning something this code did not write, and
-          // is treated the same way — no token.
+          // "-1": someone else holds it. Unparseable reads the same way.
           Effect.map((result) => {
             const raw = String(result);
             return raw === "-1" ? O.none<LeaseToken>() : parseToken(raw);
@@ -450,10 +340,7 @@ export const RedisCoordinationLayer = (
           ],
           args: [formatToken(token), JSON.stringify(checkpoint)],
         }).pipe(
-          // The script echoes back the token it considers current. Anything
-          // other than the one we sent means we were fenced — including a
-          // value that will not parse, which is a coordinator that lost its
-          // state and is a stale writer's problem either way.
+          // The script echoes the current token; anything but ours is fenced.
           Effect.flatMap((result) =>
             O.match(parseToken(String(result)), {
               onNone: () =>
@@ -475,16 +362,10 @@ export const RedisCoordinationLayer = (
           args: [],
         }).pipe(
           Effect.flatMap((raw) => {
-            // Absent is ordinary: an API nobody has checkpointed yet.
             if (typeof raw !== "string") return Effect.succeed(O.none<Checkpoint>());
 
-            // Unreadable is not, and it stays an `Option` rather than becoming
-            // a failure on purpose. Failing here would take the instance out
-            // of leadership over one bad key, where resuming from nothing
-            // costs one API its sequence continuity — and *that* is caught
-            // downstream, because a sequence starting over is exactly what the
-            // delivery contract check is watching for. What it must not be is
-            // silent.
+            // Unreadable is a logged cold start, not a failure: failing would cost
+            // leadership over one key, and a restarted sequence is detected downstream.
             return Result.match(readCheckpoint(raw), {
               onSuccess: (checkpoint) => Effect.succeed(O.some(checkpoint)),
               onFailure: (why) =>

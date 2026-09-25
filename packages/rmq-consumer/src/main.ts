@@ -11,25 +11,10 @@ import { TracingLive } from "@egress/tracing/Tracing.ts";
 import { runDaemon } from "./daemon.ts";
 
 /**
- * One daemon, one process:
- *
- *   node src/main.ts
- *
- * Settings come from the environment because these are containers rather than
- * commands someone types; `DAEMON_INDEX` is the one value that differs between
- * otherwise identical daemon containers. Also serves `/metrics` from the same
- * in-process registry the aggregator uses, so the fleet and the circuit it
- * reacts to land on one dashboard.
+ * One daemon per process. Settings come from the environment (these are
+ * containers), each also a flag; `/metrics` is served from the same registry.
  */
 
-/**
- * Every setting this process takes, declared once.
- *
- * A flag with the environment behind it: containers set `FLEET_SIZE` and get
- * exactly what they always did, while `--fleet-size` works when someone runs
- * this by hand — and `--help` lists the lot, which is the part that was
- * missing. Reading main.ts was the documentation before.
- */
 // Strictly between: a decrease of 0 or 1 is a limit that collapses or never moves.
 const OpenFraction = Schema.Finite.check(
   Schema.isBetween({ minimum: 0, maximum: 1, exclusiveMinimum: true, exclusiveMaximum: true }),
@@ -106,22 +91,9 @@ class Fatal extends Data.TaggedError("Fatal")<{ readonly reason: string }> {
 }
 
 /**
- * The graph is built *from* the settings, so it is built inside the command's
- * handler. Nothing below an unbuilt layer is built, so a value this process
- * cannot use still stops it before a socket is opened.
- *
- * The daemon itself runs as a scoped fiber for the lifetime of the server, the
- * same shape the aggregator's tick loop uses: interruption is structural, and
- * failing setup — a broker that never comes up, a queue redeclared with
- * different arguments — is a defect rather than something to recover from,
- * hence `orDie` and the restart policy on these containers.
- *
- * That defect still has to reach something that ends the process: forked into
- * the layer's scope with `forkScoped`, it is otherwise as invisible to
- * `Layer.launch` as a lost connection would be without `launchWithRmq` — the
- * same gap ADR 005 fixed for the connection, never applied to this fiber. So
- * its `catchDefect` fails `fatal`, and `launchWithRmq` races that against the
- * broker connection, mirroring `@egress/aggregator`'s `Fatal`-deferred pattern.
+ * A setup failure (a broker that never comes up, a mismatched redeclare) is a
+ * defect. Forked into the layer's scope it would be invisible to `Layer.launch`,
+ * so it fails `fatal`, which `launchWithRmq` races against the connection (ADR 005).
  */
 const daemon = Command.make("rmq-daemon", flags, (settings) => {
   const fatal = Deferred.makeUnsafe<never, Fatal>();

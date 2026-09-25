@@ -8,36 +8,16 @@ import { CircuitEvent, SEQUENCED_EVENT, State } from "@egress/domain/Model.ts";
 type CircuitEventData = CircuitEvent["data"];
 
 /**
- * Drives the "Demo script" from the README end to end over HTTP, narrating
- * every published transition as it happens — so a live demo is one command in
- * a second terminal, and the console/Grafana is what the audience watches.
+ * Drives the demo incident over HTTP and narrates every published transition.
  *
- *   pnpm run demo                          # sim fleet: payments-provider, localhost:8088
- *   pnpm run demo -- shipping-rates        # a different API
- *   pnpm run demo:envoy                    # same script, against `docker compose up`
+ *   pnpm run demo                  # sim fleet, localhost:8088
+ *   pnpm run demo -- shipping-rates
+ *   pnpm run demo:envoy            # against `docker compose up`
  *
- * It reads /api/events — the same feed subscriber.ts consumes over SSE — so
- * what it prints is the published contract, not an assumption about timing.
- * Nothing here is simulated or mocked: this is either the sim fleet's own
- * outlier detection, or (FAILURE_MODE=envoy) three real Envoy replicas, and
- * the aggregator's own quorum/dwell logic, all running on the wall clock.
- *
- * The two modes differ only in how failure gets injected, because the sim
- * fleet is driven by the console's /api/failure route while real Envoy has no
- * such hook — it only reacts to the upstream flaky-upstream.mjs actually
- * returns, so FAILURE_MODE=envoy posts straight to its /__fail port instead.
- * Everything downstream of that (waiting on /api/events, the delivery-contract
- * check) is identical either way.
- *
- * The last step covers the other half of the system. When PROMETHEUS points
- * at the monitoring stack, the driver also asserts what the RabbitMQ daemon
- * fleet did — stopped pulling on OPEN, let the queue build, ramped back, and
- * kept the same per-API sequence contract on the AMQP transport. Unset, or
- * pointed at an API no fleet is running for, that step is skipped rather
- * than failed.
- *
- * Flags or the environment, whichever suits: `--failure-mode=envoy` and
- * `FAILURE_MODE=envoy` are the same instruction. `--help` is the full list.
+ * It reads /api/events, so what it prints is the published contract. The modes
+ * differ only in how failure is injected: the sim's /api/failure, or
+ * flaky-upstream's /__fail. With PROMETHEUS set it also asserts what the daemon
+ * fleet did; unset, that step is skipped.
  */
 
 const decodeEvent = Schema.decodeUnknownOption(CircuitEvent);
@@ -62,14 +42,7 @@ type Settings = {
 
 /** The whole script, as a function of what it was asked to do. */
 const run = (settings: Settings) => {
-  /**
-   * One or more comma-separated aggregator instances. Only the leader publishes,
-   * so only the leader's /api/events has anything on it — pointing this at a
-   * standby means every wait below times out on an empty feed. With two real
-   * instances competing for one lease, which of them that is at any moment is
-   * not knowable in advance, so the list is resolved against the live
-   * `leader.isLeader` flag at startup rather than guessed in configuration.
-   */
+  /** Only the leader's /api/events has anything, so the list is resolved against the live leader. */
   const CANDIDATES = settings.aggregator
     .split(",")
     .map((s) => s.trim())
@@ -80,33 +53,17 @@ const run = (settings: Settings) => {
   const FLAKY_UPSTREAM = settings.flakyUpstream;
   const PROMETHEUS = settings.prometheus;
 
-  // Real Envoy's outlier detection needs actual requests flowing (see
-  // traffic-generator.mjs, part of `docker compose up`) before failure injected
-  // here shows up as anything — the sim fleet has no such lag, so give the
-  // envoy path more room on every wait below.
+  // Real Envoy needs traffic flowing before a failure shows.
   const TIMEOUT_SCALE = FAILURE_MODE === "envoy" ? 2 : 1;
 
-  /**
-   * flaky-upstream.mjs's ports, several per API — one per endpoint in the
-   * matching Envoy cluster. Failing *all* of an API's ports is what this script
-   * does, because the six steps are about a whole third party degrading;
-   * failing a subset by hand is what produces partial ejection and therefore
-   * DEGRADED, which is the interesting thing to try afterwards.
-   */
+  /** One port per endpoint. Failing all is an outage; failing some is how to reach DEGRADED. */
   const UPSTREAM_PORTS: Readonly<Record<string, ReadonlyArray<number>>> = {
     "payments-provider": [8080, 8081, 8082, 8083, 8084, 8085],
     "shipping-rates": [8090, 8091, 8092, 8093],
     "tax-calc": [8094, 8095, 8096],
   };
 
-  /**
-   * Decoded against the published schema, not cast to a shape declared here.
-   * This script's claim is that what it prints *is* the contract; reading it
-   * through a hand-written copy of the payload would make a contract change
-   * show up as a timeout or a printed `undefined` rather than as a failure
-   * naming the field. Anything that does not decode is dropped and counted, so
-   * a partial answer is visible instead of silently short.
-   */
+  /** Decoded, not cast: a contract change must fail naming the field. Undecodable events are counted. */
   const getEvents = Effect.tryPromise({
     try: () => fetch(`${ORIGIN}/api/events`).then((r) => r.json() as Promise<unknown>),
     catch: (cause) => new Error(`GET /api/events failed: ${String(cause)}`),
@@ -125,13 +82,7 @@ const run = (settings: Settings) => {
     ),
   );
 
-  /**
-   * Decoded, not cast, for the same reason `/subscriber/webhook` is: these four
-   * numbers are the verdict this script prints, and the check below is
-   * `duplicates > 0`. A field that went missing would read as `undefined`, and
-   * `undefined > 0` is false — so a drifted contract would pass the contract
-   * check silently. It fails naming the field instead.
-   */
+  /** Decoded: a missing `duplicates` would be `undefined > 0`, false, and pass silently. */
   const getSubscriber = Effect.tryPromise({
     try: () => fetch(`${ORIGIN}/api/subscriber`).then((r) => r.json() as Promise<unknown>),
     catch: (cause) => new Error(`GET /api/subscriber failed: ${String(cause)}`),
@@ -175,11 +126,7 @@ const run = (settings: Settings) => {
     );
   };
 
-  /**
-   * One instant-vector query, summed. `null` means the series does not exist —
-   * which is how the fleet step tells "no daemons are running for this API"
-   * apart from "the daemons are running and the value is zero".
-   */
+  /** `null`: no series, i.e. no daemons for this API, as opposed to zero. */
   const promQuery = (query: string) =>
     Effect.tryPromise({
       try: () =>
@@ -208,16 +155,9 @@ const run = (settings: Settings) => {
 
   const fleetSnapshot: Effect.Effect<Fleet, Error> = Effect.all({
     target: promQuery(`max(egress_daemon_target_fraction{apiId="${API}"})`),
-    // The broker's own count of consumers on the work queue, not a daemon-reported
-    // gauge — RabbitMQ already knows who is pulling. During HALF_OPEN this also
-    // counts the one elected prober, which briefly opens its own consumer on the
-    // same queue to take its single message; nothing here asserts through that
-    // window, so it doesn't change what the two checks below mean.
+    // The broker's count, not a daemon's; includes the prober during HALF_OPEN.
     active: promQuery(`sum(rabbitmq_detailed_queue_consumers{queue="${API}.work"})`),
-    // Counted rather than configured: the fleet is one scaled service and no
-    // daemon knows how many there are, so how many are reporting *is* the size.
-    // `target_fraction` still has one series per daemon, published whether or
-    // not it is currently pulling work.
+    // No daemon knows the fleet size; the number reporting is the size.
     size: promQuery(`count(egress_daemon_target_fraction{apiId="${API}"})`),
     work: promQuery(`rabbitmq_detailed_queue_messages{queue="${API}.work"}`),
     dead: promQuery(`rabbitmq_detailed_queue_messages{queue="${API}.work.dead"}`),
@@ -227,13 +167,7 @@ const run = (settings: Settings) => {
     ),
   });
 
-  /**
-   * The deepest the work queue was seen to get. Sampled by a background fiber
-   * rather than read once at the end of the outage: the queue is at its minimum
-   * the instant the fleet stops (that is when the drain finished and the build
-   * has not started) and at its maximum somewhere in the middle, so a single
-   * reading taken at either edge understates it by an order of magnitude.
-   */
+  /** Sampled in the background: the queue peaks mid-outage, not at either edge. */
   let peakWork = 0;
 
   const sampleFleet = Effect.repeat(
@@ -255,12 +189,6 @@ const run = (settings: Settings) => {
     `${f.target !== null && f.size !== null ? ` (~${Math.round(f.target * f.size)} of ${f.size})` : ""}` +
     ` pulling=${f.active} work=${f.work} dead-lettered=${f.dead}`;
 
-  /**
-   * Polls `probe` every `everyMs` until it yields something, or dies saying
-   * what it was waiting for and what it last saw. Both waits below are this
-   * shape: a condition the system reaches on its own clock, not a sleep long
-   * enough to hope it has.
-   */
   const awaitOn = <A, E>(
     probe: Effect.Effect<O.Option<A>, E>,
     everyMs: number,
@@ -284,12 +212,7 @@ const run = (settings: Settings) => {
       Effect.orDie,
     );
 
-  /**
-   * Polls Prometheus until the fleet satisfies `predicate`. Scrape interval is
-   * 2s and the daemons publish once a second, so anything asserted here is
-   * necessarily a few seconds behind the event that caused it — which is why
-   * this waits for a condition rather than reading once after a sleep.
-   */
+  /** A condition, not a sleep: scrapes lag the event by a few seconds. */
   const awaitFleet = (predicate: (f: Fleet) => boolean, what: string, timeoutMs: number) => {
     let last: Fleet | null = null;
     return awaitOn(
@@ -352,20 +275,9 @@ const run = (settings: Settings) => {
     );
 
   /**
-   * Polls /api/events (newest first) until a state_changed for `apiId` with
-   * sequence > `after` that reaches `expected` appears, narrates every
-   * transition up to and including it, and returns its sequence.
-   *
-   * `expected` is a parameter and not a trailing comment because it is the
-   * assertion. This used to return the newest transition it could see, so a
-   * poll that caught two — HALF_OPEN and the OPEN right behind it land well
-   * inside one 300ms window — consumed both, every later step shifted by one,
-   * and the run finished a transition early. The last call in the script is
-   * the only check that the circuit recovered, and in that state it returned
-   * on a transition to HALF_OPEN and reported success with the circuit open.
-   *
-   * Transitions past the expected one are left un-narrated on purpose: the
-   * next step filters on `sequence > after` and reports them itself.
+   * Waits for the transition to `expected` after `after`. `expected` is the
+   * assertion: returning the newest transition once consumed HALF_OPEN and the
+   * OPEN behind it together, and reported recovery with the circuit open.
    */
   const awaitTransition = (
     apiId: string,

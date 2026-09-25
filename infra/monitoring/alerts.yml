@@ -4,9 +4,6 @@
 # outside: a process that was up and serving 200s while doing nothing at all.
 # That is the shape to alert on — not CPU, not memory, but "the thing that is
 # supposed to be moving has stopped".
-# `runbook_url` is a path in this repo rather than a URL, because there is no
-# canonical host to point at and a link that 404s at three in the morning is
-# worse than a path you can open next to the code.
 groups:
   - name: egress-control-plane
     interval: 15s
@@ -20,7 +17,6 @@ groups:
         for: 1m
         labels: { severity: critical }
         annotations:
-          runbook_url: "docs/runbooks/ControlLoopStalled.md"
           summary: "No aggregator is ticking"
           description: >-
             Every aggregator instance has stopped iterating its control loop.
@@ -43,7 +39,6 @@ groups:
         for: 2m
         labels: { severity: critical }
         annotations:
-          runbook_url: "docs/runbooks/NoLeaderElected.md"
           summary: "No aggregator holds the publishing lease"
           description: >-
             Instances are running but none can confirm it holds the lease, so
@@ -66,7 +61,6 @@ groups:
         for: 30s
         labels: { severity: critical }
         annotations:
-          runbook_url: "docs/runbooks/SplitBrain.md"
           summary: "More than one aggregator believes it is leader"
 
       # The delivery contract, on both transports. These are the numbers the
@@ -81,7 +75,6 @@ groups:
         for: 0m
         labels: { severity: critical }
         annotations:
-          runbook_url: "docs/runbooks/DeliveryContractBroken.md"
           summary: "A per-API sequence gap or duplicate was observed"
 
   - name: egress-daemon-fleet
@@ -104,7 +97,6 @@ groups:
         for: 2m
         labels: { severity: warning }
         annotations:
-          runbook_url: "docs/runbooks/FleetDisagreesWithTarget.md"
           summary: "Daemons disagree about how much of the fleet should be working"
           description: >-
             Every daemon computes the target from the same published events, so
@@ -120,7 +112,6 @@ groups:
         for: 2m
         labels: { severity: warning }
         annotations:
-          runbook_url: "docs/runbooks/FleetDisagreesWithTarget.md"
           summary: "The fleet's floor is held by {{ $value }} daemons, not one"
           description: >-
             Zero means a DEGRADED fleet could stop entirely and report nothing.
@@ -141,7 +132,6 @@ groups:
         for: 1m
         labels: { severity: warning }
         annotations:
-          runbook_url: "docs/runbooks/FleetShrunk.md"
           summary: "A replica stopped contributing to the fleet quorum"
           description: >-
             {{ $value }} replica(s) left the fleet in the last 10 minutes
@@ -159,7 +149,6 @@ groups:
         for: 1m
         labels: { severity: warning }
         annotations:
-          runbook_url: "docs/runbooks/EgressSheddingLocally.md"
           summary: "The egress proxy is rejecting requests itself"
           description: >-
             {{ $value }} request(s) shed by adaptive concurrency in the last 5
@@ -172,7 +161,6 @@ groups:
         for: 15m
         labels: { severity: warning }
         annotations:
-          runbook_url: "docs/runbooks/DeadLetterQueueGrowing.md"
           summary: "Dead-lettered work is accumulating and not being recovered"
           description: >-
             Failed work is preserved but not replayed. Either the circuit has
@@ -191,7 +179,6 @@ groups:
         for: 2m
         labels: { severity: critical }
         annotations:
-          runbook_url: "docs/runbooks/WorkQueueStalled.md"
           summary: "Work is ready and consumers are attached, but nothing is being acked"
           description: >-
             {{ $labels.queue }} has had ready messages, consumers and zero acks
@@ -246,7 +233,6 @@ groups:
         for: 2m
         labels: { severity: critical }
         annotations:
-          runbook_url: "docs/runbooks/DeliverySLOBurn.md"
           summary: "Delivery is burning the 99.9% error budget fast"
           description: >-
             Undelivered events are being dead-lettered at more than fourteen
@@ -262,7 +248,6 @@ groups:
         for: 15m
         labels: { severity: warning }
         annotations:
-          runbook_url: "docs/runbooks/DeliverySLOBurn.md"
           summary: "Delivery is steadily burning the error budget"
 
       # Sequence integrity: the honest framing is that its budget is zero, so

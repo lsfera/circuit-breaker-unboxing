@@ -77,7 +77,7 @@ const AGGREGATORS = [
   { container: `${PROJECT}-aggregator-2-1`, url: "http://aggregator-2:8088" },
 ];
 const PAYMENT_PORTS = [8080, 8081, 8082, 8083, 8084, 8085];
-const OUT = flag("out", `history/runs/chaos-load-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
+const OUT = flag("out", `docs/runs/chaos-load-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
 
 /** The reducer's table (packages/domain/src/Breaker.ts), as edges with the reasons each may carry. */
 const LEGAL = {
@@ -446,14 +446,9 @@ const withOutage = (detail, cut) =>
 const sumShed = (daemons) => daemons.reduce((n, d) => n + (d.shed ?? 0), 0);
 
 /**
- * A journey drives the flaky upstream through a sequence of behaviours and waits,
- * after each, for the transitions that behaviour must produce, in order. Every
- * step starts a fresh spike. `quiet` asserts no transition at all for that long.
- * `expectShed` asserts the fleet's shed counter (Envoy's adaptive-concurrency
- * filter rejecting admission, tracked separately from a call failure) rose
- * during the step — for a fault meant to be absorbed below the breaker rather
- * than tripping it, this is what tells "nothing happened because nothing was
- * provoked" apart from "nothing happened because the provocation worked".
+ * Drives the upstream through behaviours, waiting after each for the transitions
+ * it must produce. `quiet` asserts none; `expectShed` asserts Envoy shed load,
+ * which tells "absorbed below the breaker" from "never provoked".
  */
 const journey = (steps, { forbid = [] } = {}) =>
   fault("journey", async () => ({
@@ -659,20 +654,10 @@ const FAULTS = {
     ],
     { forbid: ["OPEN"] },
   ),
-  // A uniform latency bump, not a failure: at this fleet's default concurrency
-  // (5 daemons x MAX_IN_FLIGHT=32 = 160 in flight, max) the connection pool
-  // never reaches Envoy's own circuit_breakers.max_pending_requests (256) no
-  // matter how long the delay holds, so `THRESHOLD_OVERFLOW` — which reads
-  // circuit_breakers' overflow counters, not the admission filter's — cannot
-  // fire here by construction, verified against a live run (those counters
-  // stayed at 0 throughout). What actually happens, also verified live: the
-  // adaptive-concurrency filter (layer 4, envoy.yaml) sheds admission for
-  // roughly the first 20-30s, then its own periodic min-RTT recalibration
-  // (min_rtt_calc_params.interval: 30s) adopts the new latency as the normal
-  // baseline and shedding stops — exactly the layering envoy.yaml's own
-  // comment describes this filter for: catching a gradual/uniform shift
-  // before circuit_breakers, or the breaker, ever need to react. `expectShed`
-  // is what tells that apart from the fault silently doing nothing at all.
+  // A uniform latency bump: 160 in flight never reaches Envoy's
+  // max_pending_requests (256), so THRESHOLD_OVERFLOW cannot fire. Adaptive
+  // concurrency sheds for 20-30 s until its min-RTT recalculation adopts the new
+  // latency; `expectShed` checks that happened.
   "flaky-overflow": journey([
     { label: "+900ms everywhere under a spike", set: [PAYMENT_PORTS, { delayMs: 900 }], quiet: 45, expectShed: true },
     { label: "healed", set: "heal" },

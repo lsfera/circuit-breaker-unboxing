@@ -3,14 +3,9 @@ import { Reason, State, Vote } from "./Model.ts";
 import type { AggregatorConfig, ApiSnapshot, ReplicaReport } from "./Model.ts";
 
 /**
- * Authoritative breaker state for one API, aggregated across the whole fleet.
- *
- * This module is deliberately pure — no Effect, no clock, no I/O. `step` is a
- * total function of (state, reports, now) and every timing rule is expressed as
- * arithmetic on timestamps passed in. Everything that makes this hard to reason
- * about (concurrency, scheduling, delivery) lives in the Effect layer above it,
- * so the logic that actually decides what subscribers are told can be tested
- * exhaustively without a runtime.
+ * One API's breaker across the fleet. Pure: `step` is a total function of
+ * (state, reports, now), so the logic deciding what subscribers are told is
+ * tested exhaustively without a runtime.
  */
 
 type ReplicaSlot = {
@@ -31,14 +26,10 @@ export type BreakerState = {
   readonly probeStreak: number;
   readonly openBackoffMs: number;
   /**
-   * How long the fleet must look healthy without a break before
-   * DEGRADED->CLOSED. `dwellMs` for a first incident, so it closes as fast as
-   * any other transition. A relapse (DEGRADED again within `relapseWindowMs`
-   * of the last close) raises it to at least `relapseHoldMs`, then doubles it,
-   * up to `maxCloseHoldMs`. It is measured from `candidateSince`, not from
-   * entering DEGRADED: a flapping link's healthy windows are shorter than the
-   * hold, so none of them can close the breaker. Carried through OPEN and
-   * HALF_OPEN, so a flap cannot reset it by passing through a probe.
+   * Healthy time needed before DEGRADED->CLOSED, measured from `candidateSince`
+   * so a flap's short healthy windows cannot close it. `dwellMs` at first; a
+   * relapse within `relapseWindowMs` raises it to `relapseHoldMs`, then doubles
+   * it up to `maxCloseHoldMs`. Survives OPEN and HALF_OPEN.
    */
   readonly closeHoldMs: number;
   /** `now` at the last DEGRADED->CLOSED, or -Infinity before the first one.
@@ -56,10 +47,7 @@ export type Transition = {
   readonly reason: Reason;
 };
 
-/**
- * `now` seeds changedAt/candidateSince. Passing a real timestamp matters: these
- * are published as `observedSince`, and a zero here emits 1970 on the wire.
- */
+/** A real `now`: it is published as `observedSince`, and 0 is 1970. */
 export const initial = (
   apiId: string,
   cfg: AggregatorConfig,
@@ -148,13 +136,7 @@ type Tick = {
   readonly overflowDrove: boolean;
 };
 
-/**
- * Why a verdict is what it is, keyed by the verdict itself rather than by the
- * state being left: a DEGRADED fleet means THRESHOLD_OVERFLOW or
- * OUTLIER_EJECTION whether it is reached from CLOSED or out of a probe, and
- * writing that rule once is the difference between the two agreeing and the
- * two being kept in step by hand.
- */
+/** Keyed by verdict, not by the state left, so every path agrees. */
 const REASON: Record<Candidate, (tick: Tick) => Reason> = {
   OPEN: ({ allGone }) => (allGone ? Reason.ALL_ENDPOINTS_EJECTED : Reason.OUTLIER_EJECTION),
   DEGRADED: ({ overflowDrove }) =>
@@ -203,16 +185,7 @@ const probeSucceeded: Resolve = (self, now, { cfg }) => {
     : [{ ...self, probeStreak }, O.none()];
 };
 
-/**
- * The probe found the fleet partly healthy, which is a verdict and not an
- * inconclusive result: DEGRADED is the state that says "keep pulling, at
- * reduced rate", and the daemon fleet acts on it (half the daemons, against
- * exactly one prober for HALF_OPEN).
- *
- * `openBackoffMs` is deliberately not reset the way PROBE_SUCCEEDED resets it.
- * The upstream is still impaired, so if this relapses to OPEN it should wait
- * out the backoff it had already earned rather than start over optimistically.
- */
+/** A verdict, not inconclusive. The backoff is kept: a relapse to OPEN waits out what it earned. */
 const probeDegraded: Resolve = (self, now, tick) => {
   const reset = { ...self, probeStreak: 0 };
   return tick.dwelled
@@ -276,16 +249,8 @@ const stayClosed: Resolve = (self, now, { cfg }) => [
 ];
 
 /**
- * The whole graph, as a table rather than a chain of `if`s: every state this
- * machine can be in, against every verdict the fleet can return.
- *
- * `Record<State, Record<Candidate, Resolve>>` is what makes it total. The
- * previous shape let a pair fall off the end of the HALF_OPEN branch and mean
- * "stay put", which is how HALF_OPEN x DEGRADED became a state the machine
- * could enter and never leave — a half-healthy upstream held the fleet at one
- * prober indefinitely while DEGRADED, the state that exists for exactly that,
- * sat unreachable. Falling through is now spelt `hold`, and a missing pair is
- * a compile error.
+ * Every state against every verdict; a missing pair is a compile error. A
+ * fall-through once made HALF_OPEN x DEGRADED a state the machine never left.
  */
 const RESOLVE: Record<State, Record<Candidate, Resolve>> = {
   OPEN: { CLOSED: waitOutBackoff, DEGRADED: waitOutBackoff, OPEN: waitOutBackoff },

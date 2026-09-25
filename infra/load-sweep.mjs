@@ -44,7 +44,7 @@ const RABBIT = flag("rabbit", "http://guest:guest@rabbitmq:15672");
 const PRODUCER = flag("producer", "http://rmq-producer:9464");
 const WORK_QUEUE = "payments-provider.work";
 const DEAD_QUEUE = "payments-provider.work.dead";
-const OUT = flag("out", `history/runs/load-sweep-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
+const OUT = flag("out", `docs/runs/load-sweep-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
 
 // ---- sources ---------------------------------------------------------------
 

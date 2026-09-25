@@ -2,21 +2,14 @@ import { Option as O, Result, Schema } from "effect";
 import { readerFor } from "@egress/domain/Model.ts";
 import type { CircuitEvent, DecodeFailure } from "@egress/domain/Model.ts";
 
-/**
- * Naming conventions for the circuit.control control plane, shared by
- * @egress/aggregator's AmqpControlPlaneSink (publisher side) and
- * @egress/rmq-consumer's daemon fleet (consumer side), so the two are never
- * tempted to drift apart on topology.
- */
+/** Topology and message shapes shared by the aggregator (publisher) and the daemons (consumers). */
 
 export const CONTROL_EXCHANGE = "circuit.control";
 
 /**
- * The payments idempotency key, as the third party receives it. On the broker
- * it is the AMQP `message_id`, assigned once by the producer: a broker
- * redelivery hands back the same message, so it carries the same key for free,
- * and every republish (a retry, a redrive) passes `messageId` forward rather
- * than letting `send` invent a new one.
+ * The idempotency key as the third party receives it. On the broker it is the
+ * `message_id`, assigned once by the producer; every republish must pass
+ * `messageId` forward or `send` stamps a new one.
  */
 export const IDEMPOTENCY_KEY_HTTP_HEADER = "x-idempotency-key";
 
@@ -60,24 +53,15 @@ export const encodeWorkMessage = Schema.encodeSync(WorkMessageJson);
 export const decodeWorkMessage = Schema.decodeUnknownOption(WorkMessageJson);
 
 /**
- * How many times a message has been *called* — not delivered — since it was
- * last a fresh message. Distinct from the broker's own `x-delivery-count`:
- * that counts deliveries of the same message, and a failed call now retries
- * by republishing a new message rather than requeuing the old one. Absent
- * means zero. Reset (omitted) whenever `REDRIVE_COUNT_HEADER` advances — a
- * redrive is a fresh outage, and deserves a fresh call budget.
+ * Calls made since the message was last fresh — not `x-delivery-count`, since a
+ * retry is a republished copy. Absent means zero; reset by a redrive.
  */
 export const ATTEMPTS_HEADER = "x-egress-attempts";
 
 /**
- * Where a message came from, stamped by anything that moves a message
- * between queues without going through the broker's own dead-lettering —
- * the daemon's own republish to `<api>.work.dead` once `ATTEMPTS_HEADER`
- * exhausts `WORK_DELIVERY_LIMIT`, and Redrive.ts's parking of a non-work
- * message. Read by Redrive.ts as the fallback for `delivery.deadLetter`,
- * which is only populated when the *broker* did the dead-lettering — a
- * message published straight onto the queue carries no `x-first-death-*` at
- * all, and without this it would look unattributable and never get redriven.
+ * Stamped on anything moved between queues by a publish rather than by the
+ * broker's dead-lettering, which is the only thing that sets `x-first-death-*`.
+ * Without it the redrive cannot attribute the message.
  */
 export const ORIGIN_QUEUE_HEADER = "x-egress-origin-queue";
 export const ORIGIN_REASON_HEADER = "x-egress-origin-reason";
@@ -105,21 +89,12 @@ export const workQueueFor = (apiId: string): string => `${apiId}.work`;
 /** Where work that could not be completed ends up. */
 export const deadLetterQueueFor = (apiId: string): string => `${apiId}.work.dead`;
 
-/**
- * Where a message goes once it has been redriven `MAX_REDRIVES` times without
- * succeeding — a true poison message, told apart from a message that only
- * failed because the outage it was caught in hadn't ended yet. The periodic
- * sweep would otherwise replay it forever: dead-letter, redrive, three more
- * calls, dead-letter again.
- */
+/** Poison: redriven `MAX_REDRIVES` times, refused with a 4xx, or never work at all. Nothing leaves it on its own. */
 export const parkedQueueFor = (apiId: string): string => `${apiId}.work.parked`;
 
 /**
- * One dead-letter destination for *every* queue this fleet declares, so anything
- * unhandleable lands somewhere you can count and replay from.
- *
- * Must be declared identically by every process that touches a queue: RabbitMQ
- * rejects a redeclare whose arguments differ, and container startup is unordered.
+ * One dead-letter destination for every queue. Every process must declare a
+ * queue identically: RabbitMQ rejects a redeclare whose arguments differ.
  */
 const deadLetterArgs = (apiId: string): Record<string, unknown> => ({
   "x-dead-letter-exchange": "",
@@ -129,48 +104,30 @@ const deadLetterArgs = (apiId: string): Record<string, unknown> => ({
 /** Identical to `deadLetterArgs` today; named separately because here it is designed behaviour, not a backstop. */
 const workQueueArgs = deadLetterArgs;
 
-/**
- * A single-active-consumer queue that also dead-letters, so a malformed trigger
- * is kept. The dead-letter queue itself gets no target — that would be a cycle.
- */
+/** Dead-letters, so a malformed trigger is kept. */
 const sacQueueArgs = (apiId: string): Record<string, unknown> => ({
   ...deadLetterArgs(apiId),
   "x-single-active-consumer": true,
 });
 
 /**
- * Calls a message gets per outage. The daemon spends it, counting in
- * `ATTEMPTS_HEADER` on each republish (ADR 016); the same number is the work
- * queue's `x-delivery-limit`, the broker's backstop for a delivery that keeps
- * coming back unsettled — a daemon killed mid-call — and never reaches a
- * republish.
- *
- * Low because RabbitMQ redelivers with no backoff, so every extra attempt is
- * load on a failing upstream. A redrive republishes the body, so a replayed
- * message starts a fresh budget — three attempts per outage, not three ever.
+ * Calls per outage, counted in `ATTEMPTS_HEADER` (ADR 016). The same number is the
+ * work queue's `x-delivery-limit`, the backstop for a delivery that never reaches
+ * a republish. Low because every attempt is load on a failing upstream.
  */
 export const WORK_DELIVERY_LIMIT = 3;
 
 /**
- * Durability, decided here so producer and daemons cannot disagree — a mismatch
- * is a redeclare conflict (`409 inequivalent arg 'durable'`), so changing a flag
- * on a broker that already holds the queue means deleting it first.
- *
- * Every queue is durable. RabbitMQ 4.3 refuses a transient queue that is not
- * exclusive, and refuses it by closing the whole connection (541), so one such
- * declare takes the daemon down. The control and floor queues cannot be
- * exclusive — the floor is shared by the fleet — so they are durable classic
- * queues whose `x-expires` does the cleanup transience used to. Everything else
- * is a quorum queue, which could never be transient anyway.
+ * Every queue is durable: RabbitMQ 4.3 answers a non-exclusive transient declare by
+ * closing the connection (541). Control and floor queues are classic with
+ * `x-expires`; everything else is quorum.
  */
 export const workQueueOptions = (apiId: string) => ({
   args: {
     ...workQueueArgs(apiId),
     "x-queue-type": "quorum",
     "x-delivery-limit": WORK_DELIVERY_LIMIT,
-    // At-least-once: the default (at-most-once) drops a dead letter the target
-    // queue does not take. Not what lost the 1,570 — see deadLetterQueueOptions.
-    // Quorum queues require reject-publish for it.
+    // At-least-once dead-lettering requires reject-publish on a quorum queue.
     "x-dead-letter-strategy": "at-least-once",
     "x-overflow": "reject-publish",
   },
@@ -178,14 +135,9 @@ export const workQueueOptions = (apiId: string) => ({
 });
 
 /**
- * The end of the line, so nothing may ever leave it except by being moved.
- *
- * `x-delivery-limit: -1`, because a quorum queue left alone has a limit of 20, and
- * a queue with no dead-letter target at its limit *drops* the message
- * (`dead_letter_strategy="disabled"`). Every redrive pass hands back what it did not
- * move — its channel closing counts — so the old default quietly lost dead letters:
- * 1,570 in one chaos run, and 0 of 50 survived 22 channel closes on this broker
- * where -1 kept all 50 through 25.
+ * `x-delivery-limit: -1`: a quorum queue defaults to 20, and one with no dead-letter
+ * target drops a message at its limit. Every redrive pass returns what it did not
+ * move, so the default lost 1,570 dead letters in one chaos run.
  */
 export const deadLetterQueueOptions = () => ({
   args: { "x-queue-type": "quorum", "x-delivery-limit": -1 },
@@ -198,55 +150,29 @@ export const parkedQueueOptions = () => ({
   durable: true,
 });
 
-/**
- * Stamped on a redriven message so the next redrive can tell a message caught
- * in its second outage from one that has failed every single time. Absent
- * means zero — a message dead-lettered by the broker directly, never yet
- * redriven.
- */
+/** Redrives so far; absent means zero. */
 export const REDRIVE_COUNT_HEADER = "x-egress-redrive-count";
 
-/**
- * Redrives before a message is treated as poison rather than unlucky. Each
- * redrive grants a fresh `WORK_DELIVERY_LIMIT`-attempt budget, so this bounds
- * outages survived, not attempts: five outages' worth of retrying the same
- * message is enough evidence that the upstream will never accept it.
- */
+/** Outages survived, not attempts: each redrive grants a fresh budget. */
 export const MAX_REDRIVES = 5;
 
 /**
- * How long a control queue may sit with no consumer before the broker deletes
- * it. A daemon that leaves the fleet — a scale-down, a replaced instance id —
- * otherwise leaves a queue that is still bound to `circuit.control` and still
- * being published into, with nobody reading it. Measured: three messages in
- * forty seconds, which is one snapshot interval, growing for as long as the
- * broker lives.
- *
- * Ten minutes, because it has to outlast a reconnect. `@egress/rmq` recovers
- * for about five minutes before giving up (see ADR 005), and a queue deleted
- * mid-recovery would be redeclared empty on reconnect — harmless, since a
- * daemon rebuilds its view from the next snapshot, but pointless churn.
+ * A departed daemon's control queue would otherwise stay bound and fill for ever.
+ * Ten minutes outlasts the client's ~5 minutes of reconnecting.
  */
 export const CONTROL_QUEUE_EXPIRES_MS = 600_000;
 
 /**
- * The floor queue. One per API, bound to `circuit.control` alongside the
- * per-daemon control queues, and single-active-consumer — so every published
- * event also lands in exactly one daemon's lap, and that daemon is the one
- * running while the fraction alone would have selected nobody.
- *
- * Bound rather than published to: the election needs no traffic of its own,
- * and a snapshot every `snapshotMs` is already a heartbeat.
+ * Single-active-consumer and bound to `circuit.control`, so every published event
+ * re-elects one daemon to run when the fraction alone selects nobody (ADR 013).
  */
 export const floorQueueFor = (apiId: string) => `${apiId}.floor`;
 
 export const floorQueueOptions = () => ({
   args: {
     "x-single-active-consumer": true,
-    // Self-deleting for the same reason as a control queue: one left behind
-    // by a departed fleet should not keep filling.
     "x-expires": CONTROL_QUEUE_EXPIRES_MS,
-    // The lease is short, so an event nobody took is worthless within seconds.
+    // The lease is short: an event nobody took is worthless within seconds.
     "x-message-ttl": 30_000,
     "x-max-length": 16,
   },
@@ -263,19 +189,13 @@ export const sacQueueOptions = (apiId: string) => ({
   durable: true,
 });
 
-/** Durable so the topology itself survives, even though what it feeds does not need to. */
 export const CONTROL_EXCHANGE_OPTIONS = { durable: true };
 
 export const encodeCircuitEvent = (event: CircuitEvent): string => JSON.stringify(event);
 
 /**
- * The body on both SAC queues. Every daemon publishes one per transition so a
- * trigger still arrives when some are down; the elected consumer dedupes on the
- * sequence.
- *
- * `Natural` is load-bearing: the dedupe is `sequence <= probedSequence`, and any
- * comparison against `NaN` is false, so a sequence that cannot be ordered must
- * not decode. See docs/decisions/007-message-contracts.md.
+ * The body on both election queues. `Natural` is load-bearing: the dedupe is
+ * `sequence <= seen`, and every comparison against `NaN` is false (ADR 007).
  */
 const ElectionTrigger = Schema.Struct({ sequence: Schema.Natural });
 type ElectionTrigger = typeof ElectionTrigger.Type;

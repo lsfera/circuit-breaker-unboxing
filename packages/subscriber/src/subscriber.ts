@@ -12,13 +12,8 @@ import {
 import type { CircuitEvent, State as StateType } from "@egress/domain/Model.ts";
 
 /**
- * A downstream consumer (`npm run subscribe`), demonstrating the three properties
- * the event contract is built for: it syncs from a single message, since every
- * event carries full state; it detects loss, since per-API sequences are gapless;
- * and it is idempotent, which is what lets delivery be at-least-once.
- *
- * Decoded through the same Schema the aggregator publishes with, so contract
- * drift fails here instead of corrupting state silently.
+ * A downstream consumer: syncs from any one event, detects loss by sequence,
+ * and is idempotent. Decodes with the aggregator's own schema.
  */
 
 
@@ -34,14 +29,7 @@ const program = Effect.fnUntraced(function* (ORIGIN: string) {
   if (!res.body) return yield* Effect.die(`cannot reach aggregator at ${ORIGIN}`);
   yield* Effect.log(`subscribed to ${ORIGIN}`);
 
-  /**
-   * `Sse.decode` rather than splitting on a blank line, which is what this did
-   * and which only ever worked against this server: SSE separates on `\r\n\r\n`
-   * and `\r\r` too, `data:` may span lines or omit the space, and a stream that
-   * never separates grew the buffer without bound. A subscriber this repo
-   * offers as the shape a real one should take had a parser that fit exactly
-   * one publisher.
-   */
+  // `Sse.decode`: splitting on a blank line fit exactly one publisher.
   yield* Stream.fromReadableStream({
     evaluate: () => res.body!,
     onError: (cause) => new Error(String(cause)),
@@ -49,10 +37,7 @@ const program = Effect.fnUntraced(function* (ORIGIN: string) {
     Stream.decodeText(),
     Stream.pipeThroughChannel(Sse.decode()),
     Stream.filter((frame) => frame.event === "cloudevent"),
-    // `filterMapEffect`, so a frame this cannot use contributes nothing —
-    // rather than an `undefined` travelling down the stream for whoever
-    // consumes it to remember to check for. `Result.fail` is this
-    // combinator's "skip". See docs/decisions/006-representing-absence.md.
+    // `Result.fail` is this combinator's "skip".
     Stream.filterMapEffect((frame) =>
       // Through the contract's own reader: a frame that is not JSON at all is
       // a failure to report, not an exception to escape into the stream.
@@ -69,10 +54,7 @@ const program = Effect.fnUntraced(function* (ORIGIN: string) {
               const { apiId, sequence, state } = event.data;
               const highest = O.map(O.fromUndefinedOr(map.get(apiId)), (k) => k.sequence);
 
-              // The same rule the aggregator's own observer and the daemon fleet
-              // apply, from a third vantage point. Reimplementing it here — in the
-              // subscriber this repo offers as the shape a real one should take —
-              // is how three readings of one guarantee end up disagreeing.
+              // The shared rule, from a third vantage point.
               return Match.value(classifySequence(highest, sequence)).pipe(
                 // Idempotent: an already-applied sequence is a no-op.
                 Match.when("duplicate", () => ["sync", map] as const),

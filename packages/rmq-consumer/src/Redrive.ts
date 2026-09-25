@@ -11,15 +11,8 @@ import type { Consumer, DeliveryInfo, RmqService, Settlement } from "@egress/rmq
 import type { Semaphore } from "effect/Semaphore";
 
 /**
- * Where a redriven work message goes next, and what it carries there — pulled
- * out because it is the one decision in this file with no broker in it.
- *
- * `header` is `delivery.properties[REDRIVE_COUNT_HEADER]` as the broker hands
- * it back: absent on a message that has never been redriven, a digit string
- * on one that has. Anything that doesn't parse as a redrive count (there is
- * no way to publish one except this function) is treated as 0 rather than
- * trusted — the failure mode of trusting it is a poison message that redrives
- * forever, which is the one thing MAX_REDRIVES exists to prevent.
+ * Where a redriven work message goes next. A header that does not parse counts
+ * as 0: trusting it risks a poison message that redrives for ever.
  */
 export type RedriveDecision =
   | { readonly destination: "work"; readonly count: number }
@@ -32,13 +25,9 @@ export const nextRedrive = (header: string | undefined): RedriveDecision => {
 };
 
 /**
- * Recovering the dead-letter queue: bounded passes that replay work back onto the
- * work queue and leave anything that is not work where a human can find it.
- *
- * Elected to one daemon by the broker — five replaying the same backlog would
- * make a recovery a fivefold burst at an upstream that has just come back. The
- * options are the coupling written down, including the daemon's consumer Ref and
- * permit, because `reconcile` retires the channel from the other side.
+ * Bounded passes that replay work from the dead-letter queue and park anything
+ * that is not work. One daemon runs it (elected, or the floor's sweep): five
+ * replaying one backlog would be a fivefold burst at a recovering upstream.
  */
 type RedriveOptions = {
   readonly label: string;
@@ -57,14 +46,8 @@ type RedriveOptions = {
   readonly consumer: Ref.Ref<O.Option<Consumer>>;
   readonly gate: Semaphore;
   /**
-   * Whether a pass is currently running, claimed with `Ref.modify` rather than
-   * `consumer`: `consumer` is only set once `conn.consume` has actually
-   * returned a channel, and that is itself an async round trip. Two callers
-   * that both check "is a pass running" while the first is still awaiting that
-   * round trip would both see none and both open a consumer on the same
-   * dead-letter queue. `Ref.modify` reads and marks the claim in one
-   * synchronous step, so there is no gap between them to race into — see the
-   * comment on `redriveOnce` below.
+   * Claimed with `Ref.modify`, not inferred from `consumer`, which is only set
+   * after `consume` returns — two callers in that gap would both open a consumer.
    */
   readonly running: Ref.Ref<boolean>;
 };
@@ -77,11 +60,7 @@ const PASS_DEADLINE = Duration.seconds(60);
 // Every message a pass does not move is handed back with `release`, never `requeue`:
 // nothing about it failed, and a counted return is a step towards a delivery limit.
 export const makeRedrive = (opts: RedriveOptions) => {
-  /**
-   * The delivery's own `message_id`, which is its idempotency key: a republish
-   * that let `send` invent a new one would give the third party no way to
-   * recognise a replay as a request it may already have answered.
-   */
+  /** The idempotency key: a republish must carry it, or a replay reaches the third party as new work. */
   const sameId = (delivery: DeliveryInfo) => O.getOrUndefined(delivery.messageId);
 
   const redrivePass = Effect.gen(function* () {
@@ -92,11 +71,7 @@ export const makeRedrive = (opts: RedriveOptions) => {
     });
     const toParked = yield* conn.publisherToQueue(opts.parkedQueue);
 
-    /**
-     * Captured for the same reason daemon.ts captures it: the handler below is a
-     * plain AMQP callback, and `Effect.runPromise` would build a fresh runtime
-     * with default services for every message a pass moves — thousands of them.
-     */
+    // The handler is a plain callback; a bare `runPromise` builds a fresh runtime per message.
     const services = yield* Effect.context<never>();
     const runInContext = Effect.runPromiseWith(services);
 
@@ -105,17 +80,8 @@ export const makeRedrive = (opts: RedriveOptions) => {
     let poisoned = 0;
     let lastReplayAt = Date.now();
     const consumer = yield* conn.consume(opts.deadQueue, async (body, delivery): Promise<Settlement> => {
-      // One canonical dead-letter queue means this one holds more than
-      // failed work: a control event or an election trigger that would not
-      // decode lands here too, and replaying *that* onto the work queue would
-      // be nonsense. The broker records where each message was dead-lettered
-      // from, so the filter is exact rather than a guess at the body's shape.
-
-      // Where it came from: the broker's annotation while it still has one, our
-      // own stamp once an earlier pass moved it and the annotation was lost, and
-      // "unknown" for anything published straight onto this queue by something
-      // else. Only work is ever replayed, so anything unattributable is kept,
-      // not guessed at. One fold, because both fields come or go together.
+      // The broker's annotation, else our stamp from an earlier move, else unknown.
+      // Only work from the work queue is replayed; anything else is parked.
       const { queue: originQueue, reason: originReason } = O.getOrElse(
         delivery.deadLetter,
         () => ({
@@ -125,10 +91,7 @@ export const makeRedrive = (opts: RedriveOptions) => {
       );
 
       if (originQueue !== opts.workQueue) {
-        // Never work, so never replayed: parked for a human, stamped so the
-        // provenance the broker's annotations carried survives the move. It
-        // used to go back to the tail of this queue, where it stayed for
-        // good, holding the queue non-empty and every pass busy lapping it.
+        // Parked, not returned to this queue, where it would be lapped by every pass for good.
         strays++;
         try {
           await runInContext(
@@ -147,44 +110,19 @@ export const makeRedrive = (opts: RedriveOptions) => {
         }
       }
 
-      // Reserve the slot *before* awaiting. The consumer's prefetch lets the
-      // broker keep a hundred deliveries in flight, so check-then-await-then-increment
-      // lets every in-flight handler pass the same check and overshoot the
-      // cap by an order of magnitude — measured at 5739 against a cap of
-      // 5000 before this was reordered. Poison and replayed messages share
-      // one cap: both leave the dead-letter queue in this branch, and the cap
-      // bounds the burst either puts on the queue it lands on.
+      // Reserve the slot before awaiting: with a prefetch of 100, check-await-increment
+      // overshot the cap (5,739 against 5,000).
       if (moved + poisoned >= opts.maxPerPass) return "release";
 
-      // A message redriven MAX_REDRIVES times without succeeding is poison,
-      // not unlucky: WORK_DELIVERY_LIMIT already spent three attempts per
-      // redrive, so this is five outages' worth of the third party rejecting
-      // it. Parking it is what keeps the periodic sweep from redriving it
-      // forever — see nextRedrive.
       const decision = nextRedrive(delivery.properties[REDRIVE_COUNT_HEADER]);
       if (decision.destination === "work") moved++;
       else poisoned++;
-      // Publish, then accept — never the reverse. A crash between the two
-      // redelivers a message that was already replayed, which is a duplicate;
-      // accepting first would lose it outright. Duplicates are recoverable and
-      // losses are not, and the premise of this queue is that the work matters.
+      // Publish, then accept: a crash in between is a duplicate, the reverse a loss.
       try {
-        // A replayed message rejoins the trace that produced it. The
-        // `traceparent` survives being dead-lettered — RabbitMQ keeps
-        // application headers — and republishing the body alone was throwing it
-        // away, so the one message worth following, the one that failed and was
-        // retried, arrived looking like a brand new one with no history.
-        //
-        // Only a message that carried a parent pays for a span, same as the
-        // daemon's egress call: an untraced replay takes the plain path.
-        // Both destinations carry the trace the same way — a parked message is
-        // still the tail of the same story, now waiting on a human instead of
-        // another attempt.
+        // The `traceparent` survives dead-lettering, so a replay rejoins its trace.
         const destinationQueue =
           decision.destination === "work" ? opts.workQueue : opts.parkedQueue;
-        // ATTEMPTS_HEADER is deliberately not carried forward: a redrive is a
-        // fresh outage, and starting it with the prior outage's call count
-        // would dead-letter the message on its first failure this time round.
+        // ATTEMPTS_HEADER is dropped: a redrive is a fresh outage with a fresh budget.
         const send = conn.send(decision.destination === "work" ? into : toParked, body, {
           messageId: sameId(delivery),
           headers:
@@ -209,41 +147,26 @@ export const makeRedrive = (opts: RedriveOptions) => {
           ).pipe(O.getOrElse(() => send)),
         );
       } catch {
-        // The destination is unreachable; leave the message where it is
-        // rather than accepting it into nothing.
         if (decision.destination === "work") moved--;
         else poisoned--;
         return "release";
       }
-      // `moved`/`poisoned` already carry this for the pass-end log lines; the
-      // metrics registry reads queue-flow numbers from RabbitMQ itself now
-      // (rabbitmq_detailed_queue_*, rabbitmq_global_messages_dead_lettered_*),
-      // not from an application counter.
       lastReplayAt = Date.now();
       return "accept";
     });
 
     yield* opts.gate.withPermit(Ref.set(opts.consumer, O.some(consumer)));
 
-    /**
-     * Every way a pass ends, as one total function polled on a schedule — the
-     * deadline is the timeout around it rather than a sixth branch, so no
-     * `reason` can be reached without saying which one it was.
-     */
     const when = (ended: boolean, reason: () => string): O.Option<string> =>
       ended ? O.some(reason()) : O.none();
 
     const finished = Effect.map(opts.isClosed, (closed) =>
-      // The order is the priority, and `firstSomeOf` is what makes it data
-      // rather than the order four `if`s happen to be written in.
+      // Order is priority.
       O.firstSomeOf([
         when(!closed, () => "circuit reopened"),
         when(moved + poisoned >= opts.maxPerPass, () => "cap reached"),
-        // Idle is measured on *replays and parkings* rather than on
-        // deliveries, so a pass that is only being handed things it will not
-        // replay still ends. On `Date.now()` at both ends deliberately: what
-        // is being measured is how long the broker has gone without handing
-        // over work.
+        // Idle counts moves, not deliveries, so a pass handed only things it
+        // releases still ends.
         when(Date.now() - lastReplayAt > PASS_IDLE_MS, () => "drained"),
       ]),
     );
@@ -254,11 +177,8 @@ export const makeRedrive = (opts: RedriveOptions) => {
       Effect.timeoutOrElse({ duration: PASS_DEADLINE, orElse: () => Effect.succeed("deadline") }),
     );
 
-    // Close *this pass's* channel, and only clear the Ref if it still points
-    // at it. Closing whatever the Ref happens to hold is not the same thing:
-    // reconcile retires the consumer on any state change, so a pass whose
-    // channel had already been retired and replaced by a newer one would tear
-    // down the newer pass's live consumer on its way out.
+    // Clear the Ref only if it still holds this pass's consumer: reconcile may
+    // already have replaced it with a newer pass's.
     yield* opts.gate.withPermit(
       Ref.update(opts.consumer, O.filter((held) => held !== consumer)),
     );
@@ -278,28 +198,14 @@ export const makeRedrive = (opts: RedriveOptions) => {
       : Effect.void;
     return { moved, strays, poisoned, reason };
   });
-  /**
-   * Replay in bounded passes until empty or told to stop, only while CLOSED.
-   *
-   * Passes rather than one drain: each is a fresh channel it can afford to
-   * destroy, and `redriveMax` bounds any single burst onto the work queue.
-   * Looping until drained is what keeps a backlog larger than the cap from
-   * needing one outage per cap to recover.
-   */
+  /** Passes until drained, capped, so a backlog larger than one pass needs no second outage. */
   const REDRIVE_MAX_PASSES = 20;
   const passes = Effect.gen(function* () {
-    // Debug rather than info: this runs every REDRIVE_SWEEP_MS from the sweep,
-    // not only on a recovery, and most runs find nothing — see daemon.ts. The
-    // finish line below carries the outcome at info level whenever one moved.
+    // Debug: the sweep runs every 30s and usually finds nothing.
     yield* Effect.logDebug(
       `${opts.label}: redriving ${opts.deadQueue} (max ${opts.maxPerPass} per pass)`,
     );
 
-    /**
-     * The loop is `repeat` with an `until`, and the state it threads is a Ref
-     * rather than a mutable local: `finished` carries the reason the run ended,
-     * and its absence after the cap is what tells the two log lines apart.
-     */
     const state = yield* Ref.make({
       pass: 0,
       total: 0,
@@ -343,17 +249,8 @@ export const makeRedrive = (opts: RedriveOptions) => {
   });
 
   /**
-   * `running` is claimed atomically before `passes` starts and released once
-   * it ends, however it ends — `Effect.ensuring` covers the interrupt case
-   * too, which matters here: this fiber can be cancelled mid-pass by the
-   * daemon shutting down.
-   *
-   * This is what makes a sweep that lands while an election-triggered pass is
-   * still going — or a sweep that lands before the previous sweep's pass has
-   * finished, since a pass may legitimately run up to PASS_DEADLINE while the
-   * sweep repeats every REDRIVE_SWEEP_MS — a no-op instead of a second
-   * consumer on the same dead-letter queue. `consumer` alone cannot do this
-   * job; see the comment on `running` in RedriveOptions.
+   * A sweep landing while another pass runs (up to PASS_DEADLINE) is a no-op.
+   * `ensuring` releases the claim on interruption too.
    */
   const redriveOnce = opts.enabled
     ? Ref.modify(opts.running, (running) => [!running, true] as const).pipe(

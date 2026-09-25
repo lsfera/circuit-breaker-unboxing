@@ -21,39 +21,16 @@ import type { ApiSnapshot, CircuitEvent, EventType, State } from "@egress/domain
 
 export const SOURCE = "egress-proxy/control-plane";
 
-/**
- * How many dead letters a sink keeps in memory for inspection.
- *
- * This list is a diagnostic buffer, not a ledger: an unbounded one grows for
- * as long as a subscriber stays broken, in a process meant to run for months.
- * The authoritative total is `egress_webhook_dead_lettered_total`, which is a
- * counter and costs nothing to keep exact.
- */
+/** A diagnostic buffer, not a ledger; the exact total is the metric. */
 export const DEAD_LETTER_BUFFER = 200;
 
-/**
- * How hard any sink tries before dead-lettering. One declaration because both
- * sinks had it written out: a subscriber and a broker that disagree about how
- * long an outage has to last before an event is given up on is a difference
- * nobody chose.
- *
- * Low on purpose. Delivery is forked off the tick loop, so a longer retry does
- * not stall anything — but the outbox behind the webhook sink is the durable
- * answer to a subscriber that stays down, and retrying into one that is gone is
- * just latency before the durable path takes over.
- */
+/** Shared by both sinks. Low: the webhook's outbox, not retrying, is the answer to a subscriber that stays down. */
 export const DELIVERY_RETRY = {
   schedule: Schedule.exponential(Duration.millis(100)),
   times: 3,
 } as const;
 
-/**
- * `now` is passed in rather than read here. Every other instant this system
- * publishes comes from the Effect clock — `observedSince` included, two lines
- * down — and a wall-clock read in this one field meant a tick carried two clocks:
- * simulated time in the payload and wall time in the envelope, which is also
- * why no test could assert what `time` should be.
- */
+/** `now` from the caller's Effect clock, so envelope and payload share one clock. */
 const build = (
   type: EventType,
   snap: ApiSnapshot,
@@ -80,21 +57,12 @@ const build = (
   },
 });
 
-// `null`, not `Option`: this feeds `Schema.NullOr(StateSchema)` on the
-// published event. JSON has null, subscribers parse null, and the first event
-// for an API genuinely has no predecessor — see
-// docs/decisions/006-representing-absence.md.
+// `null`: the published schema is `NullOr`, and the first event has no predecessor.
 export const stateChanged = (snap: ApiSnapshot, previous: State | null, now: number) =>
   build(SEQUENCED_EVENT, snap, previous, now);
 
 export const snapshotEvent = (snap: ApiSnapshot, now: number) =>
   build(SNAPSHOT_EVENT, snap, null, now);
-
-// ---------------------------------------------------------------------------
-// EventBus — one PubSub, many subscribers. Backpressure and per-subscriber
-// cursors come with it, and each SSE client is a Stream that ends with its
-// request scope rather than a listener something has to remember to remove.
-// ---------------------------------------------------------------------------
 
 export class EventBus extends Context.Service<
   EventBus,
@@ -122,10 +90,6 @@ export class EventBus extends Context.Service<
   );
 }
 
-// ---------------------------------------------------------------------------
-// Sinks
-// ---------------------------------------------------------------------------
-
 export class EventSink extends Context.Service<
   EventSink,
   {
@@ -146,66 +110,21 @@ export class EventSink extends Context.Service<
 export type SinkImpl = {
   readonly name: string;
   /**
-   * Completes once delivery is confirmed *to the extent leadership depends on
-   * it*, and fails with `DeliveryFailed` if it is not — the caller
-   * (Aggregator.ts's `attemptTick`) awaits this for a sequenced event and
-   * checkpoints only on success, so the sequence guarantee holds across a
-   * leader that loses its transport mid-delivery.
-   *
-   * That is why WebhookSink and AmqpControlPlaneSink keep different shapes
-   * here even though both "fork delivery off the hot path": a subscriber
-   * failure is not a leadership question (WebhookSink forks its attempt and
-   * returns success immediately, same as always), but AmqpControlPlaneSink's
-   * publish *is* the thing leadership is about, so it forks into its own
-   * fenceable scope and then awaits that fork's outcome before returning.
-   * `combineSinks` runs every mounted sink and fails if any does — in
-   * practice only the AMQP leg can make it wait or fail, since the webhook
-   * leg has already returned by the time `Effect.all` reaches it.
+   * Fails if the event did not reach what leadership depends on; the tick
+   * checkpoints only on success. The AMQP sink awaits its confirm; the webhook
+   * sink forks and returns, since a subscriber's outage is not a leadership question.
    */
   readonly deliver: (event: CircuitEvent) => Effect.Effect<void, DeliveryFailed>;
   readonly deadLetters: Effect.Effect<ReadonlyArray<DeliveryFailed>>;
-  /**
-   * Replay whatever an earlier attempt could not deliver, and answer how many
-   * got through. A sink with nothing durable behind it returns 0.
-   *
-   * Required rather than optional so that adding a sink is a decision about
-   * this, not an omission. It is the *caller* that decides when to run it,
-   * because the answer is "only on the instance that holds the lease" — a
-   * standby replaying the same outbox would deliver every event twice, which
-   * is precisely the break the sequence contract exists to make visible.
-   */
+  /** Replay what earlier attempts could not deliver. Leader-only, or every event goes out twice. */
   readonly drainOutbox: Effect.Effect<number>;
-  /**
-   * Whether this sink can currently deliver. A leader whose sink is not ready
-   * steps down (Aggregator.ts's `attemptTick`) rather than keep "publishing"
-   * into nothing while the lease says it is doing its one job. A subscriber
-   * failure is not a leadership question — WebhookSink is always ready — but
-   * a transport this instance itself cannot reach is: AmqpControlPlaneSink
-   * ties this to its connection and recent delivery outcomes.
-   */
+  /** A leader whose sink is not ready steps down rather than publish into nothing. */
   readonly ready: Effect.Effect<boolean>;
-  /**
-   * Fence off anything this sink has written but not yet had confirmed, so a
-   * demoted instance cannot deliver it late, after another leader has moved
-   * the sequence on. Called on step-down and on demotion of a leader — see
-   * `Aggregator.ts`'s `demoteAndFence` — never on a standby's ordinary tick.
-   *
-   * Meaningful only for a transport that buffers past this process's control
-   * — AmqpControlPlaneSink resets its connection and stops retrying whatever
-   * it had in flight. A sink with nothing to fence (WebhookSink, the noop
-   * sink) is a no-op.
-   */
+  /** On demotion: stop anything written but unconfirmed from landing after a new leader moved on. */
   readonly resetConnection: Effect.Effect<void>;
 };
 
-/**
- * Stand-in for the real middleware hop. In production this is a produce() to
- * Kafka or NATS keyed by apiId; HTTP keeps the demo broker-free.
- *
- * The retry policy is the reason this is worth doing in Effect: v1 hand-rolled
- * a loop with a counter, a sleep and a try/catch. Here the policy is a value —
- * exponential backoff, capped attempts — and it composes.
- */
+/** Stand-in for a real middleware hop (Kafka or NATS keyed by apiId). */
 export const makeWebhookSink = Effect.fnUntraced(function* (url: string): Effect.fn.Return<SinkImpl, never, Outbox> {
     const dead = yield* Ref.make<ReadonlyArray<DeliveryFailed>>([]);
     const outbox = yield* Outbox;
@@ -217,16 +136,14 @@ export const makeWebhookSink = Effect.fnUntraced(function* (url: string): Effect
             method: "POST",
             headers: {
               "content-type": "application/cloudevents+json",
-              // Partition key. On Kafka this is the message key; ordering
-              // per API is the only ordering subscribers actually need.
+              // Per-API ordering is the only ordering subscribers need.
               "ce-partitionkey": event.data.apiId,
               "idempotency-key": `${event.data.apiId}:${event.data.sequence}`,
             },
             body: JSON.stringify(event),
             signal,
           });
-          // Drained even though the status is all this cares about: an
-          // unconsumed body keeps its connection out of the pool.
+          // An unconsumed body keeps its connection out of the pool.
           await res.text().catch(() => {});
           return res;
         },
@@ -266,15 +183,8 @@ export const makeWebhookSink = Effect.fnUntraced(function* (url: string): Effect
           Metric.update(Metric.withAttributes(Telemetry.webhookDelivered, { apiId }), 1),
         ),
         Effect.asVoid,
-        // A failing subscriber must never stall the control loop, so the
-        // failure is recorded and swallowed rather than propagated.
-        //
-        // Two records, and they are not redundant. The in-memory list is a
-        // diagnostic: it answers "what did this instance fail to send", it
-        // is bounded, and it dies with the process. The outbox is the
-        // authoritative one: it survives the process, it is what gets
-        // replayed, and it is the reason the per-API guarantee now reaches
-        // the subscriber rather than stopping at the aggregator's edge.
+        // Swallowed: a failing subscriber must not stall the loop. The outbox is
+        // what gets replayed; the list is a bounded diagnostic.
         Effect.catchCause((cause) =>
           Effect.all(
             [
@@ -300,9 +210,7 @@ export const makeWebhookSink = Effect.fnUntraced(function* (url: string): Effect
                       ], { discard: true })
                     : Effect.void,
                 ),
-                // An unreachable outbox degrades to what this did before it
-                // existed: the event is lost and counted. It must not turn a
-                // failed delivery into a failed tick.
+                // An unreachable outbox loses the event, counted; never a failed tick.
                 Effect.catchCause((cause) =>
                   Effect.logWarning(`could not persist an undelivered event for ${apiId}`, cause),
                 ),
@@ -311,30 +219,19 @@ export const makeWebhookSink = Effect.fnUntraced(function* (url: string): Effect
             { discard: true },
           ),
         ),
-        // Delivery is off the hot path by construction: the loop forks it and
-        // never awaits it.
         Effect.forkChild,
         Effect.asVoid,
       );
     };
 
     /**
-     * One pass over the outbox, oldest first, per API.
-     *
-     * Stops that API at its first failure rather than skipping ahead: delivering
-     * 8 while 7 is stuck hands the subscriber a gap that never closes. Nothing
-     * is committed until delivered, so a crash mid-pass replays rather than
-     * loses. Bounded per pass, so a subscriber coming back is not met with
-     * everything at once.
+     * Oldest first per API, stopping at the first failure: delivering 8 while 7
+     * is stuck is a gap that never closes. Committed only after delivery.
      */
     const draining = yield* Ref.make(false);
     /**
-     * `consumed` is what the commit trims, and counts entries this pass is
-     * done with — delivered or unreadable. `delivered` is what the subscriber
-     * actually took. They differ only when an entry no longer decodes, and
-     * conflating them is what leaves a delivered event in place to be sent
-     * twice. `stopped` is the old `break`: once an entry cannot be delivered,
-     * nothing behind it is posted or consumed.
+     * `consumed` (delivered or unreadable) is what the commit trims; `delivered`
+     * is what the subscriber took. Conflating them sent events twice.
      */
     type Pass = {
       readonly consumed: number;
@@ -399,14 +296,8 @@ export const makeWebhookSink = Effect.fnUntraced(function* (url: string): Effect
     });
 
     /**
-     * One pass at a time. The caller forks this, and a subscriber that hangs
-     * rather than refusing costs a full timeout per pass — without the
-     * guard, a tick every 250ms against a subscriber timing out at 2s would
-     * stack passes until they outnumber the events they are trying to
-     * deliver.
-     *
-     * The flag is released only by the pass that took it, which is why this
-     * is not a plain `ensuring` around the whole thing.
+     * One pass at a time: a hanging subscriber costs a 2s timeout per pass, and
+     * a 250ms tick would stack them.
      */
     const drainable = yield* Ref.make(true);
     const drainOutbox = Ref.getAndSet(draining, true).pipe(
@@ -424,13 +315,7 @@ export const makeWebhookSink = Effect.fnUntraced(function* (url: string): Effect
               ),
             ),
       ),
-      // The outbox being unreachable is a reason to try again next tick, not
-      // a reason to end the loop that is trying — but not a reason to say
-      // nothing either. The append path warns per event it could not persist;
-      // this half had no voice at all, so an outbox holding undelivered
-      // events for a subscriber that has since recovered could fail to
-      // replay them on every tick, forever, in silence. Edge-triggered, the
-      // way coordination reachability is: once on the way down, once back.
+      // Retried next tick, and logged on the edge (once down, once back).
       Effect.catchCause((cause) =>
         Ref.getAndSet(drainable, false).pipe(
           Effect.flatMap((was) =>
@@ -443,12 +328,7 @@ export const makeWebhookSink = Effect.fnUntraced(function* (url: string): Effect
       ),
     );
 
-    // Always ready: a subscriber that is down or slow is not a reason for
-    // this instance to give up the publishing lease — see SinkImpl's doc
-    // comment. The outbox above is what carries a webhook subscriber's outage.
-    //
-    // Nothing to fence: HTTP has no confirm to leave dangling, and a failed
-    // POST already goes to the outbox rather than being retried blind.
+    // Always ready, nothing to fence: the outbox carries a subscriber's outage.
     return {
       name: "webhook",
       deliver,
@@ -459,31 +339,15 @@ export const makeWebhookSink = Effect.fnUntraced(function* (url: string): Effect
     };
 });
 
-/**
- * Fans one event out to every given sink. Each sink's own `deliver` decides
- * whether that means "returns once forked" (WebhookSink) or "returns once
- * confirmed" (AmqpControlPlaneSink) — see SinkImpl's doc comment — so a slow
- * or unreachable webhook subscriber still never delays this, but a control
- * plane that will not confirm does delay (and can fail) it, on purpose.
- * Dead letters from all sinks are pooled — a subscriber checking the
- * delivery contract does not need to know how many sinks are mounted.
- */
+/** Fans out to every sink; fails, or is unready, if any one is. */
 export const combineSinks = (sinks: ReadonlyArray<SinkImpl>): SinkImpl => ({
   name: sinks.map((s) => s.name).join("+"),
   deliver: (event) => Effect.all(sinks.map((s) => s.deliver(event)), { discard: true }),
   deadLetters: Effect.all(sinks.map((s) => s.deadLetters)).pipe(Effect.map((xs) => xs.flat())),
-  // Each sink owns its own outbox, because "the webhook subscriber is down"
-  // and "RabbitMQ is down" are different failures with different backlogs —
-  // replaying one into the other would duplicate events on the sink that was
-  // healthy all along.
   drainOutbox: Effect.all(sinks.map((s) => s.drainOutbox)).pipe(
     Effect.map((counts) => counts.reduce((a, b) => a + b, 0)),
   ),
-  // Ready only if every mounted sink is: nothing published means the leader
-  // is not doing its one job, whichever transport is the one that cannot.
   ready: Effect.all(sinks.map((s) => s.ready)).pipe(Effect.map((rs) => rs.every((r) => r))),
-  // Every sink fences its own outstanding writes; a demotion does not know
-  // in advance which transport (if any) had something buffered.
   resetConnection: Effect.all(sinks.map((s) => s.resetConnection), { discard: true }),
 });
 

@@ -5,48 +5,23 @@ import { decodeCircuitEvent, readerFor } from "@egress/domain/Model.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 
 /**
- * Where an event goes when the subscriber will not take it — the durable half of
- * the guarantee, which otherwise held everywhere except the last hop.
- *
- * Same shape as `CheckpointStore`: one `RedisLike` port, scripts that read and
- * write in one round trip, and an in-memory implementation that solo mode
- * genuinely uses rather than a mock.
- *
- * Not a queue with delivery semantics: one consumer, the leader's tick loop, and
- * ordering per API, which is the only ordering the contract claims.
+ * Where an event waits when the webhook subscriber will not take it. One consumer
+ * (the leader's tick), ordered per API. Same port and shape as `CheckpointStore`.
  */
 
-/**
- * Per-API bound, so a subscriber that stays down cannot consume the aggregator's
- * memory on its way out.
- *
- * Overflow drops the *oldest*: the subscriber then sees a gap, which its
- * delivery-integrity check detects, and catches up. Dropping the newest would
- * leave it permanently stale while the outbox held ancient history.
- */
+/** Overflow drops the oldest: the subscriber sees a detectable gap, not permanent staleness. */
 export const OUTBOX_MAX_PER_API = 500;
 
 /** How many entries one drain pass may replay per API. Bounded for the same reason the redrive is: a recovery must not become its own thundering herd. */
 export const OUTBOX_DRAIN_LIMIT = 50;
 
-/**
- * One stored entry, in list order. `None` is an entry that no longer decodes —
- * a version skew, or a corrupt write.
- *
- * It keeps its position rather than being filtered out on the way up, because
- * a drain commits by *count*: an entry that vanished here would take a
- * delivered event's position with it, and the trim would stop short and leave
- * that event to be sent a second time.
- */
+/** `None`: no longer decodes. It keeps its position; filtering it once sent events twice (ADR 006). */
 export type Entry = O.Option<CircuitEvent>;
 
 /**
- * What `peek` saw, and where. `from` is the absolute position of the first
- * entry: every entry ever appended for an API has one, and the bound's drops
- * move the head forward. A drain commits the position it got to, not a count,
- * because an append can drop the oldest entries while the drain is posting
- * them, and trimming a count from the new head would remove entries nobody
- * delivered.
+ * `from` is the absolute position of the first entry. Drains commit a position,
+ * not a count: the bound can drop the oldest mid-drain, and a count would then
+ * trim undelivered entries.
  */
 export type Peeked = {
   readonly from: number;
@@ -124,16 +99,8 @@ export const InMemoryOutboxLayer = Layer.effect(Outbox, makeInMemoryOutbox);
 // Redis: the same port CheckpointStore uses, deliberately.
 // ---------------------------------------------------------------------------
 
-/**
- * `RedisLike.eval` returns one scalar, and these scripts need to return lists.
- * Rather than widen the port — the whole point of it being one method is that
- * any client adapts to it in one line — the scripts encode with `cjson`.
- *
- * `cjson.encode` on an empty Lua table produces `{}`, an object, not `[]`, so
- * every script that can return nothing says so explicitly. A JSON parse that
- * yields an object where the caller expects an array is the kind of bug that
- * only shows up when the queue is empty, which is most of the time.
- */
+// The port returns one scalar, so list results are `cjson`-encoded. An empty Lua
+// table encodes as `{}`, so every script that can return nothing says `[]`.
 // KEYS[3] throughout is the absolute position of the list's first entry — see
 // `Peeked`. It outlives the list, so a commit from an older peek never trims
 // entries appended after the list last emptied.
@@ -189,11 +156,7 @@ const evalGuarded = (
     catch: (cause) => new CoordinationUnavailable({ operation, cause: String(cause) }),
   });
 
-/**
- * What every list-returning script above encodes: a JSON array of strings.
- * Anything else — a Lua error string, a `{}` from an empty table, a number —
- * reads as an empty list rather than as elements nobody checked the type of.
- */
+/** Anything but a JSON array of strings reads as empty. */
 const readStringList = readerFor(Schema.Array(Schema.String));
 
 const NOTHING_PEEKED: Peeked = { from: 0, entries: [] };
@@ -228,11 +191,7 @@ export const RedisOutboxLayer = (redis: RedisLike, keyPrefix = "egress:aggregato
         keys: [`${keyPrefix}:outbox:${apiId}`, `${keyPrefix}:outbox:${apiId}:head`],
         args: [String(limit)],
       }).pipe(
-        // A stored entry that cannot be decoded is not replayed: garbage here
-        // is a version skew or a corrupt write, and handing it to a subscriber
-        // that trusts the schema is worse than losing it. It still comes back
-        // as a `None` in its own position — see `Entry`. An answer that does
-        // not decode at all reads as nothing pending, with nothing to commit.
+        // An undecodable entry is never replayed, but keeps its position.
         Effect.map((result): Peeked =>
           Predicate.isString(result)
             ? Result.match(readPeeked(result), {

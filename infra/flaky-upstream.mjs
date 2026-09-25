@@ -1,12 +1,6 @@
-// The upstreams Envoy's clusters point at — several per API, not one.
-//
-// One host per cluster is the shape this repo cannot demonstrate anything
-// with: a replica's report is then either 0/1 or 1/1, so `healthy < total` is
-// unreachable, no replica can ever vote DEGRADED from partial ejection, and
-// `failure_percentage_*` (which needs failure_percentage_minimum_hosts) never
-// evaluates at all. The endpoint counts below match the simulated fleet's in
-// packages/aggregator/src/main.ts on purpose, so the two FleetSource layers
-// tell the same story rather than merely producing the same record shape.
+// The upstreams behind Envoy, several per API: with one host per cluster no
+// replica can report partial ejection, so DEGRADED is unreachable. Counts match
+// the simulated fleet's.
 //
 //   curl -X POST localhost:8080/__fail -d '{"rate":1.0}'                  # 503s
 //   curl -X POST localhost:8080/__fail -d '{"rate":1.0,"status":422}'     # 422s: refused, not down
@@ -143,15 +137,9 @@ for (const [cluster, ports] of Object.entries(CLUSTERS)) {
       }
       const b = behaviour.get(port);
 
-      // Active health checking samples the same failing service real traffic
-      // does, so it fails at the same rate rather than being a separate
-      // truth. That matters at partial failure rates: a deterministic health
-      // endpoint would mark every host down at once and collapse DEGRADED
-      // into OPEN, which is exactly the state this demo needs to be able to
-      // reach. It also makes successful_active_health_check_uneject_host
-      // real — a recovered upstream passes its next check and Envoy
-      // un-ejects immediately, instead of waiting out base_ejection_time ×
-      // ejection_count.
+      // Health checks fail at the traffic's rate: a deterministic endpoint would
+      // eject every host at once and collapse DEGRADED into OPEN. A recovered
+      // host passes its next check and is un-ejected at once.
       if (req.url === "/__health") {
         return misbehave(
           b,

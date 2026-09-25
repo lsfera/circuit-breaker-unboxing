@@ -5,14 +5,9 @@ import { initial as initialPolicy, runsWork, step } from "./DaemonPolicy.ts";
 import type { DaemonPolicyState } from "./DaemonPolicy.ts";
 
 /**
- * Everything one daemon decides, in one value, with one function that moves it:
- * which state it is in, which sequences it has already probed and redriven, and
- * which connections should therefore exist.
- *
- * One value rather than four `Ref`s because the invariants between them are real
- * and the handlers that touch them run concurrently from AMQP callbacks — here a
- * transition is atomic. The connections themselves stay out: they are resources,
- * and the "actual" side `plan` compares this against.
+ * Everything a daemon decides, in one value moved by one pure function, so each
+ * transition is atomic against concurrent AMQP callbacks. Channels stay outside:
+ * they are the "actual" side `plan` compares against.
  */
 export type DaemonState = {
   readonly circuit: State;
@@ -22,14 +17,7 @@ export type DaemonState = {
    */
   readonly applied: O.Option<Applied>;
   readonly policy: DaemonPolicyState;
-  /**
-   * Highest circuit sequence this daemon has already probed for.
-   *
-   * Every daemon publishes a probe trigger on entering HALF_OPEN so the trigger
-   * still arrives when some are down; SAC delivers all of them to the one
-   * elected consumer, and this is what turns "several triggers" back into "one
-   * probe per transition".
-   */
+  /** Every daemon publishes a trigger, and SAC hands them all to one: this turns them back into one probe. */
   readonly probedSequence: number;
   /** The same idea for the redrive election: one replay per recovery, not one per trigger message. */
   readonly redrivenSequence: number;
@@ -58,19 +46,9 @@ export type Command =
   | { readonly _tag: "RampTick"; readonly at: number }
   | { readonly _tag: "ProbeTriggered"; readonly sequence: number }
   | { readonly _tag: "RedriveTriggered"; readonly sequence: number }
-  /**
-   * The action a trigger asked for failed. Un-marks the sequence so the
-   * redelivered trigger, or another daemon's copy of it, is acted on rather
-   * than dropped as a duplicate.
-   */
+  /** Un-marks the sequence so the redelivered trigger is acted on, not deduped. */
   | { readonly _tag: "TriggerFailed"; readonly election: "probe" | "redrive"; readonly sequence: number }
-  /**
-   * Fired on a timer, not a transition — the only command with no sequence to
-   * dedupe on. Messages dead-letter while the circuit stays CLOSED too: a
-   * broker restart advances `x-delivery-count` on outstanding deliveries, an
-   * Envoy 503 counts as a failure, a rolling redeploy churns consumers. None
-   * of that is a recovery, so nothing else would ever replay them.
-   */
+  /** On a timer: dead letters that arrive while CLOSED would otherwise never be replayed. */
   | { readonly _tag: "SweepTick"; readonly isFloor: boolean };
 
 /**
@@ -159,11 +137,7 @@ export const reduce = (
       ignored: false,
     }),
 
-    // No sequence, so no dedupe and no state change — a sweep either finds the
-    // circuit CLOSED and itself the floor right now, or it doesn't, and the next
-    // one thirty seconds later decides fresh. `redriveOnce` is what makes a
-    // sweep that finds nothing to do, or one that overlaps a pass already
-    // running, harmless — see Redrive.ts.
+    // No sequence, no dedupe, no state change.
     SweepTick: (command): Transition => ({
       next: state,
       actions:
@@ -185,15 +159,9 @@ export const desired = (
   state: DaemonState,
   self: { readonly position: number; readonly isFloor: boolean },
 ): Connections => ({
-  // HALF_OPEN is the one state where a daemon must not decide for itself. The
-  // one call it permits belongs to whichever daemon the broker elected, and a
-  // daemon low enough in the hash space would otherwise self-activate and race
-  // it — two calls for a state whose entire contract is "exactly one".
+  // In HALF_OPEN only the elected prober calls; a low hash position must not race it.
   work: state.circuit !== State.HALF_OPEN && runsWork(state.policy, self),
-  // A probe connection only ever belongs to HALF_OPEN, and a redrive only to
-  // CLOSED. Leaving either state retires the connection: replaying a backlog
-  // into an upstream that has just started failing again is the one thing this
-  // whole design exists to prevent.
+  // Leaving HALF_OPEN or CLOSED retires the probe or the redrive.
   probe: state.circuit === State.HALF_OPEN,
   redrive: state.circuit === State.CLOSED,
 });
@@ -205,14 +173,7 @@ type Plan = {
   readonly stopRedrive: boolean;
 };
 
-/**
- * The reconciliation, as arithmetic on two records.
- *
- * Note the asymmetry, which is not an oversight: work connections are opened
- * here, probe and redrive connections never are. Those two are opened by
- * whichever daemon the broker elected, in response to a trigger, and this only
- * ever retires them when the state they belong to is gone.
- */
+/** Opens only work channels: probe and redrive are opened by the elected daemon, and only retired here. */
 export const plan = (want: Connections, have: Connections): Plan => ({
   startWork: want.work && !have.work,
   stopWork: !want.work && have.work,

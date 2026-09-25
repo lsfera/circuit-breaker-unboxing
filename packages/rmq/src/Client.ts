@@ -95,7 +95,7 @@ type QueueArgs = Record<string, unknown>;
  *   Use `release` if the message did not fail.
  * - `discard` — reject without requeue: dead-lettered where a target is declared, dropped otherwise.
  * - `release` — back on the queue like `requeue` but not counted: for a delivery held only for
- *   backpressure (a local concurrency-limiter 503), not because the work failed.
+ *   backpressure (a `429`), not because the work failed.
  */
 export type Settlement = "accept" | "requeue" | "discard" | "release";
 

@@ -3,26 +3,11 @@ import { Sse } from "effect/unstable/encoding";
 import { STATE_CODE, State, type ApiSnapshot } from "@egress/domain/Model.ts";
 import * as Telemetry from "./Telemetry.ts";
 
-/**
- * One SSE event as text. `Sse.encoder` rather than a template string, so the
- * wire format has one definition: @egress/subscriber decodes with the same
- * module, and an encoder and a parser that merely happen to agree are two
- * definitions waiting to drift.
- *
- * `id` carries a revision for the events the attention view publishes
- * (below), so a reconnecting browser's `Last-Event-ID` names a point in this
- * same sequence. Omitted, as before, for the full-frame channel and the tape.
- */
+/** `Sse.encoder`, the module the subscriber decodes with. `id` is the attention view's revision. */
 export const encodeEvent = (event: string, data: unknown, id?: string): string =>
   Sse.encoder.write({ _tag: "Event", event, id, data: JSON.stringify(data) });
 
-/**
- * An SSE comment. Every spec-conforming decoder ignores it, `Sse.decode`
- * included, and it keeps a stream that has nothing to say from looking idle to
- * a load balancer — which closes idle connections, typically after a minute,
- * and a subscriber whose connection closed in a quiet hour is one that misses
- * the event that ends it.
- */
+/** Ignored by decoders; keeps a quiet stream from being closed as idle. */
 export const KEEP_ALIVE = ": keep-alive\n\n";
 
 export interface ConsoleFrames {
@@ -37,34 +22,10 @@ export interface ConsoleFrames {
 }
 
 /**
- * Builds the console's frame once per interval, for every connection at once.
- *
- * It used to be built inside each request — `Stream.fromEffectSchedule` per
- * connection — so every open browser snapshotted the whole fleet and
- * serialized it every 400ms, on the event loop that runs the breaker. At a
- * thousand APIs that is a 1.1 MB frame per browser per tick: a hundred open
- * consoles took 16–22% of the control loop's cadence and 0.6% of a core each
- * (docs/decisions/015-the-console-at-a-thousand-apis.md). Now the frame is
- * built and encoded once, and what each connection costs is writing bytes it
- * did not compute.
- *
- * Two properties are the reason for the particular pieces:
- *
- * - **Nothing is built while nobody is watching.** A process with no console
- *   open does no console work at all, which the per-request schedule got for
- *   free and a shared one has to count connections to keep.
- * - **A slow reader holds one frame, not a queue of them.** `PubSub.sliding`
- *   with a capacity of one: a newer frame replaces an unread older one. Not
- *   `SubscriptionRef`, whose `changes` is backed by an *unbounded* PubSub — a
- *   browser on a slow link, pulling 1.1 MB frames slower than they arrive,
- *   would have queued them in this process without limit. The HTTP response
- *   already waits on `drain`, so between the write in flight and the one slot,
- *   a reader that stops reading costs two frames and then costs nothing.
- *
- * No replay, deliberately. A replayed frame would be the last one built, and
- * the last one built could be from whenever a console was last open — an hour
- * ago, showing an incident that has since ended. A newly connected console
- * waits at most one interval for a frame that is current instead.
+ * The console frame, built once per interval for every connection (ADR 015).
+ * Nothing is built while nobody watches. `PubSub.sliding(1)`, not
+ * `SubscriptionRef`, whose unbounded `changes` would queue 1.1 MB frames for a
+ * slow browser. No replay: the last frame built could be an hour old.
  */
 export const make = Effect.fnUntraced(function* <A>(
   build: Effect.Effect<A>,
@@ -93,26 +54,15 @@ export const make = Effect.fnUntraced(function* <A>(
     );
 
   return {
-    // `ensuring` runs when the stream is interrupted, which is how a browser
-    // closing its tab reaches this: the response stream ends with the
-    // request's scope, and the count has to come down with it or the frame
-    // would go on being built for a console nobody has open.
+    // A closed tab interrupts the stream; the count must come down with it.
     frames: Stream.fromPubSub(pubsub).pipe(Stream.onStart(track(1)), Stream.ensuring(track(-1))),
     watching: Ref.get(watching),
   };
 });
 
-/**
- * ---------------------------------------------------------------------------
- * The attention view (docs/decisions/015, steps 3–4): counts by state plus
- * the worst APIs, sent as a snapshot on connect and patches afterwards, with
- * resume through the SSE `Last-Event-ID` header.
- * ---------------------------------------------------------------------------
- */
+// The attention view (ADR 015): counts plus the worst APIs, snapshot then patches, resumable.
 
-/** Everything not `CLOSED`, worst state first then most recently changed,
- *  capped at fifty (docs/decisions/015, step 3). Bounded by the cap rather
- *  than the fleet, so it costs the same at ten thousand APIs. */
+/** Everything not `CLOSED`, worst first then most recent; the cap bounds its cost at any fleet size. */
 export const ATTENTION_CAP = 50;
 
 export type Counts = Record<State, number>;
@@ -139,11 +89,6 @@ export interface Attention {
   readonly truncated: Truncated | null;
 }
 
-/**
- * The view a person can use at a thousand APIs, computed from the fleet's
- * full snapshots: a number for the APIs that are fine, and a capped,
- * ranked list for the ones that are not.
- */
 export const attentionOf = (apis: ReadonlyArray<ApiSnapshot>, cap = ATTENTION_CAP): Attention => {
   const counts = apis.reduce((acc, api) => ({ ...acc, [api.state]: acc[api.state] + 1 }), emptyCounts());
   const worst = apis
@@ -156,11 +101,7 @@ export const attentionOf = (apis: ReadonlyArray<ApiSnapshot>, cap = ATTENTION_CA
   };
 };
 
-/** One tick's worth of change: whole API objects that entered the view or
- *  changed, and the ids of ones that left it — closed, or pushed out by the
- *  cap. Whole objects rather than changed fields: a client merging partial
- *  objects into state it already holds is where this kind of code grows its
- *  bugs (docs/decisions/015, step 4). */
+/** Whole API objects, not changed fields: merging partial objects is where bugs grow. */
 interface Patch {
   readonly revision: number;
   readonly upserts: ReadonlyArray<ApiSnapshot>;
@@ -187,43 +128,20 @@ interface Current {
   readonly encodedSnapshot: Uint8Array;
 }
 
-/** Patches retained for resume — docs/decisions/015 step 4's "last 64
- *  revisions". Past this, a reconnecting browser gets a fresh `snapshot`
- *  instead of the patches it missed. Exported so a test can drive past it
- *  without hard-coding the number. */
+/** Past this many revisions, a reconnect gets a fresh snapshot. */
 export const RETAINED_PATCHES = 64;
 
 export interface AttentionFrames {
-  /**
-   * One connection's byte stream: a `snapshot` (revision and all) when
-   * `lastEventId` is absent or older than the retained history, otherwise
-   * just the patches from there forward — then the live patch tail either
-   * way. Quiet ticks publish nothing, so a quiet fleet costs nothing past
-   * the one snapshot or catch-up.
-   */
+  /** A snapshot, or the retained patches after `lastEventId`, then the live tail. */
   readonly connect: (lastEventId: O.Option<number>) => Stream.Stream<Uint8Array>;
   readonly watching: Effect.Effect<number>;
 }
 
 /**
- * Builds the attention view once per interval, the same shape as `make`:
- * nothing built while nobody is watching, one build serving every
- * connection. What differs is what gets sent — a `snapshot` or `patch`
- * event with a revision, not the whole frame every tick — and that a
- * connection can ask, via `connect`'s `lastEventId`, to resume rather than
- * start over.
- *
- * Correctness of resume rests on `PubSub`'s own replay buffer rather than a
- * hand-rolled one: `PubSub.sliding({ capacity, replay })` hands a new
- * subscriber its own `replayWindow`, populated atomically with whatever was
- * retained at subscribe time and then drained into the same ordered stream
- * as everything published afterwards (repos/effect/packages/effect/test/PubSub.test.ts,
- * "preserves replay order across multiple slides"). A connection reads that
- * window directly — `subscription.replayWindow.takeAll()` is exactly what
- * `PubSub.take` does internally — decides snapshot-or-resume from it, and
- * then keeps reading the same subscription for the live tail. There is no
- * gap between "what was buffered" and "what arrives next": both come from
- * one subscription.
+ * Resume rests on `PubSub.sliding({ capacity, replay })`: a subscriber's
+ * `replayWindow` and its live tail come from one subscription, so nothing falls
+ * between them (effect's PubSub.test.ts, "preserves replay order across multiple
+ * slides").
  */
 export const makeAttention = Effect.fnUntraced(function* (
   snapshots: Effect.Effect<ReadonlyArray<ApiSnapshot>>,
@@ -317,10 +235,7 @@ export const makeAttention = Effect.fnUntraced(function* (
             // still in `buffered`. If the oldest retained one is already past
             // `after + 1`, something in between was evicted.
             (oldestRetained === undefined || oldestRetained <= after + 1) &&
-            // Not from the future either — a revision this process never
-            // published, most often because it restarted and its revisions
-            // reset. Treating that as "already caught up" would leave the
-            // client waiting on a live tail it can never be caught up on.
+            // An id from the future (this process restarted) is not "caught up".
             after <= snap.revision,
         );
 
