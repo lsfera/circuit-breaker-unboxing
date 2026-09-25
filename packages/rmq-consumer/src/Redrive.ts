@@ -56,6 +56,9 @@ type RedriveOptions = {
 const PASS_POLL = Duration.millis(200);
 const PASS_IDLE_MS = 2000;
 const PASS_DEADLINE = Duration.seconds(60);
+/** How a finished pass waits for its last publishes to be confirmed before closing the channel. */
+const SETTLE_POLL = Duration.millis(20);
+const SETTLE_DEADLINE = Duration.seconds(10);
 
 // Every message a pass does not move is handed back with `release`, never `requeue`:
 // nothing about it failed, and a counted return is a step towards a delivery limit.
@@ -85,9 +88,13 @@ export const makeRedrive = (opts: RedriveOptions) => {
       poisoned += decision.destination === "parked" ? delta : 0;
     };
 
+    /** Publishes not yet settled: the pass must not close its channel under them. */
+    let inFlight = 0;
+
     /** Publish, then accept: a crash in between is a duplicate, the reverse a loss. */
-    const settleAfter = (send: Effect.Effect<void, RmqError>, onFailure: () => void): Promise<Settlement> =>
-      runInContext(send).then(
+    const settleAfter = (send: Effect.Effect<void, RmqError>, onFailure: () => void): Promise<Settlement> => {
+      inFlight++;
+      return runInContext(send).then(
         (): Settlement => {
           lastReplayAt = Date.now();
           return "accept";
@@ -96,7 +103,10 @@ export const makeRedrive = (opts: RedriveOptions) => {
           onFailure();
           return "release";
         },
-      );
+      ).finally(() => {
+        inFlight--;
+      });
+    };
 
     // Parked, not returned to this queue, where it would be lapped by every pass for good.
     const parkStray = (body: string, delivery: DeliveryInfo, originQueue: string, originReason: string) => {
@@ -175,6 +185,20 @@ export const makeRedrive = (opts: RedriveOptions) => {
       Effect.repeat({ schedule: Schedule.spaced(PASS_POLL), until: O.isSome }),
       Effect.map(O.getOrElse(() => "deadline")),
       Effect.timeoutOrElse({ duration: PASS_DEADLINE, orElse: () => Effect.succeed("deadline") }),
+    );
+
+    // The cap counts reservations, so a pass reaches it with its last publishes still
+    // awaiting confirms. Closing then dropped their acks: each went back to the dead
+    // queue and was replayed again, every capped pass (measured: 5 messages, 23 replays).
+    // Cancel, let what was taken settle, then close.
+    yield* conn.cancelConsumer(consumer);
+    yield* Effect.sync(() => inFlight).pipe(
+      Effect.repeat({ schedule: Schedule.spaced(SETTLE_POLL), until: (n) => n === 0 }),
+      Effect.timeoutOrElse({
+        duration: SETTLE_DEADLINE,
+        orElse: () =>
+          Effect.logWarning(`${opts.label}: ${inFlight} redrive publish(es) still unconfirmed; closing anyway, they may be replayed twice`),
+      }),
     );
 
     // Clear the Ref only if it still holds this pass's consumer: reconcile may
