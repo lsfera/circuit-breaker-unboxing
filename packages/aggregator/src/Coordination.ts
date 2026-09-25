@@ -1,4 +1,4 @@
-import { Clock, Context, Data, Duration, Effect, Layer, Option as O, Ref, Result, Schema } from "effect";
+import { Clock, Context, Data, Duration, Effect, Layer, Option as O, Predicate, Ref, Result, Schema } from "effect";
 import { readerFor, ReasonSchema, StateSchema } from "@egress/domain/Model.ts";
 import { randomUUID } from "node:crypto";
 
@@ -34,7 +34,7 @@ const decodeToken = Schema.decodeUnknownOption(LeaseTokenFromString);
 const encodeToken = Schema.encodeSync(LeaseTokenFromString);
 
 export const formatToken = (token: LeaseToken): string =>
-  encodeToken([token.epoch, ":", token.counter] as never);
+  encodeToken([token.epoch, ":", token.counter] as const);
 
 export const parseToken = (raw: string): O.Option<LeaseToken> =>
   O.map(decodeToken(raw), ([epoch, , counter]) => ({ epoch, counter }));
@@ -361,22 +361,23 @@ export const RedisCoordinationLayer = (
           keys: [`${keyPrefix}:checkpoint:${apiId}`],
           args: [],
         }).pipe(
-          Effect.flatMap((raw) => {
-            if (typeof raw !== "string") return Effect.succeed(O.none<Checkpoint>());
-
-            // Unreadable is a logged cold start, not a failure: failing would cost
-            // leadership over one key, and a restarted sequence is detected downstream.
-            return Result.match(readCheckpoint(raw), {
-              onSuccess: (checkpoint) => Effect.succeed(O.some(checkpoint)),
-              onFailure: (why) =>
-                Effect.as(
-                  Effect.logWarning(
-                    `checkpoint for ${apiId} is ${why} — resuming that API from nothing`,
-                  ),
-                  O.none<Checkpoint>(),
-                ),
-            });
-          }),
+          Effect.flatMap((reply) =>
+            O.match(O.liftPredicate(reply, Predicate.isString), {
+              // No key: nothing checkpointed yet.
+              onNone: () => Effect.succeed(O.none<Checkpoint>()),
+              // Unreadable is a logged cold start, not a failure: failing would cost
+              // leadership over one key, and a restarted sequence is detected downstream.
+              onSome: (raw) =>
+                Result.match(readCheckpoint(raw), {
+                  onSuccess: (checkpoint) => Effect.succeed(O.some(checkpoint)),
+                  onFailure: (why) =>
+                    Effect.as(
+                      Effect.logWarning(`checkpoint for ${apiId} is ${why} — resuming that API from nothing`),
+                      O.none<Checkpoint>(),
+                    ),
+                }),
+            }),
+          ),
         ),
     }),
   );
