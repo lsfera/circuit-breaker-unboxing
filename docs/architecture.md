@@ -143,6 +143,7 @@ the delivery:
 | 2xx | ack |
 | 429 (Envoy shed or third party full) | released uncounted after 100–400 ms; the daemon's concurrency limit ×0.7 |
 | other 4xx | parked on `work.parked`, stamped `refused-<status>` |
+| (no call) wrong format, not a work message, or no `message_id` | parked unread, stamped `unreadable-<reason>` |
 | 408, 5xx, no response | republished with `x-egress-attempts` + 1; the third goes to `work.dead` |
 
 The attempt count travels in a header because a broker requeue cannot add one

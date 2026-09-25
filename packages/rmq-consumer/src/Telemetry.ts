@@ -63,7 +63,7 @@ export const discarded = Metric.counter("egress_daemon_discarded_total", {
     "Work deliveries this daemon refused to spend a call on, by reason: `format` (a content " +
     "type, encoding or message type it does not read), `malformed` (a body that does not " +
     "decode as a work message) or `keyless` (no `message_id` to use as the idempotency key). " +
-    "Each goes to the dead-letter queue unread.",
+    "Each is parked unread, stamped `unreadable-<reason>`.",
 });
 
 export const controlStale = Metric.counter("egress_daemon_control_stale_total", {

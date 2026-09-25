@@ -18,13 +18,14 @@ code was reviewed for Effect style, not swept for every `if`.
 
 | Property | Rule here |
 |---|---|
-| `content_type` / `content_encoding` | declared by the producer (`application/json`); a daemon reads JSON, unencoded, or undeclared, and dead-letters anything else unread |
+| `content_type` / `content_encoding` | declared by the producer (`application/json`); a daemon reads JSON, unencoded, or undeclared, and parks anything else unread |
 | `type` | `egress.work`; another type is declined |
 | `message_id` | the idempotency key, `<run>:<n>`, assigned once by the producer and carried by every retry and redrive; sent as the third party's `x-idempotency-key`. No id, no call |
 | `mandatory` | set on queue publishers; a `basic.return` fails `send` with `Unroutable` |
 
 Every declined delivery is counted in `egress_daemon_discarded_total{reason}`
-(`format`, `malformed`, `keyless`) and dead-lettered.
+(`format`, `malformed`, `keyless`) and parked unread as `unreadable-<reason>`;
+through the dead-letter queue the redrive would replay it five times.
 
 **A handler that throws is dead-lettered**, not acked. Acking had lost its work.
 

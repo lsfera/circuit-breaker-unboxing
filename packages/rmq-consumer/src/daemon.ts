@@ -229,6 +229,21 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
         ),
     });
 
+  /**
+   * Poison goes straight to the parked queue: through the dead-letter queue it came from the work queue, so the
+   * redrive would replay it `MAX_REDRIVES` times for the same answer. `otherwise` is the settlement if the park fails.
+   */
+  const park = (body: string, messageId: O.Option<string>, reason: string, otherwise: Settlement): Promise<Settlement> =>
+    runInContext(
+      control.send(parkedPublisher, body, {
+        messageId: O.getOrUndefined(messageId),
+        headers: { [ORIGIN_QUEUE_HEADER]: workQueue, [ORIGIN_REASON_HEADER]: reason },
+      }),
+    ).then(
+      (): Settlement => "accept",
+      (): Settlement => otherwise,
+    );
+
   const attempt = async (body: string, delivery: DeliveryInfo, key: string): Promise<Settlement> => {
     const status = await limitedStatus(key);
     const outcome = Attempts.classify(status);
@@ -257,20 +272,7 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
       park: async (): Promise<Settlement> => {
         // Refused (4xx other than 408/429): a retry gets the same answer. Parked for a human.
         counts.refused++;
-        try {
-          await runInContext(
-            control.send(parkedPublisher, body, {
-              messageId: key,
-              headers: {
-                [ORIGIN_QUEUE_HEADER]: workQueue,
-                [ORIGIN_REASON_HEADER]: `refused-${status}`,
-              },
-            }),
-          );
-          return "accept";
-        } catch {
-          return "requeue";
-        }
+        return park(body, O.some(key), `refused-${status}`, "requeue");
       },
 
       republish: async (decision): Promise<Settlement> => {
@@ -317,23 +319,23 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
     });
   };
 
-  /** Never published by this fleet: dead-lettered unread, not retried. */
-  const discard = (reason: "Format" | "Malformed" | "Keyless"): Settlement => {
+  /** Never published by this fleet: parked unread, not retried or redriven. */
+  const discard = (reason: "Format" | "Malformed" | "Keyless", body: string, delivery: DeliveryInfo): Promise<Settlement> => {
     counts[`discarded${reason}`]++;
-    return "discard";
+    return park(body, delivery.messageId, `unreadable-${reason.toLowerCase()}`, "discard");
   };
 
   const call = (body: string, delivery: DeliveryInfo): Settlement | Promise<Settlement> =>
     readsWorkFormat(delivery)
       ? O.match(decodeWorkMessage(body), {
-          onNone: () => discard("Malformed"),
+          onNone: () => discard("Malformed", body, delivery),
           onSome: () =>
             O.match(delivery.messageId, {
-              onNone: () => discard("Keyless"),
+              onNone: () => discard("Keyless", body, delivery),
               onSome: (key) => attempt(body, delivery, key),
             }),
         })
-      : discard("Format");
+      : discard("Format", body, delivery);
 
   /** Traced only when the message carried a parent; the common case stays a plain call. */
   const callEgress = (body: string, delivery: DeliveryInfo): Settlement | Promise<Settlement> =>
