@@ -1,5 +1,5 @@
 import { Context, Effect, Layer, Ref, Option as O, Predicate, Result, Schema } from "effect";
-import { CoordinationUnavailable } from "./Coordination.ts";
+import { CoordinationUnavailable, evalGuarded } from "./Coordination.ts";
 import type { RedisLike } from "./Coordination.ts";
 import { decodeCircuitEvent, readerFor } from "@egress/domain/Model.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
@@ -144,17 +144,6 @@ local members = redis.call("SMEMBERS", KEYS[1])
 if #members == 0 then return "[]" end
 return cjson.encode(members)
 `;
-
-const evalGuarded = (
-  redis: RedisLike,
-  operation: string,
-  script: string,
-  options: { readonly keys: ReadonlyArray<string>; readonly args: ReadonlyArray<string> },
-) =>
-  Effect.tryPromise({
-    try: () => redis.eval(script, options),
-    catch: (cause) => new CoordinationUnavailable({ operation, cause: String(cause) }),
-  });
 
 /** Anything but a JSON array of strings reads as empty. */
 const readStringList = readerFor(Schema.Array(Schema.String));

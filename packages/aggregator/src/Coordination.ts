@@ -281,8 +281,8 @@ return ARGV[1]
  */
 const COORDINATION_TIMEOUT_MS = 1000;
 
-/** Every call to the store goes through this: a rejected promise is a failure, never a defect. */
-const evalGuarded = (
+/** Every call to Redis goes through this, the outbox's too: a rejected or hung promise is a failure, never a defect. */
+export const evalGuarded = (
   redis: RedisLike,
   operation: string,
   script: string,

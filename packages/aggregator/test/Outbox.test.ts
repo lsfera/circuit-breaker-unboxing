@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Effect, Option as O } from "effect";
-import { makeInMemoryOutbox, OUTBOX_MAX_PER_API } from "../src/Outbox.ts";
+import { Effect, Exit, Option as O } from "effect";
+import { makeInMemoryOutbox, Outbox, OUTBOX_MAX_PER_API, RedisOutboxLayer } from "../src/Outbox.ts";
+import type { RedisLike } from "../src/Coordination.ts";
 import { SOURCE } from "../src/Events.ts";
 import type { Entry } from "../src/Outbox.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
@@ -129,4 +130,17 @@ test("a commit after the bound dropped entries mid-drain removes only what was d
   );
 
   assert.deepEqual(remaining, [51], "the first undelivered entry is next, not the 61st");
+});
+
+test("a Redis call that never answers fails the outbox call instead of hanging it", async () => {
+  // A one-sided partition: the command is queued on a socket that never answers.
+  const hung: RedisLike = { eval: () => new Promise(() => {}) };
+  const started = Date.now();
+  const exit = await Effect.runPromise(
+    Effect.exit(Effect.flatMap(Outbox, (outbox) => outbox.peek("payments", 10))).pipe(
+      Effect.provide(RedisOutboxLayer(hung)),
+    ),
+  );
+  assert.equal(Exit.isFailure(exit), true);
+  assert.ok(Date.now() - started < 3000, "failed within the coordination timeout");
 });
