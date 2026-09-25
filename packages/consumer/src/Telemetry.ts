@@ -6,11 +6,11 @@ import { Metric } from "effect";
  */
 
 export const calls = Metric.counter("egress_consumer_calls_total", {
-  description: "Calls made toward the third party, by outcome — ok; failed (counts against the breaker); throttled (a 429 while the concurrency limit adapts: the third party is full, not broken — released uncounted, not a breaker failure); client_error (a 4xx other than 408 and 429: the third party is up and refused the request, so it is dead-lettered and does not count); or open (rejected locally by this replica's own breaker or lost the probe-permit race, no call made) — and by status: the HTTP status, or timeout / network when none came, or none for open.",
+  description: "Calls made toward the third party, by outcome — ok; failed (counts against the breaker); throttled (a 429 while the concurrency limit adapts: the third party is full, not broken — released uncounted, not a breaker failure); client_error (a 4xx other than 408 and 429: the third party is up and refused the request, so it is parked and does not count); or open (rejected locally by this replica's own breaker or lost the probe-permit race, no call made) — and by status: the HTTP status, or timeout / network when none came, or none for open.",
 });
 
 export const discarded = Metric.counter("egress_consumer_discarded_total", {
-  description: "Deliveries this replica refused to spend a call on, by reason: `format` (a content type, encoding or message type it does not read) `malformed` (a body that does not decode as a work message) or `keyless` (no `message_id` to use as the idempotency key). Each goes to the dead-letter queue unread.",
+  description: "Deliveries this replica refused to spend a call on, by reason: `format` (a content type, encoding or message type it does not read) `malformed` (a body that does not decode as a work message) or `keyless` (no `message_id` to use as the idempotency key). Each is parked on `work.parked` unread, with `x-egress-parked-reason`.",
 });
 
 export const inFlight = Metric.gauge("egress_consumer_in_flight", {

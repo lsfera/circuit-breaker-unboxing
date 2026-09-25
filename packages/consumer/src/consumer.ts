@@ -6,6 +6,7 @@ import {
   deadLetterQueueFor,
   deadLetterQueueOptions,
   decodeWorkMessage,
+  PARKED_REASON_HEADER,
   parkedQueueFor,
   parkedQueueOptions,
   readsWorkFormat,
@@ -57,19 +58,21 @@ export type ConsumerConfig = {
  * A total function of the one thing that matters, testable with no broker, breaker or fetch. `"open"` means no
  * call was attempted, so it releases: RabbitMQ 4.3 doesn't count a release toward `x-delivery-limit`, and three
  * redeliveries onto open breakers would otherwise dead-letter work the third party never saw. `"failed"`
- * requeues, spending the budget on a real call. `"client_error"` skips straight to the dead-letter queue: a
- * retry gets the same answer. `"throttled"` releases too, for the opposite reason to `"open"`: a call was
+ * requeues, spending the budget on a real call. `"client_error"` is parked at once: a retry, or a redrive,
+ * gets the same answer. `"throttled"` releases too, for the opposite reason to `"open"`: a call was
  * made and the third party answered "not right now", which says nothing about the message — spending its
  * budget on that would dead-letter healthy work merely because the third party was busy (master's ADR 010
  * measured 22,226 of those from a proxy shedding with a 503).
  */
 export type CallOutcome = Breaker.CallOutcome | "open";
-export const decide = (outcome: CallOutcome): Settlement =>
+/** A settlement, or `park`: publish to `work.parked`, then accept. */
+export type Disposition = Settlement | "park";
+export const decide = (outcome: CallOutcome): Disposition =>
   Match.value(outcome).pipe(
-    Match.when("ok", (): Settlement => "accept"),
-    Match.when("client_error", (): Settlement => "discard"),
-    Match.when("failed", (): Settlement => "requeue"),
-    Match.whenOr("open", "throttled", (): Settlement => "release"),
+    Match.when("ok", (): Disposition => "accept"),
+    Match.when("client_error", (): Disposition => "park"),
+    Match.when("failed", (): Disposition => "requeue"),
+    Match.whenOr("open", "throttled", (): Disposition => "release"),
     Match.exhaustive,
   );
 
@@ -132,6 +135,7 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   // Recovering `<api>.work.dead`. `parkedQueue` needs declaring even on the four replicas that will never
   // redrive into it — every process that might touch a queue has to agree on its arguments.
   yield* rmq.declareQueue(parkedQueueFor(cfg.apiId), parkedQueueOptions());
+  const parkedPub = yield* rmq.publisherToQueue(parkedQueueFor(cfg.apiId));
   const redriveQueue = redriveTriggerQueueFor(cfg.apiId);
   yield* rmq.declareQueue(redriveQueue, redriveTriggerQueueOptions());
   const redriveTriggerPub = yield* rmq.publisherToQueue(redriveQueue);
@@ -236,7 +240,23 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
     );
   };
 
-  const attempt = async (key: string): Promise<Settlement> => {
+  /**
+   * Poison goes straight to `work.parked`, never through the dead-letter queue: the redrive would replay it
+   * `MAX_REDRIVES` times for the same answer. If the park itself fails, dead-lettering keeps it, and the
+   * redrive parks it in the end.
+   */
+  const park = (body: string, messageId: O.Option<string>, reason: string): Promise<Settlement> =>
+    runInContext(
+      rmq.send(parkedPub, body, {
+        messageId: O.getOrUndefined(messageId),
+        headers: { [PARKED_REASON_HEADER]: reason },
+      }),
+    ).then(
+      (): Settlement => "accept",
+      (): Settlement => "discard",
+    );
+
+  const attempt = async (body: string, key: string): Promise<Settlement> => {
     // Checked inside the wrapped function, not before execute(): cockatiel moves Open -> HalfOpen inside
     // execute(), just before running the probe, so a check made before it reads Open and the probe would skip the permit.
     const attemptUpstream = () =>
@@ -258,41 +278,42 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
     await Match.value(outcome).pipe(
       Match.when("open", () => sleep(holdMs())),
       Match.when("client_error", () =>
-        warnAtMostOncePerSecond(() => `${cfg.apiId}/consumer: third party refused message_id ${key} with ${status}, dead-lettering it`),
+        warnAtMostOncePerSecond(() => `${cfg.apiId}/consumer: third party refused message_id ${key} with ${status}, parking it`),
       ),
       Match.orElse(() => Promise.resolve()),
     );
-    return decide(outcome);
+    const disposition = decide(outcome);
+    return disposition === "park" ? park(body, O.some(key), `refused-${status}`) : disposition;
   };
 
   // A delivery in a format this daemon can't read, that doesn't decode, or with no message_id to use as its
-  // idempotency key was never published by this fleet — discard rather than spend a retry no fix helps.
-  const discard = (reason: "format" | "malformed" | "keyless", delivery: DeliveryInfo): Promise<Settlement> => {
+  // idempotency key was never published by this fleet — parked unread rather than spend a retry no fix helps.
+  const discard = (reason: "format" | "malformed" | "keyless", body: string, delivery: DeliveryInfo): Promise<Settlement> => {
     runInContext(Metric.update(Metric.withAttributes(Telemetry.discarded, { reason }), 1));
     warnAtMostOncePerSecond(() => {
       const declared = (o: O.Option<string>) => O.getOrElse(o, () => "none");
       return (
-        `${cfg.apiId}/consumer: discarding a ${reason} delivery — message_id ${declared(delivery.messageId)}, ` +
+        `${cfg.apiId}/consumer: parking a ${reason} delivery — message_id ${declared(delivery.messageId)}, ` +
         `type ${declared(delivery.type)}, content-type ${declared(delivery.contentType)}, ` +
         `content-encoding ${declared(delivery.contentEncoding)}`
       );
     });
-    return Promise.resolve<Settlement>("discard");
+    return park(body, delivery.messageId, `unreadable-${reason}`);
   };
 
   const call = (body: string, delivery: DeliveryInfo): Promise<Settlement> =>
     readsWorkFormat(delivery)
       ? O.match(decodeWorkMessage(body), {
-          onNone: () => discard("malformed", delivery),
+          onNone: () => discard("malformed", body, delivery),
           // The key is the message's own `message_id`, assigned once by the
           // producer: no id means no safe retry, so no call.
           onSome: () =>
             O.match(delivery.messageId, {
-              onNone: () => discard("keyless", delivery),
-              onSome: attempt,
+              onNone: () => discard("keyless", body, delivery),
+              onSome: (key) => attempt(body, key),
             }),
         })
-      : discard("format", delivery);
+      : discard("format", body, delivery);
 
   yield* rmq.consume(workQueue, (body, delivery) => call(body, delivery), {
     prefetch: cfg.maxInFlight,

@@ -3,6 +3,7 @@ import { Rmq } from "@egress/rmq/Client.ts";
 import {
   deadLetterQueueFor,
   MAX_REDRIVES,
+  PARKED_REASON_HEADER,
   parkedQueueFor,
   REDRIVE_COUNT_HEADER,
   workQueueFor,
@@ -92,7 +93,10 @@ export const runPass = Effect.fn(function* (opts: RedriveOptions) {
       yield* got.value.ack;
       opts.onOutcome("moved");
     } else {
-      yield* rmq.send(parkedPub, got.value.body, { messageId });
+      yield* rmq.send(parkedPub, got.value.body, {
+        messageId,
+        headers: { [PARKED_REASON_HEADER]: "redriven-too-often" },
+      });
       yield* got.value.ack;
       opts.onOutcome("parked");
     }

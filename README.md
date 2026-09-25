@@ -68,12 +68,13 @@ flowchart LR
   rtrigger -.->|"elects exactly one"| dead
   dead -->|"redrive pass"| queue
   dead -.->|"MAX_REDRIVES exceeded"| parked
+  queue -.->|"4xx or unreadable"| parked
   b1 -.->|"breaker state"| prom[("Prometheus\n(fleet_open rule)")]
   b2 -.->|"breaker state"| prom
   b3 -.->|"breaker state"| prom
   classDef new fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#1c1917
   class permit,dead,parked,rtrigger,prom,l1,l2,l3 new
-  linkStyle 4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22 stroke:#d97706,stroke-width:3px
+  linkStyle 4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23 stroke:#d97706,stroke-width:3px
 ```
 
 <sub>Amber: new or changed on this branch.</sub>
@@ -163,15 +164,21 @@ outage after. The work queue grows instead (6,800 at 40s, still climbing).
   `work.dead` sat at 1,225 for 20s+ with every breaker closed; `master`'s
   ADR 016 fixes the same stall the same way.
 - **Idempotency:** the republish keeps the original `message_id`.
+- **Poison skips the dead-letter queue.** A message the third party
+  refused (4xx) or the consumer cannot read (wrong format, not a work
+  message, no `message_id`) goes straight to `work.parked`, stamped
+  `x-egress-parked-reason`. Through the dead-letter queue it would be
+  redriven five times for the same answer. The dead-letter queue keeps
+  only what an outage failed, which is what a redrive can fix.
 
 ## The breaker
 
 As in article 2: 5 consecutive failures trip it, half-open after 1s–30s
 exponential backoff. `classify` (`Breaker.ts`) gives five outcomes: `ok`
 accept, `throttled` (a `429`, while the limit adapts) release after a
-100–400ms hold, `client_error` (4xx except 408/429) dead-letter at once,
+100–400ms hold, `client_error` (4xx except 408/429) parked at once,
 `failed` requeue, `open` release after a 100–400ms hold. A 4xx that is
-really ours (401, 403, 404) dead-letters every message it touches; the
+really ours (401, 403, 404) parks every message it touches; the
 `status` label on `egress_consumer_calls_total` shows it.
 
 ## The fleet view: a Prometheus rule

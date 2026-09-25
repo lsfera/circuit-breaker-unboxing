@@ -136,7 +136,7 @@ test("a message already at MAX_REDRIVES is parked instead of moved", async () =>
 
   assert.deepEqual(outcomes, ["parked"]);
   assert.equal(sent["payments-provider.work"], undefined);
-  assert.deepEqual(sent["payments-provider.work.parked"], [{ body: "poison", headers: {}, messageId: undefined }]);
+  assert.deepEqual(sent["payments-provider.work.parked"], [{ body: "poison", headers: { "x-egress-parked-reason": "redriven-too-often" }, messageId: undefined }]);
 });
 
 test("a pass stops the instant the gate closes, leaving the rest of the queue untouched", async () => {

@@ -22,8 +22,8 @@ test("a call the third party answered 429 is released, not requeued: it is not t
   assert.equal(decide("throttled"), "release");
 });
 
-test("a client error is dead-lettered at once: repeating the request would get the same answer", () => {
-  assert.equal(decide("client_error"), "discard");
+test("a client error is parked at once: a retry or a redrive would get the same answer", () => {
+  assert.equal(decide("client_error"), "park");
 });
 
 /**
