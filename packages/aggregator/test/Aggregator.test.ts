@@ -407,3 +407,32 @@ test("sequences are tracked per API, not globally", () => {
   assert.equal(i.duplicates, 0);
   assert.deepEqual(i.gaps, []);
 });
+
+const leased = (event: CircuitEvent, epoch: string, counter: number): CircuitEvent => ({
+  ...event,
+  data: { ...event.data, lease: { epoch, counter } },
+});
+
+test("a new epoch restarts the sequences: neither a gap nor duplicates", () => {
+  // Redis lost its state; the coordinator counts from 1 again under a new epoch.
+  const i = fold([
+    leased(changed("payments", 40), "a", 3),
+    leased(changed("payments", 41), "a", 3),
+    leased(changed("payments", 1), "b", 1),
+    leased(changed("payments", 2), "b", 1),
+    leased(changed("payments", 4), "b", 1),
+  ]);
+  assert.equal(i.duplicates, 0, "1 and 2 under epoch b are not repeats of epoch a");
+  assert.equal(i.gapCount, 1, "and the new epoch is still checked: 2 -> 4 is a gap");
+  assert.match(i.gaps[0]!, /payments: jumped 2 -> 4/);
+});
+
+test("an older leader's event is a duplicate, however high its sequence", () => {
+  const i = fold([
+    leased(changed("payments", 10), "a", 2),
+    leased(changed("payments", 30), "a", 1),
+    leased(changed("payments", 11), "a", 2),
+  ]);
+  assert.equal(i.duplicates, 1);
+  assert.deepEqual(i.gaps, [], "the paused leader's 30 must neither be a gap nor move the mark");
+});

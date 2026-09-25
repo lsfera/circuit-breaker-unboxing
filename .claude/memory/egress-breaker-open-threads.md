@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: d23c6dbd-5c0e-471a-a8fc-5ed6afc8c7c7
-  modified: 2026-09-14T10:41:14.891Z
+  modified: 2026-09-25T11:32:36.180Z
 ---
 
 As of 2026-09-13. Verify against `git log` and the ADRs before acting.
@@ -70,5 +70,14 @@ As of 2026-09-13. Verify against `git log` and the ADRs before acting.
   [[chaos-reliability-work-2026-09-17]] for the 2026-09-17/18 follow-up (first
   live chaos-load run against the real stack, a consumer-rebuild bug, and the
   full ADR 017 split-brain arc — all resolved and committed).
+- **Branch 04, as of 2026-09-25:** the 11-finding Effect review is fixed
+  (one commit each, up to 8061161dbf), plus a redrive bug the review
+  surfaced (1bce156431: capped passes closed their channel before the
+  confirms arrived and replayed work several times). 02/03 redrive with
+  `get`, so they don't have it. Still open: the aggregator's own
+  subscriber-integrity `record` in Http.ts ranks by sequence only (the same
+  lease blindness fixed in the subscriber and Contract); and the user's
+  "native prometheus rabbitmq monitor" request is waiting on which
+  difference from 03 they meant.
 
 Related: [[rmq-control-plane-design]], [[egress-breaker-session-record]], [[chaos-reliability-work-2026-09-13]], [[chaos-reliability-work-2026-09-17]].

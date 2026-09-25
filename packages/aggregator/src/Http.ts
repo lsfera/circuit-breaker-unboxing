@@ -1,7 +1,8 @@
 import { Clock, Effect, Match, Metric, Option as O, Ref, Schema, Stream } from "effect";
 import { HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 import { NodeStream } from "@effect/platform-node";
-import { CircuitEvent, classifySequence, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
+import { CircuitEvent, classifyEvent, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
+import type { Applied, Lease } from "@egress/domain/Model.ts";
 import { metricsResponse } from "@egress/tracing/Metrics.ts";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -27,7 +28,8 @@ type Integrity = {
   /** Every gap seen; `gaps` keeps only the last `GAP_BUFFER` descriptions. */
   readonly gapCount: number;
   readonly gaps: ReadonlyArray<string>;
-  readonly bySequence: ReadonlyMap<string, number>;
+  /** The last `state_changed` counted per API, with its lease: a new epoch restarts the sequences. */
+  readonly last: ReadonlyMap<string, Applied>;
   readonly recent: ReadonlyArray<CircuitEvent>;
 };
 
@@ -37,7 +39,7 @@ export const emptyIntegrity: Integrity = {
   duplicates: 0,
   gapCount: 0,
   gaps: [],
-  bySequence: new Map(),
+  last: new Map(),
   recent: [],
 };
 
@@ -52,27 +54,27 @@ export const record = (self: Integrity, event: CircuitEvent): Integrity => {
 const recordSequenced = (
   self: Integrity,
   base: Integrity,
-  { apiId, sequence }: { readonly apiId: string; readonly sequence: number },
+  { apiId, sequence, lease }: { readonly apiId: string; readonly sequence: number; readonly lease?: Lease },
 ): Integrity => {
-  const last = self.bySequence.get(apiId);
-  const highest = O.fromUndefinedOr(last);
-  const advanced = () => new Map(self.bySequence).set(apiId, sequence);
+  const last = O.fromUndefinedOr(self.last.get(apiId));
+  const incoming = { lease: O.fromUndefinedOr(lease), sequence };
+  const advanced = () => new Map(self.last).set(apiId, incoming);
   // The rule lives in @egress/domain, shared with the daemon fleet's own
-  // observer. What is local here is the shape: one highest sequence per API,
+  // observer. What is local here is the shape: one last event per API,
   // because this process watches all of them at once.
-  return Match.value(classifySequence(highest, sequence)).pipe(
-    Match.when("duplicate", () => ({
-      ...base,
-      bySequence: self.bySequence,
-      duplicates: self.duplicates + 1,
-    })),
+  return Match.value(classifyEvent(last, incoming)).pipe(
+    // A stale leader's event is a repeat of the past, however high its sequence.
+    Match.when(Match.is("duplicate", "stale"), () => ({ ...base, duplicates: self.duplicates + 1 })),
     Match.when("gap", () => ({
       ...base,
-      bySequence: advanced(),
+      last: advanced(),
       gapCount: self.gapCount + 1,
-      gaps: [...self.gaps, `${apiId}: jumped ${last} -> ${sequence}`].slice(-GAP_BUFFER),
+      gaps: [
+        ...self.gaps,
+        `${apiId}: jumped ${O.getOrElse(O.map(last, (l) => String(l.sequence)), () => "?")} -> ${sequence}`,
+      ].slice(-GAP_BUFFER),
     })),
-    Match.when(Match.is("first", "next"), () => ({ ...base, bySequence: advanced() })),
+    Match.when(Match.is("first", "next", "new-epoch"), () => ({ ...base, last: advanced() })),
     Match.exhaustive,
   );
 };
