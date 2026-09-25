@@ -5,6 +5,7 @@ import {
   deadLetterQueueFor,
   deadLetterQueueOptions,
   decodeWorkMessage,
+  PARKED_REASON_HEADER,
   parkedQueueFor,
   parkedQueueOptions,
   readsWorkFormat,
@@ -52,10 +53,9 @@ export type ConsumerConfig = {
 };
 
 /**
- * Whether a call outcome is accepted, handed back to the broker or dead-lettered: a total function of what
- * matters, so it is testable without a broker, breaker or fetch. `client_error` skips the delivery budget and
- * the release/requeue split below entirely: it is discarded at once, on this replica or the next, because a
- * retry gets the same answer.
+ * Whether a call outcome is accepted, handed back to the broker or parked: a total function of what matters,
+ * so it is testable without a broker, breaker or fetch. `client_error` skips the delivery budget and the
+ * release/requeue split below entirely: it is parked at once, because a retry or a redrive gets the same answer.
  *
  * A `failed` is charged to the message (`requeue` counts toward the queue's delivery budget) only when it stands
  * alone. One that follows another failure on the same replica (`streak` above 1) or is a probe is evidence about
@@ -68,12 +68,14 @@ export type ConsumerConfig = {
  * says nothing about the message.
  */
 export type Role = "work" | "probe";
-export const decide = (outcome: Breaker.CallOutcome, role: Role = "work", streak = 1): Settlement =>
+/** A settlement, or `park`: publish to `work.parked`, then accept. */
+export type Disposition = Settlement | "park";
+export const decide = (outcome: Breaker.CallOutcome, role: Role = "work", streak = 1): Disposition =>
   Match.value(outcome).pipe(
-    Match.when("ok", (): Settlement => "accept"),
-    Match.when("client_error", (): Settlement => "discard"),
-    Match.when("throttled", (): Settlement => "release"),
-    Match.when("failed", (): Settlement => (role === "probe" || streak > 1 ? "release" : "requeue")),
+    Match.when("ok", (): Disposition => "accept"),
+    Match.when("client_error", (): Disposition => "park"),
+    Match.when("throttled", (): Disposition => "release"),
+    Match.when("failed", (): Disposition => (role === "probe" || streak > 1 ? "release" : "requeue")),
     Match.exhaustive,
   );
 
@@ -132,6 +134,7 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   // Every replica declares the parked queue, even those never elected: every process that might touch a
   // queue has to agree on its arguments.
   yield* rmq.declareQueue(parkedQueueFor(cfg.apiId), parkedQueueOptions());
+  const parkedPub = yield* rmq.publisherToQueue(parkedQueueFor(cfg.apiId));
   const redriveQueue = redriveTriggerQueueFor(cfg.apiId);
   yield* rmq.declareQueue(redriveQueue, redriveTriggerQueueOptions());
   const redriveTriggerPub = yield* rmq.publisherToQueue(redriveQueue);
@@ -235,7 +238,23 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   };
 
   // The permit is held for the call alone, not while the probe consumer waits for a message.
-  const probeCall = (key: string, verdict: (v: Breaker.ProbeVerdict) => void): Promise<Settlement> =>
+  /**
+   * Poison goes straight to `work.parked`, never through the dead-letter queue: the redrive would replay it
+   * `MAX_REDRIVES` times for the same answer. If the park itself fails, dead-lettering keeps it, and the
+   * redrive parks it in the end.
+   */
+  const park = (body: string, messageId: O.Option<string>, reason: string): Promise<Settlement> =>
+    runInContext(
+      rmq.send(parkedPub, body, {
+        messageId: O.getOrUndefined(messageId),
+        headers: { [PARKED_REASON_HEADER]: reason },
+      }),
+    ).then(
+      (): Settlement => "accept",
+      (): Settlement => "discard",
+    );
+
+  const probeCall = (body: string, key: string, verdict: (v: Breaker.ProbeVerdict) => void): Promise<Settlement> =>
     runInContext(Permit.take(cfg.apiId).pipe(Effect.orElseSucceed(() => O.none<Effect.Effect<void>>()))).then(
       O.match({
         onNone: () => {
@@ -243,64 +262,65 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
           return permitLost();
         },
         onSome: (giveBack) =>
-          attempt(key, "probe", (ok) => {
+          attempt(body, key, "probe", (ok) => {
             verdict(ok ? "ok" : "failed");
             return ok ? 0 : 1;
           }).finally(() => runInContext(giveBack)),
       }),
     );
 
-  const attempt = async (key: string, role: Role, report: Breaker.Report): Promise<Settlement> => {
+  const attempt = async (body: string, key: string, role: Role, report: Breaker.Report): Promise<Settlement> => {
     const status = await callUpstream(key);
     const outcome = Breaker.classify(status, throttling);
     const streak = report(outcome !== "failed");
     runInContext(Metric.update(Metric.withAttributes(Telemetry.calls, { outcome, status: String(status) }), 1));
     if (outcome === "client_error") {
       warnAtMostOncePerSecond(
-        () => `${cfg.apiId}/consumer: third party refused message_id ${key} with ${status}, dead-lettering it`,
+        () => `${cfg.apiId}/consumer: third party refused message_id ${key} with ${status}, parking it`,
       );
     }
-    return decide(outcome, role, streak);
+    const disposition = decide(outcome, role, streak);
+    return disposition === "park" ? park(body, O.some(key), `refused-${status}`) : disposition;
   };
 
   // A body that declares a content type, encoding or message type this daemon cannot read, does not decode, or
-  // carries no `message_id` to use as its idempotency key was never published by this fleet: discard it rather
-  // than spend the delivery budget on something no retry can fix.
-  const discard = (reason: "format" | "malformed" | "keyless", delivery: DeliveryInfo): Promise<Settlement> => {
+  // carries no `message_id` to use as its idempotency key was never published by this fleet: park it unread
+  // rather than spend the delivery budget on something no retry can fix.
+  const discard = (reason: "format" | "malformed" | "keyless", body: string, delivery: DeliveryInfo): Promise<Settlement> => {
     runInContext(Metric.update(Metric.withAttributes(Telemetry.discarded, { reason }), 1));
     warnAtMostOncePerSecond(() => {
       const declared = (o: O.Option<string>) => O.getOrElse(o, () => "none");
       return (
-        `${cfg.apiId}/consumer: discarding a ${reason} delivery — message_id ${declared(delivery.messageId)}, ` +
+        `${cfg.apiId}/consumer: parking a ${reason} delivery — message_id ${declared(delivery.messageId)}, ` +
         `type ${declared(delivery.type)}, content-type ${declared(delivery.contentType)}, ` +
         `content-encoding ${declared(delivery.contentEncoding)}`
       );
     });
-    return Promise.resolve<Settlement>("discard");
+    return park(body, delivery.messageId, `unreadable-${reason}`);
   };
 
   const call = (body: string, delivery: DeliveryInfo, run: (key: string) => Promise<Settlement>): Promise<Settlement> =>
     readsWorkFormat(delivery)
       ? O.match(decodeWorkMessage(body), {
-          onNone: () => discard("malformed", delivery),
+          onNone: () => discard("malformed", body, delivery),
           // The key is the message's own `message_id`, assigned once by the
           // producer: no id means no safe retry, so no call.
           onSome: () =>
             O.match(delivery.messageId, {
-              onNone: () => discard("keyless", delivery),
+              onNone: () => discard("keyless", body, delivery),
               onSome: run,
             }),
         })
-      : discard("format", delivery);
+      : discard("format", body, delivery);
 
   const supervisor = Breaker.supervise(cfg.breaker, {
     subscribe: (report) =>
-      rmq.consume(workQueue, (body, delivery) => call(body, delivery, (key) => attempt(key, "work", report)), {
+      rmq.consume(workQueue, (body, delivery) => call(body, delivery, (key) => attempt(body, key, "work", report)), {
         prefetch: cfg.maxInFlight,
       }),
     // A probe is one message: prefetch 1 is the whole mechanism.
     probe: (verdict) =>
-      rmq.consume(workQueue, (body, delivery) => call(body, delivery, (key) => probeCall(key, verdict)), {
+      rmq.consume(workQueue, (body, delivery) => call(body, delivery, (key) => probeCall(body, key, verdict)), {
         prefetch: 1,
       }),
     retire: rmq.drainConsumer,

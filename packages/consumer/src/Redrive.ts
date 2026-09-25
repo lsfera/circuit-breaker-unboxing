@@ -5,6 +5,7 @@ import {
   deadLetterQueueFor,
   MAX_REDRIVES,
   parkedQueueFor,
+  PARKED_REASON_HEADER,
   REDRIVE_COUNT_HEADER,
   workQueueFor,
 } from "@egress/rmq/WorkQueue.ts";
@@ -58,7 +59,7 @@ export const runPass = Effect.fn(function* (opts: RedriveOptions) {
     const [publish, outcome] =
       decision.destination === "work"
         ? [rmq.send(workPub, got.body, { messageId, headers: { [REDRIVE_COUNT_HEADER]: String(decision.count) } }), "moved" as const]
-        : [rmq.send(parkedPub, got.body, { messageId }), "parked" as const];
+        : [rmq.send(parkedPub, got.body, { messageId, headers: { [PARKED_REASON_HEADER]: "redriven-too-often" } }), "parked" as const];
     return publish.pipe(
       Effect.andThen(got.ack),
       Effect.andThen(Effect.sync(() => opts.onOutcome(outcome))),

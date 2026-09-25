@@ -90,8 +90,14 @@ export const redriveTriggerQueueOptions = () => ({
   durable: true,
 });
 
-/** Where a message goes once it has been redriven `MAX_REDRIVES` times: terminal, like the dead-letter queue. */
+/**
+ * Poison, parked for a human: what the consumer cannot read, what the third party refused, and what the redrive
+ * gave up on after `MAX_REDRIVES`. Terminal, like the dead-letter queue.
+ */
 export const parkedQueueFor = (apiId: string): string => `${apiId}.work.parked`;
+
+/** Why a message was parked: `refused-<status>`, `unreadable-<format|malformed|keyless>`, or `redriven-too-often`. */
+export const PARKED_REASON_HEADER = "x-egress-parked-reason";
 
 export const parkedQueueOptions = () => ({
   args: { "x-queue-type": "quorum", "x-delivery-limit": -1 },

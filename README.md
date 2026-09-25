@@ -54,9 +54,10 @@ flowchart LR
   rtrigger -. "elects one replica" .-> c3
   c3 -. "redrive" .-> dead
   dead -. "back to work,\nor after 5 redrives" .-> parked
+  queue -. "4xx or unreadable" .-> parked
   classDef new fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#1c1917
   class b1,b2,b3,chain,permit,parked,rtrigger,l1,l2,l3 new
-  linkStyle 4,5,6,7,8,9,10,11,12,14,15,16 stroke:#d97706,stroke-width:3px
+  linkStyle 4,5,6,7,8,9,10,11,12,14,15,16,17 stroke:#d97706,stroke-width:3px
 ```
 
 <sub>Amber: new on this branch.</sub>
@@ -78,13 +79,16 @@ fact about the broker rather than a variable:
   request, so it counts as a breaker success and never trips or reopens
   anything; everything else (5xx, 408, 429, a timeout, a dropped connection) is
   `failed`, and is what the phase table above means by "calls fail".
-- **A `client_error` is discarded at once, not released or requeued.**
+- **A `client_error` is parked at once, not released or requeued.**
   Repeating a refused request gets the same answer, so `decide()`
-  (`consumer.ts`) sends it straight to the dead-letter queue on its first
-  delivery, skipping the release/requeue distinction below entirely. The
-  catch: a 4xx that is really ours to fix — expired credentials (401, 403), a
-  wrong path (404) — refuses every message the same way, and every one is
-  dead-lettered on its first call. Nothing here stops that;
+  (`consumer.ts`) sends it straight to `work.parked` on its first delivery,
+  stamped `x-egress-parked-reason: refused-<status>`, skipping the
+  release/requeue distinction below entirely. A delivery the consumer cannot
+  read (wrong format, not a work message, no `message_id`) is parked the same
+  way, as `unreadable-<reason>`. Through `work.dead` either would be redriven
+  five times for the same answer. The catch: a 4xx that is really ours to
+  fix — expired credentials (401, 403), a wrong path (404) — refuses every
+  message the same way, and every one is parked on its first call. Nothing here stops that;
   `egress_consumer_calls_total`'s `status` label shows it, and a refused
   message is logged, at most once a second, with its status and `message_id`.
 - **Open is silence, not rejection.** Tripping drains the consumer (in-flight
@@ -258,8 +262,8 @@ for 90 s:
 - **Triggers**: this replica closing (startup included), and a 30 s sweep while
   it is closed. A message can dead-letter while no breaker moves.
 
-What still reaches `work.dead` here is mostly a `client_error`, a poison
-message, or a message caught between successes in a partial failure. The
+What still reaches `work.dead` here is mostly a message that kept failing
+with a 5xx, or one caught between successes in a partial failure. The
 RabbitMQ-held breaker already keeps an outage's messages out of it (see
 *Measured* above).
 
@@ -375,9 +379,6 @@ Runs: `docs/runs/compare-article3-cockatiel.json` and
   is a verdict for people and alerts: no replica acts on it.
 - **The redrive waits on the elected replica's breaker**, which can be open
   while the rest of the fleet is closed. A pass is up to 30 s late.
-- **Refused work is redriven too.** A `client_error` goes to `work.dead` on its
-  first delivery, and the redrive sends it back until it is parked: five more
-  calls the third party will refuse again. The same holds in article 3.
 - **A trigger that arrives mid-pass is dropped**; the next sweep picks up the
   rest.
 - **A lost permit is a stuck fleet.** If the permit queue is purged, every

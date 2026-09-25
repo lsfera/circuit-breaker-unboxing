@@ -18,10 +18,10 @@ test("a call the third party answered 429 is released, not requeued, whatever th
   assert.equal(decide("throttled", "work", 5), "release");
 });
 
-test("a client error is dead-lettered at once, whatever the role or streak: repeating it gets the same answer", () => {
-  assert.equal(decide("client_error"), "discard");
-  assert.equal(decide("client_error", "probe"), "discard");
-  assert.equal(decide("client_error", "work", 5), "discard");
+test("a client error is parked at once, whatever the role or streak: a retry or a redrive gets the same answer", () => {
+  assert.equal(decide("client_error"), "park");
+  assert.equal(decide("client_error", "probe"), "park");
+  assert.equal(decide("client_error", "work", 5), "park");
 });
 
 /**
