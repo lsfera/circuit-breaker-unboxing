@@ -251,11 +251,12 @@ A pass opens its own channel on the daemon's single connection, consumes
   outages' worth of a message failing every attempt is treated as poison
   rather than unlucky, so the sweep stops replaying it into an upstream it
   will only fail again.
-- **Anything else** — republished to the *tail* of the dead-letter queue rather
-  than released. Releasing puts it straight back at the head, where it starves
-  everything behind it. One canonical dead-letter queue holds more than failed
-  work — a control event that would not decode lands here too — and replaying
-  that onto the work queue would be nonsense.
+- **Anything else** — parked on `<apiId>.work.parked`, stamped with where it
+  came from. One canonical dead-letter queue holds more than failed work — a
+  control event or an election trigger that would not decode lands here too —
+  and replaying that onto the work queue would be nonsense. Until 2026-09-24 it
+  went back to the tail of the dead-letter queue instead, where it stayed for
+  good: one malformed trigger kept the queue non-empty and every pass lapping it.
 
 Provenance is the discriminator, and it has three sources in priority order: the
 broker's own `x-first-death-queue` annotation while the message still has one,
@@ -265,27 +266,20 @@ queue by something else. Unattributable messages are kept, never guessed at.
 
 ### How a pass ends
 
-Five ways, evaluated in this order every 200ms:
+Four ways, evaluated in this order every 200ms:
 
 | Reason | Meaning |
 |---|---|
 | `circuit reopened` | `isClosed` went false — the upstream failed again mid-recovery |
 | `cap reached` | `maxPerPass` messages moved (`REDRIVE_MAX`, default 5000) |
-| `came full circle` | this pass met its own `x-egress-redrive-pass` stamp |
-| `nothing left to replay` / `drained` | 2s without a replay, with or without parked messages |
+| `drained` | 2s without moving anything |
 | `deadline` | 60s hard ceiling on a single pass |
 
 Only `cap reached` with at least one message moved starts another pass, up to 20.
-Every other reason ends the run, because a pass that replayed nothing means
-whatever is left is not work and more passes would only cycle it.
-
-The pass stamp is what makes `came full circle` possible, and it is load-bearing:
-without it a pass re-parks the same handful of messages tail to tail as fast as
-the broker can deliver them — [measured at 17,703 republishes of two messages in
-2.5 seconds](../history/what-the-broker-taught.md#one-dead-letter-queue-for-everything-and-how-to-drain-it-anyway). A
-stamp from an *older* pass means only "something already decided this is not
-work" and must be moved on rather than ending the lap, or one parked message at
-the head makes every later redrive give up before replaying anything.
+Every other reason ends the run. Nothing is ever put back on the dead-letter
+queue, so a pass cannot lap it: the per-pass stamp (`x-egress-redrive-pass`)
+and the `came full circle` ending that stopped a lap are gone with the tail
+republish they existed for.
 
 ### What a replay carries, and what it resets
 
@@ -302,9 +296,7 @@ ever. That is deliberate and
 [measured](../history/what-the-broker-taught.md#rejecting-a-message-preserves-it-only-if-the-queue-outlives-the-broker).
 Redrives themselves *are* capped, by `x-egress-redrive-count`: past
 `MAX_REDRIVES` (5) a message stops being replayed as work and is parked
-instead — see [One pass](#one-pass) above. `x-egress-redrive-count` and
-`x-egress-redrive-pass` are two different stamps; the former survives on the
-message across passes, the latter is local to one pass.
+instead — see [One pass](#one-pass) above.
 
 ### Why one daemon, and how it is held
 

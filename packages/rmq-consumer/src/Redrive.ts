@@ -1,5 +1,4 @@
 import { Duration, Effect, Option as O, Ref, Schedule } from "effect";
-import { randomUUID } from "node:crypto";
 import {
   MAX_REDRIVES,
   WORK_CONTENT_TYPE,
@@ -78,9 +77,6 @@ const PASS_DEADLINE = Duration.seconds(60);
 // Every message a pass does not move is handed back with `release`, never `requeue`:
 // nothing about it failed, and a counted return is a step towards a delivery limit.
 export const makeRedrive = (opts: RedriveOptions) => {
-  /** Marks a lap of this pass, local to it — ORIGIN_QUEUE_HEADER/ORIGIN_REASON_HEADER (ControlPlane.ts) are the ones shared with daemon.ts's own dead-lettering. */
-  const ORIGIN_PASS_PROPERTY = "x-egress-redrive-pass";
-
   /**
    * The delivery's own `message_id`, which is its idempotency key: a republish
    * that let `send` invent a new one would give the third party no way to
@@ -94,7 +90,6 @@ export const makeRedrive = (opts: RedriveOptions) => {
       contentType: WORK_CONTENT_TYPE,
       type: WORK_MESSAGE_TYPE,
     });
-    const back = yield* conn.publisherToQueue(opts.deadQueue);
     const toParked = yield* conn.publisherToQueue(opts.parkedQueue);
 
     /**
@@ -105,33 +100,16 @@ export const makeRedrive = (opts: RedriveOptions) => {
     const services = yield* Effect.context<never>();
     const runInContext = Effect.runPromiseWith(services);
 
-    const passId = randomUUID();
     let moved = 0;
-    let parked = 0;
+    let strays = 0;
     let poisoned = 0;
-    let cycled = false;
     let lastReplayAt = Date.now();
     const consumer = yield* conn.consume(opts.deadQueue, async (body, delivery): Promise<Settlement> => {
       // One canonical dead-letter queue means this one holds more than
-      // failed work: a control event that would not decode lands here too,
-      // and replaying *that* onto the work queue would be nonsense. The
-      // broker records where each message was dead-lettered from, so the
-      // filter is exact rather than a guess at the body's shape.
-
-      // Our own stamp, from *this* pass: the queue has come the whole way
-      // round and everything left is stuff this pass will not replay.
-      // Without that signal the pass re-parks the same handful of messages
-      // tail to tail as fast as the broker can deliver them — measured at
-      // 17,703 republishes of two messages in 2.5 seconds before an idle
-      // timer eventually noticed. A stamp from an *older* pass means only
-      // "something already decided this is not work", and must be moved on
-      // rather than ending the lap: otherwise one parked message sitting at
-      // the head makes every later redrive give up before replaying
-      // anything, which is the opposite of self-healing.
-      if (delivery.properties[ORIGIN_PASS_PROPERTY] === passId) {
-        cycled = true;
-        return "release";
-      }
+      // failed work: a control event or an election trigger that would not
+      // decode lands here too, and replaying *that* onto the work queue would
+      // be nonsense. The broker records where each message was dead-lettered
+      // from, so the filter is exact rather than a guess at the body's shape.
 
       // Where it came from: the broker's annotation while it still has one, our
       // own stamp once an earlier pass moved it and the annotation was lost, and
@@ -147,22 +125,22 @@ export const makeRedrive = (opts: RedriveOptions) => {
       );
 
       if (originQueue !== opts.workQueue) {
-        // Moved to the tail rather than released, because releasing puts it
-        // straight back at the head and starves everything behind it, and
-        // stamped on the way so the provenance the annotations carried is
-        // not lost with them.
-        parked++;
+        // Never work, so never replayed: parked for a human, stamped so the
+        // provenance the broker's annotations carried survives the move. It
+        // used to go back to the tail of this queue, where it stayed for
+        // good, holding the queue non-empty and every pass busy lapping it.
+        strays++;
         try {
           await runInContext(
-            conn.send(back, body, {
+            conn.send(toParked, body, {
               messageId: sameId(delivery),
               headers: {
                 [ORIGIN_QUEUE_HEADER]: originQueue,
                 [ORIGIN_REASON_HEADER]: originReason,
-                [ORIGIN_PASS_PROPERTY]: passId,
               },
             }),
           );
+          lastReplayAt = Date.now();
           return "accept";
         } catch {
           return "release";
@@ -261,15 +239,12 @@ export const makeRedrive = (opts: RedriveOptions) => {
       O.firstSomeOf([
         when(!closed, () => "circuit reopened"),
         when(moved + poisoned >= opts.maxPerPass, () => "cap reached"),
-        when(cycled, () => "came full circle"),
         // Idle is measured on *replays and parkings* rather than on
         // deliveries, so a pass that is only being handed things it will not
         // replay still ends. On `Date.now()` at both ends deliberately: what
         // is being measured is how long the broker has gone without handing
         // over work.
-        when(Date.now() - lastReplayAt > PASS_IDLE_MS, () =>
-          parked > 0 ? "nothing left to replay" : "drained",
-        ),
+        when(Date.now() - lastReplayAt > PASS_IDLE_MS, () => "drained"),
       ]),
     );
 
@@ -289,9 +264,9 @@ export const makeRedrive = (opts: RedriveOptions) => {
     );
     yield* conn.closeConsumer(consumer);
 
-    yield* parked > 0
+    yield* strays > 0
       ? Effect.logWarning(
-          `${opts.label}: left ${parked} non-work message(s) on ${opts.deadQueue} — ` +
+          `${opts.label}: parked ${strays} non-work message(s) on ${opts.parkedQueue} — ` +
           `dead-lettered from somewhere other than ${opts.workQueue}, so not replayed as work`,
         )
       : Effect.void;
@@ -301,7 +276,7 @@ export const makeRedrive = (opts: RedriveOptions) => {
           `redriven ${MAX_REDRIVES} time(s) without succeeding`,
         )
       : Effect.void;
-    return { moved, parked, poisoned, reason };
+    return { moved, strays, poisoned, reason };
   });
   /**
    * Replay in bounded passes until empty or told to stop, only while CLOSED.
@@ -334,15 +309,14 @@ export const makeRedrive = (opts: RedriveOptions) => {
 
     yield* Effect.repeat(
       redrivePass.pipe(
-        Effect.flatMap(({ moved, poisoned, reason }) =>
+        Effect.flatMap(({ moved, strays, poisoned, reason }) =>
           Ref.updateAndGet(state, (prior) => ({
             pass: prior.pass + 1,
             total: prior.total + moved,
-            totalParked: prior.totalParked + poisoned,
-            // A pass that moved nothing — replayed or parked — means whatever
-            // is left is not work, so more passes would only cycle it.
+            totalParked: prior.totalParked + poisoned + strays,
+            // Another pass only if this one stopped at the cap having moved something.
             finished:
-              reason !== "cap reached" || moved + poisoned === 0
+              reason !== "cap reached" || moved + poisoned + strays === 0
                 ? O.some(reason)
                 : O.none<string>(),
           })),
