@@ -83,7 +83,7 @@ services:
   # for the service name (see infra/monitoring/prometheus.yml).
   rmq-consumer:
     <<: *rmq-node
-    command: node packages/consumer/src/main.ts
+    command: node packages/rmq-consumer/src/main.ts
     environment:
       <<: *rmq-node-env
       # One address, the fake third party directly: the address a real client of a real third party would be given.

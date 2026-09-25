@@ -194,7 +194,7 @@ importers:
         specifier: 'catalog:'
         version: 4.0.0-rc.116
 
-  packages/consumer:
+  packages/rmq-consumer:
     dependencies:
       '@effect/platform-node':
         specifier: 'catalog:'

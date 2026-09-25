@@ -109,7 +109,7 @@ redelivery repeats the same request.
 ### What this branch cannot overcome
 
 There is no circuit breaker here. Each limit below follows from that, none is a
-bug in `packages/consumer`.
+bug in `packages/rmq-consumer`.
 
 1. **No coordination between consumers.** Each replica decides for itself
    whether its own last call worked; there is no shared verdict on the third
@@ -150,7 +150,7 @@ packages/
                work-queue naming/options a producer and a consumer fleet share
   rmq-producer/  the load: a steady stream onto <apiId>.work in confirmed batches,
                  never backing off
-  consumer/    the naive competing-consumer fleet, see src/consumer.ts
+  rmq-consumer/  the naive competing-consumer fleet, see src/consumer.ts
   tracing/     the /metrics HTTP route every process serves; OpenTelemetry
                tracing is wired but off unless OTEL_EXPORTER_OTLP_ENDPOINT is set
 infra/
