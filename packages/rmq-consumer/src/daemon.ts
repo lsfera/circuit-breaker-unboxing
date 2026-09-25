@@ -530,11 +530,11 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
         Tally.observed(counts, type);
 
         const before = contract;
-        contract = observe(contract, type, data.sequence);
+        contract = observe(contract, type, O.fromUndefinedOr(data.lease), data.sequence);
         if (contract.gaps > before.gaps) {
           forkInContext(
             Effect.logWarning(
-              `${label}: sequence gap — expected ${O.getOrElse(O.map(before.lastSequence, (n) => n + 1), () => 0)}, got ${data.sequence} (${type}, ${data.state}, ${data.reason})`,
+              `${label}: sequence gap — expected ${O.getOrElse(O.map(before.last, (l) => l.sequence + 1), () => 0)}, got ${data.sequence} (${type}, ${data.state}, ${data.reason})`,
             ),
           );
         }

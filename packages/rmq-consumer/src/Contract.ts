@@ -1,35 +1,39 @@
 import { Match, Option as O } from "effect";
-import { classifySequence, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
-import type { EventType } from "@egress/domain/Model.ts";
+import { classifyEvent, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
+import type { Applied, EventType, Lease } from "@egress/domain/Model.ts";
 
-/** The delivery contract, observed over AMQP; the rule is the shared `classifySequence`. */
+/** The delivery contract, observed over AMQP; the rule is the shared `classifyEvent`. */
 
 export type ContractState = {
   /** `None` until the first `state_changed`: joining mid-incident is not a gap. */
-  readonly lastSequence: O.Option<number>;
+  readonly last: O.Option<Applied>;
   readonly gaps: number;
   readonly duplicates: number;
 };
 
 export const initialContract: ContractState = {
-  lastSequence: O.none(),
+  last: O.none(),
   gaps: 0,
   duplicates: 0,
 };
 
-/** Fold one control-plane event into the observation. */
+/** Fold one control-plane event into the observation. Snapshots repeat the current sequence by design, so only `state_changed` counts. */
 export const observe = (
   self: ContractState,
   eventType: EventType,
+  lease: O.Option<Lease>,
   sequence: number,
 ): ContractState => {
-  if (eventType !== SEQUENCED_EVENT) return self;
-  return Match.value(classifySequence(self.lastSequence, sequence)).pipe(
-    // The only verdict that does not move the mark: a stale event must not
-    // drag it backwards and turn the next live one into a gap.
-    Match.when("duplicate", () => ({ ...self, duplicates: self.duplicates + 1 })),
-    Match.when("gap", () => ({ ...self, lastSequence: O.some(sequence), gaps: self.gaps + 1 })),
-    Match.when(Match.is("first", "next"), () => ({ ...self, lastSequence: O.some(sequence) })),
-    Match.exhaustive,
-  );
+  const mark = { ...self, last: O.some({ lease, sequence }) };
+  return eventType !== SEQUENCED_EVENT
+    ? self
+    : Match.value(classifyEvent(self.last, { lease, sequence })).pipe(
+      // The only verdicts that do not move the mark: a stale event must not
+      // drag it backwards and turn the next live one into a gap.
+      Match.when(Match.is("duplicate", "stale"), () => ({ ...self, duplicates: self.duplicates + 1 })),
+      Match.when("gap", () => ({ ...mark, gaps: self.gaps + 1 })),
+      // A new epoch restarts the sequences: a fresh start, like joining.
+      Match.when(Match.is("first", "next", "new-epoch"), () => mark),
+      Match.exhaustive,
+    );
 };

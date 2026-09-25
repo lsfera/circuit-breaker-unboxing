@@ -162,6 +162,10 @@ export const classifySequence = (
       sequence <= last ? "duplicate" : sequence > last + 1 ? "gap" : "next",
   });
 
+// No lease reads as epoch "" and counter 0: a publisher that predates it.
+const epochOf = (lease: O.Option<Lease>): string => O.getOrElse(O.map(lease, (l) => l.epoch), () => "");
+const counterOf = (lease: O.Option<Lease>): number => O.getOrElse(O.map(lease, (l) => l.counter), () => 0);
+
 /** The last event a reader acted on, as `supersedes` ranks it. */
 export type Applied = {
   readonly lease: O.Option<Lease>;
@@ -182,17 +186,37 @@ export const supersedes = (
   O.match(applied, {
     onNone: () => true,
     onSome: (last) => {
-      // No lease reads as epoch "" and counter 0: a publisher that predates it.
-      const epoch = (lease: O.Option<Lease>) => O.getOrElse(O.map(lease, (l) => l.epoch), () => "");
-      const counter = (lease: O.Option<Lease>) => O.getOrElse(O.map(lease, (l) => l.counter), () => 0);
-      const sameEpoch = epoch(last.lease) === epoch(incoming.lease);
-      const ahead = counter(incoming.lease) - counter(last.lease);
+      const sameEpoch = epochOf(last.lease) === epochOf(incoming.lease);
+      const ahead = counterOf(incoming.lease) - counterOf(last.lease);
       const forward =
         incoming.type === SEQUENCED_EVENT
           ? incoming.sequence > last.sequence
           : incoming.sequence >= last.sequence;
       return !sameEpoch || ahead > 0 || (ahead === 0 && forward);
     },
+  });
+
+/** `classifySequence`, plus what the lease says: `stale` is an older leader, `new-epoch` a coordinator that restarted. */
+export type EventVerdict = SequenceVerdict | "stale" | "new-epoch";
+
+/**
+ * An event against the last one a reader recorded. Sequences restart with
+ * a new epoch (the coordinator lost its state), so a new epoch is neither a gap
+ * nor a duplicate; an older leader's event is `stale`. Shared by every observer
+ * of the contract, as `classifySequence` is.
+ */
+export const classifyEvent = (
+  last: O.Option<Applied>,
+  incoming: { readonly lease: O.Option<Lease>; readonly sequence: number },
+): EventVerdict =>
+  O.match(last, {
+    onNone: () => "first",
+    onSome: (l) =>
+      epochOf(l.lease) !== epochOf(incoming.lease)
+        ? "new-epoch"
+        : counterOf(incoming.lease) < counterOf(l.lease)
+          ? "stale"
+          : classifySequence(O.some(l.sequence), incoming.sequence),
   });
 
 export class DeliveryFailed extends Data.TaggedError("DeliveryFailed")<{

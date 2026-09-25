@@ -2,13 +2,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Option as O } from "effect";
 import { SEQUENCED_EVENT, SNAPSHOT_EVENT } from "@egress/domain/Model.ts";
-import type { EventType } from "@egress/domain/Model.ts";
+import type { EventType, Lease } from "@egress/domain/Model.ts";
 import { initialContract, observe } from "../src/Contract.ts";
 import type { ContractState } from "../src/Contract.ts";
 
 const fold = (
-  events: ReadonlyArray<readonly [type: EventType, sequence: number]>,
-): ContractState => events.reduce((s, [type, seq]) => observe(s, type, seq), initialContract);
+  events: ReadonlyArray<readonly [type: EventType, sequence: number, lease?: Lease]>,
+): ContractState =>
+  events.reduce((s, [type, seq, lease]) => observe(s, type, O.fromUndefinedOr(lease), seq), initialContract);
+
+const lastSequence = (c: ContractState) => O.map(c.last, (l) => l.sequence);
 
 const changes = (...sequences: ReadonlyArray<number>) =>
   sequences.map((n) => [SEQUENCED_EVENT, n] as const);
@@ -17,7 +20,7 @@ test("a consecutive run is neither gapped nor duplicated", () => {
   const c = fold(changes(1, 2, 3, 4));
   assert.equal(c.gaps, 0);
   assert.equal(c.duplicates, 0);
-  assert.deepEqual(c.lastSequence, O.some(4));
+  assert.deepEqual(lastSequence(c), O.some(4));
 });
 
 test("joining mid-incident is not a gap", () => {
@@ -26,14 +29,14 @@ test("joining mid-incident is not a gap", () => {
   // restart, which is worse than not measuring it at all.
   const c = fold(changes(97, 98));
   assert.equal(c.gaps, 0);
-  assert.deepEqual(c.lastSequence, O.some(98));
+  assert.deepEqual(lastSequence(c), O.some(98));
 });
 
 test("a skipped sequence is a gap", () => {
   const c = fold(changes(1, 2, 5));
   assert.equal(c.gaps, 1);
   assert.equal(c.duplicates, 0);
-  assert.deepEqual(c.lastSequence, O.some(5));
+  assert.deepEqual(lastSequence(c), O.some(5));
 });
 
 test("a repeated sequence is a duplicate", () => {
@@ -46,7 +49,7 @@ test("a sequence that goes backwards is a duplicate, and does not rewind the hig
   const c = fold(changes(10, 11, 12, 8, 9));
   assert.equal(c.duplicates, 2, "8 and 9 both reuse a sequence already seen");
   assert.equal(c.gaps, 0, "going backwards is not a gap");
-  assert.deepEqual(c.lastSequence, O.some(12), "a stale event must not move the mark back");
+  assert.deepEqual(lastSequence(c), O.some(12), "a stale event must not move the mark back");
 });
 
 test("snapshots repeat the current sequence and are exempt", () => {
@@ -58,10 +61,35 @@ test("snapshots repeat the current sequence and are exempt", () => {
   ]);
   assert.equal(c.duplicates, 0, "a snapshot repeating the sequence is the contract, not a breach");
   assert.equal(c.gaps, 0);
-  assert.deepEqual(c.lastSequence, O.some(2));
+  assert.deepEqual(lastSequence(c), O.some(2));
 });
 
 test("a gap is counted once, not once per missing number", () => {
   const c = fold(changes(1, 9));
   assert.equal(c.gaps, 1);
+});
+
+test("a new epoch restarts the sequences: neither a gap nor a duplicate", () => {
+  // Redis lost its state: the coordinator starts a new epoch and counts from 1 again.
+  const c = fold([
+    [SEQUENCED_EVENT, 40, { epoch: "a", counter: 3 }],
+    [SEQUENCED_EVENT, 41, { epoch: "a", counter: 3 }],
+    [SEQUENCED_EVENT, 1, { epoch: "b", counter: 1 }],
+    [SEQUENCED_EVENT, 2, { epoch: "b", counter: 1 }],
+  ]);
+  assert.equal(c.gaps, 0);
+  assert.equal(c.duplicates, 0);
+  assert.deepEqual(lastSequence(c), O.some(2));
+});
+
+test("an older leader's event is stale, counted as a duplicate, and does not move the mark", () => {
+  const c = fold([
+    [SEQUENCED_EVENT, 10, { epoch: "a", counter: 2 }],
+    [SEQUENCED_EVENT, 11, { epoch: "a", counter: 2 }],
+    [SEQUENCED_EVENT, 30, { epoch: "a", counter: 1 }],
+    [SEQUENCED_EVENT, 12, { epoch: "a", counter: 2 }],
+  ]);
+  assert.equal(c.duplicates, 1);
+  assert.equal(c.gaps, 0, "the paused leader's higher sequence must not read as a gap");
+  assert.deepEqual(lastSequence(c), O.some(12));
 });
