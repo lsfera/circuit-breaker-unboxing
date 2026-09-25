@@ -135,7 +135,7 @@ node infra/chaos-load.mjs --profiles=low --faults=flaky-full-cycle,kill-leader
 inside a devcontainer: the fixtures are bind-mounted. Console on `:8088` and
 `:8089`, Grafana on `:3000`, Prometheus on `:9090`, RabbitMQ on `:15672`.
 
-Effect 4 (`4.0.0-rc.115`, pinned) — read `AGENTS.md` before writing Effect
+Effect 4 (`4.0.0-rc.117`, pinned) — read `AGENTS.md` before writing Effect
 code. No build step: every package runs from `src/*.ts` through Node's type
 stripping, which makes `tsc --noEmit` load-bearing.
 

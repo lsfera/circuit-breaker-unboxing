@@ -23,7 +23,7 @@ it was collapsed to one `O.getOrElse` over a pair.
 - The functional version must also be the *simpler* one. If removing an `if`
   needs a combinator the reader has to look up plus a helper, it has gone too
   far — pick the most direct composition.
-- This repo is Effect 4 (rc.115 as of 2026-09-13). Check APIs against `repos/effect`, not memory;
+- This repo is Effect 4 (rc.117 as of 2026-09-25). Check APIs against `repos/effect`, not memory;
   see `agent-patterns/effect-3-to-4.md` in the repo.
 
 Related: [[essential-comments-not-narrative]], [[rmq-control-plane-design]].

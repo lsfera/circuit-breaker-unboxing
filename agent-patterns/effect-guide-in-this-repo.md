@@ -7,7 +7,7 @@ repository — an ADR, or a reason written next to the code — **the repository
 wins**. This note lists both halves so that nobody "fixes" the code back toward
 the guide.
 
-Checked against `effect@4.0.0-rc.115` on 2026-09-13.
+Checked against `effect@4.0.0-rc.115` on 2026-09-13; line numbers moved to `effect@4.0.0-rc.117` on 2026-09-25.
 
 ## Guidance this repository follows
 
@@ -33,7 +33,7 @@ Two traps met while applying these:
   directly throws at module load. `Rmq.layer` has no such problem, because it is
   a function that runs only when called.
 - **`Schema.UnknownFromJsonString` is `@internal`** in this version
-  (`Schema.ts:9208`). Use the public `Schema.fromJsonString(Schema.Unknown)`.
+  (`Schema.ts:9209`). Use the public `Schema.fromJsonString(Schema.Unknown)`.
   Decoding in two steps is what keeps ADR 006's distinction between
   `malformed-json` and `schema-mismatch`.
 

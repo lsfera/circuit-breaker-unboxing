@@ -1319,7 +1319,7 @@
    "id": 6,
    "type": "timeseries",
    "title": "Webhook delivery latency (p95)",
-   "description": "effect's PrometheusMetrics.format() (rc.112 through rc.115 at least) emits a mislabeled le=\"Infinity\" bucket beside the real le=\"+Inf\" one, and histogram_quantile over both returns the top boundary, 4294967296 (\"49.7 days\"). Prometheus 3 normalizes le at ingestion, so anything it scraped is correct unfiltered; the filter is for the series Prometheus 2 scraped, which stay in this TSDB until retention expires them (15 days after 2026-09-13). Drop it after that.",
+   "description": "effect's PrometheusMetrics.format() (rc.112 through rc.117 at least) emits a mislabeled le=\"Infinity\" bucket beside the real le=\"+Inf\" one, and histogram_quantile over both returns the top boundary, 4294967296 (\"49.7 days\"). Prometheus 3 normalizes le at ingestion, so anything it scraped is correct unfiltered; the filter is for the series Prometheus 2 scraped, which stay in this TSDB until retention expires them (15 days after 2026-09-13). Drop it after that.",
    "gridPos": {
     "x": 12,
     "y": 93,
