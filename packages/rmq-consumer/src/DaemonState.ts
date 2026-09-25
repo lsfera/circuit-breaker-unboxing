@@ -59,6 +59,12 @@ export type Command =
   | { readonly _tag: "ProbeTriggered"; readonly sequence: number }
   | { readonly _tag: "RedriveTriggered"; readonly sequence: number }
   /**
+   * The action a trigger asked for failed. Un-marks the sequence so the
+   * redelivered trigger, or another daemon's copy of it, is acted on rather
+   * than dropped as a duplicate.
+   */
+  | { readonly _tag: "TriggerFailed"; readonly election: "probe" | "redrive"; readonly sequence: number }
+  /**
    * Fired on a timer, not a transition — the only command with no sequence to
    * dedupe on. Messages dead-letter while the circuit stays CLOSED too: a
    * broker restart advances `x-delivery-count` on outstanding deliveries, an
@@ -80,7 +86,14 @@ export type Action =
 type Transition = {
   readonly next: DaemonState;
   readonly actions: ReadonlyArray<Action>;
+  /** The command was out-ranked or already handled, so nothing changed. */
+  readonly ignored: boolean;
 };
+
+const ignore = (state: DaemonState): Transition => ({ next: state, actions: [], ignored: true });
+
+/** Un-mark `sequence` only if nothing newer was marked since: a later transition's mark stands. */
+const unmark = (marked: number, sequence: number): number => (marked === sequence ? sequence - 1 : marked);
 
 export const reduce = (
   state: DaemonState,
@@ -89,7 +102,7 @@ export const reduce = (
 ): Transition =>
   Match.valueTags(command, {
     CircuitChanged: (command): Transition => {
-      if (!supersedes(state.applied, command)) return { next: state, actions: [] };
+      if (!supersedes(state.applied, command)) return ignore(state);
       const next: DaemonState = {
         ...state,
         applied: O.some({ lease: command.lease, sequence: command.sequence }),
@@ -106,33 +119,45 @@ export const reduce = (
       if (redriveOnClose && command.state === State.CLOSED && state.circuit !== State.CLOSED) {
         actions.push({ _tag: "PublishRedriveTrigger", sequence: command.sequence });
       }
-      return { next, actions };
+      return { next, actions, ignored: false };
     },
 
     RampTick: (command): Transition => {
       // Only while CLOSED: every other state is a level, not a ramp.
-      if (state.circuit !== State.CLOSED) return { next: state, actions: [] };
+      if (state.circuit !== State.CLOSED) return { next: state, actions: [], ignored: false };
       return {
         next: { ...state, policy: step(state.policy, state.circuit, command.at) },
         actions: [],
+        ignored: false,
       };
     },
 
     ProbeTriggered: (command): Transition => {
-      if (command.sequence <= state.probedSequence) return { next: state, actions: [] };
+      if (command.sequence <= state.probedSequence) return ignore(state);
       return {
         next: { ...state, probedSequence: command.sequence },
         actions: [{ _tag: "Probe" }],
+        ignored: false,
       };
     },
 
     RedriveTriggered: (command): Transition => {
-      if (command.sequence <= state.redrivenSequence) return { next: state, actions: [] };
+      if (command.sequence <= state.redrivenSequence) return ignore(state);
       return {
         next: { ...state, redrivenSequence: command.sequence },
         actions: [{ _tag: "Redrive" }],
+        ignored: false,
       };
     },
+
+    TriggerFailed: (command): Transition => ({
+      next:
+        command.election === "probe"
+          ? { ...state, probedSequence: unmark(state.probedSequence, command.sequence) }
+          : { ...state, redrivenSequence: unmark(state.redrivenSequence, command.sequence) },
+      actions: [],
+      ignored: false,
+    }),
 
     // No sequence, so no dedupe and no state change — a sweep either finds the
     // circuit CLOSED and itself the floor right now, or it doesn't, and the next
@@ -145,6 +170,7 @@ export const reduce = (
         redriveOnClose && state.circuit === State.CLOSED && command.isFloor
           ? [{ _tag: "Redrive" }]
           : [],
+      ignored: false,
     }),
   });
 

@@ -196,6 +196,8 @@ const evalGuarded = (
  */
 const readStringList = readerFor(Schema.Array(Schema.String));
 
+const NOTHING_PEEKED: Peeked = { from: 0, entries: [] };
+
 /** PEEK_SCRIPT's answer. `entries` is the string "none" for an empty list, since cjson encodes `{}` for one. */
 const readPeeked = readerFor(
   Schema.Struct({
@@ -232,15 +234,17 @@ export const RedisOutboxLayer = (redis: RedisLike, keyPrefix = "egress:aggregato
         // as a `None` in its own position — see `Entry`. An answer that does
         // not decode at all reads as nothing pending, with nothing to commit.
         Effect.map((result): Peeked =>
-          Result.match(readPeeked(Predicate.isString(result) ? result : ""), {
-            onFailure: () => ({ from: 0, entries: [] }),
-            onSuccess: ({ from, entries }) => ({
-              from,
-              entries: (entries === "none" ? [] : entries).map((raw) =>
-                Result.getSuccess(decodeCircuitEvent(raw)),
-              ),
-            }),
-          }),
+          Predicate.isString(result)
+            ? Result.match(readPeeked(result), {
+                onFailure: () => NOTHING_PEEKED,
+                onSuccess: ({ from, entries }) => ({
+                  from,
+                  entries: (entries === "none" ? [] : entries).map((raw) =>
+                    Result.getSuccess(decodeCircuitEvent(raw)),
+                  ),
+                }),
+              })
+            : NOTHING_PEEKED,
         ),
       ),
 

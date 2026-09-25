@@ -121,6 +121,9 @@ const HEARTBEAT_INTERVAL = Duration.seconds(15);
  */
 const SWEEP_INTERVAL = Duration.seconds(30);
 
+/** Before a failed trigger is requeued, so a failure that persists doesn't spin on redelivery. */
+const TRIGGER_RETRY_HOLD = Duration.seconds(1);
+
 /** What a retry declares about its body, the same as the producer's publish. */
 const WORK_FORMAT = { contentType: WORK_CONTENT_TYPE, type: WORK_MESSAGE_TYPE };
 
@@ -305,10 +308,12 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
               const startedIn = l.epoch;
               const status = yield* Effect.promise(() => fetchStatus(key));
               const before = l.slots;
-              Match.value(Attempts.classify(status)).pipe(
-                Match.when("ok", () => l.succeeded()),
-                Match.when("shed", () => l.throttled(startedIn)),
-                Match.orElse(() => {}),
+              yield* Effect.sync(() =>
+                Match.value(Attempts.classify(status)).pipe(
+                  Match.when("ok", () => l.succeeded()),
+                  Match.when("shed", () => l.throttled(startedIn)),
+                  Match.orElse(() => {}),
+                ),
               );
               yield* Effect.when(resize(l.slots), Effect.sync(() => l.slots !== before));
               return status;
@@ -425,22 +430,22 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
    * no `message_id` to use as its idempotency key was never published by this
    * fleet: dead-lettered unread rather than spending retries no fix helps.
    */
-  const discard = (reason: "format" | "malformed" | "keyless"): Settlement => {
-    forkInContext(Metric.update(Metric.withAttributes(Telemetry.discarded, { ...attrs, reason }), 1));
+  const discard = (reason: "Format" | "Malformed" | "Keyless"): Settlement => {
+    counts[`discarded${reason}`]++;
     return "discard";
   };
 
   const call = (body: string, delivery: DeliveryInfo): Settlement | Promise<Settlement> =>
     readsWorkFormat(delivery)
       ? O.match(decodeWorkMessage(body), {
-          onNone: () => discard("malformed"),
+          onNone: () => discard("Malformed"),
           onSome: () =>
             O.match(delivery.messageId, {
-              onNone: () => discard("keyless"),
+              onNone: () => discard("Keyless"),
               onSome: (key) => attempt(body, delivery, key),
             }),
         })
-      : discard("format");
+      : discard("Format");
 
   /**
    * The same call inside a span, only when the message carried a parent:
@@ -586,8 +591,8 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   /** One command in, one atomic transition out. `Ref.modify` because callers run concurrently. */
   const dispatch = (command: Command) =>
     Ref.modify(state, (prior) => {
-      const { next, actions } = reduce(prior, command, cfg.redriveOnClose);
-      return [{ prior, next, actions }, next] as const;
+      const transition = reduce(prior, command, cfg.redriveOnClose);
+      return [{ prior, ...transition }, transition.next] as const;
     });
 
   /** The shell half of the reducer: what an Action actually does. */
@@ -619,7 +624,7 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   const applyEvent = Effect.fnUntraced(function* (event: CircuitEvent) {
     const { state: circuitState, sequence, reason } = event.data;
     const at = yield* Clock.currentTimeMillis;
-    const { prior, next, actions } = yield* dispatch({
+    const { ignored, actions } = yield* dispatch({
       _tag: "CircuitChanged",
       type: event.type,
       lease: O.fromUndefinedOr(event.data.lease),
@@ -628,13 +633,15 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
       at,
     });
     // Out-ranked by an event already applied: nothing changed, and saying so is the log line.
-    if (next === prior) {
-      counts.stale++;
-      return yield* Effect.logWarning(`${label}: seq=${sequence} (${reason}, ${circuitState}) is stale, ignored`);
-    }
-    yield* reconcile;
-    yield* Effect.log(`${label}: seq=${sequence} (${reason}) ${yield* describe}`);
-    yield* performAll(actions);
+    yield* ignored
+      ? Effect.sync(() => void counts.stale++).pipe(
+          Effect.andThen(Effect.logWarning(`${label}: seq=${sequence} (${reason}, ${circuitState}) is stale, ignored`)),
+        )
+      : reconcile.pipe(
+          Effect.andThen(describe),
+          Effect.flatMap((d) => Effect.log(`${label}: seq=${sequence} (${reason}) ${d}`)),
+          Effect.andThen(performAll(actions)),
+        );
   });
 
   yield* control.consume(controlQueue, (body) =>
@@ -683,9 +690,16 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
    * Both elections read their trigger the same way, through `ElectionTrigger`.
    * A duplicate for a transition already acted on produces no actions — that is
    * the reducer's job, not this handler's.
+   *
+   * Settled only once the action has run. If it fails, the sequence is
+   * un-marked and the trigger requeued after a pause, so it is tried again; if
+   * this daemon dies first, the unacked trigger goes to the next one SAC
+   * promotes. A redrive can hold its trigger for REDRIVE_MAX_PASSES ×
+   * PASS_DEADLINE (20 min), inside RabbitMQ's 30-minute delivery timeout.
    */
   const onTrigger =
-    (what: string, command: (sequence: number) => Command) => (body: string) => {
+    (what: "probe" | "redrive", command: (sequence: number) => Command) =>
+    (body: string): Settlement | Promise<Settlement> =>
       Result.match(decodeElectionTrigger(body), {
         onFailure: (why) =>
           sampleUnreadable(
@@ -694,14 +708,20 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
               : `${what} trigger that does not match the schema`,
           ),
         onSuccess: ({ sequence }) =>
-          forkInContext(
+          runInContext(
             dispatch(command(sequence)).pipe(
               Effect.flatMap(({ actions }) => performAll(actions)),
-              Effect.catchCause((cause) => Effect.logError(`${label}: ${what} failed`, cause)),
+              Effect.as<Settlement>("accept"),
+              Effect.catchCause((cause) =>
+                Effect.logError(`${label}: ${what} for seq=${sequence} failed, retrying`, cause).pipe(
+                  Effect.andThen(dispatch({ _tag: "TriggerFailed", election: what, sequence })),
+                  Effect.andThen(Effect.sleep(TRIGGER_RETRY_HOLD)),
+                  Effect.as<Settlement>("requeue"),
+                ),
+              ),
             ),
           ),
       });
-    };
 
   // Registered for the life of the process and idle almost all of it: SAC promotion
   // needs candidates already waiting when the active one dies.
@@ -751,6 +771,9 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
     ["gaps", Metric.withAttributes(Telemetry.controlGaps, attrs)],
     ["duplicates", Metric.withAttributes(Telemetry.controlDuplicates, attrs)],
     ["stale", Metric.withAttributes(Telemetry.controlStale, attrs)],
+    ["discardedFormat", Metric.withAttributes(Telemetry.discarded, { ...attrs, reason: "format" })],
+    ["discardedMalformed", Metric.withAttributes(Telemetry.discarded, { ...attrs, reason: "malformed" })],
+    ["discardedKeyless", Metric.withAttributes(Telemetry.discarded, { ...attrs, reason: "keyless" })],
   ] as const;
 
   const flush = Effect.gen(function* () {

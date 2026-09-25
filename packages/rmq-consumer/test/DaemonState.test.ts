@@ -315,6 +315,7 @@ test("a paused leader's event, out-ranked by its successor's lease, is ignored",
   const stale = reduce(successor, changed(State.OPEN, 42, lease(7)));
   assert.equal(stale.next, successor, "nothing changes");
   assert.deepEqual(stale.actions, []);
+  assert.equal(stale.ignored, true, "and the reducer says so, rather than the caller comparing objects");
 
   const staleAhead = reduce(successor, changed(State.OPEN, 43, lease(7)));
   assert.equal(staleAhead.next.circuit, State.CLOSED, "an older lease loses even with a higher sequence");
@@ -347,4 +348,31 @@ test("a new epoch is accepted, even with a lower counter and sequence", () => {
   const old = reduce(start, changed(State.OPEN, 500, lease(9, "e1"))).next;
   const fresh = reduce(old, changed(State.CLOSED, 0, lease(1, "e2"), SNAPSHOT_EVENT)).next;
   assert.equal(fresh.circuit, State.CLOSED);
+});
+
+/**
+ * A trigger is marked handled before its action runs, so a failed action has to
+ * un-mark it: otherwise the requeued trigger, and every other daemon's copy of
+ * it, is dropped as a duplicate and that transition never gets its probe.
+ */
+test("a failed probe un-marks its sequence, so the retried trigger probes", () => {
+  const probed = reduce(start, { _tag: "ProbeTriggered", sequence: 9 }).next;
+  const failed = reduce(probed, { _tag: "TriggerFailed", election: "probe", sequence: 9 }).next;
+  assert.deepEqual(reduce(failed, { _tag: "ProbeTriggered", sequence: 9 }).actions, [{ _tag: "Probe" }]);
+});
+
+test("a failed redrive un-marks only its own election", () => {
+  const both = reduce(reduce(start, { _tag: "ProbeTriggered", sequence: 4 }).next, {
+    _tag: "RedriveTriggered",
+    sequence: 4,
+  }).next;
+  const failed = reduce(both, { _tag: "TriggerFailed", election: "redrive", sequence: 4 }).next;
+  assert.equal(failed.redrivenSequence, 3);
+  assert.equal(failed.probedSequence, 4, "the probe election is untouched");
+});
+
+test("a late failure does not un-mark a newer transition", () => {
+  const newer = reduce(start, { _tag: "ProbeTriggered", sequence: 12 }).next;
+  const staleFailure = reduce(newer, { _tag: "TriggerFailed", election: "probe", sequence: 9 }).next;
+  assert.equal(staleFailure.probedSequence, 12);
 });

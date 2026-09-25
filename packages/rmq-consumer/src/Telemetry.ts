@@ -70,7 +70,6 @@ export const controlDuplicates = Metric.counter("egress_daemon_control_duplicate
   description: "Repeated sequences observed in the state_changed stream on circuit.control.",
 });
 
-
 export const concurrencyLimit = Metric.gauge("egress_daemon_concurrency_limit", {
   description:
     "How many third-party calls this daemon currently lets itself have open at once: the " +

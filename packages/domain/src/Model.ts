@@ -260,13 +260,11 @@ export const supersedes = (
       const counter = (lease: O.Option<Lease>) => O.getOrElse(O.map(lease, (l) => l.counter), () => 0);
       const sameEpoch = epoch(last.lease) === epoch(incoming.lease);
       const ahead = counter(incoming.lease) - counter(last.lease);
-      return !sameEpoch || ahead > 0
-        ? true
-        : ahead < 0
-          ? false
-          : incoming.type === SEQUENCED_EVENT
-            ? incoming.sequence > last.sequence
-            : incoming.sequence >= last.sequence;
+      const forward =
+        incoming.type === SEQUENCED_EVENT
+          ? incoming.sequence > last.sequence
+          : incoming.sequence >= last.sequence;
+      return !sameEpoch || ahead > 0 || (ahead === 0 && forward);
     },
   });
 

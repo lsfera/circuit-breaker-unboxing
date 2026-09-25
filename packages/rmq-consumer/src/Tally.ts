@@ -21,6 +21,9 @@ type Counts = {
   probed: number;
   undecodable: number;
   stale: number;
+  discardedFormat: number;
+  discardedMalformed: number;
+  discardedKeyless: number;
   /**
    * Control-plane events by CloudEvents type — read directly by the heartbeat
    * log line (its `control=` count), not published as a metric: RabbitMQ's own
@@ -37,6 +40,9 @@ export const zero = (): Counts => ({
   probed: 0,
   undecodable: 0,
   stale: 0,
+  discardedFormat: 0,
+  discardedMalformed: 0,
+  discardedKeyless: 0,
   byType: new Map(),
 });
 
@@ -58,6 +64,9 @@ type Snapshot = {
   readonly probed: number;
   readonly undecodable: number;
   readonly stale: number;
+  readonly discardedFormat: number;
+  readonly discardedMalformed: number;
+  readonly discardedKeyless: number;
   readonly gaps: number;
   readonly duplicates: number;
 };
@@ -70,6 +79,9 @@ export const nothing: Snapshot = {
   probed: 0,
   undecodable: 0,
   stale: 0,
+  discardedFormat: 0,
+  discardedMalformed: 0,
+  discardedKeyless: 0,
   gaps: 0,
   duplicates: 0,
 };
@@ -82,6 +94,9 @@ export const snapshot = (counts: Counts, contract: ContractState): Snapshot => (
   probed: counts.probed,
   undecodable: counts.undecodable,
   stale: counts.stale,
+  discardedFormat: counts.discardedFormat,
+  discardedMalformed: counts.discardedMalformed,
+  discardedKeyless: counts.discardedKeyless,
   gaps: contract.gaps,
   duplicates: contract.duplicates,
 });
@@ -95,6 +110,9 @@ type Delta = {
   readonly probed: number;
   readonly undecodable: number;
   readonly stale: number;
+  readonly discardedFormat: number;
+  readonly discardedMalformed: number;
+  readonly discardedKeyless: number;
   readonly gaps: number;
   readonly duplicates: number;
 };
@@ -107,6 +125,9 @@ export const since = (published: Snapshot, current: Snapshot): Delta => ({
   probed: current.probed - published.probed,
   undecodable: current.undecodable - published.undecodable,
   stale: current.stale - published.stale,
+  discardedFormat: current.discardedFormat - published.discardedFormat,
+  discardedMalformed: current.discardedMalformed - published.discardedMalformed,
+  discardedKeyless: current.discardedKeyless - published.discardedKeyless,
   gaps: current.gaps - published.gaps,
   duplicates: current.duplicates - published.duplicates,
 });
