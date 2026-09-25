@@ -1,5 +1,5 @@
 // Drives one incident against the fleet and reports what happened, including whether the five in-process breakers
-// agree with each other about the same third party: they share nothing (see packages/consumer/src/Breaker.ts), so
+// agree with each other about the same third party: they share nothing (see packages/rmq-consumer/src/Breaker.ts), so
 // this measures the disagreement instead of asserting it.
 //
 //   node infra/incident.mjs

@@ -33,7 +33,7 @@ subgraphs are the point: nothing here draws a line *between* them.
 
 ## The breaker
 
-`packages/consumer/src/Breaker.ts` wraps every third-party call in a cockatiel
+`packages/rmq-consumer/src/Breaker.ts` wraps every third-party call in a cockatiel
 `CircuitBreakerPolicy`, one instance per process, created once and reused for
 the process's whole life (a breaker only works if the same instance sees every
 execution; a fresh one per call would never accumulate a failure count).
@@ -224,8 +224,8 @@ packages/
                work-queue naming/options a producer and a consumer fleet share
   rmq-producer/  the load: a steady stream onto <apiId>.work in confirmed batches,
                  never backing off
-  consumer/    the competing-consumer fleet, each with its own in-process
-               breaker (src/Breaker.ts)
+  rmq-consumer/  the competing-consumer fleet, each with its own in-process
+                 breaker (src/Breaker.ts)
   tracing/     the /metrics HTTP route every process serves; OpenTelemetry
                tracing is wired but off unless OTEL_EXPORTER_OTLP_ENDPOINT is set
 infra/
