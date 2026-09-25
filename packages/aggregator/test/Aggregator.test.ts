@@ -357,6 +357,13 @@ test("a consecutive run is neither gapped nor duplicated", () => {
   assert.deepEqual(i.gaps, []);
 });
 
+test("gaps keep counting after the description list is full", () => {
+  // Every other sequence: 150 gaps, beyond the 100 descriptions kept.
+  const i = fold(Array.from({ length: 151 }, (_, k) => changed("payments", 1 + 2 * k)));
+  assert.equal(i.gapCount, 150);
+  assert.equal(i.gaps.length, 100);
+});
+
 test("a skipped sequence is a gap", () => {
   const i = fold([1, 2, 5].map((n) => changed("payments", n)));
   assert.equal(i.gaps.length, 1);

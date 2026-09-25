@@ -24,6 +24,8 @@ type Integrity = {
   readonly received: number;
   readonly snapshots: number;
   readonly duplicates: number;
+  /** Every gap seen; `gaps` keeps only the last `GAP_BUFFER` descriptions. */
+  readonly gapCount: number;
   readonly gaps: ReadonlyArray<string>;
   readonly bySequence: ReadonlyMap<string, number>;
   readonly recent: ReadonlyArray<CircuitEvent>;
@@ -33,6 +35,7 @@ export const emptyIntegrity: Integrity = {
   received: 0,
   snapshots: 0,
   duplicates: 0,
+  gapCount: 0,
   gaps: [],
   bySequence: new Map(),
   recent: [],
@@ -60,6 +63,7 @@ export const record = (self: Integrity, event: CircuitEvent): Integrity => {
     Match.when("gap", () => ({
       ...base,
       bySequence: advanced(),
+      gapCount: self.gapCount + 1,
       gaps: [...self.gaps, `${apiId}: jumped ${last} -> ${sequence}`].slice(-GAP_BUFFER),
     })),
     Match.when(Match.is("first", "next"), () => ({ ...base, bySequence: advanced() })),
@@ -139,7 +143,7 @@ export const HttpLive = HttpRouter.use((router) =>
         subscriber: {
           count: i.received,
           snapshots: i.snapshots,
-          gaps: i.gaps.length,
+          gaps: i.gapCount,
           duplicates: i.duplicates,
         },
       };
@@ -348,7 +352,7 @@ export const HttpLive = HttpRouter.use((router) =>
             return [[i, next] as const, next];
           });
           yield* Metric.update(Metric.withAttributes(Telemetry.subscriberReceived, { apiId }), 1);
-          yield* after.gaps.length > before.gaps.length
+          yield* after.gapCount > before.gapCount
             ? Metric.update(Metric.withAttributes(Telemetry.subscriberGaps, { apiId }), 1)
             : Effect.void;
           yield* after.duplicates > before.duplicates
