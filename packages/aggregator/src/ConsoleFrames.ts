@@ -195,12 +195,14 @@ export const makeAttention = Effect.fnUntraced(function* (
       ),
     });
 
-    if (changed) {
-      const patch: Patch = { revision, upserts, removed, counts: view.counts, truncated: view.truncated };
-      const bytes = text.encode(encodeEvent("patch", patch, String(revision)));
-      yield* PubSub.publish(patches, { revision, bytes });
-      yield* Metric.update(Telemetry.consoleAttentionBuilt, 1);
-    }
+    const patch: Patch = { revision, upserts, removed, counts: view.counts, truncated: view.truncated };
+    yield* Effect.when(
+      Effect.andThen(
+        PubSub.publish(patches, { revision, bytes: text.encode(encodeEvent("patch", patch, String(revision))) }),
+        Metric.update(Telemetry.consoleAttentionBuilt, 1),
+      ),
+      Effect.succeed(changed),
+    );
   });
 
   yield* Effect.forkScoped(

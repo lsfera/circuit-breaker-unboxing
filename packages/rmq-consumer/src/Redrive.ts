@@ -7,7 +7,7 @@ import {
   ORIGIN_REASON_HEADER,
   REDRIVE_COUNT_HEADER,
 } from "@egress/rmq/ControlPlane.ts";
-import type { Consumer, DeliveryInfo, RmqService, Settlement } from "@egress/rmq/Client.ts";
+import type { Consumer, DeliveryInfo, RmqError, RmqService, Settlement } from "@egress/rmq/Client.ts";
 import type { Semaphore } from "effect/Semaphore";
 
 /**
@@ -79,80 +79,80 @@ export const makeRedrive = (opts: RedriveOptions) => {
     let strays = 0;
     let poisoned = 0;
     let lastReplayAt = Date.now();
-    const consumer = yield* conn.consume(opts.deadQueue, async (body, delivery): Promise<Settlement> => {
-      // The broker's annotation, else our stamp from an earlier move, else unknown.
-      // Only work from the work queue is replayed; anything else is parked.
-      const { queue: originQueue, reason: originReason } = O.getOrElse(
-        delivery.deadLetter,
-        () => ({
-          queue: delivery.properties[ORIGIN_QUEUE_HEADER] ?? "unknown",
-          reason: delivery.properties[ORIGIN_REASON_HEADER] ?? "unknown",
-        }),
-      );
+    /** Reserved before the publish is awaited, and handed back if it fails. */
+    const reserve = (decision: RedriveDecision, delta: 1 | -1) => {
+      moved += decision.destination === "work" ? delta : 0;
+      poisoned += decision.destination === "parked" ? delta : 0;
+    };
 
-      if (originQueue !== opts.workQueue) {
-        // Parked, not returned to this queue, where it would be lapped by every pass for good.
-        strays++;
-        try {
-          await runInContext(
-            conn.send(toParked, body, {
-              messageId: sameId(delivery),
-              headers: {
-                [ORIGIN_QUEUE_HEADER]: originQueue,
-                [ORIGIN_REASON_HEADER]: originReason,
-              },
-            }),
-          );
+    /** Publish, then accept: a crash in between is a duplicate, the reverse a loss. */
+    const settleAfter = (send: Effect.Effect<void, RmqError>, onFailure: () => void): Promise<Settlement> =>
+      runInContext(send).then(
+        (): Settlement => {
           lastReplayAt = Date.now();
           return "accept";
-        } catch {
+        },
+        (): Settlement => {
+          onFailure();
           return "release";
-        }
-      }
+        },
+      );
 
-      // Reserve the slot before awaiting: with a prefetch of 100, check-await-increment
-      // overshot the cap (5,739 against 5,000).
-      if (moved + poisoned >= opts.maxPerPass) return "release";
-
-      const decision = nextRedrive(delivery.properties[REDRIVE_COUNT_HEADER]);
-      if (decision.destination === "work") moved++;
-      else poisoned++;
-      // Publish, then accept: a crash in between is a duplicate, the reverse a loss.
-      try {
-        // The `traceparent` survives dead-lettering, so a replay rejoins its trace.
-        const destinationQueue =
-          decision.destination === "work" ? opts.workQueue : opts.parkedQueue;
-        // ATTEMPTS_HEADER is dropped: a redrive is a fresh outage with a fresh budget.
-        const send = conn.send(decision.destination === "work" ? into : toParked, body, {
+    // Parked, not returned to this queue, where it would be lapped by every pass for good.
+    const parkStray = (body: string, delivery: DeliveryInfo, originQueue: string, originReason: string) => {
+      strays++;
+      return settleAfter(
+        conn.send(toParked, body, {
           messageId: sameId(delivery),
-          headers:
-            decision.destination === "work"
-              ? { [REDRIVE_COUNT_HEADER]: String(decision.count) }
-              : {},
-        });
-        await runInContext(
-          O.map(delivery.parent, (span) =>
-            send.pipe(
-              Effect.withSpan("work.redrive", {
-                attributes: {
-                  "messaging.system": "rabbitmq",
-                  "messaging.operation.name": "redrive",
-                  "messaging.destination.name": destinationQueue,
-                  "egress.origin_reason": originReason,
-                  "egress.redrive_destination": decision.destination,
-                },
-              }),
-              Effect.withParentSpan(span),
-            ),
-          ).pipe(O.getOrElse(() => send)),
-        );
-      } catch {
-        if (decision.destination === "work") moved--;
-        else poisoned--;
-        return "release";
-      }
-      lastReplayAt = Date.now();
-      return "accept";
+          headers: { [ORIGIN_QUEUE_HEADER]: originQueue, [ORIGIN_REASON_HEADER]: originReason },
+        }),
+        () => {},
+      );
+    };
+
+    const replay = (body: string, delivery: DeliveryInfo, originReason: string) => {
+      const decision = nextRedrive(delivery.properties[REDRIVE_COUNT_HEADER]);
+      reserve(decision, 1);
+      const destinationQueue = decision.destination === "work" ? opts.workQueue : opts.parkedQueue;
+      // ATTEMPTS_HEADER is dropped: a redrive is a fresh outage with a fresh budget.
+      const send = conn.send(decision.destination === "work" ? into : toParked, body, {
+        messageId: sameId(delivery),
+        headers: decision.destination === "work" ? { [REDRIVE_COUNT_HEADER]: String(decision.count) } : {},
+      });
+      // The `traceparent` survives dead-lettering, so a replay rejoins its trace.
+      const traced = O.match(delivery.parent, {
+        onNone: () => send,
+        onSome: (span) =>
+          send.pipe(
+            Effect.withSpan("work.redrive", {
+              attributes: {
+                "messaging.system": "rabbitmq",
+                "messaging.operation.name": "redrive",
+                "messaging.destination.name": destinationQueue,
+                "egress.origin_reason": originReason,
+                "egress.redrive_destination": decision.destination,
+              },
+            }),
+            Effect.withParentSpan(span),
+          ),
+      });
+      return settleAfter(traced, () => reserve(decision, -1));
+    };
+
+    const consumer = yield* conn.consume(opts.deadQueue, (body, delivery): Settlement | Promise<Settlement> => {
+      // The broker's annotation, else our stamp from an earlier move, else unknown.
+      // Only work from the work queue is replayed; anything else is parked.
+      const { queue: originQueue, reason: originReason } = O.getOrElse(delivery.deadLetter, () => ({
+        queue: delivery.properties[ORIGIN_QUEUE_HEADER] ?? "unknown",
+        reason: delivery.properties[ORIGIN_REASON_HEADER] ?? "unknown",
+      }));
+      return originQueue !== opts.workQueue
+        ? parkStray(body, delivery, originQueue, originReason)
+        // The slot is reserved synchronously, before anything is awaited: with a prefetch
+        // of 100, check-await-increment overshot the cap (5,739 against 5,000).
+        : moved + poisoned >= opts.maxPerPass
+          ? "release"
+          : replay(body, delivery, originReason);
     });
 
     yield* opts.gate.withPermit(Ref.set(opts.consumer, O.some(consumer)));

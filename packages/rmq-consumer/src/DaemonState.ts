@@ -79,54 +79,49 @@ export const reduce = (
   redriveOnClose: boolean,
 ): Transition =>
   Match.valueTags(command, {
-    CircuitChanged: (command): Transition => {
-      if (!supersedes(state.applied, command)) return ignore(state);
-      const next: DaemonState = {
-        ...state,
-        applied: O.some({ lease: command.lease, sequence: command.sequence }),
-        circuit: command.state,
-        policy: step(state.policy, command.state, command.at),
-      };
-      const actions: Action[] = [];
-      if (command.state === State.HALF_OPEN) {
-        actions.push({ _tag: "PublishProbeTrigger", sequence: command.sequence });
-      }
-      // Only on the actual transition back into CLOSED. The aggregator's
-      // periodic snapshots repeat the current state, and a redrive per snapshot
-      // would replay the queue every fifteen seconds forever.
-      if (redriveOnClose && command.state === State.CLOSED && state.circuit !== State.CLOSED) {
-        actions.push({ _tag: "PublishRedriveTrigger", sequence: command.sequence });
-      }
-      return { next, actions, ignored: false };
-    },
+    CircuitChanged: (command): Transition =>
+      supersedes(state.applied, command)
+        ? {
+          next: {
+            ...state,
+            applied: O.some({ lease: command.lease, sequence: command.sequence }),
+            circuit: command.state,
+            policy: step(state.policy, command.state, command.at),
+          },
+          actions: [
+            ...(command.state === State.HALF_OPEN
+              ? [{ _tag: "PublishProbeTrigger", sequence: command.sequence } as const]
+              : []),
+            // Only on the actual transition back into CLOSED. The aggregator's
+            // periodic snapshots repeat the current state, and a redrive per snapshot
+            // would replay the queue every fifteen seconds forever.
+            ...(redriveOnClose && command.state === State.CLOSED && state.circuit !== State.CLOSED
+              ? [{ _tag: "PublishRedriveTrigger", sequence: command.sequence } as const]
+              : []),
+          ],
+          ignored: false,
+        }
+        : ignore(state),
 
-    RampTick: (command): Transition => {
-      // Only while CLOSED: every other state is a level, not a ramp.
-      if (state.circuit !== State.CLOSED) return { next: state, actions: [], ignored: false };
-      return {
-        next: { ...state, policy: step(state.policy, state.circuit, command.at) },
-        actions: [],
-        ignored: false,
-      };
-    },
+    // Only while CLOSED: every other state is a level, not a ramp.
+    RampTick: (command): Transition => ({
+      next:
+        state.circuit === State.CLOSED
+          ? { ...state, policy: step(state.policy, state.circuit, command.at) }
+          : state,
+      actions: [],
+      ignored: false,
+    }),
 
-    ProbeTriggered: (command): Transition => {
-      if (command.sequence <= state.probedSequence) return ignore(state);
-      return {
-        next: { ...state, probedSequence: command.sequence },
-        actions: [{ _tag: "Probe" }],
-        ignored: false,
-      };
-    },
+    ProbeTriggered: (command): Transition =>
+      command.sequence > state.probedSequence
+        ? { next: { ...state, probedSequence: command.sequence }, actions: [{ _tag: "Probe" }], ignored: false }
+        : ignore(state),
 
-    RedriveTriggered: (command): Transition => {
-      if (command.sequence <= state.redrivenSequence) return ignore(state);
-      return {
-        next: { ...state, redrivenSequence: command.sequence },
-        actions: [{ _tag: "Redrive" }],
-        ignored: false,
-      };
-    },
+    RedriveTriggered: (command): Transition =>
+      command.sequence > state.redrivenSequence
+        ? { next: { ...state, redrivenSequence: command.sequence }, actions: [{ _tag: "Redrive" }], ignored: false }
+        : ignore(state),
 
     TriggerFailed: (command): Transition => ({
       next:

@@ -109,21 +109,18 @@ export const EnvoyPushFleetLayer = (
           callback: (error: grpc.ServiceError | null, value?: object) => void,
         ) => {
           // Remembered for the life of the stream: Envoy sends it once.
-          let replicaId: string | null = null;
+          let replicaId = O.none<string>();
           call.on("data", (message: StreamMetricsMessage) => {
-            const id = message.identifier?.node?.id;
-            if (id !== undefined && id !== "") replicaId = id;
-            if (replicaId === null) {
+            const announced = O.filter(O.fromUndefinedOr(message.identifier?.node?.id), (id) => id !== "");
+            replicaId = O.orElse(announced, () => replicaId);
+            O.match(replicaId, {
               // An Envoy started without `--service-node` pushes stats nothing can
               // attribute; filing them under the last writer would be a second vote
               // from one replica. Dropped, but counted — see `poll`.
-              anonymous++;
-              return;
-            }
-            // `Date.now()`: no fiber here, and this layer only ever runs on wall time.
-            latest.set(replicaId, {
-              stats: flatten(message.envoy_metrics ?? []).stats,
-              receivedAt: Date.now(),
+              onNone: () => void anonymous++,
+              // `Date.now()`: no fiber here, and this layer only ever runs on wall time.
+              onSome: (id) =>
+                void latest.set(id, { stats: flatten(message.envoy_metrics ?? []).stats, receivedAt: Date.now() }),
             });
           });
           call.on("end", () => callback(null, {}));
@@ -152,17 +149,17 @@ export const EnvoyPushFleetLayer = (
 
         const unidentified = anonymous;
         anonymous = 0;
-        if (unidentified > 0) {
-          yield* Effect.logWarning(
-            `envoy metrics: discarded ${unidentified} push(es) carrying no node id — ` +
-              `a replica started without --service-node reports stats nobody can ` +
-              `attribute, and is therefore absent from this API's quorum`,
-          );
-          yield* Metric.update(
-            Metric.withAttributes(Telemetry.replicasLost, { reason: "no-node-id" }),
-            1,
-          );
-        }
+        yield* Effect.when(
+          Effect.andThen(
+            Effect.logWarning(
+              `envoy metrics: discarded ${unidentified} push(es) carrying no node id — ` +
+                `a replica started without --service-node reports stats nobody can ` +
+                `attribute, and is therefore absent from this API's quorum`,
+            ),
+            Metric.update(Metric.withAttributes(Telemetry.replicasLost, { reason: "no-node-id" }), 1),
+          ),
+          Effect.succeed(unidentified > 0),
+        );
 
         const [quiet, live] = Arr.separate(
           Arr.map([...latest], ([replicaId, snapshot]) =>

@@ -364,21 +364,19 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   const UNDECODABLE_SAMPLE = 20;
 
   const sampleUnreadable = (what: string): Settlement => {
-    counts.undecodable++;
-    if (counts.undecodable <= UNDECODABLE_SAMPLE) {
-      forkInContext(Effect.logWarning(`${label}: ${what}, dead-lettered`));
-      return "discard";
-    }
-    if (counts.undecodable === UNDECODABLE_SAMPLE + 1) {
-      forkInContext(
-        Effect.logWarning(
-          `${label}: ${UNDECODABLE_SAMPLE} unreadable messages already preserved on ` +
-            `${deadQueue} — accepting further ones rather than flooding it; ` +
-            `egress_daemon_undecodable_total still counts them all`,
-        ),
-      );
-    }
-    return "accept";
+    const seen = ++counts.undecodable;
+    forkInContext(
+      seen <= UNDECODABLE_SAMPLE
+        ? Effect.logWarning(`${label}: ${what}, dead-lettered`)
+        : seen === UNDECODABLE_SAMPLE + 1
+          ? Effect.logWarning(
+            `${label}: ${UNDECODABLE_SAMPLE} unreadable messages already preserved on ` +
+              `${deadQueue} — accepting further ones rather than flooding it; ` +
+              `egress_daemon_undecodable_total still counts them all`,
+          )
+          : Effect.void,
+    );
+    return seen <= UNDECODABLE_SAMPLE ? "discard" : "accept";
   };
 
   /** Serializes reconciliation: two callbacks could otherwise both see "no work consumer". */
@@ -410,38 +408,52 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
         redrive: O.isSome(yield* Ref.get(redriveConsumer)),
       };
       const actions = plan(desired(yield* Ref.get(state), self()), have);
-      if (actions.startWork) yield* startWork;
-      if (actions.stopWork) yield* retire(workConsumer);
-      if (actions.stopProbe) yield* retire(probeConsumer);
-      if (actions.stopRedrive) yield* retire(redriveConsumer);
+      yield* Effect.all(
+        [
+          actions.startWork ? startWork : Effect.void,
+          actions.stopWork ? retire(workConsumer) : Effect.void,
+          actions.stopProbe ? retire(probeConsumer) : Effect.void,
+          actions.stopRedrive ? retire(redriveConsumer) : Effect.void,
+        ],
+        { discard: true },
+      );
     }),
   );
 
   /** One message, one call, on a channel that exists only for this probe. */
   const probeOnce = gate.withPermit(
-    Effect.gen(function* () {
-      if (O.isSome(yield* Ref.get(probeConsumer))) return;
+    Effect.flatMap(
+      Ref.get(probeConsumer),
+      O.match({
+        // Already probing: one message per election.
+        onSome: () => Effect.void,
+        onNone: () =>
+          Effect.gen(function* () {
+            // Cancel, not close: the channel must outlive the cancel to settle the message.
+            let self: Consumer | null = null;
+            let taken = false;
+            const consumer = yield* control.consume(
+              workQueue,
+              (body, delivery): Settlement | Promise<Settlement> =>
+                O.match(O.filter(O.fromNullOr(self), () => !taken), {
+                  // Released, never acked: returning nothing acks, and extra deliveries were lost that way.
+                  onNone: (): Settlement => "release",
+                  onSome: (mine) => {
+                    taken = true;
+                    forkInContext(control.cancelConsumer(mine));
+                    return callEgress(body, delivery);
+                  },
+                }),
+              { prefetch: 1 },
+            );
+            self = consumer;
 
-      // Cancel, not close: the channel must outlive the cancel to settle the message.
-      let self: Consumer | null = null;
-      let taken = false;
-      const consumer = yield* control.consume(
-        workQueue,
-        (body, delivery): Settlement | Promise<Settlement> => {
-          // Released, never acked: returning nothing acks, and extra deliveries were lost that way.
-          if (taken || self === null) return "release";
-          taken = true;
-          forkInContext(control.cancelConsumer(self));
-          return callEgress(body, delivery);
-        },
-        { prefetch: 1 },
-      );
-      self = consumer;
-
-      counts.probed++;
-      yield* Ref.set(probeConsumer, O.some(consumer));
-      yield* Effect.log(`${label}: elected prober, taking one message`);
-    }),
+            counts.probed++;
+            yield* Ref.set(probeConsumer, O.some(consumer));
+            yield* Effect.log(`${label}: elected prober, taking one message`);
+          }),
+      }),
+    ),
   );
 
   const redriveOnce = makeRedrive({

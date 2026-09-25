@@ -44,10 +44,16 @@ export const emptyIntegrity: Integrity = {
 export const record = (self: Integrity, event: CircuitEvent): Integrity => {
   const recent = [event, ...self.recent].slice(0, 100);
   const base = { ...self, received: self.received + 1, recent };
-  if (event.type !== SEQUENCED_EVENT) {
-    return { ...base, snapshots: self.snapshots + 1 };
-  }
-  const { apiId, sequence } = event.data;
+  return event.type === SEQUENCED_EVENT
+    ? recordSequenced(self, base, event.data)
+    : { ...base, snapshots: self.snapshots + 1 };
+};
+
+const recordSequenced = (
+  self: Integrity,
+  base: Integrity,
+  { apiId, sequence }: { readonly apiId: string; readonly sequence: number },
+): Integrity => {
   const last = self.bySequence.get(apiId);
   const highest = O.fromUndefinedOr(last);
   const advanced = () => new Map(self.bySequence).set(apiId, sequence);
@@ -199,23 +205,22 @@ export const HttpLive = HttpRouter.use((router) =>
         const request = yield* HttpServerRequest.HttpServerRequest;
         const view = new URL(request.url, "http://localhost").searchParams.get("view");
 
-        if (view !== "attention") {
-          return HttpServerResponse.stream(Stream.merge(consoleFrames.frames, Stream.encodeText(tape)), sseHeaders);
-        }
+        const attentionBody = () =>
+          Stream.merge(attention.connect(lastEventIdOf(request)), Stream.encodeText(Stream.merge(tape, keepAlive)));
 
-        const body = Stream.merge(attention.connect(lastEventIdOf(request)), Stream.encodeText(Stream.merge(tape, keepAlive)));
-
-        return acceptsGzip(request)
-          ? HttpServerResponse.stream(gzip(body), {
-              ...sseHeaders,
-              headers: {
-                ...sseHeaders.headers,
-                "content-encoding": "gzip",
-                "cache-control": "no-cache, no-transform",
-                "x-accel-buffering": "no",
-              },
-            })
-          : HttpServerResponse.stream(body, sseHeaders);
+        return view !== "attention"
+          ? HttpServerResponse.stream(Stream.merge(consoleFrames.frames, Stream.encodeText(tape)), sseHeaders)
+          : acceptsGzip(request)
+            ? HttpServerResponse.stream(gzip(attentionBody()), {
+                ...sseHeaders,
+                headers: {
+                  ...sseHeaders.headers,
+                  "content-encoding": "gzip",
+                  "cache-control": "no-cache, no-transform",
+                  "x-accel-buffering": "no",
+                },
+              })
+            : HttpServerResponse.stream(attentionBody(), sseHeaders);
       }),
     );
 
