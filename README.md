@@ -148,7 +148,8 @@ packages/
   config/      @egress/config — settings declared once, decoded at boot
   rmq/         @egress/rmq — Effect wrapper over amqplib, plus the generic
                work-queue naming/options a producer and a consumer fleet share
-  rmq-producer/  the load: a steady stream onto <apiId>.work, never backing off
+  rmq-producer/  the load: a steady stream onto <apiId>.work in confirmed batches,
+                 never backing off
   consumer/    the naive competing-consumer fleet, see src/consumer.ts
   tracing/     the /metrics HTTP route every process serves; OpenTelemetry
                tracing is wired but off unless OTEL_EXPORTER_OTLP_ENDPOINT is set
