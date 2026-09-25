@@ -22,6 +22,9 @@ dead-lettered, and a 2% baseline.
 
 - `traceparent` rides as a message header, built with `Tracer.externalSpan`, so
   `@egress/rmq` has no OpenTelemetry dependency.
+- The producer publishes a batch per tick under one `work.publish` span
+  (`messaging.batch.message_count`), so one trace holds a tick's messages and
+  each daemon's `work.call` beneath it.
 - A plain callback running `Effect.runPromise` gets a fresh runtime with the
   no-op tracer: spans were made and went nowhere. Use `runPromiseWith` on a
   captured context.

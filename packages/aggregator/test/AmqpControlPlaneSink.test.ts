@@ -37,6 +37,7 @@ const fakeRmq = (
       }),
     publisherToQueue: () => notUsed,
     send: () => Effect.flatMap(Ref.get(sendResult), (e) => e),
+    sendBatch: () => notUsed,
     cancelConsumer: () => Effect.void,
     closeConsumer: () => Effect.void,
     lost: Effect.never,

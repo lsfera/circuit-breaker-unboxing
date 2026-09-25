@@ -28,8 +28,10 @@ site changed.
   [018](018-control-flow-as-expressions.md).)
 - The publish channel is a **confirm channel**: `send` resolves when the broker
   has the message, which is what publish-before-ack in the redrive assumes.
-  Batches are published concurrently so confirms pipeline (165/s serial,
-  190/s concurrent, against 195/s unconfirmed).
+  Confirms pipeline when messages are published back to back (165/s serial,
+  190/s pipelined, against 195/s unconfirmed). `sendBatch` does that for a
+  batch: every publish issued in order, then all confirms awaited together.
+  The producer sends one batch per 100 ms tick.
 - A channel closed by a channel-level error is reopened on demand; otherwise one
   bad publish ended publishing for the process, silently.
 - amqplib does not reconnect: see [005](005-connection-recovery.md).
