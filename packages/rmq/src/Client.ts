@@ -47,6 +47,9 @@ export type SendOptions = {
   readonly messageId?: string;
 };
 
+/** One message of a `sendBatch`. */
+export type BatchMessage = SendOptions & { readonly body: string };
+
 /**
  * One message fetched by `get`, held unsettled until `ack`/`nack` runs — `ack` drops it, `nack` requeues it.
  * `Settlement`'s `requeue`/`release` split doesn't apply here: just "done with it" or "put it back".
@@ -166,6 +169,12 @@ export interface RmqService {
   readonly publisherToQueue: (queue: string, format?: Format) => Effect.Effect<Publisher, RmqError>;
   /** Always persistent: ignored on a transient queue, the difference between surviving a restart and appearing to. */
   readonly send: (pub: Publisher, body: string, options?: SendOptions) => Effect.Effect<void, RmqError>;
+  /**
+   * Publishes every message back to back on the confirm channel, in order, then waits for all their confirms:
+   * one round trip for the batch rather than one per message. Fails if any message was nacked or unroutable;
+   * the others may still have been taken, so a caller retrying the batch must tolerate duplicates.
+   */
+  readonly sendBatch: (pub: Publisher, messages: ReadonlyArray<BatchMessage>) => Effect.Effect<void, RmqError>;
   /**
    * Stop delivery but leave the channel able to settle what it still holds; closing instead would hand
    * that back to the queue.
@@ -667,6 +676,27 @@ export const makeRmq = Effect.fnUntraced(function* (
         }),
     );
 
+  /**
+   * The properties every publish carries. The `traceparent` goes on as an ordinary header when the caller is inside
+   * a span; outside one nothing is added (see Trace.ts). The id ties a broker's `basic.return` to its publish.
+   */
+  const propertiesFor = (pub: Publisher, tp: O.Option<string>, options: SendOptions): amqp.Options.Publish => {
+    const headers = O.match(tp, {
+      onNone: () => O.fromNullishOr(options.headers),
+      onSome: (value) => O.some({ ...(options.headers ?? {}), [TRACEPARENT]: value }),
+    });
+    return {
+      persistent: true,
+      mandatory: pub.mandatory,
+      messageId: O.getOrElse(O.fromNullishOr(options.messageId), () => randomUUID()),
+      timestamp: Math.floor(Date.now() / 1000),
+      ...O.match(headers, { onNone: () => ({}), onSome: (h) => ({ headers: h }) }),
+      ...O.match(pub.contentType, { onNone: () => ({}), onSome: (c) => ({ contentType: c }) }),
+      ...O.match(pub.contentEncoding, { onNone: () => ({}), onSome: (c) => ({ contentEncoding: c }) }),
+      ...O.match(pub.type, { onNone: () => ({}), onSome: (t) => ({ type: t }) }),
+    };
+  };
+
   /** Forget a consumer, so a recovery does not bring back one we retired. */
   const forget = (c: Consumer) => {
     O.map(Arr.findFirst(live, (entry) => entry.handle === c), (entry) => live.delete(entry));
@@ -775,32 +805,17 @@ export const makeRmq = Effect.fnUntraced(function* (
         type: O.fromNullishOr(format?.type),
         mandatory: true,
       }),
-    // The `traceparent` goes on as an ordinary header when the caller is inside a span; outside one nothing is added (see Trace.ts).
     send: (pub, body, options) =>
-      Effect.flatMap(traceparent, (tp) => {
-        const properties = options?.headers;
-        const headers = O.match(tp, {
-          onNone: () => O.fromNullishOr(properties),
-          onSome: (value) => O.some({ ...(properties ?? {}), [TRACEPARENT]: value }),
-        });
-        return wrap("send", () =>
-          publish(
-            pub,
-            Buffer.from(body, "utf8"),
-            {
-              persistent: true,
-              mandatory: pub.mandatory,
-              // The id ties a broker's `basic.return` to this publish; both are stamped here so no caller has to remember.
-              messageId: O.getOrElse(O.fromNullishOr(options?.messageId), () => randomUUID()),
-              timestamp: Math.floor(Date.now() / 1000),
-              ...O.match(headers, { onNone: () => ({}), onSome: (h) => ({ headers: h }) }),
-              ...O.match(pub.contentType, { onNone: () => ({}), onSome: (c) => ({ contentType: c }) }),
-              ...O.match(pub.contentEncoding, { onNone: () => ({}), onSome: (c) => ({ contentEncoding: c }) }),
-              ...O.match(pub.type, { onNone: () => ({}), onSome: (t) => ({ type: t }) }),
-            },
-          ),
-        );
-      }),
+      Effect.flatMap(traceparent, (tp) =>
+        wrap("send", () => publish(pub, Buffer.from(body, "utf8"), propertiesFor(pub, tp, options ?? {}))),
+      ),
+    // Every `publish` is issued before any is awaited: they reach the channel in order and their confirms pipeline.
+    sendBatch: (pub, messages) =>
+      Effect.flatMap(traceparent, (tp) =>
+        wrap("sendBatch", () =>
+          Promise.all(messages.map((m) => publish(pub, Buffer.from(m.body, "utf8"), propertiesFor(pub, tp, m)))),
+        ),
+      ).pipe(Effect.asVoid),
     cancelConsumer: (c) =>
       Effect.promise(() => {
         forget(c);

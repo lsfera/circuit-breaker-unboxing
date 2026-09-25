@@ -169,6 +169,7 @@ const fakePermitRmq = (): RmqService & { readonly ready: () => number } => {
         : Effect.sync(() => {
             ready++;
           }),
+    sendBatch: unimplemented("sendBatch"),
     cancelConsumer: unimplemented("cancelConsumer"),
     closeConsumer: unimplemented("closeConsumer"),
     lost: Effect.never,

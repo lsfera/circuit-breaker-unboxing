@@ -72,6 +72,7 @@ const fakeRedriveRmq = (dead: ReadonlyArray<GotMessage>) => {
       Effect.sync(() => {
         (sent[pub.routingKey] ??= []).push({ body, headers: options?.headers ?? {}, messageId: options?.messageId });
       }),
+    sendBatch: unimplemented("sendBatch"),
     cancelConsumer: unimplemented("cancelConsumer"),
     closeConsumer: unimplemented("closeConsumer"),
     lost: Effect.never,
