@@ -1,4 +1,4 @@
-import { Array as Arr, Clock, Context, Effect, Layer, Metric, Ref, Result } from "effect";
+import { Array as Arr, Clock, Context, Effect, Layer, Metric, Ref, Result, Schema } from "effect";
 import { StatsUnavailable } from "@egress/domain/Model.ts";
 import * as Telemetry from "./Telemetry.ts";
 import type { ReplicaReport } from "@egress/domain/Model.ts";
@@ -230,6 +230,15 @@ const PATTERN = new RegExp(
 type EnvoyReplica = { readonly replicaId: string; readonly adminUrl: string };
 
 /**
+ * Envoy's `/stats?format=json`. Histograms share the array in another shape, so each
+ * entry is decoded on its own and one that isn't a numeric stat is skipped, not fatal.
+ */
+const decodeStats = Schema.decodeUnknownOption(Schema.Struct({ stats: Schema.optionalKey(Schema.Array(Schema.Unknown)) }));
+const decodeStat = Schema.decodeUnknownOption(
+  Schema.Struct({ name: Schema.String, value: Schema.optionalKey(Schema.Finite) }),
+);
+
+/**
  * The membership pair is never defaulted: `{ healthy: 0, total: 6 }` means every
  * host is gone. A cluster missing either is not reported; the replica abstains.
  */
@@ -372,16 +381,16 @@ export const EnvoyFleetLayer = (
                 cause: String(cause),
               }),
           });
-          const body = yield* Effect.tryPromise({
-            try: () => res.json() as Promise<{ stats?: { name: string; value?: number }[] }>,
-            catch: (cause) =>
-              new StatsUnavailable({
-                replicaId: replica.replicaId,
-                cause: String(cause),
-              }),
+          const json = yield* Effect.tryPromise({
+            try: (): Promise<unknown> => res.json(),
+            catch: (cause) => new StatsUnavailable({ replicaId: replica.replicaId, cause: String(cause) }),
           });
+          const body = yield* Effect.fromOption(decodeStats(json)).pipe(
+            Effect.mapError(() => new StatsUnavailable({ replicaId: replica.replicaId, cause: "not Envoy's stats JSON" })),
+          );
           yield* returned(replica);
-          const parsed = parseStats(replica.replicaId, body, now, (c) => known.has(c));
+          const stats = Arr.getSomes(Arr.map(body.stats ?? [], (stat) => decodeStat(stat)));
+          const parsed = parseStats(replica.replicaId, { stats }, now, (c) => known.has(c));
           yield* noteIncomplete(replica.replicaId, parsed.incomplete);
           return parsed.reports as ReplicaReport[];
         },
