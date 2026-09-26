@@ -19,6 +19,12 @@ a **fleet view** of the third party, as a Prometheus rule, and a `429`
 treated as **backpressure**, with a concurrency limit each replica learns from
 it.
 
+The consumer is now an SDK and an application written against it (see *The
+consumer as an SDK*): a replica runs one breaker per dependency it calls, and
+here there are two, the third party and a PostgreSQL ledger, fed by two
+producers. The diagram shows the third party's breaker, which is what the
+sections up to that one measure.
+
 ```mermaid
 flowchart LR
   producer["Producer"] --> queue[("payments-provider.work")]
@@ -121,8 +127,9 @@ fact about the broker rather than a variable:
   so replicas that tripped together don't come back together. A closed breaker
   forgets: the next outage starts from the first hold.
 - **Failures that are the third party's are `release`d, not `requeue`d.** A
-  `failed` probe, and any `failed` call that follows another on the same
-  replica, says something about the third party, not about the message that
+  `failed` probe, and any `failed` call that follows another at the same
+  dependency on the same replica, says something about the third party, not
+  about the message that
   happened to be carrying it. The queue's three-attempt budget is for messages, so charging it
   here dead-lettered 2–3 healthy messages per outage in the first chaos run —
   the breaker needs five failures to open and its consumer takes a round trip
@@ -189,13 +196,12 @@ answered `429`, no breaker trip and nothing dead-lettered. `outage`,
 passed again alongside it (`docs/runs/chaos-breaker-429.json`). Runs are saved
 under `history/runs/` (git-ignored;
 the runs behind the article are kept in `docs/runs/`).
-Since the consumer became an SDK (see *The consumer as an SDK*), this breaker is
-the application's `payments-api` dependency, and the same suite ran against it
-on 2026-09-26. All nine graded scenarios passed: 0 lost, 0 dead-lettered,
-600 of 600 redriven, and no breaker trip under `overload` (1,485 calls
-answered `429`). The results are in `docs/runs/chaos-breaker-sdk.json`;
-`redrive-failover` was voided by a host suspend, and its rerun is
-`…-sdk-redrive-rerun.json`.
+With the consumer as an SDK (see *The consumer as an SDK*), this breaker is
+the application's `payments-api` dependency. Against it, on 2026-09-26, all
+nine graded scenarios passed: 0 lost, 0 dead-lettered, 600 of 600 redriven,
+and no breaker trip under `overload` (1,485 calls answered `429`)
+(`docs/runs/chaos-breaker-sdk.json`; `redrive-failover` from
+`…-sdk-redrive-rerun.json`).
 `infra/capture-incident.mjs` records the dashboard through an incident (it needs
 `playwright-core`, which this repo does not depend on).
 
@@ -270,10 +276,11 @@ for 90 s:
   `x-egress-redrive-count`. Past 5 redrives it goes to `work.parked` instead.
   Then it acks. A crash in between duplicates, never loses. At most 200 per
   pass.
-- **Gate**: the elected replica's own breaker is closed, re-read before every
-  message.
-- **Triggers**: this replica closing (startup included), and a 30 s sweep while
-  it is closed. A message can dead-letter while no breaker moves.
+- **Condition**: on the elected replica, every dependency the consumer lists
+  is closed, re-read before every message.
+- **Triggers**: one of those breakers closing on this replica (startup
+  included), and a 30 s sweep while all of them are closed. A message can
+  dead-letter while no breaker moves.
 
 What still reaches `work.dead` here is mostly a message that kept failing
 with a 5xx, or one caught between successes in a partial failure. The
@@ -297,9 +304,13 @@ of it left 11 parked.
   dependency) fires after 30s of that. Prometheus sends it to Alertmanager
   (`infra/monitoring/alertmanager.yml`), which groups it per dependency and
   forwards it by webhook to `alert-sink`. That container logs what it is sent
-  (`docker compose logs -f alert-sink`), standing in for Slack or PagerDuty:
-  swap the webhook URL for a real integration. Both are ported from
-  article 4.
+  (`docker compose logs -f alert-sink`) and keeps the last hundred at
+  <http://alert-sink:9095/alerts>, standing in for Slack or PagerDuty: swap
+  the webhook URL for a real integration. Both are ported from article 4.
+- An alert exists only during an outage. Alertmanager's UI reads "no alert
+  group found" until about 45s after the dependency fails (a few seconds for
+  the breakers to open, the 30s `for`, a 10s `group_wait`), and again once it
+  resolves.
 
 It needs no extra process and no heartbeat: a replica counts while Prometheus
 scrapes it, and nothing in the fleet reads the rule back. The freshness filter
@@ -352,8 +363,8 @@ half of the fault, against a third party that serves 5.
 
 ## Against article 3, on the same harness
 
-Article 3 has the same three additions on top of cockatiel. Both designs
-were run through the same `chaos-breaker.mjs` scenarios, against the same
+Article 3 puts the same permit, redrive and fleet view on top of cockatiel
+(the comparison predates the 429 work). Both designs were run through the same `chaos-breaker.mjs` scenarios, against the same
 broker and third party, on 2026-09-24. Each ran with its own branch's image
 and compose file, one run per scenario. The harness detects which design is
 running. It also voids a run if the host was suspended during it; none was.
@@ -431,7 +442,8 @@ Consumer.run({
   not an exception. Each dependency is declared with a
   `classify` over the Exit of the effect it wraps. `byStatus` is the HTTP
   table above. `bySqlError` reads the SQLSTATE class Effect already puts on
-  `SqlError`: contention (lock timeout, deadlock, serialization) is
+  `SqlError`: contention (lock timeout, statement timeout, deadlock,
+  serialization) is
   `throttled`, a constraint the row violates is `client_error`, and
   everything else is `failed`.
 - **One breaker per dependency.** `Breaker.supervise` is unchanged, but a
@@ -469,16 +481,11 @@ without a charge. Every scenario met all of that.
 | `kill-replica-mid-write` | 3 replicas killed, inserts slowed to 200ms | 44,486 / 9,073, 0 lost | none | 60 charges repeated, each recorded once |
 | `both-down` | both, the ledger restored first | 75,950 / 15,697, 0 lost | `payments-api` 34, `ledger` 35 | refunds back on every replica while payments still waited on the third party |
 
-(`docs/runs/chaos-app.json`; `both-down` is from
-`docs/runs/chaos-app-both-down-rerun.json`. The first run of `both-down` failed on
-a harness bug: it checked a window it had not sampled.) After the
-application's settings moved into flags, `upstream-outage`, `db-down` and
-`db-contention` passed again (`docs/runs/chaos-app-flags-rerun.json`). After a
-review brought the SDK's Effect code into line with the repo's conventions,
-`upstream-outage`, `db-down`, `db-contention` and `both-down` passed, and so
-did the breaker suite's `outage`, `restart-during-probe`,
-`kill-permit-holder` and `overload`. The review touched the breaker's
-callbacks, clocks and state (`docs/runs/chaos-app-review-rerun.json`,
+(`docs/runs/chaos-app.json`; `both-down` from
+`docs/runs/chaos-app-both-down-rerun.json`.) The code as it stands passed
+`upstream-outage`, `db-down`, `db-contention` and `both-down` again, and the
+breaker suite's `outage`, `restart-during-probe`, `kill-permit-holder` and
+`overload` (`docs/runs/chaos-app-review-rerun.json`,
 `chaos-breaker-sdk-review-rerun.json`).
 
 **What writing the application exposed:**
@@ -497,15 +504,12 @@ callbacks, clocks and state (`docs/runs/chaos-app-review-rerun.json`,
   (`@egress/rmq`) and the application's `Payment` agree by hand. The producer
   is not generic either: the refunds producer publishes the same
   `{ apiId, n }` as `egress.work`.
-- **Settings were split, and are not any more.** At first the SDK's settings
-  were flags with environment fallbacks, listed in `--help`, while the
-  application's (`EGRESS_ADDR`, `DATABASE_URL`) were `Config` read inside its
-  layers, and didn't show. Now `run` also takes the application's own `flags`,
-  parsed with the SDK's into one command, and `layer` is built from them. The
-  SDK exports `flags`, and `command` builds the command, so an application
-  can extend it (a description, subcommands) before `launch`. What remains:
-  one set of `BREAKER_*` applies to every dependency, and one `MAX_IN_FLIGHT`
-  to every consumer.
+- **Tuning is per application, not per dependency.** `run` parses the
+  application's own `flags` with the SDK's into one command (one `--help`)
+  and builds `layer` from them; the SDK exports `flags` and `command`, so an
+  application can extend the command (a description, subcommands) before
+  `launch`. But one set of `BREAKER_*` applies to every dependency, and one
+  `MAX_IN_FLIGHT` to every consumer.
 
 ## What this still doesn't fix
 
@@ -515,8 +519,8 @@ callbacks, clocks and state (`docs/runs/chaos-app-review-rerun.json`,
   is up. Watch the "Breaker state per replica" panel, or `infra/incident.mjs`'s
   `breaker agreement` line. The permit serialises probes, and the fleet view
   is a verdict for people and alerts: no replica acts on it.
-- **The redrive waits on the elected replica's breaker**, which can be open
-  while the rest of the fleet is closed. A pass is up to 30 s late.
+- **The redrive waits on the elected replica's breakers**, any of which can
+  be open while the rest of the fleet's are closed. A pass is up to 30 s late.
 - **A trigger that arrives mid-pass is dropped**; the next sweep picks up the
   rest.
 - **A lost permit is a stuck fleet.** If the permit queue is purged, every
@@ -544,17 +548,17 @@ docker compose exec postgres psql -U consumer -d ledger -c 'select count(*) from
 
 The addresses below are compose service names, reachable from the devcontainer
 (it joins the `devcontainer` network); from the host, the same ports are
-published on `localhost`.
+published on `localhost`, except `alert-sink`'s.
 
-- RabbitMQ management UI: <http://rabbitmq:15672> (guest/guest) — watch
-  `payments-provider.work`'s depth and `payments-provider.work.dead`'s
-  growth.
+- RabbitMQ management UI: <http://rabbitmq:15672> (guest/guest) — watch each
+  consumer's `<key>.work` depth and `<key>.work.dead` growth
+  (`payments-provider`, `refunds-provider`).
 - Grafana: <http://grafana:3000/d/in-process-breaker>
-  Panels: breaker state per replica, work-queue depth, dead-letter-queue depth,
-  calls by outcome, failed and refused calls by status, breaker trips, active
-  consumers on the work queue, the wake tokens RabbitMQ holds (the open
-  breakers), parked-queue depth, redrives, probe-permit races lost, and the
-  concurrency limit per replica, with
+  Panels: breaker state per replica and dependency; work, dead-letter and
+  parked queue depth and active consumers, per consumer; calls to each
+  dependency by outcome; failed and refused calls by dependency and reason;
+  breaker trips; the wake tokens RabbitMQ holds (the open breakers); redrives;
+  probe-permit races lost; and the concurrency limit per replica, with
   "Fleet open" (see *The fleet view*) at the top. Plain `:3000` lands on
   Grafana's Welcome screen, not this dashboard — use the direct link, or
   `Dashboards` in the left nav.
@@ -661,7 +665,7 @@ straight off its `src/*.ts` through Node's built-in type stripping.
 
 ```bash
 pnpm run check       # vendored-version check, typecheck, unit tests (the breaker, the Gate and the
-                     # dependency wrapper run against fake worlds)
+                     # dependency wrapper against fake worlds; settlement and negotiation as tables)
 pnpm run test:rmq    # optional — needs Docker: AMQP behaviour against a real broker,
                      # including the delay chain's timing and graceful consumer drain
 ```

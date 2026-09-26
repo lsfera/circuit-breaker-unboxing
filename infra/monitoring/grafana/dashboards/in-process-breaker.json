@@ -130,7 +130,7 @@
   {
    "id": 1,
    "type": "timeseries",
-   "title": "Work queue depth — payments-provider.work",
+   "title": "Work queue depth, per consumer",
    "description": "Messages ready plus in flight. Only climbs when the third party fails slowly enough to pin every consumer's in-flight slots (e.g. flaky-upstream's hang mode) — a fast failure dead-letters before a backlog can form. See the dead-letter panel for that case.",
    "gridPos": {
     "x": 0,
@@ -148,8 +148,8 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "rabbitmq_detailed_queue_messages_ready{queue=\"payments-provider.work\"}",
-     "legendFormat": "ready",
+     "expr": "rabbitmq_detailed_queue_messages_ready{queue=~\".+[.]work\"}",
+     "legendFormat": "{{queue}} ready",
      "refId": "A"
     },
     {
@@ -157,8 +157,8 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "rabbitmq_detailed_queue_messages_unacked{queue=\"payments-provider.work\"}",
-     "legendFormat": "unacked (in flight)",
+     "expr": "rabbitmq_detailed_queue_messages_unacked{queue=~\".+[.]work\"}",
+     "legendFormat": "{{queue}} unacked (in flight)",
      "refId": "B"
     }
    ]
@@ -166,7 +166,7 @@
   {
    "id": 2,
    "type": "timeseries",
-   "title": "Dead-letter queue depth — payments-provider.work.dead",
+   "title": "Dead-letter queue depth, per consumer",
    "description": "Messages that exhausted the broker's own delivery limit (x-delivery-limit, 3 attempts). Nothing here recovers them — that is a later article's problem.",
    "gridPos": {
     "x": 12,
@@ -184,8 +184,8 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "rabbitmq_detailed_queue_messages_ready{queue=\"payments-provider.work.dead\"}",
-     "legendFormat": "dead-lettered",
+     "expr": "rabbitmq_detailed_queue_messages_ready{queue=~\".+[.]work[.]dead\"}",
+     "legendFormat": "{{queue}}",
      "refId": "A"
     }
    ]
@@ -247,7 +247,7 @@
   {
    "id": 4,
    "type": "timeseries",
-   "title": "Active consumers on the work queue",
+   "title": "Active consumers on each work queue",
    "description": "The broker's own count. With this breaker it is also the fleet's state: a replica whose breaker is open has cancelled its consumer, so the line steps down by one per open replica and back up as each half-opens (a half-open replica consumes with prefetch 1, so it counts). It should track --scale rmq-consumer=N only while every breaker is closed.",
    "gridPos": {
     "x": 0,
@@ -265,8 +265,8 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "rabbitmq_detailed_queue_consumers{queue=\"payments-provider.work\"}",
-     "legendFormat": "consumers",
+     "expr": "rabbitmq_detailed_queue_consumers{queue=~\".+[.]work\"}",
+     "legendFormat": "{{queue}}",
      "refId": "A"
     }
    ]
@@ -302,7 +302,7 @@
    "id": 7,
    "type": "timeseries",
    "title": "Wake tokens held by RabbitMQ — the open breakers",
-   "description": "rabbitmq_detailed_queue_messages for the delay chain (rmq.delay.level.NN), one line per level a token is waiting in. Level n holds a token for 2^n seconds, so a token in level 4 is a breaker that has been told to stay open 16s, and a token in level 16 would be an 18-hour hold. Each open replica is exactly one token here; a closed fleet has none. Read alongside the panel to the left: consumers leave the work queue as tokens enter the chain.",
+   "description": "rabbitmq_detailed_queue_messages for the delay chain (rmq.delay.level.NN), one line per level a token is waiting in. Level n holds a token for 2^n seconds, so a token in level 4 is a breaker that has been told to stay open 16s, and a token in level 16 would be an 18-hour hold. Each open breaker (one replica, one dependency) is exactly one token here; a closed fleet has none. Read alongside the panel to the left: consumers leave a work queue as tokens enter the chain.",
    "gridPos": {
     "x": 12,
     "y": 28,
@@ -328,7 +328,7 @@
   {
    "id": 9,
    "type": "timeseries",
-   "title": "Parked queue depth — payments-provider.work.parked",
+   "title": "Parked queue depth, per consumer",
    "description": "Messages redriven MAX_REDRIVES (5) times without succeeding — true poison, not just an outage. Should stay 0 for any incident this series injects; nonzero means something the third party will never accept.",
    "gridPos": {
     "x": 0,
@@ -346,8 +346,8 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "rabbitmq_detailed_queue_messages_ready{queue=\"payments-provider.work.parked\"}",
-     "legendFormat": "parked",
+     "expr": "rabbitmq_detailed_queue_messages_ready{queue=~\".+[.]work[.]parked\"}",
+     "legendFormat": "{{queue}}",
      "refId": "A"
     }
    ]
