@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: reference
   originSessionId: d23c6dbd-5c0e-471a-a8fc-5ed6afc8c7c7
-  modified: 2026-09-19T09:11:46.691Z
+  modified: 2026-09-26T13:48:58.774Z
 ---
 
 Facts about this environment, each learned by losing time to it (2026-09-12/13):
@@ -116,5 +116,13 @@ Facts about this environment, each learned by losing time to it (2026-09-12/13):
   hadn't; it was still running, just orphaned from the tool's tracking). If a
   background command needs its own long-lived process, let
   `run_in_background: true` do the only backgrounding.
+- **Profiling a live replica (2026-09-26):** `docker exec <c> kill -USR1 1`
+  opens PID 1's inspector on 127.0.0.1:9229 inside the container; a CDP
+  script run there (`docker exec -d`) drives `Profiler.start/stop`. Output of
+  `docker exec … node` was unreliable here (stdout lost, a script with only a
+  WebSocket and a timer pending exited early): keep a `setInterval` alive,
+  write results to files, poll for them. A top-level `sleep` in the Bash tool
+  is a no-op; wrap it in `timeout N bash -c 'sleep …'`. Close the inspector
+  afterwards (`process.getBuiltinModule('node:inspector').close()`).
 
 Related: [[rmq-control-plane-design]].

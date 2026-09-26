@@ -511,26 +511,45 @@ breaker suite's `outage`, `restart-during-probe`, `kill-permit-holder` and
   `launch`. But one set of `BREAKER_*` applies to every dependency, and one
   `MAX_IN_FLIGHT` to every consumer.
 
-## What this still doesn't fix
+## Limits it accepts
 
-- **Five breakers still don't agree.** Each is formed only from the calls that
-  one process happened to make. They trip at different moments, recover at
-  different moments, and briefly disagree about whether the same third party
-  is up. Watch the "Breaker state per replica" panel, or `infra/incident.mjs`'s
-  `breaker agreement` line. The permit serialises probes, and the fleet view
-  is a verdict for people and alerts: no replica acts on it.
-- **The redrive waits on the elected replica's breakers**, any of which can
-  be open while the rest of the fleet's are closed. A pass is up to 30 s late.
-- **A trigger that arrives mid-pass is dropped**; the next sweep picks up the
-  rest.
-- **A lost permit is a stuck fleet.** If the permit queue is purged, every
-  probe loses the race, so every breaker that opens stays open until some
-  replica restarts and reseeds.
-- **Only a `429` teaches the limit.** A third party that sheds by slowing
-  down or with `503`s gets no help.
+None of these is needed for correctness. In each, no message is lost and none
+is charged for a dependency's failure. What they cost is latency, a few extra
+calls, or an operator's attention, and each has a known remedy if that cost
+ever matters.
+
+- **The five breakers don't agree.** Each is formed from the calls one process
+  made, so they trip and recover at different moments. The cost: until its own
+  breaker trips, each replica still sends a failing dependency
+  `BREAKER_THRESHOLD` calls in a row, all but the first released uncharged. Watch the "Breaker
+  state per replica" panel, or `infra/incident.mjs`'s `breaker agreement` line.
+  The permit already serialises probes, and the fleet view is a verdict for
+  people and alerts that no replica acts on. The remedy: replicas that act on
+  a shared verdict.
+- **A redrive waits on the elected replica's own breakers.** If the replica
+  RabbitMQ elected is still in a hold after the rest of the fleet has closed,
+  `work.dead` waits until that hold ends, which after a long outage is minutes.
+  Its breakers closing starts a pass at once. The remedy: gate the pass on the
+  fleet view instead.
+- **A redrive pass moves at most 200 messages, and a trigger that arrives
+  mid-pass is dropped.** The next trigger or the 30 s sweep continues, so a
+  large `work.dead` drains in steps.
+- **A purged permit queue stalls recovery.** Every probe then loses the race,
+  so a breaker that opens stays open, holding at the same attempt, until a
+  replica restarts and reseeds. It takes an operator's purge to cause and a
+  restart to undo. Reseeding on a timer is not the remedy: a seed published
+  while a probe holds the token is accepted, and the fleet has two.
+- **Only a `throttled` answer teaches the limit**, and the application's
+  `classify` decides what that is: a `429` from the third party, contention
+  from the ledger. A dependency that sheds load by slowing down past the
+  timeout, or with `503`s, reads as failing, and its breaker opens instead.
+  The remedy: classify that dependency's own shedding signal as `throttled`.
 - **The limit paces the excess; it doesn't remove it.** The backlog is the
-  same with or without it, and it is unbounded. The replicas also learn
-  independently, and their floors can sum above the third party's ceiling.
+  same with or without it, and the work queue has no length limit: it grows
+  until the producer stops or the broker's memory or disk alarm blocks
+  publishers. Each consumer's limit on each replica is learned on its own, and
+  their floors (`LIMIT_MIN` each) can sum above a dependency's ceiling. The
+  remedy: a length limit on the work queue, to push back on the producer.
 
 ## Running it
 

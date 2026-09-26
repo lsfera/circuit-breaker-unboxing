@@ -2,7 +2,7 @@
 - [Effect style: composition, not if/loops](effect-functional-style.md) — Option/Result combinators and Effect constructs instead of if/for, but never convoluted; check APIs against repos/effect.
 - [Essential comments, not narrative](essential-comments-not-narrative.md) — comments carry invariants and gotchas; history goes in git log and docs/decisions.
 - [Open threads on /workspace](egress-breaker-open-threads.md) — ADR 015 steps 3–5, the v3-era skill, offers not taken up; check before starting new work.
-- [Devcontainer gotchas](devcontainer-environment-gotchas.md) — host suspends corrupt timing runs, git subtree path, pkill self-kill, 600s tool cap, RabbitMQ ignores cgroup memory.
+- [Devcontainer gotchas](devcontainer-environment-gotchas.md) — host suspends corrupt timing runs, git subtree path, pkill self-kill, 600s tool cap, RabbitMQ ignores cgroup memory, profiling a live replica.
 - [Egress breaker session record](egress-breaker-session-record.md) — article source material: the early build-out and the later measurements that overturned beliefs.
 - [Chaos & reliability work, 2026-09-13/14](chaos-reliability-work-2026-09-13.md) — harness, 3 bugs fixed 09-14, 1 new one found (main.ts hangs forever), open decisions; now committed.
 - [Chaos & reliability work, 2026-09-17/18](chaos-reliability-work-2026-09-17.md) — first live chaos-load run: consumer-rebuild bug, full ADR 017 split-brain arc, closed to 0s, then simplified away.

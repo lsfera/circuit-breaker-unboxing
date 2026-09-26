@@ -224,7 +224,7 @@ const runConsumer = Effect.fnUntraced(function* (
         ? Effect.void
         : Redrive.runPass({
             apiId: spec.key,
-            // This replica's own view, not the fleet's: see README.md's "what this still doesn't fix".
+            // This replica's own view, not the fleet's: see README.md's "Limits it accepts".
             isClosed,
             onOutcome: (outcome) =>
               void runInContext(Metric.update(Metric.withAttributes(Telemetry.redrives, { ...attributes, outcome }), 1)),
