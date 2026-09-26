@@ -25,3 +25,37 @@ groups:
           severity: critical
         annotations:
           summary: "Half or more of the consumer fleet's breakers for {{ $labels.dependency }} have been open for 30s."
+
+  # The broker's own resource alarms, from its Prometheus plugin. An alarm blocks every connection that
+  # publishes (https://www.rabbitmq.com/docs/alarms) until it clears, and no application can act on it: the
+  # producers stop, and a consumer's parks, wake tokens and redrives wait on their confirms. Consuming and
+  # acking go on, on their own connection. So these are for whoever runs the broker.
+  - name: rabbitmq
+    rules:
+      - alert: RabbitMQMemoryAlarm
+        expr: rabbitmq_alarms_memory_used_watermark > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "RabbitMQ's memory alarm is on: every publishing connection is blocked."
+      - alert: RabbitMQDiskAlarm
+        expr: rabbitmq_alarms_free_disk_space_watermark > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "RabbitMQ's free-disk alarm is on: every publishing connection is blocked."
+      # The warnings before them: the alarm is a cliff, and the backlog that walks up to it takes minutes.
+      - alert: RabbitMQMemoryHigh
+        expr: rabbitmq_process_resident_memory_bytes / rabbitmq_resident_memory_limit_bytes > 0.8
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RabbitMQ is using {{ $value | humanizePercentage }} of its memory watermark; publishers block at 100%."
+      - alert: RabbitMQDiskLow
+        expr: rabbitmq_disk_space_available_bytes < 2 * rabbitmq_disk_space_available_limit_bytes
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RabbitMQ's free disk is under twice its limit; publishers block at the limit."

@@ -330,6 +330,30 @@ top panel is `egress:fleet_open`.
   `FIRING critical/EgressDependencyDown dependency=payments-api` 43s in (30s
   `for`, plus a 10s `group_wait`), and `RESOLVED` 60s after the restore.
 
+### The broker's own alarms
+
+A RabbitMQ memory or disk alarm blocks every connection that publishes until
+it clears ([connection.blocked](https://www.rabbitmq.com/docs/connection-blocked)).
+No application can act on that: the producers stop, and a consumer's parks,
+wake tokens and redrives wait on their confirms, while consuming and acking go
+on over their own connection. So it is watched from the broker's side, on its
+own Prometheus metrics (`infra/monitoring/rules.yml`, group `rabbitmq`):
+
+- `RabbitMQMemoryAlarm` and `RabbitMQDiskAlarm` (critical) fire while an alarm
+  is on.
+- `RabbitMQMemoryHigh` and `RabbitMQDiskLow` (warning) fire a minute into
+  memory above 80% of the watermark, or free disk under twice its limit.
+- The dashboard's bottom row shows memory against the watermark and the
+  alarms.
+
+**Measured**, 2026-09-26, by lowering the watermark to 200 MiB at runtime
+(`rabbitmqctl set_vm_memory_high_watermark absolute 200MiB`) under the default
+load: the sink logged `RabbitMQMemoryAlarm` 35s later and `RabbitMQMemoryHigh`
+a minute after that. Publishing stopped at once and every replica logged its
+publishing connection blocked. Both alerts resolved about 60s after the
+watermark was restored to 1 GiB, traffic resumed at the producers' rate, and
+nothing was dead-lettered or parked.
+
 ## A 429 is backpressure
 
 A third party that is full rather than broken answers `429` to the calls
@@ -577,7 +601,8 @@ published on `localhost`, except `alert-sink`'s.
   parked queue depth and active consumers, per consumer; calls to each
   dependency by outcome; failed and refused calls by dependency and reason;
   breaker trips; the wake tokens RabbitMQ holds (the open breakers); redrives;
-  probe-permit races lost; and the concurrency limit per replica, with
+  probe-permit races lost; the concurrency limit per replica; and RabbitMQ's
+  memory against its watermark and its resource alarms, with
   "Fleet open" (see *The fleet view*) at the top. Plain `:3000` lands on
   Grafana's Welcome screen, not this dashboard — use the direct link, or
   `Dashboards` in the left nav.
@@ -669,7 +694,8 @@ infra/
   postgres/init.sql    the ledger's schema, run once on an empty volume
   capture-incident.mjs records the dashboard through an incident
   monitoring/          Prometheus scrape config, the fleet-view rule and its alert
-                       (rules.yml), Alertmanager's routing (alertmanager.yml) and
+                       and the broker's alarm alerts (rules.yml), Alertmanager's
+                       routing (alertmanager.yml) and
                        the Grafana dashboard
   alert-sink.mjs       where Alertmanager's webhook lands: logs each alert
 docs/                  the write-up, its screenshots and recording, saved chaos runs
