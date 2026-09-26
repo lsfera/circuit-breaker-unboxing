@@ -506,11 +506,12 @@ without a charge. Every scenario met all of that.
 | `both-down` | both, the ledger restored first | 75,950 / 15,697, 0 lost | `payments-api` 34, `ledger` 35 | refunds back on every replica while payments still waited on the third party |
 
 (`docs/runs/chaos-app.json`; `both-down` from
-`docs/runs/chaos-app-both-down-rerun.json`.) The code as it stands passed
-`upstream-outage`, `db-down`, `db-contention` and `both-down` again, and the
-breaker suite's `outage`, `restart-during-probe`, `kill-permit-holder` and
-`overload` (`docs/runs/chaos-app-review-rerun.json`,
-`chaos-breaker-sdk-review-rerun.json`).
+`docs/runs/chaos-app-both-down-rerun.json`.) On Effect rc.117 all eight
+passed again, ledger exact in each, and so did the breaker suite's `outage`,
+`kill-permit-holder`, `redrive-failover` and `overload`
+(`docs/runs/chaos-app-rc117.json`, `chaos-breaker-rc117.json`;
+`kill-permit-holder` from `…-rc117-rerun.json`, the first voided by a host
+suspend).
 
 **What writing the application exposed:**
 
@@ -702,7 +703,7 @@ docs/                  the write-up, its screenshots and recording, saved chaos 
 docker-compose.yml     the whole stack
 ```
 
-Built on **Effect 4 (4.0.0-rc.116)** — see `AGENTS.md` for why that version
+Built on **Effect 4 (4.0.0-rc.117)** — see `AGENTS.md` for why that version
 matters when writing Effect code here. No build step: every package runs
 straight off its `src/*.ts` through Node's built-in type stripping.
 

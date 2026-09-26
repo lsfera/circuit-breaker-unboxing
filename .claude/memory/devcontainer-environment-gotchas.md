@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: reference
   originSessionId: d23c6dbd-5c0e-471a-a8fc-5ed6afc8c7c7
-  modified: 2026-09-26T13:48:58.774Z
+  modified: 2026-09-26T15:05:20.443Z
 ---
 
 Facts about this environment, each learned by losing time to it (2026-09-12/13):
@@ -21,8 +21,12 @@ Facts about this environment, each learned by losing time to it (2026-09-12/13):
   run can exit 0 having printed nothing. Run it detached, `docker wait`, then
   `docker logs`.
 - **`git subtree` is not on PATH.** The PATH git is 2.55 in `/usr/local`, without
-  contrib. The system copy works: `/usr/lib/git-core/git-subtree pull
-  --prefix=repos/effect https://github.com/Effect-TS/effect.git effect@<ver> --squash`.
+  contrib. Calling `/usr/lib/git-core/git-subtree` directly stopped working
+  (2026-09-26: "should run as `git subtree`"). What works: stash, then
+  `/usr/bin/git update-index -q --refresh` (else it reports "working tree has
+  modifications" on a clean tree, the index being 2.55's), then
+  `/usr/bin/git subtree pull --prefix=repos/effect
+  https://github.com/Effect-TS/effect.git effect@<ver> --squash`, then pop.
 - **`pkill -f "<path>"` kills the Bash tool's own shell**, because the shell's
   command line contains the pattern (exit 144). Use a bracket pattern like
   `pkill -f "[s]ubscriber/src/subscriber.ts"`.

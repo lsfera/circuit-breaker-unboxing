@@ -50,7 +50,7 @@ process. Use `PubSub.sliding(1)` and publish to it.
 
 ## Streams that must notice their consumer leaving
 
-- `Stream.fromPubSub(pubsub)` (`Stream.ts:1171`) subscribes when the stream
+- `Stream.fromPubSub(pubsub)` (`Stream.ts:1173`) subscribes when the stream
   runs, so one stream value served to many HTTP requests is many
   subscriptions.
 - `Stream.onStart(effect)` (`:9777`) and `Stream.ensuring(effect)` (`:9886`)

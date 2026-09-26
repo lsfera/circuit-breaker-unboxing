@@ -16,7 +16,7 @@ reader starts from the correction.
 | [effect-pubsub-and-streams.md](effect-pubsub-and-streams.md) | Fan-out, back-pressure and buffering: which PubSub to use, the unbounded buffer inside `SubscriptionRef`, and testing streams under `TestClock` |
 
 **They go stale with the pin.** The line numbers are for
-`effect@4.0.0-rc.115`, the tag `repos/effect` was vendored from. When the
+`effect@4.0.0-rc.117`, the tag `repos/effect` was vendored from. When the
 subtree moves — `pnpm run check:vendored` fails until it does — regenerate a
 note from the new source rather than trusting it:
 

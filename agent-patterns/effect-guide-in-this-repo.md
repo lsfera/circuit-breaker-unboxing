@@ -7,7 +7,8 @@ repository — an ADR, or a reason written next to the code — **the repository
 wins**. This note lists both halves so that nobody "fixes" the code back toward
 the guide.
 
-Checked against `effect@4.0.0-rc.115` on 2026-09-13.
+Checked against `effect@4.0.0-rc.115` on 2026-09-13; its line citations
+re-checked against `effect@4.0.0-rc.117` on 2026-09-26.
 
 ## Guidance this repository follows
 

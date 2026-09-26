@@ -2,9 +2,9 @@ packages:
   - "packages/*"
 
 catalog:
-  effect: 4.0.0-rc.116
-  "@effect/platform-node": 4.0.0-rc.116
-  "@effect/sql-pg": 4.0.0-rc.116
+  effect: 4.0.0-rc.117
+  "@effect/platform-node": 4.0.0-rc.117
+  "@effect/sql-pg": 4.0.0-rc.117
 
 allowBuilds:
   cpu-features: true
