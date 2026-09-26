@@ -108,7 +108,7 @@ fact about the broker rather than a variable:
   reaches the replica, so no call is made, nothing is requeued, and nothing
   spins — the work waits in the queue, which is what a queue is for. The
   in-process version had to reject each message locally and hold it 100–400ms
-  before requeueing, and every rejection spent one of the message's three
+  before requeueing, and every rejection spent one of the message's four
   delivery attempts (see *Measured* below).
 - **The hold is a message.** `packages/rmq/src/DelayedDelivery.ts` is the
   delay chain borrowed from NServiceBus
@@ -130,7 +130,7 @@ fact about the broker rather than a variable:
   `failed` probe, and any `failed` call that follows another at the same
   dependency on the same replica, says something about the third party, not
   about the message that
-  happened to be carrying it. The queue's three-attempt budget is for messages, so charging it
+  happened to be carrying it. The queue's four-attempt budget is for messages, so charging it
   here dead-lettered 2–3 healthy messages per outage in the first chaos run —
   the breaker needs five failures to open and its consumer takes a round trip
   to stop, and in that window the same few messages are redelivered again and
@@ -156,8 +156,8 @@ producer rate), before and after, against the live stack:
 Fifty real failures cannot account for 2,745 dead letters. The rest are
 messages that never got a call: an open cockatiel breaker rejects locally and
 requeues with `reject`, which counts against the queue's `x-delivery-limit`
-(see `settle` in `packages/rmq/src/Client.ts`), so three rejections
-dead-lettered a message. That is the mechanism the numbers point to; I did not
+(see `settle` in `packages/rmq/src/Client.ts`), so a message rejected
+four times was dead-lettered. That is the mechanism the numbers point to; I did not
 instrument the old build to count rejections per message. A 70-second outage on the new build: 67 calls
 reached the third party across five replicas, nothing dead-lettered, holds grew
 1 → 2 → 4 → 8 → … → 62 s, and the last breaker closed 55.9 s after restore. Both

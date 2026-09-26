@@ -13,8 +13,8 @@ outage, five replicas made 50 calls that reached the failing third party. The
 dead-letter queue grew by **2,745**.
 
 Nothing was wrong with those 2,745 messages. An open breaker rejects locally
-and requeues, a requeue spends one of the message's three delivery attempts,
-and a message that is rejected three times is parked. I did not instrument the
+and requeues, a requeue spends one of the message's four delivery attempts,
+and a message that is rejected four times is dead-lettered. I did not instrument the
 old build to watch it happen; fifty real failures cannot account for 2,745
 dead letters, and that is the mechanism the numbers point to.
 
@@ -140,7 +140,7 @@ transition in any scenario.
 
 Same scenarios, same load, one run each. One rule shapes them: a failure that
 follows another failure on the same replica, and any failed probe, is `release`d,
-which hands the message back with no strike against its three delivery attempts.
+which hands the message back with no strike against its four delivery attempts.
 A failure that stands alone, a poison message between successes, is still
 charged and still parked. It is a heuristic, and it trades some poison-message
 protection during an outage for not dead-lettering healthy messages while the

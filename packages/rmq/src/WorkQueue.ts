@@ -91,9 +91,10 @@ export const REDRIVE_COUNT_HEADER = "x-egress-redrive-count";
 export const MAX_REDRIVES = 5;
 
 /**
- * Attempts before the broker parks a message. The budget belongs to the queue, not the daemon: an in-process
- * counter is lost when the message moves to another consumer, which is what an outage causes. Low because
- * RabbitMQ redelivers with no backoff, so every extra attempt is load on a failing upstream.
+ * Counted returns (`requeue`) the broker allows: a message is delivered `WORK_DELIVERY_LIMIT + 1` times, and the
+ * return after the last dead-letters it (DeadLetter.test.ts pins the count). The budget belongs to the queue, not
+ * the daemon: an in-process counter is lost when the message moves to another consumer, which is what an outage
+ * causes. Low because RabbitMQ redelivers with no backoff, so every extra attempt is load on a failing upstream.
  */
 export const WORK_DELIVERY_LIMIT = 3;
 

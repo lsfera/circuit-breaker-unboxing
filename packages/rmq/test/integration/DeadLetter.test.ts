@@ -229,9 +229,9 @@ test("a durable queue keeps its messages across a broker restart", async (t) => 
 
 /**
  * The redelivery budget belongs to the queue: a quorum queue carrying `x-delivery-limit` has the broker count the
- * attempts and park the message itself once they are spent. Two things are asserted together: the budget is spent
- * by *requeue*, and a republish resets it (a replayed message is a new message with a full budget, so three
- * attempts per outage, not three ever), which is the part someone reading `WORK_DELIVERY_LIMIT` would get wrong.
+ * attempts and dead-letter the message itself once they are spent. Two things are asserted together: the budget is spent
+ * by *requeue*, and a republish resets it (a replayed message is a new message with a full budget, so four
+ * attempts per outage, not four ever), which is the part someone reading `WORK_DELIVERY_LIMIT` would get wrong.
  */
 /**
  * A replay of failed work should keep its trace: the trace context survives dead-lettering because RabbitMQ keeps
