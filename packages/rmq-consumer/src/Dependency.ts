@@ -1,5 +1,7 @@
-import { Cause, Context, Data, Duration, Effect, Exit, Metric, Option as O } from "effect";
-import type { Outcome, ProbeVerdict, Report } from "./Breaker.ts";
+import { Cause, Context, Data, Duration, Effect, Exit, Metric, Option as O, Result, Schema } from "effect";
+import { PositiveInt } from "@egress/config/Settings.ts";
+import { MAX_DELAY_SECONDS } from "@egress/rmq/DelayedDelivery.ts";
+import type { BreakerConfig, Outcome, ProbeVerdict, Report } from "./Breaker.ts";
 import * as Telemetry from "./Telemetry.ts";
 
 /**
@@ -69,10 +71,26 @@ export const CurrentCaller = Context.Reference<Caller>("@egress/rmq-consumer/Dep
 
 const DEFAULT_TIMEOUT = Duration.seconds(2);
 
+/** What a dependency may set of its own breaker; the rest comes from the application's `BREAKER_*` defaults. */
+const BreakerOverrides = Schema.Struct({
+  consecutiveFailures: Schema.optionalKey(PositiveInt),
+  initialDelaySeconds: Schema.optionalKey(PositiveInt),
+  maxDelaySeconds: Schema.optionalKey(PositiveInt.check(Schema.isLessThanOrEqualTo(MAX_DELAY_SECONDS))),
+});
+export type BreakerOverrides = typeof BreakerOverrides.Type;
+const decodeOverrides = Schema.decodeUnknownResult(BreakerOverrides);
+
+/** This dependency's breaker: its own settings where it has them, the application's defaults elsewhere. */
+export const breakerFor = (defaults: BreakerConfig, dependency: AnyDependency): BreakerConfig => ({
+  ...defaults,
+  ...dependency.breaker,
+});
+
 export interface Dependency<Name extends string, A, E> {
   <R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, Halted, R | Gated<Name>>;
   readonly dependencyName: Name;
   readonly guard: Context.Service<Gated<Name>, Guard>;
+  readonly breaker: BreakerOverrides;
 }
 
 export type AnyDependency = Dependency<any, any, any>;
@@ -82,10 +100,17 @@ export const make = <const Name extends string, A, E>(
   options: {
     readonly classify: (exit: Exit.Exit<A, E>) => Verdict;
     readonly timeout?: Duration.Input;
+    /** This dependency's own breaker settings; anything left out follows the application's `BREAKER_*`. */
+    readonly breaker?: BreakerOverrides;
   },
 ): Dependency<Name, A, E> => {
   const guard = guardFor(name);
   const timeout = options.timeout ?? DEFAULT_TIMEOUT;
+  // A declaration, not input: an impossible setting stops the application as it loads, naming the dependency.
+  const breaker = Result.getOrThrowWith(
+    decodeOverrides(options.breaker ?? {}),
+    (error) => new Error(`dependency ${name}: invalid breaker settings: ${error.message}`),
+  );
 
   // The SDK's own failures are judged before the application's `classify` sees anything.
   const judge = (exit: Exit.Exit<A, E | Cause.TimeoutError>): Verdict =>
@@ -165,5 +190,5 @@ export const make = <const Name extends string, A, E>(
     });
   });
 
-  return Object.assign(call, { dependencyName: name, guard });
+  return Object.assign(call, { dependencyName: name, guard, breaker });
 };

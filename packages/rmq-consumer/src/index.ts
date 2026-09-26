@@ -36,12 +36,14 @@ export { Halted, Rejected } from "./Dependency.ts";
 export type Metadata = DeliveryInfo;
 
 /**
- * A dependency the action calls, with its own breaker, probe permit and timeout (2s unless given). Wrapping an
+ * A dependency the action calls, with its own breaker, probe permit and timeout (2s unless given). Its breaker
+ * follows the application's `BREAKER_*` settings except for what it sets itself (`breaker`). Wrapping an
  * effect in it runs the effect under the timeout, judges its Exit with `classify`, tells this dependency's breaker,
  * and halts the action on anything but `ok`. Its name labels metrics and names its queues.
  */
 export const Dependency = Dep.make;
 export type Dependency<Name extends string, A, E> = Dep.Dependency<Name, A, E>;
+export type { BreakerOverrides } from "./Dependency.ts";
 
 declare const RegistrationTypeId: unique symbol;
 
@@ -104,13 +106,13 @@ export const flags = {
     Flag.withSchema(PositiveInt),
     Flag.withFallbackConfig(Config.schema(PositiveInt, "BREAKER_THRESHOLD")),
     Flag.withDefault(5),
-    Flag.withDescription("Consecutive failures at a dependency before its breaker opens"),
+    Flag.withDescription("Consecutive failures at a dependency before its breaker opens, for a dependency that sets none of its own"),
   ),
   breakerInitialDelaySeconds: Flag.Int("breaker-initial-delay-seconds").pipe(
     Flag.withSchema(PositiveInt),
     Flag.withFallbackConfig(Config.schema(PositiveInt, "BREAKER_INITIAL_DELAY_SECONDS")),
     Flag.withDefault(1),
-    Flag.withDescription("First hold after a breaker opens, before its half-open probe"),
+    Flag.withDescription("First hold after a breaker opens, before its half-open probe, for a dependency that sets none of its own"),
   ),
   breakerMaxDelaySeconds: Flag.Int("breaker-max-delay-seconds").pipe(
     Flag.withSchema(PositiveInt.check(Schema.isLessThanOrEqualTo(MAX_DELAY_SECONDS))),
@@ -118,7 +120,7 @@ export const flags = {
       Config.schema(PositiveInt.check(Schema.isLessThanOrEqualTo(MAX_DELAY_SECONDS)), "BREAKER_MAX_DELAY_SECONDS"),
     ),
     Flag.withDefault(86_400),
-    Flag.withDescription(`Ceiling a hold grows to; the delay chain counts to ${MAX_DELAY_SECONDS}`),
+    Flag.withDescription(`Ceiling a hold grows to, for a dependency that sets none of its own; the delay chain counts to ${MAX_DELAY_SECONDS}`),
   ),
   replicaId: Flag.String("replica-id").pipe(
     Flag.withFallbackConfig(Config.NonEmptyString("REPLICA_ID")),

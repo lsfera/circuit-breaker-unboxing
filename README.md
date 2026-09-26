@@ -75,7 +75,7 @@ fact about the broker rather than a variable:
 
 | phase | in the broker | leaves when |
 | --- | --- | --- |
-| **closed** | a work consumer at full prefetch (`MAX_IN_FLIGHT`) | `BREAKER_THRESHOLD` (5) calls fail **in a row** — the one thing a process still counts |
+| **closed** | a work consumer at full prefetch (`MAX_IN_FLIGHT`) | `BREAKER_THRESHOLD` (5, unless the dependency sets its own) calls fail **in a row** — the one thing a process still counts |
 | **open** | *no* consumer; a wake token is in the delay chain, addressed to this replica | the token comes back after its hold |
 | **half-open** | a consumer with `prefetch: 1` — the first message it gets is the probe | probe succeeds → closed; fails → open again with a longer hold |
 
@@ -123,7 +123,8 @@ fact about the broker rather than a variable:
   second; a 5-second delay measured 5.21 s end to end.
 - **The token carries the attempt.** Each failed probe re-sends the token with
   `attempt + 1`, and the hold is `initial · 2^attempt`, capped at
-  `BREAKER_MAX_DELAY_SECONDS` (default 86,400) and jittered into its upper half
+  `BREAKER_MAX_DELAY_SECONDS` (default 86,400; the ledger sets 300) and
+  jittered into its upper half
   so replicas that tripped together don't come back together. A closed breaker
   forgets: the next outage starts from the first hold.
 - **Failures that are the third party's are `release`d, not `requeue`d.** A
@@ -436,7 +437,7 @@ refunds only record.
 
 ```ts
 const ThirdParty = Consumer.Dependency("payments-api", { classify: byStatus });
-const Database = Consumer.Dependency("ledger", { classify: bySqlError });
+const Database = Consumer.Dependency("ledger", { classify: bySqlError, breaker: { maxDelaySeconds: 300 } });
 const json = Consumer.accept(
   { "application/json": Schema.fromJsonString(Schema.Unknown) },
   { undeclared: "application/json", type: "egress.work" },
@@ -478,6 +479,15 @@ Consumer.run({
   prefetch 1, and all closed means full prefetch. Wake queues and probe
   permits are per dependency (`consumer.<dependency>.…`), shared by every
   consumer that calls it.
+- **Each breaker is tuned for its dependency.** A dependency may set its own
+  `breaker: { consecutiveFailures, initialDelaySeconds, maxDelaySeconds }`;
+  what it leaves out follows `BREAKER_*`, which are the application's
+  defaults. The ledger caps its hold at 300s: our own database comes back in
+  seconds to minutes, and while it is down every consumer waits, so a
+  day-long hold would leave the fleet dark long after it is back. The third
+  party keeps the day. An impossible setting fails as the application loads,
+  naming the dependency, and the startup log line lists every breaker's
+  settings.
 - **The types hold the application to its lists.** A wrapped call needs its
   dependency's breaker as a service, which only a consumer that lists the
   dependency provides. A dependency called but not listed, or a service no
@@ -529,12 +539,13 @@ suspend).
   (`@egress/rmq`) and the application's `Payment` agree by hand. The producer
   is not generic either: the refunds producer publishes the same
   `{ apiId, n }` as `egress.work`.
-- **Tuning is per application, not per dependency.** `run` parses the
+- **Concurrency is per application, not per consumer.** `run` parses the
   application's own `flags` with the SDK's into one command (one `--help`)
   and builds `layer` from them; the SDK exports `flags` and `command`, so an
   application can extend the command (a description, subcommands) before
-  `launch`. But one set of `BREAKER_*` applies to every dependency, and one
-  `MAX_IN_FLIGHT` to every consumer.
+  `launch`. Breakers are tuned per dependency (above), but one
+  `MAX_IN_FLIGHT` applies to every consumer, and a dependency's own breaker
+  settings live in code: tuning one means a redeploy.
 
 ## Limits it accepts
 

@@ -135,3 +135,17 @@ test("half-open without the permit: no call, verdict `no-permit`, and the messag
   assert.deepEqual(w.verdicts, ["no-permit"]);
   assert.equal(ran, false);
 });
+
+const defaults = { consecutiveFailures: 5, initialDelaySeconds: 1, maxDelaySeconds: 86_400 };
+
+test("a dependency's breaker takes what it sets and the application's defaults for the rest", () => {
+  assert.deepEqual(Dependency.breakerFor(defaults, Thing), defaults);
+  const Quick = Dependency.make("quick", { classify: byNumber, breaker: { maxDelaySeconds: 300 } });
+  assert.deepEqual(Dependency.breakerFor(defaults, Quick), { ...defaults, maxDelaySeconds: 300 });
+});
+
+test("an impossible breaker setting stops the declaration, naming the dependency", () => {
+  for (const breaker of [{ consecutiveFailures: 0 }, { initialDelaySeconds: 1.5 }, { maxDelaySeconds: 2 ** 17 }]) {
+    assert.throws(() => Dependency.make("broken", { classify: byNumber, breaker }), /dependency broken: invalid breaker settings/);
+  }
+});

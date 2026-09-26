@@ -106,7 +106,9 @@ const bySqlError = (exit: Exit.Exit<void, SqlError.SqlError>): Consumer.Verdict 
   });
 
 const ThirdParty = Consumer.Dependency("payments-api", { classify: byStatus });
-const Database = Consumer.Dependency("ledger", { classify: bySqlError });
+// Our own database comes back in seconds to minutes (a restart, a failover), and while it is down every consumer
+// waits, so a day-long hold would leave the fleet dark long after it is back: five minutes at most.
+const Database = Consumer.Dependency("ledger", { classify: bySqlError, breaker: { maxDelaySeconds: 300 } });
 
 const json = Consumer.accept(
   { "application/json": Schema.fromJsonString(Schema.Unknown) },

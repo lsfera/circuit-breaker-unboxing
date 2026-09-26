@@ -14,7 +14,7 @@ import {
 } from "@egress/rmq/WorkQueue.ts";
 import * as Delay from "@egress/rmq/DelayedDelivery.ts";
 import * as Breaker from "./Breaker.ts";
-import { CurrentCaller } from "./Dependency.ts";
+import { breakerFor, CurrentCaller } from "./Dependency.ts";
 import type { AnyDependency, Caller, Registration, Verdict } from "./Dependency.ts";
 import * as Gate from "./Gate.ts";
 import * as Limiter from "./Limiter.ts";
@@ -53,6 +53,7 @@ export type ApplicationConfig = {
   readonly maxInFlight: number;
   /** Names this replica's wake queues, so a token finds only this process. */
   readonly replicaId: string;
+  /** Every dependency's breaker, except for what the dependency sets of its own. */
   readonly breaker: Breaker.BreakerConfig;
   /**
    * Adapt each consumer's concurrency to its dependencies' `throttled` answers. `None`: `throttled` is a failed
@@ -150,7 +151,7 @@ export const runApplication = Effect.fnUntraced(function* (cfg: ApplicationConfi
     const breakerState = Metric.withAttributes(Telemetry.breakerState, { dependency: name });
     const breakerTrips = Metric.withAttributes(Telemetry.breakerTrips, { dependency: name });
 
-    return yield* Breaker.supervise<Registration>(cfg.breaker, {
+    return yield* Breaker.supervise<Registration>(breakerFor(cfg.breaker, d), {
       subscribe: (report) => register({ phase: "closed", report }),
       probe: (verdict) => register({ phase: "half-open", verdict }),
       // Unregistering can only stop subscriptions, never start one: a failure here is a broken invariant.
@@ -174,10 +175,14 @@ export const runApplication = Effect.fnUntraced(function* (cfg: ApplicationConfi
     });
   });
 
+  const describeBreaker = (d: AnyDependency) => {
+    const b = breakerFor(cfg.breaker, d);
+    return `${d.dependencyName}:${b.consecutiveFailures}consecutive/${b.initialDelaySeconds}-${b.maxDelaySeconds}s`;
+  };
   yield* Effect.log(
     `${cfg.name}: up — consumers=${running.map((r) => `${r.spec.key}[${r.spec.dependencies.map((d) => d.dependencyName).join(",")}]`).join(",")} ` +
       `maxInFlight=${cfg.maxInFlight} wake=${cfg.name}.<dependency>.breaker.wake.${cfg.replicaId} ` +
-      `breaker=${cfg.breaker.consecutiveFailures}consecutive/${cfg.breaker.initialDelaySeconds}-${cfg.breaker.maxDelaySeconds}s ` +
+      `breakers=${dependencies.map(describeBreaker).join(",")} ` +
       `limit=${O.match(cfg.limit, { onNone: () => "off", onSome: (l) => `${l.min}-${l.max} x${l.decrease}` })}`,
   );
 

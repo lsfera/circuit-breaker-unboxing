@@ -126,6 +126,8 @@ services:
       # through the broker's delay chain brings the replica back for its
       # half-open probe after ~1s, and doubles per failed probe up to a day
       # (86400s; the chain counts to 131071s) if the third party stays down.
+      # The defaults for every dependency; one that sets its own in code (the
+      # ledger caps its hold at 300s) keeps it.
       BREAKER_THRESHOLD: "5"
       BREAKER_INITIAL_DELAY_SECONDS: "1"
       BREAKER_MAX_DELAY_SECONDS: "86400"
