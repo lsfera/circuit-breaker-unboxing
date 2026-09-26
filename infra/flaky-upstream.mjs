@@ -16,9 +16,9 @@ const CLUSTERS = {
  * Which messages were answered 200, by idempotency key `<run>:<n>`, so a test
  * can prove per message that nothing was lost and count exact duplicates:
  *
- *   curl 'localhost:8080/__audit?run=abc'            # bitmap of n, plus counts
- *   curl 'localhost:8080/__audit?run=*'              # totals across every run, no bitmap
- *   curl -X DELETE 'localhost:8080/__audit?run=abc'
+ *   curl 'flaky-upstream:8080/__audit?run=abc'            # bitmap of n, plus counts
+ *   curl 'flaky-upstream:8080/__audit?run=*'              # totals across every run, no bitmap
+ *   curl -X DELETE 'flaky-upstream:8080/__audit?run=abc'
  *
  * Keys in any other shape are counted and otherwise ignored.
  */

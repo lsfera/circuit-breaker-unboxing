@@ -13,9 +13,9 @@
 // Assumes `docker compose up -d` is already running.
 import { createRequire } from "node:module";
 
-const BROKER = process.env.BROKER ?? "amqp://guest:guest@localhost:5672";
-const FLAKY_UPSTREAM = process.env.FLAKY_UPSTREAM ?? "http://localhost:8080";
-const PROMETHEUS = process.env.PROMETHEUS ?? "http://localhost:9090";
+const BROKER = process.env.BROKER ?? "amqp://guest:guest@rabbitmq:5672";
+const FLAKY_UPSTREAM = process.env.FLAKY_UPSTREAM ?? "http://flaky-upstream:8080";
+const PROMETHEUS = process.env.PROMETHEUS ?? "http://prometheus:9090";
 const API_ID = process.env.API_ID ?? "payments-provider";
 const RATE = Number(process.env.RATE ?? "1.0");
 // With the default "error" mode a failed call answers almost instantly, so five daemons at maxInFlight=20 clear a

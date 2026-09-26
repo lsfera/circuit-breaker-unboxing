@@ -542,10 +542,14 @@ docker compose up -d --scale rmq-consumer=12   # resize the fleet, no restart ne
 docker compose exec postgres psql -U consumer -d ledger -c 'select count(*) from payments'
 ```
 
-- RabbitMQ management UI: <http://localhost:15672> (guest/guest) — watch
+The addresses below are compose service names, reachable from the devcontainer
+(it joins the `devcontainer` network); from the host, the same ports are
+published on `localhost`.
+
+- RabbitMQ management UI: <http://rabbitmq:15672> (guest/guest) — watch
   `payments-provider.work`'s depth and `payments-provider.work.dead`'s
   growth.
-- Grafana: <http://localhost:3000/d/in-process-breaker>
+- Grafana: <http://grafana:3000/d/in-process-breaker>
   Panels: breaker state per replica, work-queue depth, dead-letter-queue depth,
   calls by outcome, failed and refused calls by status, breaker trips, active
   consumers on the work queue, the wake tokens RabbitMQ holds (the open
@@ -554,7 +558,7 @@ docker compose exec postgres psql -U consumer -d ledger -c 'select count(*) from
   "Fleet open" (see *The fleet view*) at the top. Plain `:3000` lands on
   Grafana's Welcome screen, not this dashboard — use the direct link, or
   `Dashboards` in the left nav.
-- Prometheus: <http://localhost:9090>. Alertmanager: <http://localhost:9093>;
+- Prometheus: <http://prometheus:9090>. Alertmanager: <http://alertmanager:9093>;
   what it forwards is in `docker compose logs alert-sink`.
 
 ## Injecting a failure
@@ -563,17 +567,17 @@ docker compose exec postgres psql -U consumer -d ledger -c 'select count(*) from
 POST replaces the whole behaviour, so `{}` restores health:
 
 ```bash
-curl -X POST localhost:8080/__fail -d '{"rate":1.0}'                # 503s
-curl -X POST localhost:8080/__fail -d '{"rate":1.0,"status":422}'   # 422s: refused, not down — no trip, no backlog
-curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"hang"}'  # never answers
-curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"reset"}' # drops the connection
-curl -X POST localhost:8080/__fail -d '{"delayMs":1500}'            # slow, still correct
-curl -X POST localhost:8080/__fail -d '{"delayMs":100,"capacity":5}' # full, not broken: 5 at once (50/s), 429 beyond
-curl -X POST localhost:8080/__fail -d '{}'                          # healthy again
+curl -X POST flaky-upstream:8080/__fail -d '{"rate":1.0}'                # 503s
+curl -X POST flaky-upstream:8080/__fail -d '{"rate":1.0,"status":422}'   # 422s: refused, not down — no trip, no backlog
+curl -X POST flaky-upstream:8080/__fail -d '{"rate":1.0,"mode":"hang"}'  # never answers
+curl -X POST flaky-upstream:8080/__fail -d '{"rate":1.0,"mode":"reset"}' # drops the connection
+curl -X POST flaky-upstream:8080/__fail -d '{"delayMs":1500}'            # slow, still correct
+curl -X POST flaky-upstream:8080/__fail -d '{"delayMs":100,"capacity":5}' # full, not broken: 5 at once (50/s), 429 beyond
+curl -X POST flaky-upstream:8080/__fail -d '{}'                          # healthy again
 ```
 
 Every call answered 200 is recorded by its idempotency key (`<run>:<n>`), so you
-can check what got through: `curl 'localhost:8080/__audit?run=*'` for totals, or
+can check what got through: `curl 'flaky-upstream:8080/__audit?run=*'` for totals, or
 `?run=<id>` for one run's processed and duplicate counts.
 
 ## The incident script
@@ -594,7 +598,7 @@ breakers opened, the fraction of poll ticks in which every replica was in the
 one closed. With `CAPACITY` set it also reports goodput, the calls answered
 `429`, the fleet's summed limit and how often the fleet read open. Replica
 states are read from Prometheus (`PROMETHEUS`, default
-`http://localhost:9090`).
+`http://prometheus:9090`).
 
 ## Load
 
