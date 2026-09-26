@@ -149,6 +149,29 @@ services:
     networks: [default, devcontainer]
     deploy: *limits-store
 
+  # Where rules.yml's alert goes (infra/monitoring/alertmanager.yml): grouped per dependency and forwarded to
+  # the sink below.
+  alertmanager:
+    image: prom/alertmanager:v0.34.0@sha256:690c7b525f4367aa91f73e2f91c632206d32e97c6384bdbf2fb7a861b420340d
+    volumes:
+      - $HOST_WORKSPACE_FOLDER/infra/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    restart: unless-stopped
+    depends_on: [alert-sink]
+    ports: ["9093:9093"]
+    networks: [default, devcontainer]
+    deploy: *limits-small
+
+  # Stands in for Slack or PagerDuty: it logs what it is sent, so routing is something you can watch rather than
+  # infer. Not the product, so it stays a bind-mounted file on the stock Node image like flaky-upstream.
+  alert-sink:
+    image: *node-image
+    working_dir: /app
+    volumes: ["$HOST_WORKSPACE_FOLDER/infra/alert-sink.mjs:/app/alert-sink.mjs:ro"]
+    command: node alert-sink.mjs
+    restart: unless-stopped
+    networks: [default, devcontainer]
+    deploy: *limits-small
+
   grafana:
     image: grafana/grafana:13.2.1@sha256:f772d434e8fab0049deb2b1b30abd43342bcfca1537614aa8d36080232cf4283
     environment:

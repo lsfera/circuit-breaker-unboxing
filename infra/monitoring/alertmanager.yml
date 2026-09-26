@@ -1,0 +1,23 @@
+# Where rules.yml's alert goes. Without this, Prometheus evaluates it and routes it nowhere: an alert with an
+# audience of whoever thinks to open /alerts.
+#
+# The receiver is a webhook to a container that logs what it gets (infra/alert-sink.mjs), not Slack or
+# PagerDuty: this repo cannot hold someone else's credentials, and what is worth showing is that a firing rule
+# reaches something outside Prometheus. Swap the URL for a real integration and nothing else changes.
+
+global:
+  resolve_timeout: 1m
+
+route:
+  receiver: sink
+  # One notification per dependency, not one per replica: the rule is already a fleet-wide fraction.
+  group_by: [alertname, dependency]
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 1h
+
+receivers:
+  - name: sink
+    webhook_configs:
+      - url: http://alert-sink:9095/alerts
+        send_resolved: true

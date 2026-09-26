@@ -21,5 +21,7 @@ groups:
       - alert: EgressDependencyDown
         expr: egress:fleet_open_fraction >= 0.5
         for: 30s
+        labels:
+          severity: critical
         annotations:
           summary: "Half or more of the consumer fleet's breakers for {{ $labels.dependency }} have been open for 30s."

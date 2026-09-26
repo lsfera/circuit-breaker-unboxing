@@ -290,10 +290,16 @@ of it left 11 parked.
 
 `infra/monitoring/rules.yml`, the same as article 3's:
 
-- `egress:fleet_open_fraction` is the share of replicas whose breaker is open
-  or half-open. Only samples under 10s old count.
+- `egress:fleet_open_fraction` is, per dependency, the share of replicas whose
+  breaker for it is open or half-open. Only samples under 10s old count.
 - `egress:fleet_open` is 1 when half or more are open.
-- The alert `EgressThirdPartyDown` fires after 30s of that.
+- The alert `EgressDependencyDown` (severity `critical`, labelled with the
+  dependency) fires after 30s of that. Prometheus sends it to Alertmanager
+  (`infra/monitoring/alertmanager.yml`), which groups it per dependency and
+  forwards it by webhook to `alert-sink`. That container logs what it is sent
+  (`docker compose logs -f alert-sink`), standing in for Slack or PagerDuty:
+  swap the webhook URL for a real integration. Both are ported from
+  article 4.
 
 It needs no extra process and no heartbeat: a replica counts while Prometheus
 scrapes it, and nothing in the fleet reads the rule back. The freshness filter
@@ -309,6 +315,9 @@ top panel is `egress:fleet_open`.
 - It cleared at the first poll below half, about 4s after restore.
 - The fraction returned to 0 57s after restore. The last replica was still in
   a long hold (see *The price of a long hold*).
+- Through Alertmanager, 2026-09-26: in a full third-party outage the sink logged
+  `FIRING critical/EgressDependencyDown dependency=payments-api` 43s in (30s
+  `for`, plus a 10s `group_wait`), and `RESOLVED` 60s after the restore.
 
 ## A 429 is backpressure
 
@@ -545,7 +554,8 @@ docker compose exec postgres psql -U consumer -d ledger -c 'select count(*) from
   "Fleet open" (see *The fleet view*) at the top. Plain `:3000` lands on
   Grafana's Welcome screen, not this dashboard — use the direct link, or
   `Dashboards` in the left nav.
-- Prometheus: <http://localhost:9090>.
+- Prometheus: <http://localhost:9090>. Alertmanager: <http://localhost:9093>;
+  what it forwards is in `docker compose logs alert-sink`.
 
 ## Injecting a failure
 
@@ -631,8 +641,10 @@ infra/
   chaos-publisher.mjs  their load generator: remembers which messages were confirmed
   postgres/init.sql    the ledger's schema, run once on an empty volume
   capture-incident.mjs records the dashboard through an incident
-  monitoring/          Prometheus scrape config, the fleet-view rule (rules.yml)
-                       and the Grafana dashboard
+  monitoring/          Prometheus scrape config, the fleet-view rule and its alert
+                       (rules.yml), Alertmanager's routing (alertmanager.yml) and
+                       the Grafana dashboard
+  alert-sink.mjs       where Alertmanager's webhook lands: logs each alert
 docs/                  the write-up, its screenshots and recording, saved chaos runs
 docker-compose.yml     the whole stack
 ```

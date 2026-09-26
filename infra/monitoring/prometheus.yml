@@ -4,6 +4,12 @@ global:
 # The fleet-wide open fraction and its alert. See rules.yml.
 rule_files: [rules.yml]
 
+# The alert goes to Alertmanager, which groups it and forwards it to a receiver that logs (infra/alert-sink.mjs).
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
 scrape_configs:
   # RabbitMQ's own exporter (`rabbitmq_prometheus`, enabled in the management image on 15692). Two jobs, because
   # the plain endpoint aggregates every queue metric into a cluster-wide sum with no `queue` label; per-queue
