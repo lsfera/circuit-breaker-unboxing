@@ -1,4 +1,4 @@
-import { Cause, Context, Data, Duration, Effect, Exit, Metric, Option as O, Result, Schema } from "effect";
+import { Cause, Context, Data, Deferred, Duration, Effect, Exit, Match, Metric, Option as O, Ref, Result, Schema } from "effect";
 import { PositiveInt } from "@egress/config/Settings.ts";
 import { MAX_DELAY_SECONDS } from "@egress/rmq/DelayedDelivery.ts";
 import type { BreakerConfig, Outcome, ProbeVerdict, Report } from "./Breaker.ts";
@@ -18,13 +18,55 @@ export type Registration =
   | { readonly phase: "closed"; readonly report: Report }
   | { readonly phase: "half-open"; readonly verdict: (v: ProbeVerdict) => Effect.Effect<void> };
 
+/** What asking for a dependency's probe permit found. */
+export type PermitAnswer =
+  | { readonly _tag: "Taken"; readonly giveBack: Effect.Effect<void> }
+  /** Another probe in this process holds it; `settled` waits for that probe's call, which is the breaker's verdict. */
+  | { readonly _tag: "HeldHere"; readonly settled: Effect.Effect<void> }
+  | { readonly _tag: "HeldElsewhere" };
+
 /** The live side of one dependency, provided by the application runner. */
 export type Guard = {
   /** `None` while the breaker is open. */
   readonly registration: Effect.Effect<O.Option<Registration>>;
-  /** The fleet's probe permit for this dependency, as the effect that hands it back; `None` if another replica holds it. */
-  readonly takePermit: Effect.Effect<O.Option<Effect.Effect<void>>>;
+  readonly takePermit: Effect.Effect<PermitAnswer>;
 };
+
+/**
+ * The fleet's permit (`take`: the effect that hands it back, or `None` if another replica holds it), taken by one
+ * probe of this process at a time. Every consumer that lists a half-open dependency probes it, so one replica can
+ * have several probes at once. Were a sibling's lost race reported as `no-permit`, it would reach the breaker
+ * before the call the permit holder is making, every time, and the hold would never grow. A sibling waits for the
+ * holder instead: released at once, its message would come straight back to its prefetch-1 consumer, and round
+ * again for as long as the holder's call takes.
+ */
+export const localPermit = Effect.fnUntraced(function* (take: Effect.Effect<O.Option<Effect.Effect<void>>>) {
+  const holder = yield* Ref.make(O.none<Deferred.Deferred<void>>());
+  return Effect.uninterruptibleMask((restore) =>
+    Effect.flatMap(Deferred.make<void>(), (mine) =>
+      Effect.flatMap(
+        Ref.modify(holder, (current) => [current, O.orElse(current, () => O.some(mine))] as const),
+        O.match({
+          onSome: (theirs): Effect.Effect<PermitAnswer> =>
+            Effect.succeed({ _tag: "HeldHere", settled: Deferred.await(theirs) }),
+          onNone: (): Effect.Effect<PermitAnswer> => {
+            const free = Ref.set(holder, O.none()).pipe(Effect.andThen(Deferred.succeed(mine, undefined)));
+            return restore(take).pipe(
+              Effect.onInterrupt(() => free),
+              Effect.flatMap(
+                O.match({
+                  onNone: () => Effect.as(free, { _tag: "HeldElsewhere" } as PermitAnswer),
+                  onSome: (giveBack) =>
+                    Effect.succeed<PermitAnswer>({ _tag: "Taken", giveBack: Effect.ensuring(giveBack, free) }),
+                }),
+              ),
+            );
+          },
+        }),
+      ),
+    ),
+  );
+});
 
 declare const GatedTypeId: unique symbol;
 /** The service a wrapped call needs: the breaker of dependency `Name`, provided only if the consumer lists it. */
@@ -164,13 +206,15 @@ export const make = <const Name extends string, A, E>(
     caller: Caller,
   ) =>
     Effect.flatMap(g.takePermit, (permit) =>
-      O.match(permit, {
-        onNone: () =>
+      Match.valueTags(permit, {
+        HeldElsewhere: () =>
           verdict("no-permit").pipe(
             Effect.andThen(Metric.update(Metric.withAttributes(Telemetry.permitLost, { dependency: name }), 1)),
             Effect.andThen(halt("no-permit", "no-permit", "probe")),
           ),
-        onSome: (giveBack) =>
+        // No verdict: the call the permit holder is making decides. The message is held until it has.
+        HeldHere: ({ settled }) => Effect.andThen(settled, halt("no-permit", "probe-in-flight", "probe")),
+        Taken: ({ giveBack }) =>
           attempt(effect, (ok) => Effect.as(verdict(ok ? "ok" : "failed"), ok ? 0 : 1), "probe", caller).pipe(
             Effect.ensuring(giveBack),
           ),

@@ -246,6 +246,32 @@ non-blocking `get` first.
 The permit is held for the call only, not while the probe consumer waits for a
 message.
 
+**One probe per replica, too.** Every consumer that lists a half-open
+dependency probes it, so a replica can have several probes at once: payments
+and refunds both probe the ledger. The permit is taken by one probe of the
+process at a time. A sibling that finds it held here makes no call and gives
+no verdict: it keeps its message until the holder's call has finished, then
+releases it. Both halves were measured:
+
+- Before, the sibling lost the race against its own replica, and its instant
+  `no-permit` reached the breaker ahead of the real call every time, so the
+  ledger's hold never grew. In a 30-minute PostgreSQL outage every replica
+  held for 1s, 2,981 times, and 2,674 probe calls reached the stopped
+  database. With the fix, in a 14-minute outage, the holds doubled to the
+  ledger's 300s cap (the capped ones were 150–289s), 20 calls failed, and the
+  last replica closed 2m40s after the restore.
+- A sibling that released its message at once instead spun: its prefetch-1
+  consumer got the message straight back, charged the third party again, and
+  released it again, for as long as the holder's call took (2s against a
+  paused database). `db-hang` counted 37,074 repeated charges
+  (`docs/runs/chaos-app-shared-probe-spin.json`). Waiting for the holder
+  brought it to 159 (191 before any of this).
+
+In `db-down`, `db-hang` and `both-down` the ledger now trips 36–42 times
+instead of 278–309, and closes 28–46s after the restore instead of 7–14s: the
+holds grow, as they were meant to, and a longer hold is found later
+(`docs/runs/chaos-app-shared-probe.json`, all three passing).
+
 **The token goes back as a publish, then an ack, never a requeue.**
 `x-max-length` counts only *ready* messages, so a seed published while a probe
 holds the token is accepted, and the fleet has two. Measured on RabbitMQ 4.3

@@ -1,0 +1,646 @@
+{
+  "at": "2026-09-26T16:39:03.705Z",
+  "results": [
+    {
+      "scenario": "db-hang",
+      "runs": {
+        "payments": "dbhangmuim4qrhp",
+        "refunds": "dbhangmuim4qrhr"
+      },
+      "startedAt": "2026-09-26T16:37:24.221Z",
+      "correctness": {
+        "payments": {
+          "sent": 63484,
+          "confirmed": 63484,
+          "charged": 63484,
+          "repeatCharges": 37074,
+          "recorded": 63484,
+          "uncharged": 0,
+          "lost": 0,
+          "dead": 0,
+          "parked": 0
+        },
+        "ledger": {
+          "chargedNotRecorded": 0,
+          "recordedNotCharged": 0,
+          "duplicateRows": 0
+        },
+        "refunds": {
+          "sent": 13075,
+          "confirmed": 13075,
+          "recorded": 13075,
+          "unrecorded": 0,
+          "lost": 0,
+          "dead": 0,
+          "parked": 0
+        },
+        "drained": true
+      },
+      "breakers": {
+        "trips": {
+          "payments-api": 0,
+          "ledger": 54
+        },
+        "recovered": true,
+        "secondsFromRestoreToAllClosed": 30,
+        "violations": [],
+        "permits": {
+          "payments-api": {
+            "ready": 1,
+            "held": 0
+          },
+          "ledger": {
+            "ready": 1,
+            "held": 0
+          }
+        }
+      },
+      "calls": {
+        "payments-api:ok": 102624,
+        "payments-api:failed": 0,
+        "payments-api:throttled": 0,
+        "payments-api:client_error": 0,
+        "ledger:ok": 78139,
+        "ledger:failed": 245,
+        "ledger:throttled": 0,
+        "ledger:client_error": 0
+      },
+      "expected": {
+        "pass": true,
+        "summary": "ledger tripped 54 times (want > 0), payments-api 0 (want 0); consumers down to payments 0, refunds 0 of 5; 0 new charges from 15s into the outage to its end (probes only)"
+      },
+      "series": [
+        {
+          "t": 0,
+          "payments": 0,
+          "paymentsConsumers": 5,
+          "refunds": 0,
+          "refundsConsumers": 5,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 0
+        },
+        {
+          "t": 1,
+          "payments": 0,
+          "paymentsConsumers": 5,
+          "refunds": 0,
+          "refundsConsumers": 5,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 0
+        },
+        {
+          "t": 2,
+          "payments": 0,
+          "paymentsConsumers": 5,
+          "refunds": 0,
+          "refundsConsumers": 5,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 0
+        },
+        {
+          "t": 3,
+          "payments": 0,
+          "paymentsConsumers": 5,
+          "refunds": 0,
+          "refundsConsumers": 5,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 0
+        },
+        {
+          "t": 4,
+          "payments": 0,
+          "paymentsConsumers": 5,
+          "refunds": 0,
+          "refundsConsumers": 5,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 0
+        },
+        {
+          "t": 5,
+          "payments": 0,
+          "paymentsConsumers": 5,
+          "refunds": 0,
+          "refundsConsumers": 5,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 0
+        },
+        {
+          "t": 6,
+          "payments": 0,
+          "paymentsConsumers": 5,
+          "refunds": 0,
+          "refundsConsumers": 5,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 0
+        },
+        {
+          "t": 7,
+          "payments": 0,
+          "paymentsConsumers": 5,
+          "refunds": 0,
+          "refundsConsumers": 5,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 0
+        },
+        {
+          "t": 23,
+          "payments": 15072,
+          "paymentsConsumers": 1,
+          "refunds": 3013,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 25,
+          "payments": 16112,
+          "paymentsConsumers": 1,
+          "refunds": 3221,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 26,
+          "payments": 17161,
+          "paymentsConsumers": 1,
+          "refunds": 3431,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 27,
+          "payments": 18203,
+          "paymentsConsumers": 1,
+          "refunds": 3639,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 28,
+          "payments": 19245,
+          "paymentsConsumers": 1,
+          "refunds": 3848,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 29,
+          "payments": 20293,
+          "paymentsConsumers": 1,
+          "refunds": 4057,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 30,
+          "payments": 21334,
+          "paymentsConsumers": 0,
+          "refunds": 4267,
+          "refundsConsumers": 0,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 31,
+          "payments": 22376,
+          "paymentsConsumers": 1,
+          "refunds": 4475,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 32,
+          "payments": 23427,
+          "paymentsConsumers": 1,
+          "refunds": 4685,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 33,
+          "payments": 24469,
+          "paymentsConsumers": 0,
+          "refunds": 4895,
+          "refundsConsumers": 0,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 34,
+          "payments": 25516,
+          "paymentsConsumers": 0,
+          "refunds": 5103,
+          "refundsConsumers": 0,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 35,
+          "payments": 26564,
+          "paymentsConsumers": 1,
+          "refunds": 5313,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 36,
+          "payments": 27608,
+          "paymentsConsumers": 1,
+          "refunds": 5521,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 37,
+          "payments": 28659,
+          "paymentsConsumers": 0,
+          "refunds": 5731,
+          "refundsConsumers": 0,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 38,
+          "payments": 29699,
+          "paymentsConsumers": 1,
+          "refunds": 5940,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 39,
+          "payments": 30747,
+          "paymentsConsumers": 1,
+          "refunds": 6149,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 40,
+          "payments": 31788,
+          "paymentsConsumers": 0,
+          "refunds": 6357,
+          "refundsConsumers": 0,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 41,
+          "payments": 32841,
+          "paymentsConsumers": 1,
+          "refunds": 6566,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 42,
+          "payments": 33877,
+          "paymentsConsumers": 1,
+          "refunds": 6776,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 43,
+          "payments": 34922,
+          "paymentsConsumers": 0,
+          "refunds": 6986,
+          "refundsConsumers": 0,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 44,
+          "payments": 35974,
+          "paymentsConsumers": 0,
+          "refunds": 7195,
+          "refundsConsumers": 0,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 45,
+          "payments": 37030,
+          "paymentsConsumers": 0,
+          "refunds": 7406,
+          "refundsConsumers": 0,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 46,
+          "payments": 38087,
+          "paymentsConsumers": 0,
+          "refunds": 7617,
+          "refundsConsumers": 0,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 48,
+          "payments": 39133,
+          "paymentsConsumers": 1,
+          "refunds": 7825,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 49,
+          "payments": 40178,
+          "paymentsConsumers": 0,
+          "refunds": 8035,
+          "refundsConsumers": 0,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 50,
+          "payments": 41221,
+          "paymentsConsumers": 0,
+          "refunds": 8244,
+          "refundsConsumers": 0,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 51,
+          "payments": 42261,
+          "paymentsConsumers": 0,
+          "refunds": 8452,
+          "refundsConsumers": 0,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 52,
+          "payments": 43310,
+          "paymentsConsumers": 1,
+          "refunds": 8661,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 53,
+          "payments": 44358,
+          "paymentsConsumers": 1,
+          "refunds": 8870,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 54,
+          "payments": 45401,
+          "paymentsConsumers": 0,
+          "refunds": 9081,
+          "refundsConsumers": 0,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 55,
+          "payments": 46450,
+          "paymentsConsumers": 0,
+          "refunds": 9289,
+          "refundsConsumers": 0,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 56,
+          "payments": 47493,
+          "paymentsConsumers": 0,
+          "refunds": 9498,
+          "refundsConsumers": 0,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 57,
+          "payments": 48535,
+          "paymentsConsumers": 1,
+          "refunds": 9705,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 58,
+          "payments": 49575,
+          "paymentsConsumers": 1,
+          "refunds": 9915,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 59,
+          "payments": 50621,
+          "paymentsConsumers": 1,
+          "refunds": 10124,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 60,
+          "payments": 51665,
+          "paymentsConsumers": 1,
+          "refunds": 10332,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 61,
+          "payments": 52718,
+          "paymentsConsumers": 0,
+          "refunds": 10543,
+          "refundsConsumers": 0,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 62,
+          "payments": 53765,
+          "paymentsConsumers": 0,
+          "refunds": 10753,
+          "refundsConsumers": 0,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 63,
+          "payments": 54809,
+          "paymentsConsumers": 0,
+          "refunds": 10962,
+          "refundsConsumers": 0,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 64,
+          "payments": 55715,
+          "paymentsConsumers": 1,
+          "refunds": 11010,
+          "refundsConsumers": 1,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 5
+        },
+        {
+          "t": 66,
+          "payments": 46927,
+          "paymentsConsumers": 2,
+          "refunds": 508,
+          "refundsConsumers": 2,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 3
+        },
+        {
+          "t": 68,
+          "payments": 23592,
+          "paymentsConsumers": 4,
+          "refunds": 0,
+          "refundsConsumers": 4,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 2
+        },
+        {
+          "t": 70,
+          "payments": 0,
+          "paymentsConsumers": 4,
+          "refunds": 0,
+          "refundsConsumers": 4,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 1
+        },
+        {
+          "t": 72,
+          "payments": 0,
+          "paymentsConsumers": 4,
+          "refunds": 0,
+          "refundsConsumers": 4,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 1
+        },
+        {
+          "t": 75,
+          "payments": 0,
+          "paymentsConsumers": 4,
+          "refunds": 0,
+          "refundsConsumers": 4,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 1
+        },
+        {
+          "t": 77,
+          "payments": 0,
+          "paymentsConsumers": 4,
+          "refunds": 0,
+          "refundsConsumers": 4,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 1
+        },
+        {
+          "t": 79,
+          "payments": 0,
+          "paymentsConsumers": 4,
+          "refunds": 0,
+          "refundsConsumers": 4,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 1
+        },
+        {
+          "t": 81,
+          "payments": 0,
+          "paymentsConsumers": 4,
+          "refunds": 0,
+          "refundsConsumers": 4,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 1
+        },
+        {
+          "t": 83,
+          "payments": 0,
+          "paymentsConsumers": 4,
+          "refunds": 0,
+          "refundsConsumers": 4,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 1
+        },
+        {
+          "t": 85,
+          "payments": 0,
+          "paymentsConsumers": 4,
+          "refunds": 0,
+          "refundsConsumers": 4,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 1
+        },
+        {
+          "t": 87,
+          "payments": 0,
+          "paymentsConsumers": 4,
+          "refunds": 0,
+          "refundsConsumers": 4,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 1
+        },
+        {
+          "t": 89,
+          "payments": 0,
+          "paymentsConsumers": 4,
+          "refunds": 0,
+          "refundsConsumers": 4,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 1
+        },
+        {
+          "t": 91,
+          "payments": 0,
+          "paymentsConsumers": 4,
+          "refunds": 0,
+          "refundsConsumers": 4,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 1
+        },
+        {
+          "t": 93,
+          "payments": 0,
+          "paymentsConsumers": 5,
+          "refunds": 0,
+          "refundsConsumers": 5,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 0
+        },
+        {
+          "t": 94,
+          "payments": 0,
+          "paymentsConsumers": 5,
+          "refunds": 0,
+          "refundsConsumers": 5,
+          "thirdPartyNotClosed": 0,
+          "ledgerNotClosed": 0
+        }
+      ],
+      "suspendedMs": -1,
+      "void": false,
+      "pass": true
+    }
+  ]
+}

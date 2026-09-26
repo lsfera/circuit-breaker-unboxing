@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Cause, Effect, Exit, Option as O } from "effect";
+import { Cause, Effect, Exit, Fiber, Option as O } from "effect";
 import type { ProbeVerdict } from "../src/Breaker.ts";
 import * as Dependency from "../src/Dependency.ts";
 import type { Caller, Registration, Verdict } from "../src/Dependency.ts";
@@ -24,7 +24,7 @@ const Dupe = Dependency.make("dupe", {
 
 type Breaker = { readonly phase: "open" } | { readonly phase: "closed"; readonly streak: number } | { readonly phase: "half-open" };
 
-const world = (breaker: Breaker, options: { permit?: boolean; throttling?: boolean } = {}) => {
+const world = (breaker: Breaker, options: { permit?: "free" | "here" | "elsewhere"; throttling?: boolean } = {}) => {
   const reports: Array<boolean> = [];
   const verdicts: Array<ProbeVerdict> = [];
   const observed: Array<string> = [];
@@ -37,8 +37,12 @@ const world = (breaker: Breaker, options: { permit?: boolean; throttling?: boole
         : O.some({ phase: "half-open", verdict: (v) => Effect.sync(() => void verdicts.push(v)) });
   const guard: Dependency.Guard = {
     registration: Effect.succeed(registration),
-    takePermit: Effect.sync(() =>
-      options.permit === false ? O.none() : (permits.taken++, O.some(Effect.sync(() => void permits.returned++))),
+    takePermit: Effect.sync((): Dependency.PermitAnswer =>
+      options.permit === "elsewhere"
+        ? { _tag: "HeldElsewhere" }
+        : options.permit === "here"
+          ? { _tag: "HeldHere", settled: Effect.void }
+          : (permits.taken++, { _tag: "Taken", giveBack: Effect.sync(() => void permits.returned++) }),
     ),
   };
   const caller: Caller = {
@@ -129,7 +133,7 @@ test("half-open: the probe takes the fleet's permit, gives the breaker its verdi
 
 test("half-open without the permit: no call, verdict `no-permit`, and the message is released", async () => {
   let ran = false;
-  const w = world({ phase: "half-open" }, { permit: false });
+  const w = world({ phase: "half-open" }, { permit: "elsewhere" });
   const h = halted(await w.run(Thing(Effect.sync(() => ((ran = true), 200)))));
   assert.deepEqual([h.stop, h.role], ["no-permit", "probe"]);
   assert.deepEqual(w.verdicts, ["no-permit"]);
@@ -148,4 +152,46 @@ test("an impossible breaker setting stops the declaration, naming the dependency
   for (const breaker of [{ consecutiveFailures: 0 }, { initialDelaySeconds: 1.5 }, { maxDelaySeconds: 2 ** 17 }]) {
     assert.throws(() => Dependency.make("broken", { classify: byNumber, breaker }), /dependency broken: invalid breaker settings/);
   }
+});
+
+test("half-open while another probe of this process holds the permit: no call, no verdict, the message released", async () => {
+  let ran = false;
+  const w = world({ phase: "half-open" }, { permit: "here" });
+  const h = halted(await w.run(Thing(Effect.sync(() => ((ran = true), 200)))));
+  assert.deepEqual([h.stop, h.reason, h.role], ["no-permit", "probe-in-flight", "probe"]);
+  assert.deepEqual(w.verdicts, []);
+  assert.equal(ran, false);
+});
+
+test("the permit is taken by one probe of this process at a time; a sibling waits for the holder, then hears it was held here", async () => {
+  const seen = await Effect.runPromise(
+    Effect.gen(function* () {
+      let tokens = 1;
+      const events: Array<string> = [];
+      const take = Effect.sync(() =>
+        tokens > 0 ? ((tokens -= 1), O.some(Effect.sync(() => void (tokens += 1)))) : O.none<Effect.Effect<void>>(),
+      );
+      const takePermit = yield* Dependency.localPermit(take);
+      const first = yield* takePermit;
+      const sibling = yield* takePermit;
+      assert.equal(first._tag, "Taken");
+      assert.equal(sibling._tag, "HeldHere");
+      const waiting = yield* Effect.forkChild(
+        (sibling._tag === "HeldHere" ? sibling.settled : Effect.void).pipe(Effect.andThen(Effect.sync(() => void events.push("sibling settled")))),
+      );
+      yield* Effect.yieldNow;
+      events.push("holder gives back");
+      yield* first._tag === "Taken" ? first.giveBack : Effect.void;
+      yield* Fiber.join(waiting);
+      const afterGiveBack = yield* takePermit;
+      yield* afterGiveBack._tag === "Taken" ? afterGiveBack.giveBack : Effect.void;
+      tokens = 0;
+      const elsewhere = yield* takePermit;
+      tokens = 1;
+      const freedAfterLoss = yield* takePermit;
+      return { events, tags: [afterGiveBack, elsewhere, freedAfterLoss].map((a) => a._tag) };
+    }),
+  );
+  assert.deepEqual(seen.events, ["holder gives back", "sibling settled"]);
+  assert.deepEqual(seen.tags, ["Taken", "HeldElsewhere", "Taken"]);
 });

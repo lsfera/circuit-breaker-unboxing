@@ -14,7 +14,7 @@ import {
 } from "@egress/rmq/WorkQueue.ts";
 import * as Delay from "@egress/rmq/DelayedDelivery.ts";
 import * as Breaker from "./Breaker.ts";
-import { breakerFor, CurrentCaller } from "./Dependency.ts";
+import { breakerFor, CurrentCaller, localPermit } from "./Dependency.ts";
 import type { AnyDependency, Caller, Registration, Verdict } from "./Dependency.ts";
 import * as Gate from "./Gate.ts";
 import * as Limiter from "./Limiter.ts";
@@ -104,17 +104,22 @@ export const runApplication = Effect.fnUntraced(function* (cfg: ApplicationConfi
     ),
   );
   const scopeOf = (d: AnyDependency) => `${cfg.name}.${d.dependencyName}`;
+  const permits = yield* Effect.forEach(dependencies, (d) =>
+    localPermit(
+      Permit.take(scopeOf(d)).pipe(
+        Effect.provideService(Rmq, rmq),
+        Effect.orElseSucceed(() => O.none<Effect.Effect<void>>()),
+      ),
+    ),
+  );
 
   // Captured so the plain-async handlers (amqplib's callbacks, not Effect fibers) reach the application's
   // services, the broker, and each dependency's breaker.
   const captured = yield* Effect.context<Rmq>();
-  const services = Arr.reduce(dependencies, captured as Context.Context<any>, (ctx, d) =>
+  const services = Arr.reduce(Arr.zip(dependencies, permits), captured as Context.Context<any>, (ctx, [d, takePermit]) =>
     Context.add(ctx, d.guard, {
       registration: Effect.map(Ref.get(cellOf(cells, d)), (c) => c.registration),
-      takePermit: Permit.take(scopeOf(d)).pipe(
-        Effect.provideService(Rmq, rmq),
-        Effect.orElseSucceed(() => O.none<Effect.Effect<void>>()),
-      ),
+      takePermit,
     }),
   );
 
