@@ -59,6 +59,26 @@ services:
     networks: [default, devcontainer]
     deploy: *limits-broker
 
+  # The consumer application's ledger. The schema is infra/postgres/init.sql, run once on an empty volume; the
+  # application assumes it exists.
+  postgres:
+    image: postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - $HOST_WORKSPACE_FOLDER/infra/postgres/init.sql:/docker-entrypoint-initdb.d/10-ledger.sql:ro
+      - postgres-data:/var/lib/postgresql
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "consumer", "-d", "ledger"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [default, devcontainer]
+    deploy: *limits-store
+
   # The load: a steady stream onto payments-provider.work that never backs off and never reads whether the third
   # party is healthy. See packages/rmq-producer/src/producer.ts.
   rmq-producer: &rmq-node
@@ -78,15 +98,26 @@ services:
     networks: [default, devcontainer]
     deploy: *limits-producer
 
-  # One service, scaled: `docker compose up -d --scale rmq-consumer=N` is the whole of resizing the fleet. Every
-  # replica is anonymous and runs its own circuit breaker (packages/rmq-consumer/src/Breaker.ts) whose open state is a
-  # token in RabbitMQ's delay chain; nothing coordinates the fleet's breakers. Prometheus tells replicas apart by the
-  # IP DNS hands back for the service name (see infra/monitoring/prometheus.yml).
-  rmq-consumer:
+  # The same producer for the refunds consumer, at a lower rate.
+  rmq-producer-refunds:
     <<: *rmq-node
-    command: node packages/rmq-consumer/src/main.ts
     environment:
       <<: *rmq-node-env
+      API_ID: refunds-provider
+      RATE_PER_SECOND: ${REFUNDS_RATE_PER_SECOND:-50}
+
+  # One service, scaled: `docker compose up -d --scale rmq-consumer=N` is the whole of resizing the fleet. Every
+  # replica is anonymous and runs the consumer application (packages/consumer), with one circuit breaker per
+  # dependency (packages/rmq-consumer/src/Breaker.ts) whose open state is a token in RabbitMQ's delay chain; nothing
+  # coordinates the fleet's breakers. Prometheus tells replicas apart by the IP DNS hands back for the service name
+  # (see infra/monitoring/prometheus.yml).
+  rmq-consumer:
+    <<: *rmq-node
+    command: node packages/consumer/src/main.ts
+    environment:
+      RMQ: rabbitmq:5672
+      METRICS_PORT: "9464"
+      DATABASE_URL: postgres://consumer:consumer@postgres:5432/ledger
       # One address, the fake third party directly: the address a real client of a real third party would be given.
       EGRESS_ADDR: http://flaky-upstream:8080
       API_PATH: /payments
@@ -101,7 +132,9 @@ services:
     deploy:
       replicas: 5
       <<: *limits-daemon
-    depends_on: *rmq-depends
+    depends_on:
+      rabbitmq: {condition: service_healthy}
+      postgres: {condition: service_healthy}
 
   # Scrapes RabbitMQ's own Prometheus plugin and both fleets' /metrics. See
   # infra/monitoring/prometheus.yml.
@@ -142,3 +175,4 @@ volumes:
   rabbitmq-data:
   prometheus-data:
   grafana-data:
+  postgres-data:

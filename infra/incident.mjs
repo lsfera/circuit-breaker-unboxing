@@ -5,7 +5,7 @@
 //   node infra/incident.mjs
 //   WINDOW_MS=30000 RATE=0.6 node infra/incident.mjs   # a partial failure instead
 //   MODE=hang node infra/incident.mjs                  # the one that grows the work queue
-//   STATUS=422 node infra/incident.mjs                 # a 4xx: Breaker.ts's classify calls it client_error,
+//   STATUS=422 node infra/incident.mjs                 # a 4xx: the application's byStatus calls it client_error,
 //                                                       # discarded at once — no trip, no backlog
 //   CAPACITY=5 DELAY_MS=100 node infra/incident.mjs    # full, not broken: 5 at once (50/s), 429 beyond. Needs
 //                                                       # RATE_PER_SECOND above that ceiling
@@ -67,9 +67,13 @@ const callsByOutcome = async () => {
     : undefined;
 };
 
-/** One reading per replica, or `undefined` if Prometheus isn't reachable — never fails the run over it. */
+/**
+ * One reading per replica of the third party's breaker (the application's `payments-api` dependency), or
+ * `undefined` if Prometheus isn't reachable — never fails the run over it.
+ */
 const breakerStates = async () => {
-  const res = await fetch(`${PROMETHEUS}/api/v1/query?query=egress_consumer_breaker_state`).catch(
+  const query = encodeURIComponent('egress_consumer_breaker_state{dependency="payments-api"}');
+  const res = await fetch(`${PROMETHEUS}/api/v1/query?query=${query}`).catch(
     () => undefined,
   );
   if (!res || !res.ok) return undefined;

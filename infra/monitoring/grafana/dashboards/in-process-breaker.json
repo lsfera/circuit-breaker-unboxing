@@ -43,7 +43,7 @@
       "uid": "${DS_PROMETHEUS}"
      },
      "expr": "egress:fleet_open",
-     "legendFormat": "fleet",
+     "legendFormat": "{{dependency}}",
      "refId": "A"
     }
    ],
@@ -94,7 +94,7 @@
       "uid": "${DS_PROMETHEUS}"
      },
      "expr": "egress_consumer_breaker_state",
-     "legendFormat": "{{instance}}",
+     "legendFormat": "{{dependency}} {{instance}}",
      "refId": "A"
     }
    ],
@@ -193,7 +193,7 @@
   {
    "id": 3,
    "type": "timeseries",
-   "title": "Calls to the third party, by outcome",
+   "title": "Calls to each dependency, by outcome",
    "description": "egress_consumer_calls_total: ok, failed (counts toward tripping) or client_error (a 4xx other than 408/429 — dead-lettered at once, not counted). No 'open': an open breaker has no consumer, so nothing is rejected locally — the queue holds the work instead.",
    "gridPos": {
     "x": 0,
@@ -211,8 +211,8 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "sum by (outcome) (rate(egress_consumer_calls_total[10s]))",
-     "legendFormat": "{{outcome}}",
+     "expr": "sum by (dependency, outcome) (rate(egress_consumer_calls_total[10s]))",
+     "legendFormat": "{{dependency}} {{outcome}}",
      "refId": "A"
     }
    ]
@@ -238,8 +238,8 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "sum(rate(egress_consumer_breaker_trips_total[10s]))",
-     "legendFormat": "trips/s",
+     "expr": "sum by (dependency) (rate(egress_consumer_breaker_trips_total[10s]))",
+     "legendFormat": "{{dependency}} trips/s",
      "refId": "A"
     }
    ]
@@ -274,7 +274,7 @@
   {
    "id": 8,
    "type": "timeseries",
-   "title": "Failed and refused calls, by HTTP status",
+   "title": "Failed and refused calls, by dependency and reason",
    "description": "egress_consumer_calls_total for outcome failed or client_error, by status: the HTTP status the third party answered with, or timeout / network when it never did. A 4xx other than 408 and 429 is a client_error: dead-lettered at once and not counted toward tripping. Everything else here counts.",
    "gridPos": {
     "x": 0,
@@ -292,8 +292,8 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "sum by (status) (rate(egress_consumer_calls_total{outcome=~\"failed|client_error\"}[10s]))",
-     "legendFormat": "{{status}}",
+     "expr": "sum by (dependency, status) (rate(egress_consumer_calls_total{outcome=~\"failed|client_error\"}[10s]))",
+     "legendFormat": "{{dependency}} {{status}}",
      "refId": "A"
     }
    ]
@@ -373,8 +373,8 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "sum by (outcome) (rate(egress_consumer_redrives_total[10s]))",
-     "legendFormat": "{{outcome}}/s",
+     "expr": "sum by (consumer, outcome) (rate(egress_consumer_redrives_total[10s]))",
+     "legendFormat": "{{consumer}} {{outcome}}/s",
      "refId": "A"
     }
    ]
@@ -400,8 +400,8 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "sum(rate(egress_consumer_probe_permit_lost_total[10s]))",
-     "legendFormat": "lost",
+     "expr": "sum by (dependency) (rate(egress_consumer_probe_permit_lost_total[10s]))",
+     "legendFormat": "{{dependency}} lost",
      "refId": "A"
     }
    ]
@@ -428,7 +428,7 @@
       "uid": "${DS_PROMETHEUS}"
      },
      "expr": "egress_consumer_concurrency_limit",
-     "legendFormat": "{{instance}}",
+     "legendFormat": "{{consumer}} {{instance}}",
      "refId": "A"
     }
    ]

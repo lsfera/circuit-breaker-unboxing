@@ -1,0 +1,14 @@
+{
+  "name": "@egress/consumer",
+  "private": true,
+  "type": "module",
+  "description": "The consumer application, written against the @egress/rmq-consumer SDK alone: payments (charge the third party, then record the charge in PostgreSQL) and refunds (record them), each dependency behind its own breaker.",
+  "scripts": {
+    "start": "node src/main.ts"
+  },
+  "dependencies": {
+    "@effect/sql-pg": "catalog:",
+    "@egress/rmq-consumer": "workspace:*",
+    "effect": "catalog:"
+  }
+}

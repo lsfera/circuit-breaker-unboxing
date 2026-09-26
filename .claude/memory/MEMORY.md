@@ -15,3 +15,4 @@
 - [RabbitMQ reject-publish nacks](rabbitmq-reject-publish-nacks.md) — reject-publish nacks the loser; x-max-length counts only ready msgs; cockatiel half-opens inside execute() (permit never gated 03/04 until fixed 09-24).
 - [Chaos-test new components](chaos-test-new-components.md) — every new article-series component needs fault-injection-under-load; also holds the 2026-09-19 ADR-compliance pass (kill-broker fault, redrive sweep, fleet-known-replicas gauge).
 - [Article series branches](article-series-branches.md) — 01–03 plus 02-rabbitmq-only, then 04 = old master (platform level, entry criteria); main is an empty default branch; cherry-pick forward to port.
+- [Consumer SDK design](consumer-sdk-design.md) — For/bind/run, per-dependency breakers, explicit negotiation, no HTTP in the SDK, app flags; the user decided each.

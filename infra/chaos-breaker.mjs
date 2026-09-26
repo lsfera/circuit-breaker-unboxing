@@ -26,31 +26,20 @@
  * stopped for a run (all traffic comes from one forked publisher) and started again at the end, along with
  * anything a scenario killed.
  */
-import { execFile, fork } from "node:child_process";
-import { createRequire } from "node:module";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { promisify } from "node:util";
 import { bits as delayBits, entryLevel, levelName, routingKey, DELIVERY_EXCHANGE, bindingKey } from "../packages/rmq/src/DelayedDelivery.ts";
+import * as lib from "./chaos-lib.mjs";
 
-const exec = promisify(execFile);
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const args = process.argv.slice(2);
-const flag = (name, fallback) => {
-  const hit = args.find((a) => a === `--${name}` || a.startsWith(`--${name}=`));
-  return hit ? (hit.includes("=") ? hit.slice(name.length + 3) : true) : fallback;
-};
+const { amqp, audit, BROKER, consumerContainers, decodeBits, exec, flag, isSet, PROJECT, promSum, queueInfo, setFailure, sleep } = lib;
+const { skewMs, tokensInChain, tryQueueInfo, waitFor } = lib;
 
-const BROKER = process.env.BROKER ?? "amqp://guest:guest@rabbitmq:5672";
-const FLAKY = process.env.FLAKY_UPSTREAM ?? "http://flaky-upstream:8080";
-const PROMETHEUS = process.env.PROMETHEUS ?? "http://prometheus:9090";
-const PROJECT = process.env.COMPOSE_PROJECT_NAME ?? "workspace";
 const API = "payments-provider";
+/** The breaker under test: the consumer application's third party. Article 3's single breaker has no name. */
+const DEPENDENCY = "payments-api";
 const WORK = `${API}.work`;
 const DEAD = `${API}.work.dead`;
-const PERMIT = `${API}.probe-permit`;
 const REDRIVE_TRIGGER = `${API}.redrive-trigger`;
-const MANAGEMENT = process.env.RABBITMQ_MANAGEMENT ?? "http://guest:guest@rabbitmq:15672";
 
 const BASE_RATE = Number(flag("rate", 200));
 const SPIKE_RATE = Number(flag("spike", 1000));
@@ -60,174 +49,21 @@ const RECOVERY_TIMEOUT_S = Number(flag("recovery-timeout", 240));
 const DRAIN_TIMEOUT_S = Number(flag("drain-timeout", 120));
 const OUT = flag("out", `history/runs/chaos-breaker-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
 
-const amqp = createRequire(new URL("../packages/rmq/package.json", import.meta.url))("amqplib");
-
-// ---- reading the system ----------------------------------------------------
-
-/** One passive-declare per read, on a channel of its own: a failed one closes the channel it arrives on. */
-const queueInfo = async (name) => {
-  const conn = await amqp.connect(BROKER);
-  try {
-    const ch = await conn.createChannel();
-    ch.on("error", () => {});
-    const q = await ch.checkQueue(name);
-    return { ready: q.messageCount, consumers: q.consumerCount };
-  } finally {
-    await conn.close().catch(() => {});
-  }
-};
-const tryQueueInfo = (name) => queueInfo(name).catch(() => undefined);
-
-/** Tokens waiting in the delay chain, summed over every level. */
-const tokensInChain = async () => {
-  const conn = await amqp.connect(BROKER).catch(() => undefined);
-  if (!conn) return undefined;
-  try {
-    let total = 0;
-    for (let n = 0; n < 17; n++) {
-      const ch = await conn.createChannel();
-      ch.on("error", () => {});
-      total += (await ch.checkQueue(levelName(n)).catch(() => ({ messageCount: 0 }))).messageCount;
-    }
-    return total;
-  } finally {
-    await conn.close().catch(() => {});
-  }
-};
-
-/** One gauge reading per replica, from Prometheus (scraped every 2s, so a little behind). */
-const breakerStates = async () => {
-  const res = await fetch(`${PROMETHEUS}/api/v1/query?query=egress_consumer_breaker_state`, {
-    signal: AbortSignal.timeout(2000),
-  }).catch(() => undefined);
-  const body = res?.ok ? await res.json() : undefined;
-  return body?.status === "success" ? body.data.result.map((r) => Number(r.value[1])) : undefined;
-};
-
-/** Ready plus held: `x-max-length` counts only ready, so a duplicate hides behind a held token. */
-const permitTokens = async () => {
-  const url = new URL(`${MANAGEMENT}/api/queues/%2F/${PERMIT}`);
-  const auth = `Basic ${Buffer.from(`${url.username}:${url.password}`).toString("base64")}`;
-  url.username = url.password = "";
-  const q = await fetch(url, { headers: { authorization: auth } }).then((r) => r.json());
-  return { ready: q.messages_ready, held: q.messages_unacknowledged };
-};
-
-/** The container RabbitMQ has made the single active consumer of the redrive trigger. */
-const activeRedriver = async () => {
-  const url = new URL(`${MANAGEMENT}/api/queues/%2F/${REDRIVE_TRIGGER}`);
-  const auth = `Basic ${Buffer.from(`${url.username}:${url.password}`).toString("base64")}`;
-  url.username = url.password = "";
-  const q = await fetch(url, { headers: { authorization: auth } }).then((r) => r.json());
-  const ip = q.consumer_details?.find((c) => c.active)?.channel_details?.peer_host;
-  const containers = await consumerContainers();
-  const ips = await Promise.all(
-    containers.map((c) =>
-      exec("docker", ["inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", c]).then((r) =>
-        r.stdout.trim().split(" "),
-      ),
-    ),
-  );
-  return containers.find((_, i) => ips[i].includes(ip));
-};
-
-const promSum = async (query) => {
-  const res = await fetch(`${PROMETHEUS}/api/v1/query?query=${encodeURIComponent(query)}`).catch(() => undefined);
-  const body = res?.ok ? await res.json() : undefined;
-  return Number(body?.data?.result?.[0]?.value?.[1] ?? 0);
-};
-
-const setFailure = (body) =>
-  fetch(`${FLAKY}/__fail`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  }).catch(() => {});
-const audit = (run) => fetch(`${FLAKY}/__audit?run=${encodeURIComponent(run)}`).then((r) => r.json());
-
-const consumerContainers = async () =>
-  (await exec("docker", ["ps", "-a", "--filter", `name=${PROJECT}-rmq-consumer`, "--format", "{{.Names}}"])).stdout
-    .split("\n")
-    .filter(Boolean)
-    .sort();
-
-const isSet = (bitmap, n) => (bitmap[n >> 3] & (1 << (n & 7))) !== 0;
-const decodeBits = (b64) => Buffer.from(b64 ?? "", "base64");
-
-// ---- the breaker, read back from the replicas' own logs ---------------------
-
-const LINE = /^\[(\d\d:\d\d:\d\d\.\d+)\].*consumer: (up —|breaker (closed|open for (\d+)s \(attempt (\d+)\)|opened|open|half-open))/;
-/** Cockatiel logs no half-open, and logs "opened" again when a probe fails, so its only rule is open ↔ closed. */
-const LEGAL = {
-  held: { closed: ["open"], open: ["half-open"], "half-open": ["closed", "open"] },
-  cockatiel: { closed: ["open"], open: ["open", "closed"] },
-};
-
-/** Which design the running fleet is: only the held breaker names a wake queue in its startup line. */
-const detectDesign = async () => {
-  const [first] = await consumerContainers();
-  const { stdout, stderr } = await exec("docker", ["logs", first]);
-  return (stdout + stderr).includes("wake=") ? "held" : "cockatiel";
-};
 let DESIGN = "held";
-
-/** The phase sequence one replica logged since `since`, restarting at each process start. */
-const transitionsOf = async (container, since) => {
-  const { stdout, stderr } = await exec("docker", ["logs", "--since", since, container], { maxBuffer: 1 << 26 });
-  const holds = [];
-  const violations = [];
-  let previous;
-  let transitions = 0;
-  let openings = 0;
-  (stdout + stderr)
-    .split("\n")
-    .map((l) => l.match(LINE))
-    .filter(Boolean)
-    .forEach((m) => {
-      const [, , head, phase, seconds, attempt] = m;
-      if (head === "up —") return void (previous = undefined);
-      const name = phase.startsWith("open") ? "open" : phase;
-      // "open" is logged twice per opening: the phase, then the hold it chose. Count the phase only.
-      if (name === "open" && seconds !== undefined) return void holds.push({ seconds: Number(seconds), attempt: Number(attempt) });
-      transitions++;
-      if (name === "open") openings++;
-      if (previous !== undefined && !LEGAL[DESIGN][previous].includes(name)) violations.push(`${previous} → ${name}`);
-      previous = name;
-    });
-  return { container, transitions, openings, holds, violations };
-};
-
-/** The container whose most recent phase is `phase`, if any — the one a scenario may kill. */
-const containerIn = async (phase) => {
-  for (const c of await consumerContainers()) {
-    const { stdout, stderr } = await exec("docker", ["logs", "--tail", "40", c]).catch(() => ({ stdout: "", stderr: "" }));
-    const phases = (stdout + stderr)
-      .split("\n")
-      .flatMap((l) => l.match(/breaker (closed|opened|open|half-open)$/)?.[1] ?? [])
-      .map((p) => (p === "opened" ? "open" : p));
-    if (phases.at(-1) === phase) return c;
-  }
-  return undefined;
-};
+const named = () => (DESIGN === "held" ? DEPENDENCY : undefined);
+const breakerStates = () => lib.breakerStates(named());
+const permitQueue = () => (DESIGN === "held" ? lib.permitQueueFor(DEPENDENCY) : `${API}.probe-permit`);
+const permitTokens = () => lib.permitTokens(permitQueue());
+const activeRedriver = () => lib.activeRedriver(REDRIVE_TRIGGER);
+const transitionsOf = (container, since) => lib.transitionsOf(container, since, { dependency: named(), design: DESIGN });
+const containerIn = (phase) => lib.containerIn(phase, named());
 const openContainer = () => containerIn("open");
+const detectDesign = lib.detectDesign;
+const startPublisher = (run) => lib.startPublisher(run, API, BASE_RATE);
 
 // ---- a run -------------------------------------------------------------------
 
 const compose = (...a) => exec("docker", ["compose", ...a]);
-
-const startPublisher = (run) => {
-  const child = fork(new URL("./chaos-publisher.mjs", import.meta.url).pathname, [], {
-    env: { ...process.env, RUN_ID: run, QUEUE: WORK, API_ID: API, AMQP_URL: BROKER },
-  });
-  const rate = (r) => child.send({ type: "rate", rate: r });
-  const stop = () =>
-    new Promise((resolve) => {
-      child.on("message", (m) => m.type === "final" && resolve(m));
-      child.send({ type: "stop" });
-    });
-  rate(BASE_RATE);
-  return { rate, stop };
-};
 
 /** Poll once a second for `seconds`, recording what the broker and the fleet are doing. */
 const observe = async (series, t0, seconds, until = () => false) => {
@@ -254,15 +90,6 @@ const observe = async (series, t0, seconds, until = () => false) => {
   }
 };
 
-const waitFor = async (done, timeoutS) => {
-  const end = Date.now() + timeoutS * 1000;
-  while (Date.now() < end) {
-    if (await done().catch(() => false)) return true;
-    await sleep(1000);
-  }
-  return false;
-};
-
 const allClosed = async () => {
   const states = await breakerStates();
   return states !== undefined && states.length >= 5 && states.every((s) => s === 0);
@@ -271,9 +98,6 @@ const allClosed = async () => {
 /**
  * @param fault {{ inject: () => Promise<void>, during?: (ctx) => Promise<void>, restore: () => Promise<void> }}
  */
-/** Grows only while the host is suspended: wall clock minus the monotonic clock. */
-const skewMs = () => Date.now() - performance.timeOrigin - performance.now();
-
 const scenario = async (name, fault) => {
   const started = new Date();
   const skewAtStart = skewMs();
@@ -467,7 +291,7 @@ const killBrokerWhileOpen = {
 };
 
 /** Ready tokens right now, over AMQP: the management API's figures lag by seconds. */
-const permitReady = async () => (await tryQueueInfo(PERMIT))?.ready;
+const permitReady = async () => (await tryQueueInfo(permitQueue()))?.ready;
 
 /**
  * Restart replicas while a probe holds the permit, three times: a hanging third party keeps each probe open for

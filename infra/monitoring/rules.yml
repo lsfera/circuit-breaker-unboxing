@@ -1,24 +1,25 @@
-# The fleet's view of the third party, computed from what every replica
+# The fleet's view of each dependency, computed from what every replica
 # already exports — no extra process, no heartbeat: a replica counts for
 # exactly as long as Prometheus scrapes it.
 groups:
   - name: egress-fleet
     interval: 2s
     rules:
-      # Share of replicas whose breaker is open or half-open (state 1 or 2);
+      # Per dependency, the share of replicas whose breaker for it is open or
+      # half-open (state 1 or 2);
       # half-open still isn't serving normal traffic. Only samples under 10s
       # old count: a container that is gone leaves its last sample (and its
       # `up`) visible for Prometheus's 5-minute lookback — measured, six
       # series for five replicas after a rebuild.
       - record: egress:fleet_open_fraction
         expr: >-
-          avg((egress_consumer_breaker_state >= bool 1)
-            and on(instance) (time() - timestamp(egress_consumer_breaker_state) < 10))
+          avg by (dependency) ((egress_consumer_breaker_state >= bool 1)
+            and on(instance, dependency) (time() - timestamp(egress_consumer_breaker_state) < 10))
       # 1 once half the fleet or more is open, else 0.
       - record: egress:fleet_open
         expr: egress:fleet_open_fraction >= bool 0.5
-      - alert: EgressThirdPartyDown
+      - alert: EgressDependencyDown
         expr: egress:fleet_open_fraction >= 0.5
         for: 30s
         annotations:
-          summary: "Half or more of the consumer fleet's breakers have been open for 30s."
+          summary: "Half or more of the consumer fleet's breakers for {{ $labels.dependency }} have been open for 30s."

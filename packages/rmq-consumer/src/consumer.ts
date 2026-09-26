@@ -1,14 +1,12 @@
-import { Effect, Match, Metric, Option as O, Queue, Ref, Schedule, Semaphore } from "effect";
-import type { HttpClient } from "effect/unstable/http";
+import { Array as Arr, Clock, Context, Effect, Metric, Option as O, Queue, Random, Ref, Result, Schedule, Semaphore } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
+import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
 import {
   deadLetterQueueFor,
   deadLetterQueueOptions,
-  decodeWorkMessage,
   PARKED_REASON_HEADER,
   parkedQueueFor,
   parkedQueueOptions,
-  readsWorkFormat,
   redriveTriggerQueueFor,
   redriveTriggerQueueOptions,
   workQueueFor,
@@ -16,68 +14,53 @@ import {
 } from "@egress/rmq/WorkQueue.ts";
 import * as Delay from "@egress/rmq/DelayedDelivery.ts";
 import * as Breaker from "./Breaker.ts";
+import { CurrentCaller } from "./Dependency.ts";
+import type { AnyDependency, Caller, Registration, Verdict } from "./Dependency.ts";
+import * as Gate from "./Gate.ts";
 import * as Limiter from "./Limiter.ts";
+import { read } from "./Negotiation.ts";
+import type { Negotiate, Unreadable } from "./Negotiation.ts";
 import * as Permit from "./Permit.ts";
 import * as Redrive from "./Redrive.ts";
+import { settle } from "./Settle.ts";
+import type { Settled } from "./Settle.ts";
 import * as Telemetry from "./Telemetry.ts";
-import * as Upstream from "./Upstream.ts";
-import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
 
 /**
- * One competing-consumer daemon behind a circuit breaker that lives in the broker (see Breaker.ts): tripping
- * cancels this replica's consumer and a message through the delay chain brings it back. It still knows nothing
- * about the other daemons: five replicas are five breakers, each with its own token; an open replica is simply
- * not consuming. Two things are shared through the broker: the one probe permit (Permit.ts), so the fleet
- * probes one call at a time, and the redrive of `<api>.work.dead`, run by whichever replica RabbitMQ elects on
- * the redrive-trigger queue (Redrive.ts).
- *
- * Beside the breaker, not in it: a concurrency limit learned from the third party's own `429`s (Limiter.ts),
- * for a third party that is full rather than broken.
+ * One application: several consumers, each draining its own `<key>.work` with its own contract and action, and
+ * the dependencies those actions call, each behind its own breaker (Breaker.ts) whose open state is a token in
+ * the broker's delay chain. A dependency is supervised once per process, however many consumers call it, and its
+ * breaker gates every consumer that lists it (Gate.ts). Nothing here knows about the other replicas: five
+ * replicas are five breakers per dependency. Shared through the broker: one probe permit per dependency
+ * (Permit.ts), and each consumer's redrive of `<key>.work.dead`, run by whichever replica RabbitMQ elects on its
+ * redrive-trigger queue (Redrive.ts).
  */
 
-export type ConsumerConfig = {
-  readonly apiId: string;
-  /** The one address a real client would be given — no replica names, no LB it can see through. */
-  readonly egressAddr: string;
-  readonly apiPath: string;
-  /** Concurrent third-party calls, applied as the work consumer's prefetch. */
+export type ConsumerSpec = {
+  /** Names the consumer's queues: `<key>.work`, `.work.dead`, `.work.parked`, `.redrive-trigger`. */
+  readonly key: string;
+  readonly negotiate: Negotiate;
+  /** The contract: what the negotiated parser produced, as a message, or `None`. */
+  readonly decode: (input: unknown) => O.Option<unknown>;
+  readonly action: (payload: unknown, metadata: DeliveryInfo) => Effect.Effect<unknown, unknown, any>;
+  readonly dependencies: ReadonlyArray<AnyDependency>;
+};
+
+export type ApplicationConfig = {
+  /** Names the dependencies' queues (wake queues, permits) and prefixes every log line. */
+  readonly name: string;
+  /** Each consumer's concurrent actions, applied as its prefetch. */
   readonly maxInFlight: number;
-  /** Names this replica's wake queue, so the token finds only this process. */
+  /** Names this replica's wake queues, so a token finds only this process. */
   readonly replicaId: string;
   readonly breaker: Breaker.BreakerConfig;
   /**
-   * Adapt the concurrent-call limit to the third party's `429`s. `None`: a `429` is just a failed call like any
-   * other non-2xx, and `maxInFlight` never moves.
+   * Adapt each consumer's concurrency to its dependencies' `throttled` answers. `None`: `throttled` is a failed
+   * call like any other, and `maxInFlight` never moves.
    */
   readonly limit: O.Option<Limiter.LimiterConfig>;
+  readonly consumers: ReadonlyArray<ConsumerSpec>;
 };
-
-/**
- * Whether a call outcome is accepted, handed back to the broker or parked: a total function of what matters,
- * so it is testable without a broker, breaker or fetch. `client_error` skips the delivery budget and the
- * release/requeue split below entirely: it is parked at once, because a retry or a redrive gets the same answer.
- *
- * A `failed` is charged to the message (`requeue` counts toward the queue's delivery budget) only when it stands
- * alone. One that follows another failure on the same replica (`streak` above 1) or is a probe is evidence about
- * the third party, not the message, and is `release`d with no strike: the breaker needs `consecutiveFailures`
- * calls to open and its consumer takes a round trip to stop, and in that window the same few messages are
- * redelivered again and again, so charging them would dead-letter healthy messages. A message that fails between
- * successes (a poison message on a healthy third party) is still charged, and still parked.
- *
- * `throttled` (a 429 while the limit adapts) is `release`d too: the third party answered "not right now", which
- * says nothing about the message.
- */
-export type Role = "work" | "probe";
-/** A settlement, or `park`: publish to `work.parked`, then accept. */
-export type Disposition = Settlement | "park";
-export const decide = (outcome: Breaker.CallOutcome, role: Role = "work", streak = 1): Disposition =>
-  Match.value(outcome).pipe(
-    Match.when("ok", (): Disposition => "accept"),
-    Match.when("client_error", (): Disposition => "park"),
-    Match.when("throttled", (): Disposition => "release"),
-    Match.when("failed", (): Disposition => (role === "probe" || streak > 1 ? "release" : "requeue")),
-    Match.exhaustive,
-  );
 
 /**
  * Longer than the client's connection-recovery budget (about five minutes), so a wake queue survives a reconnect
@@ -86,62 +69,153 @@ export const decide = (outcome: Breaker.CallOutcome, role: Role = "work", streak
 const WAKE_QUEUE_EXPIRES_MS = 600_000;
 
 /**
- * How long a 429 keeps its concurrency slot before the message is released: the backoff the third party asked
- * for. Jittered so replicas don't come back in lockstep.
+ * How long a `throttled` answer keeps its concurrency slot before the message is released: the backoff the
+ * dependency asked for. Jittered so replicas don't come back in lockstep.
  */
-const THROTTLE_HOLD_MIN_MS = 100;
-const THROTTLE_HOLD_MAX_MS = 400;
-const throttleHoldMs = (): number =>
-  THROTTLE_HOLD_MIN_MS + Math.random() * (THROTTLE_HOLD_MAX_MS - THROTTLE_HOLD_MIN_MS);
+const throttleHold = Effect.flatMap(Random.nextBetween(100, 400), (ms) => Effect.sleep(ms));
 
 /** A clock-driven redrive trigger: a message can dead-letter while every breaker stays closed. */
 const REDRIVE_SWEEP = "30 seconds";
 
-export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
+/** A breaker's state, as the Gates, the wrapped calls and the redrive read it. */
+type Cell = { readonly registration: O.Option<Registration>; readonly phase: Breaker.Phase };
+type Cells = Record<string, Ref.Ref<Cell>>;
+
+type Running = {
+  readonly spec: ConsumerSpec;
+  readonly gate: Gate.Gate;
+  readonly triggerRedrive: Effect.Effect<void>;
+};
+
+const cellOf = (cells: Cells, d: AnyDependency) => cells[d.dependencyName]!;
+
+export const runApplication = Effect.fnUntraced(function* (cfg: ApplicationConfig) {
   const rmq = yield* Rmq;
-  const workQueue = workQueueFor(cfg.apiId);
-  const deadQueue = deadLetterQueueFor(cfg.apiId);
-
-  yield* rmq.declareQueue(deadQueue, deadLetterQueueOptions());
-  yield* rmq.declareQueue(workQueue, workQueueOptions(cfg.apiId));
-
-  // Captured so the plain-async handlers below (amqplib's callbacks, not Effect fibers) can still reach this
-  // process's services: metrics, and the broker for the permit and the redrive.
-  const services = yield* Effect.context<HttpClient.HttpClient | Rmq>();
-  const runInContext = Effect.runPromiseWith(services);
-
-  // The open state is a message addressed to this replica, so the queue it comes back on belongs to it: named
-  // by it, and collected by the broker when the replica is gone for good.
-  const wakeQueue = `${cfg.apiId}.breaker.wake.${cfg.replicaId}`;
   yield* Delay.declare();
-  yield* rmq.declareQueue(wakeQueue, { args: { "x-expires": WAKE_QUEUE_EXPIRES_MS } });
-  yield* Delay.receive(wakeQueue);
-  const wakes = yield* Queue.unbounded<number>();
-  yield* rmq.consume(
-    wakeQueue,
-    (_body, delivery) => {
-      Queue.offerUnsafe(wakes, Number(delivery.properties.attempt));
-      return "accept";
-    },
-    { prefetch: 1 },
+
+  const dependencies = Arr.dedupeWith(
+    Arr.flatMap(cfg.consumers, (c) => c.dependencies),
+    (a: AnyDependency, b: AnyDependency) => a.dependencyName === b.dependencyName,
+  );
+  const cells: Cells = Object.fromEntries(
+    yield* Effect.forEach(dependencies, (d) =>
+      Effect.map(Ref.make<Cell>({ registration: O.none(), phase: "closed" }), (cell) => [d.dependencyName, cell] as const),
+    ),
+  );
+  const scopeOf = (d: AnyDependency) => `${cfg.name}.${d.dependencyName}`;
+
+  // Captured so the plain-async handlers (amqplib's callbacks, not Effect fibers) reach the application's
+  // services, the broker, and each dependency's breaker.
+  const captured = yield* Effect.context<Rmq>();
+  const services = Arr.reduce(dependencies, captured as Context.Context<any>, (ctx, d) =>
+    Context.add(ctx, d.guard, {
+      registration: Effect.map(Ref.get(cellOf(cells, d)), (c) => c.registration),
+      takePermit: Permit.take(scopeOf(d)).pipe(
+        Effect.provideService(Rmq, rmq),
+        Effect.orElseSucceed(() => O.none<Effect.Effect<void>>()),
+      ),
+    }),
   );
 
-  const phase = yield* Ref.make<Breaker.Phase>("closed");
-  const isClosed = Effect.map(Ref.get(phase), (p) => p === "closed");
+  const running = yield* Effect.forEach(cfg.consumers, (spec) => runConsumer(cfg, spec, cells, services));
 
-  yield* Permit.seed(cfg.apiId);
+  const superviseDependency = Effect.fnUntraced(function* (d: AnyDependency) {
+    const name = d.dependencyName;
+    const cell = cellOf(cells, d);
+    const gates = Arr.filter(running, (r) => r.spec.dependencies.some((x) => x.dependencyName === name));
+    // Concurrently: each Gate may have to drain its consumer's in-flight actions.
+    const reconcile = Effect.forEach(gates, (r) => r.gate.reconcile, { concurrency: "unbounded", discard: true });
 
+    // The open state is a message addressed to this replica, so the queue it comes back on belongs to it:
+    // named by it, and collected by the broker when the replica is gone for good.
+    const wakeQueue = `${scopeOf(d)}.breaker.wake.${cfg.replicaId}`;
+    yield* rmq.declareQueue(wakeQueue, { args: { "x-expires": WAKE_QUEUE_EXPIRES_MS } });
+    yield* Delay.receive(wakeQueue);
+    const wakes = yield* Queue.unbounded<number>();
+    yield* rmq.consume(
+      wakeQueue,
+      (_body, delivery) => {
+        Queue.offerUnsafe(wakes, Number(delivery.properties.attempt));
+        return "accept";
+      },
+      { prefetch: 1 },
+    );
+    yield* Permit.seed(scopeOf(d));
+
+    const setRegistration = (registration: O.Option<Registration>) =>
+      Ref.update(cell, (c) => ({ ...c, registration }));
+    const register = (registration: Registration) =>
+      setRegistration(O.some(registration)).pipe(Effect.andThen(reconcile), Effect.as(registration));
+
+    const breakerState = Metric.withAttributes(Telemetry.breakerState, { dependency: name });
+    const breakerTrips = Metric.withAttributes(Telemetry.breakerTrips, { dependency: name });
+
+    return yield* Breaker.supervise<Registration>(cfg.breaker, {
+      subscribe: (report) => register({ phase: "closed", report }),
+      probe: (verdict) => register({ phase: "half-open", verdict }),
+      // Unregistering can only stop subscriptions, never start one: a failure here is a broken invariant.
+      retire: () => setRegistration(O.none()).pipe(Effect.andThen(reconcile), Effect.orDie),
+      hold: (seconds, attempt) =>
+        Delay.sendDelayed(wakeQueue, seconds, "wake", { headers: { attempt: String(attempt) } }).pipe(
+          Effect.provideService(Rmq, rmq),
+          Effect.andThen(Effect.log(`${cfg.name}: breaker ${name} open for ${seconds}s (attempt ${attempt})`)),
+          Effect.andThen(Queue.take(wakes)),
+        ),
+      onPhase: (next) =>
+        Ref.update(cell, (c) => ({ ...c, phase: next })).pipe(
+          Effect.andThen(Metric.update(breakerState, Breaker.PHASE_CODE[next])),
+          Effect.andThen(next === "open" ? Metric.update(breakerTrips, 1) : Effect.void),
+          Effect.andThen(Effect.log(`${cfg.name}: breaker ${name} ${next}`)),
+          // Closing (startup included) is when "the outage may be over" first becomes true here.
+          Effect.andThen(
+            next === "closed" ? Effect.forEach(gates, (r) => r.triggerRedrive, { discard: true }) : Effect.void,
+          ),
+        ),
+    });
+  });
+
+  yield* Effect.log(
+    `${cfg.name}: up — consumers=${running.map((r) => `${r.spec.key}[${r.spec.dependencies.map((d) => d.dependencyName).join(",")}]`).join(",")} ` +
+      `maxInFlight=${cfg.maxInFlight} wake=${cfg.name}.<dependency>.breaker.wake.${cfg.replicaId} ` +
+      `breaker=${cfg.breaker.consecutiveFailures}consecutive/${cfg.breaker.initialDelaySeconds}-${cfg.breaker.maxDelaySeconds}s ` +
+      `limit=${O.match(cfg.limit, { onNone: () => "off", onSome: (l) => `${l.min}-${l.max} x${l.decrease}` })}`,
+  );
+
+  // Runs for the process's life: the phases repeat, and it ends only if the broker fails an operation a
+  // breaker cannot do without.
+  return yield* Effect.forEach(dependencies, superviseDependency, { concurrency: "unbounded", discard: true });
+});
+
+const runConsumer = Effect.fnUntraced(function* (
+  cfg: ApplicationConfig,
+  spec: ConsumerSpec,
+  cells: Cells,
+  services: Context.Context<any>,
+) {
+  const rmq = yield* Rmq;
+  const log = `${cfg.name}/${spec.key}`;
+  const runInContext = Effect.runPromiseWith(services);
+  const attributes = { consumer: spec.key };
+
+  const workQueue = workQueueFor(spec.key);
+  yield* rmq.declareQueue(deadLetterQueueFor(spec.key), deadLetterQueueOptions());
+  yield* rmq.declareQueue(workQueue, workQueueOptions(spec.key));
   // Every replica declares the parked queue, even those never elected: every process that might touch a
   // queue has to agree on its arguments.
-  yield* rmq.declareQueue(parkedQueueFor(cfg.apiId), parkedQueueOptions());
-  const parkedPub = yield* rmq.publisherToQueue(parkedQueueFor(cfg.apiId));
-  const redriveQueue = redriveTriggerQueueFor(cfg.apiId);
+  yield* rmq.declareQueue(parkedQueueFor(spec.key), parkedQueueOptions());
+  const parkedPub = yield* rmq.publisherToQueue(parkedQueueFor(spec.key));
+
+  const isClosed = Effect.map(
+    Effect.forEach(spec.dependencies, (d) => Ref.get(cellOf(cells, d))),
+    Arr.every((c) => c.phase === "closed"),
+  );
+
+  const redriveQueue = redriveTriggerQueueFor(spec.key);
   yield* rmq.declareQueue(redriveQueue, redriveTriggerQueueOptions());
   const redriveTriggerPub = yield* rmq.publisherToQueue(redriveQueue);
   const triggerRedrive = rmq.send(redriveTriggerPub, "redrive").pipe(
-    Effect.catch((err) => Effect.logWarning(`${cfg.apiId}/consumer: redrive trigger publish failed`, err)),
+    Effect.catch((err) => Effect.logWarning(`${log}: redrive trigger publish failed`, err)),
   );
-
   // Two triggers close together must not start overlapping passes; one that arrives mid-pass is dropped.
   const redriving = yield* Ref.make(false);
   const redrivePass = Ref.modify(redriving, (running) => [running, true] as const).pipe(
@@ -149,204 +223,152 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
       running
         ? Effect.void
         : Redrive.runPass({
-            apiId: cfg.apiId,
+            apiId: spec.key,
             // This replica's own view, not the fleet's: see README.md's "what this still doesn't fix".
             isClosed,
             onOutcome: (outcome) =>
-              void runInContext(Metric.update(Metric.withAttributes(Telemetry.redrives, { outcome }), 1)),
+              void runInContext(Metric.update(Metric.withAttributes(Telemetry.redrives, { ...attributes, outcome }), 1)),
           }).pipe(Effect.ensuring(Ref.set(redriving, false))),
     ),
-    Effect.catch((err) => Effect.logWarning(`${cfg.apiId}/consumer: redrive pass failed`, err)),
+    Effect.catch((err) => Effect.logWarning(`${log}: redrive pass failed`, err)),
   );
   // Only the consumer RabbitMQ has made active (`x-single-active-consumer`) receives anything here.
   yield* rmq.consume(redriveQueue, () => {
     Effect.runForkWith(services)(redrivePass);
     return "accept";
   });
-  yield* Effect.forkChild(
-    Effect.repeat(Effect.when(triggerRedrive, isClosed), Schedule.spaced(REDRIVE_SWEEP)),
-  );
+  yield* Effect.forkChild(Effect.repeat(Effect.when(triggerRedrive, isClosed), Schedule.spaced(REDRIVE_SWEEP)));
 
-  // With the concurrency limit adapting, a 429 means "full", not "broken": `throttled`, not a breaker failure.
-  const throttling = O.isSome(cfg.limit);
-
-  // How many of the `maxInFlight` prefetched messages may be in a call at once. Without a `limit` config the
-  // semaphore never resizes, so it admits exactly what the consumer's own prefetch already did.
+  // How many of the `maxInFlight` prefetched messages may be in an action at once. Without a `limit` config
+  // the semaphore never resizes, so it admits exactly what the consumer's own prefetch already did.
   const limit = O.map(cfg.limit, (c) => new Limiter.AdaptiveLimit(c));
   const initialSlots = O.match(limit, { onNone: () => cfg.maxInFlight, onSome: (l) => l.slots });
-  const slots = Semaphore.makeUnsafe(initialSlots);
-  yield* Metric.update(Telemetry.concurrencyLimit, initialSlots);
+  const slots = yield* Semaphore.make(initialSlots);
+  const concurrencyLimit = Metric.withAttributes(Telemetry.concurrencyLimit, attributes);
+  yield* Metric.update(concurrencyLimit, initialSlots);
   const adapt = (change: (l: Limiter.AdaptiveLimit) => void) =>
-    O.map(limit, (l) => {
-      const before = l.slots;
-      change(l);
-      return l.slots === before
-        ? undefined
-        : runInContext(
-            Semaphore.resize(slots, l.slots).pipe(Effect.andThen(Metric.update(Telemetry.concurrencyLimit, l.slots))),
-          );
-    });
+    Effect.suspend(() =>
+      O.match(limit, {
+        onNone: () => Effect.void,
+        onSome: (l) => {
+          const before = l.slots;
+          change(l);
+          return l.slots === before
+            ? Effect.void
+            : Semaphore.resize(slots, l.slots).pipe(Effect.andThen(Metric.update(concurrencyLimit, l.slots)));
+        },
+      }),
+    );
 
-  let inFlight = 0;
+  // A `throttled` answer keeps its slot through the hold. Released first, the slot is free again the moment
+  // the answer comes back and the next waiting message spends it on another `throttled`.
+  const caller: Caller = {
+    consumer: spec.key,
+    throttling: O.isSome(cfg.limit),
+    epoch: () => O.match(limit, { onNone: () => 0, onSome: (l) => l.epoch }),
+    observe: (verdict: Verdict, startedIn: number) =>
+      verdict.outcome === "ok"
+        ? adapt((l) => l.succeeded())
+        : verdict.outcome === "throttled"
+          ? adapt((l) => l.throttled(startedIn)).pipe(Effect.andThen(throttleHold))
+          : Effect.void,
+  };
+
+  const inFlight = yield* Ref.make(0);
+  const inFlightGauge = Metric.withAttributes(Telemetry.inFlight, attributes);
   const setInFlight = (delta: 1 | -1) =>
-    Effect.suspend(() => Metric.update(Telemetry.inFlight, (inFlight += delta)));
+    Effect.flatMap(Ref.updateAndGet(inFlight, (n) => n + delta), (n) => Metric.update(inFlightGauge, n));
 
-  // A `429` keeps its concurrency slot through the hold. Released first, the slot is free again the moment the
-  // 429 comes back and the next waiting message spends it on another 429.
-  const callUpstream = (key: string): Promise<Upstream.CallStatus> =>
-    runInContext(
-      Semaphore.withPermit(
-        slots,
-        Effect.suspend(() => {
-          const startedIn = O.match(limit, { onNone: () => 0, onSome: (l) => l.epoch });
-          return setInFlight(1).pipe(
-            Effect.andThen(Upstream.call(`${cfg.egressAddr}${cfg.apiPath}`, key)),
-            Effect.ensuring(setInFlight(-1)),
-            Effect.tap((status) =>
-              Match.value(Breaker.classify(status, throttling)).pipe(
-                Match.when("ok", () => Effect.sync(() => adapt((l) => l.succeeded()))),
-                Match.when("throttled", () =>
-                  Effect.sync(() => adapt((l) => l.throttled(startedIn))).pipe(
-                    Effect.andThen(Effect.sleep(throttleHoldMs())),
-                  ),
-                ),
-                Match.orElse(() => Effect.void),
-              ),
-            ),
-          );
-        }),
-      ),
-    );
-
-  // Logged at most once a second: a publisher that starts sending `gzip` by mistake, or a third party that
-  // starts refusing every request, would otherwise empty the queue into the dead-letter queue without a trace.
+  // Logged at most once a second: a publisher that starts sending `gzip` by mistake, or a dependency that
+  // starts refusing every message, would otherwise empty the queue into the parked queue without a trace.
   // The counters carry the volume.
-  let lastLoggedAt = 0;
-  const warnAtMostOncePerSecond = (message: () => string): void => {
-    O.map(
-      O.liftPredicate(Date.now(), (now) => now - lastLoggedAt >= 1000),
-      (now) => {
-        lastLoggedAt = now;
-        return runInContext(Effect.logWarning(message()));
-      },
+  const lastLoggedAt = yield* Ref.make(0);
+  const warnAtMostOncePerSecond = (message: () => string) =>
+    Clock.currentTimeMillis.pipe(
+      Effect.flatMap((now) => Ref.modify(lastLoggedAt, (last) => (now - last >= 1000 ? [true, now] : [false, last]))),
+      Effect.flatMap((due) => (due ? Effect.logWarning(message()) : Effect.void)),
     );
-  };
 
-  const permitLost = (): Settlement => {
-    runInContext(Metric.update(Telemetry.permitLost, 1));
-    return "release";
-  };
+  const declared = (o: O.Option<string>) => O.getOrElse(o, () => "none");
 
-  // The permit is held for the call alone, not while the probe consumer waits for a message.
   /**
    * Poison goes straight to `work.parked`, never through the dead-letter queue: the redrive would replay it
    * `MAX_REDRIVES` times for the same answer. If the park itself fails, dead-lettering keeps it, and the
    * redrive parks it in the end.
    */
-  const park = (body: string, messageId: O.Option<string>, reason: string): Promise<Settlement> =>
-    runInContext(
-      rmq.send(parkedPub, body, {
-        messageId: O.getOrUndefined(messageId),
+  const park = (body: string, delivery: DeliveryInfo, reason: string): Effect.Effect<Settlement> =>
+    rmq
+      .send(parkedPub, body, {
+        messageId: O.getOrUndefined(delivery.messageId),
         headers: { [PARKED_REASON_HEADER]: reason },
-      }),
-    ).then(
-      (): Settlement => "accept",
-      (): Settlement => "discard",
+      })
+      .pipe(
+        Effect.as<Settlement>("accept"),
+        Effect.orElseSucceed((): Settlement => "discard"),
+      );
+
+  // A body this consumer cannot read, or that is not a message of its contract, was never published for it:
+  // park it unread rather than spend the delivery budget on something no retry can fix.
+  const unreadable = (reason: Unreadable, body: string, delivery: DeliveryInfo) =>
+    Metric.update(Metric.withAttributes(Telemetry.discarded, { ...attributes, reason }), 1).pipe(
+      Effect.andThen(
+        warnAtMostOncePerSecond(
+          () =>
+            `${log}: parking a ${reason} delivery — message_id ${declared(delivery.messageId)}, ` +
+            `type ${declared(delivery.type)}, content-type ${declared(delivery.contentType)}, ` +
+            `content-encoding ${declared(delivery.contentEncoding)}`,
+        ),
+      ),
+      Effect.andThen(park(body, delivery, `unreadable-${reason}`)),
     );
 
-  const probeCall = (body: string, key: string, verdict: (v: Breaker.ProbeVerdict) => void): Promise<Settlement> =>
-    runInContext(Permit.take(cfg.apiId).pipe(Effect.orElseSucceed(() => O.none<Effect.Effect<void>>()))).then(
-      O.match({
-        onNone: () => {
-          verdict("no-permit");
-          return permitLost();
-        },
-        onSome: (giveBack) =>
-          attempt(body, key, "probe", (ok) => {
-            verdict(ok ? "ok" : "failed");
-            return ok ? 0 : 1;
-          }).finally(() => runInContext(giveBack)),
+  const dispose = (body: string, delivery: DeliveryInfo, settled: Settled): Effect.Effect<Settlement> =>
+    settled.disposition === "park"
+      ? warnAtMostOncePerSecond(() => `${log}: parking message_id ${declared(delivery.messageId)}: ${settled.reason}`).pipe(
+          Effect.andThen(park(body, delivery, settled.reason)),
+        )
+      : settled.reason === "defect" || settled.reason === "unwrapped-error"
+        ? warnAtMostOncePerSecond(
+            () => `${log}: the action failed outside any dependency (${settled.reason}); requeueing`,
+          ).pipe(Effect.as(settled.disposition))
+        : Effect.succeed(settled.disposition);
+
+  const act = (payload: unknown, body: string, delivery: DeliveryInfo) =>
+    Semaphore.withPermit(
+      slots,
+      setInFlight(1).pipe(
+        Effect.andThen(Effect.exit(Effect.suspend(() => spec.action(payload, delivery)))),
+        Effect.ensuring(setInFlight(-1)),
+      ),
+    ).pipe(
+      Effect.provideService(CurrentCaller, caller),
+      Effect.flatMap((exit) => {
+        // A defect is logged in full: `settle` only sees that there was one.
+        const settled = settle(exit);
+        return settled.reason === "defect"
+          ? Effect.logError(`${log}: the action died`, exit).pipe(Effect.andThen(dispose(body, delivery, settled)))
+          : dispose(body, delivery, settled);
       }),
     );
 
-  const attempt = async (body: string, key: string, role: Role, report: Breaker.Report): Promise<Settlement> => {
-    const status = await callUpstream(key);
-    const outcome = Breaker.classify(status, throttling);
-    const streak = report(outcome !== "failed");
-    runInContext(Metric.update(Metric.withAttributes(Telemetry.calls, { outcome, status: String(status) }), 1));
-    if (outcome === "client_error") {
-      warnAtMostOncePerSecond(
-        () => `${cfg.apiId}/consumer: third party refused message_id ${key} with ${status}, parking it`,
-      );
-    }
-    const disposition = decide(outcome, role, streak);
-    return disposition === "park" ? park(body, O.some(key), `refused-${status}`) : disposition;
-  };
-
-  // A body that declares a content type, encoding or message type this daemon cannot read, does not decode, or
-  // carries no `message_id` to use as its idempotency key was never published by this fleet: park it unread
-  // rather than spend the delivery budget on something no retry can fix.
-  const discard = (reason: "format" | "malformed" | "keyless", body: string, delivery: DeliveryInfo): Promise<Settlement> => {
-    runInContext(Metric.update(Metric.withAttributes(Telemetry.discarded, { reason }), 1));
-    warnAtMostOncePerSecond(() => {
-      const declared = (o: O.Option<string>) => O.getOrElse(o, () => "none");
-      return (
-        `${cfg.apiId}/consumer: parking a ${reason} delivery — message_id ${declared(delivery.messageId)}, ` +
-        `type ${declared(delivery.type)}, content-type ${declared(delivery.contentType)}, ` +
-        `content-encoding ${declared(delivery.contentEncoding)}`
-      );
+  const readBody = read(spec.negotiate, spec.decode);
+  const handle = (body: string, delivery: DeliveryInfo): Effect.Effect<Settlement, never, any> =>
+    Result.match(readBody(body, delivery), {
+      onFailure: (reason) => unreadable(reason, body, delivery),
+      onSuccess: (payload) => act(payload, body, delivery),
     });
-    return park(body, delivery.messageId, `unreadable-${reason}`);
-  };
 
-  const call = (body: string, delivery: DeliveryInfo, run: (key: string) => Promise<Settlement>): Promise<Settlement> =>
-    readsWorkFormat(delivery)
-      ? O.match(decodeWorkMessage(body), {
-          onNone: () => discard("malformed", body, delivery),
-          // The key is the message's own `message_id`, assigned once by the
-          // producer: no id means no safe retry, so no call.
-          onSome: () =>
-            O.match(delivery.messageId, {
-              onNone: () => discard("keyless", body, delivery),
-              onSome: run,
-            }),
-        })
-      : discard("format", body, delivery);
-
-  const supervisor = Breaker.supervise(cfg.breaker, {
-    subscribe: (report) =>
-      rmq.consume(workQueue, (body, delivery) => call(body, delivery, (key) => attempt(body, key, "work", report)), {
-        prefetch: cfg.maxInFlight,
-      }),
-    // A probe is one message: prefetch 1 is the whole mechanism.
-    probe: (verdict) =>
-      rmq.consume(workQueue, (body, delivery) => call(body, delivery, (key) => probeCall(body, key, verdict)), {
-        prefetch: 1,
-      }),
-    retire: rmq.drainConsumer,
-    hold: (seconds, attempt) =>
-      Delay.sendDelayed(wakeQueue, seconds, "wake", { headers: { attempt: String(attempt) } }).pipe(
-        Effect.provideService(Rmq, rmq),
-        Effect.andThen(Effect.log(`${cfg.apiId}/consumer: breaker open for ${seconds}s (attempt ${attempt})`)),
-        Effect.andThen(Queue.take(wakes)),
-      ),
-    onPhase: (next) =>
-      Ref.set(phase, next).pipe(
-        Effect.andThen(Metric.update(Telemetry.breakerState, Breaker.PHASE_CODE[next])),
-        Effect.andThen(next === "open" ? Metric.update(Telemetry.breakerTrips, 1) : Effect.void),
-        Effect.andThen(Effect.log(`${cfg.apiId}/consumer: breaker ${next}`)),
-        // Closing (startup included) is when "the outage may be over" first becomes true here.
-        Effect.andThen(next === "closed" ? triggerRedrive : Effect.void),
-      ),
-  });
-
-  yield* Effect.log(
-    `${cfg.apiId}/consumer: up — maxInFlight=${cfg.maxInFlight} egress=${cfg.egressAddr}${cfg.apiPath} work=${workQueue} ` +
-      `wake=${wakeQueue} breaker=${cfg.breaker.consecutiveFailures}consecutive/${cfg.breaker.initialDelaySeconds}-${cfg.breaker.maxDelaySeconds}s ` +
-      `limit=${O.match(cfg.limit, { onNone: () => "off", onSome: (l) => `${l.min}-${l.max} x${l.decrease}` })}`,
+  const gate = yield* Gate.make(
+    Effect.forEach(spec.dependencies, (d) => Effect.map(Ref.get(cellOf(cells, d)), (c) => c.registration)),
+    {
+      // A probe is one message: prefetch 1 is the whole mechanism.
+      subscribe: (mode) =>
+        rmq.consume(workQueue, (body, delivery) => runInContext(handle(body, delivery)), {
+          prefetch: mode === "probe" ? 1 : cfg.maxInFlight,
+        }),
+      retire: rmq.drainConsumer,
+    },
   );
 
-  // Runs for the process's life: the phases repeat, and it ends only if the
-  // broker fails an operation the breaker cannot do without.
-  yield* supervisor;
+  return { spec, gate, triggerRedrive } satisfies Running;
 });

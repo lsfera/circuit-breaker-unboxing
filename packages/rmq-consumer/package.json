@@ -2,9 +2,9 @@
   "name": "@egress/rmq-consumer",
   "private": true,
   "type": "module",
-  "description": "The competing-consumer fleet: pulls off <apiId>.work and calls the third party behind a circuit breaker whose open state lives in RabbitMQ (a token in a delay chain), not in memory. Each replica's breaker is independent — nothing here coordinates the fleet yet.",
-  "scripts": {
-    "start": "node src/main.ts"
+  "description": "The consumer SDK: an application declares its contracts, what it does with each message and the dependencies that work calls; this runs the rest — one breaker per dependency whose open state is a token in RabbitMQ's delay chain, the fleet's probe permits, the redrive of dead letters, a concurrency limit learned from throttled answers, parking and metrics. packages/consumer is the application written against it.",
+  "exports": {
+    ".": "./src/index.ts"
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",

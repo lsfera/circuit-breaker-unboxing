@@ -73,19 +73,25 @@ fact about the broker rather than a variable:
 | **open** | *no* consumer; a wake token is in the delay chain, addressed to this replica | the token comes back after its hold |
 | **half-open** | a consumer with `prefetch: 1` — the first message it gets is the probe | probe succeeds → closed; fails → open again with a longer hold |
 
-- **What counts as a failure.** `classify` in `Breaker.ts` reads the HTTP
-  status (`Upstream.ts` only reports it, unjudged): a 2xx is `ok`; a 4xx other
-  than 408 and 429 is `client_error` — the third party is up and refused this
-  request, so it counts as a breaker success and never trips or reopens
-  anything; everything else (5xx, 408, 429, a timeout, a dropped connection) is
-  `failed`, and is what the phase table above means by "calls fail".
+- **What counts as a failure** is the application's to say: each dependency is
+  declared with a `classify` over the Exit of the effect it wraps (see *The
+  consumer as an SDK* below). For the third party, `byStatus` in
+  `packages/consumer/src/main.ts`: a 2xx is `ok`; a 4xx other than 408 and 429
+  is `client_error` — the third party is up and refused this request, so it
+  counts as a breaker success and never trips or reopens anything; a 429 is
+  `throttled`; everything else (5xx, 408, a dropped connection) is `failed`,
+  and so is no answer within the dependency's timeout, which the SDK decides
+  before `classify` is asked. `failed` is what the phase table above means by
+  "calls fail".
 - **A `client_error` is parked at once, not released or requeued.**
   Repeating a refused request gets the same answer, so `decide()`
-  (`consumer.ts`) sends it straight to `work.parked` on its first delivery,
-  stamped `x-egress-parked-reason: refused-<status>`, skipping the
+  (`Settle.ts`) sends it straight to `work.parked` on its first delivery,
+  stamped `x-egress-parked-reason: refused-<dependency>-<status>`, skipping the
   release/requeue distinction below entirely. A delivery the consumer cannot
-  read (wrong format, not a work message, no `message_id`) is parked the same
-  way, as `unreadable-<reason>`. Through `work.dead` either would be redriven
+  read (a format its negotiation declines, a body that is not a message of its
+  contract) is parked the same way, as `unreadable-<reason>`, and so is one the
+  action rejects before calling anything (no `message_id`:
+  `rejected-keyless`). Through `work.dead` either would be redriven
   five times for the same answer. The catch: a 4xx that is really ours to
   fix — expired credentials (401, 403), a wrong path (404) — refuses every
   message the same way, and every one is parked on its first call. Nothing here stops that;
@@ -183,6 +189,13 @@ answered `429`, no breaker trip and nothing dead-lettered. `outage`,
 passed again alongside it (`docs/runs/chaos-breaker-429.json`). Runs are saved
 under `history/runs/` (git-ignored;
 the runs behind the article are kept in `docs/runs/`).
+Since the consumer became an SDK (see *The consumer as an SDK*), this breaker is
+the application's `payments-api` dependency, and the same suite ran against it
+on 2026-09-26. All nine graded scenarios passed: 0 lost, 0 dead-lettered,
+600 of 600 redriven, and no breaker trip under `overload` (1,485 calls
+answered `429`). The results are in `docs/runs/chaos-breaker-sdk.json`;
+`redrive-failover` was voided by a host suspend, and its rerun is
+`…-sdk-redrive-rerun.json`.
 `infra/capture-incident.mjs` records the dashboard through an incident (it needs
 `playwright-core`, which this repo does not depend on).
 
@@ -369,6 +382,122 @@ messages were processed with the redriver killed. The differences:
 Runs: `docs/runs/compare-article3-cockatiel.json` and
 `docs/runs/compare-held.json`.
 
+## The consumer as an SDK
+
+`packages/rmq-consumer` is a library, and the consumer is an application
+written against it alone (`packages/consumer/src/main.ts`, which imports
+nothing else from this repo). It has two consumers and two dependencies:
+payments charge the third party and then record the charge in PostgreSQL;
+refunds only record.
+
+```ts
+const ThirdParty = Consumer.Dependency("payments-api", { classify: byStatus });
+const Database = Consumer.Dependency("ledger", { classify: bySqlError });
+const json = Consumer.accept(
+  { "application/json": Schema.fromJsonString(Schema.Unknown) },
+  { undeclared: "application/json", type: "egress.work" },
+);
+
+const payments = Consumer.For(Payment, json).bind(
+  Effect.fnUntraced(function* (payment, metadata) {
+    const key = yield* keyOf(metadata);                     // Rejected (parked) without a message_id
+    yield* ThirdParty((yield* PaymentsApi).charge(key));    // halts here unless the charge was ok
+    yield* Database((yield* Ledger).record(key, payment));
+  }),
+  [ThirdParty, Database],
+);
+const refunds = Consumer.For(Refund, json).bind(/* … */, [Database]);
+
+Consumer.run({
+  consumers: { "payments-provider": payments, "refunds-provider": refunds },
+  flags: { egressAddr, apiPath, databaseUrl },               // beside the SDK's, in one --help
+  layer: ({ egressAddr, apiPath, databaseUrl }) =>
+    Layer.mergeAll(PaymentsApi.layer(`${egressAddr}${apiPath}`), Ledger.layer(databaseUrl)),
+});
+```
+
+- **The application decides what it reads and what an answer means.**
+  Content negotiation has no default: each media type the application reads
+  maps to a Schema that parses it, so a body that does not parse is an answer,
+  not an exception. Each dependency is declared with a
+  `classify` over the Exit of the effect it wraps. `byStatus` is the HTTP
+  table above. `bySqlError` reads the SQLSTATE class Effect already puts on
+  `SqlError`: contention (lock timeout, deadlock, serialization) is
+  `throttled`, a constraint the row violates is `client_error`, and
+  everything else is `failed`.
+- **One breaker per dependency.** `Breaker.supervise` is unchanged, but a
+  breaker no longer owns a RabbitMQ consumer. It registers (closed or
+  half-open) or withdraws (open). One Gate per consumer turns the
+  registrations of the dependencies that consumer lists into its
+  subscription: any of them open means no subscription, any half-open means
+  prefetch 1, and all closed means full prefetch. Wake queues and probe
+  permits are per dependency (`consumer.<dependency>.…`), shared by every
+  consumer that calls it.
+- **The types hold the application to its lists.** A wrapped call needs its
+  dependency's breaker as a service, which only a consumer that lists the
+  dependency provides. A dependency called but not listed, or a service no
+  layer provides, fails to compile at `run`.
+- **The ledger is the second dependency, in PostgreSQL** (compose service
+  `postgres`, schema in `infra/postgres/init.sql`, which the application
+  assumes exists). Writes are idempotent on `message_id`.
+
+**Chaos**, 2026-09-26: `node infra/chaos-app.mjs` puts both consumers under a
+spike (payments 200 → 1,000/s, refunds 50 → 200/s) and injects each fault for
+about 40s. It grades per message: nothing lost, both dead-letter queues back
+where they started, nothing parked, one permit per dependency, and legal
+transitions for each dependency on every replica. It also checks that the
+ledger is exact: every charge is recorded once, and nothing is recorded
+without a charge. Every scenario met all of that.
+
+| scenario | fault | payments / refunds | breakers | behaviour |
+| --- | --- | --- | --- | --- |
+| `upstream-outage` | third party 503s | 46,327 / 9,541, 0 lost | `payments-api` 33 trips, `ledger` 0 | payments stopped; **refunds never dropped below 5/5 consumers** |
+| `db-down` | `docker stop postgres` | 58,828 / 11,905, 0 lost | `ledger` 277, `payments-api` 0 | both stopped; 0 new charges from 15s in to the restore |
+| `db-crash` | `docker kill -s KILL postgres` | 59,810 / 12,096, 0 lost | `ledger` 279, `payments-api` 0 | as `db-down` |
+| `db-hang` | `docker pause postgres` | 59,764 / 12,147, 0 lost | `ledger` 104, `payments-api` 0 | writes time out (2s) → `failed` |
+| `db-connections-killed` | its backends terminated every 2s | 42,646 / 8,622, 0 lost | none | 28 failed writes, the pool reconnects |
+| `db-contention` | `payments` locked exclusively for 40s | 42,684 / 8,629, 0 lost | none | 888 writes `throttled`, no trip; refunds untouched |
+| `kill-replica-mid-write` | 3 replicas killed, inserts slowed to 200ms | 44,486 / 9,073, 0 lost | none | 60 charges repeated, each recorded once |
+| `both-down` | both, the ledger restored first | 75,950 / 15,697, 0 lost | `payments-api` 34, `ledger` 35 | refunds back on every replica while payments still waited on the third party |
+
+(`docs/runs/chaos-app.json`; `both-down` is from
+`docs/runs/chaos-app-both-down-rerun.json`. The first run of `both-down` failed on
+a harness bug: it checked a window it had not sampled.) After the
+application's settings moved into flags, `upstream-outage`, `db-down` and
+`db-contention` passed again (`docs/runs/chaos-app-flags-rerun.json`). After a
+review brought the SDK's Effect code into line with the repo's conventions,
+`upstream-outage`, `db-down`, `db-contention` and `both-down` passed, and so
+did the breaker suite's `outage`, `restart-during-probe`,
+`kill-permit-holder` and `overload`. The review touched the breaker's
+callbacks, clocks and state (`docs/runs/chaos-app-review-rerun.json`,
+`chaos-breaker-sdk-review-rerun.json`).
+
+**What writing the application exposed:**
+
+- **A failure after a charge repeats the charge.** A message halted at the
+  ledger is redelivered, and the whole action runs again. The same key makes
+  the second charge a duplicate at the third party, not a new charge, so it is
+  correct. It is not free: 973 repeated charges under `db-contention` (888
+  throttled writes, each retried from the top), and about 300 in each database
+  outage (in-flight charges whose writes failed). Resuming at the step that
+  failed needs state per message, such as an outbox or recording before
+  charging. The SDK has none.
+- **A probe runs the whole action.** A half-open ledger is probed by the next
+  payment, which charges the third party first.
+- **The contract is declared twice.** The producer's `WorkMessage`
+  (`@egress/rmq`) and the application's `Payment` agree by hand. The producer
+  is not generic either: the refunds producer publishes the same
+  `{ apiId, n }` as `egress.work`.
+- **Settings were split, and are not any more.** At first the SDK's settings
+  were flags with environment fallbacks, listed in `--help`, while the
+  application's (`EGRESS_ADDR`, `DATABASE_URL`) were `Config` read inside its
+  layers, and didn't show. Now `run` also takes the application's own `flags`,
+  parsed with the SDK's into one command, and `layer` is built from them. The
+  SDK exports `flags`, and `command` builds the command, so an application
+  can extend it (a description, subcommands) before `launch`. What remains:
+  one set of `BREAKER_*` applies to every dependency, and one `MAX_IN_FLIGHT`
+  to every consumer.
+
 ## What this still doesn't fix
 
 - **Five breakers still don't agree.** Each is formed only from the calls that
@@ -401,6 +530,7 @@ nothing to set. On macOS, where Docker runs in a VM, set it to this repo's path
 pnpm install
 docker compose up -d
 docker compose up -d --scale rmq-consumer=12   # resize the fleet, no restart needed
+docker compose exec postgres psql -U consumer -d ledger -c 'select count(*) from payments'
 ```
 
 - RabbitMQ management UI: <http://localhost:15672> (guest/guest) — watch
@@ -477,11 +607,15 @@ packages/
                and DelayedDelivery.ts: the delay chain a breaker's hold is made of
   rmq-producer/  the load: a steady stream onto <apiId>.work in confirmed batches,
                  never backing off
-  rmq-consumer/  the competing-consumer fleet, each with its own breaker whose
-                 state is the broker's (src/Breaker.ts), the fleet's one probe
-                 permit (src/Permit.ts), the dead-letter redrive
-                 (src/Redrive.ts) and the concurrency limit learned from 429s
-                 (src/Limiter.ts), wired together in src/consumer.ts
+  rmq-consumer/  the consumer SDK (src/index.ts): one breaker per dependency
+                 whose state is the broker's (src/Breaker.ts, src/Dependency.ts),
+                 the Gate that turns a consumer's breakers into its subscription
+                 (src/Gate.ts), content negotiation (src/Negotiation.ts), how a
+                 message settles (src/Settle.ts), the fleet's probe permits
+                 (src/Permit.ts), the dead-letter redrive (src/Redrive.ts) and the
+                 concurrency limit (src/Limiter.ts), run by src/consumer.ts
+  consumer/      the application, written against the SDK alone (src/main.ts):
+                 payments (third party, then PostgreSQL) and refunds (PostgreSQL)
   tracing/     the /metrics HTTP route every process serves; OpenTelemetry
                tracing is wired but off unless OTEL_EXPORTER_OTLP_ENDPOINT is set
 infra/
@@ -489,8 +623,13 @@ infra/
   rabbitmq.conf        the broker's flow-control watermark
   incident.mjs         drives one incident, reports what happened including
                        whether the fleet's breakers agreed with each other
-  chaos-breaker.mjs    real faults under a load spike, graded per message
-  chaos-publisher.mjs  its load generator: remembers which messages were confirmed
+  chaos-breaker.mjs    real faults under a load spike against the third party's
+                       breaker, graded per message
+  chaos-app.mjs        the application under load with faults in either dependency,
+                       graded per message and against the ledger
+  chaos-lib.mjs        what the two drivers share
+  chaos-publisher.mjs  their load generator: remembers which messages were confirmed
+  postgres/init.sql    the ledger's schema, run once on an empty volume
   capture-incident.mjs records the dashboard through an incident
   monitoring/          Prometheus scrape config, the fleet-view rule (rules.yml)
                        and the Grafana dashboard
@@ -505,7 +644,8 @@ straight off its `src/*.ts` through Node's built-in type stripping.
 ## Verification
 
 ```bash
-pnpm run check       # vendored-version check, typecheck, unit tests (Breaker.test.ts runs against a fake world)
+pnpm run check       # vendored-version check, typecheck, unit tests (the breaker, the Gate and the
+                     # dependency wrapper run against fake worlds)
 pnpm run test:rmq    # optional — needs Docker: AMQP behaviour against a real broker,
                      # including the delay chain's timing and graceful consumer drain
 ```

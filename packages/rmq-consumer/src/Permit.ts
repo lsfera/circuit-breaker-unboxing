@@ -13,33 +13,34 @@ import type { RmqError } from "@egress/rmq/Client.ts";
  * duplicate on its next return, and a crash between the two leaves two tokens rather than none.
  */
 
-export const permitQueueFor = (apiId: string): string => `${apiId}.probe-permit`;
+/** `scope` is `<application>.<dependency>`: one permit per dependency, shared by the fleet. */
+export const permitQueueFor = (scope: string): string => `${scope}.probe-permit`;
 
 /** Classic, not quorum: a quorum queue's length limit is enforced loosely and let two seeds in. */
 const PERMIT_QUEUE_OPTIONS = { args: { "x-max-length": 1, "x-overflow": "reject-publish" } } as const;
 
 /** Publish a token, and treat the broker refusing it (one is already there) as success. */
-const offer = (apiId: string) =>
+const offer = (scope: string) =>
   Effect.gen(function* () {
     const rmq = yield* Rmq;
-    const pub = yield* rmq.publisherToQueue(permitQueueFor(apiId));
+    const pub = yield* rmq.publisherToQueue(permitQueueFor(scope));
     yield* rmq.send(pub, "permit").pipe(Effect.ignore);
   });
 
 /** Every replica seeds at startup; all but the first are refused. */
-export const seed = Effect.fn(function* (apiId: string) {
+export const seed = Effect.fn(function* (scope: string) {
   const rmq = yield* Rmq;
-  yield* rmq.declareQueue(permitQueueFor(apiId), PERMIT_QUEUE_OPTIONS);
-  yield* offer(apiId);
+  yield* rmq.declareQueue(permitQueueFor(scope), PERMIT_QUEUE_OPTIONS);
+  yield* offer(scope);
 });
 
 /** The permit if it is free, as the effect that hands it back; `None` if another replica holds it. */
-export const take = (apiId: string): Effect.Effect<O.Option<Effect.Effect<void>>, RmqError, Rmq> =>
+export const take = (scope: string): Effect.Effect<O.Option<Effect.Effect<void>>, RmqError, Rmq> =>
   Effect.gen(function* () {
     const rmq = yield* Rmq;
-    const got = yield* rmq.get(permitQueueFor(apiId));
+    const got = yield* rmq.get(permitQueueFor(scope));
     return O.map(got, (token) =>
-      offer(apiId).pipe(
+      offer(scope).pipe(
         Effect.ignore,
         Effect.andThen(token.ack),
         Effect.provideService(Rmq, rmq),

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# One image for every process this repo runs (the producer and the consumer fleet); they differ only by argv,
+# One image for every process this repo runs (the producers and the consumer fleet); they differ only by argv,
 # set by `command:` in docker-compose.yml.
 #
 # Pinned by digest, not by tag: a moving image is one nobody can reproduce. This digest is node v26.8.2.
@@ -19,6 +19,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN npm install --global "$(node -p 'require("./package.json").packageManager')" >/dev/null
 # One line per workspace, kept in step by hand: a package missing here installs none of its dependencies, and
 # the failure surfaces as ERR_MODULE_NOT_FOUND at runtime, not as a build error.
+COPY packages/consumer/package.json packages/consumer/
 COPY packages/rmq-consumer/package.json packages/rmq-consumer/
 COPY packages/config/package.json packages/config/
 COPY packages/rmq/package.json packages/rmq/
@@ -51,4 +52,4 @@ USER node
 
 # Overridden per service in docker-compose.yml. The default is the consumer, so a container started with no
 # arguments does the main job.
-CMD ["node", "packages/rmq-consumer/src/main.ts"]
+CMD ["node", "packages/consumer/src/main.ts"]

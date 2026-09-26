@@ -4,7 +4,7 @@
  * third party agree on.
  */
 
-import { Option as O, Schema } from "effect";
+import { Schema } from "effect";
 
 /**
  * The payments idempotency key as the third party receives it: an HTTP header. A retry that reuses the key
@@ -21,44 +21,21 @@ export const IDEMPOTENCY_KEY_HTTP_HEADER = "x-idempotency-key";
 export const workMessageId = (run: string, n: number): string => `${run}:${n}`;
 
 /**
- * What a work message says, declared once so the producer's encoder and the daemons' decoder cannot drift.
- * `n` must be an integer: it keeps the idempotency key stable across a redelivery. Decoded to an `Option`,
- * not thrown: a body that is not a work message is an answer ("discard it"). Unknown fields are ignored, so a
- * newer producer can add one without breaking an older daemon.
+ * What the producer publishes. A consumer declares its own contract (`packages/consumer`), which must accept this
+ * shape: `n` an integer, since it keeps the idempotency key stable across a redelivery.
  */
 export const WorkMessage = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
 export type WorkMessage = typeof WorkMessage.Type;
 
 /**
- * The AMQP `content_type` a work publisher declares and a daemon negotiates on before decoding. RabbitMQ
- * neither validates nor uses it and AMQP has no `Accept`, so negotiation is the reader's: a daemon reads
- * `application/json` (parameters ignored), unencoded, and a message that declares nothing (older or raw
- * publishers). A message declaring *something else* is one this fleet did not publish and is discarded to the
- * dead-letter queue unread, not guessed at.
+ * The AMQP `content_type` and `type` a work publisher declares. RabbitMQ neither validates nor uses them; what a
+ * consumer reads is its own negotiation (`accept` in `@egress/rmq-consumer`).
  */
 export const WORK_CONTENT_TYPE = "application/json";
-
-/** The AMQP `type` of a work message, dot-separated by RabbitMQ's convention. A daemon declines any other type. */
 export const WORK_MESSAGE_TYPE = "egress.work";
-
-const mediaType = (contentType: string): string => contentType.split(";")[0]!.trim().toLowerCase();
-
-/** `content_encoding` may list several, comma-separated; only "nothing applied" is readable. */
-const unencoded = (contentEncoding: string): boolean =>
-  contentEncoding.split(",").every((encoding) => ["", "identity"].includes(encoding.trim().toLowerCase()));
-
-export const readsWorkFormat = (declared: {
-  readonly contentType: O.Option<string>;
-  readonly contentEncoding: O.Option<string>;
-  readonly type: O.Option<string>;
-}): boolean =>
-  O.match(declared.contentType, { onNone: () => true, onSome: (t) => mediaType(t) === WORK_CONTENT_TYPE }) &&
-  O.match(declared.contentEncoding, { onNone: () => true, onSome: unencoded }) &&
-  O.match(declared.type, { onNone: () => true, onSome: (t) => t === WORK_MESSAGE_TYPE });
 
 const WorkMessageJson = Schema.fromJsonString(WorkMessage);
 export const encodeWorkMessage = Schema.encodeSync(WorkMessageJson);
-export const decodeWorkMessage = Schema.decodeUnknownOption(WorkMessageJson);
 
 /** The primary competing-consumer work queue daemons drain. */
 export const workQueueFor = (apiId: string): string => `${apiId}.work`;
