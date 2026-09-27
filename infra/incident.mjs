@@ -5,7 +5,7 @@
 //   node infra/incident.mjs
 //   WINDOW_MS=30000 RATE=0.6 node infra/incident.mjs   # a partial failure instead
 //   MODE=hang node infra/incident.mjs                  # the one that grows the work queue
-//   STATUS=422 node infra/incident.mjs                 # a 4xx: the application's byStatus calls it client_error,
+//   STATUS=422 node infra/incident.mjs                 # a 4xx: the application's byHttpStatus calls it client_error,
 //                                                       # discarded at once — no trip, no backlog
 //   CAPACITY=5 DELAY_MS=100 node infra/incident.mjs    # full, not broken: 5 at once (50/s), 429 beyond. Needs
 //                                                       # RATE_PER_SECOND above that ceiling

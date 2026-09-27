@@ -69,7 +69,7 @@ flowchart LR
 | **half-open** | a consumer with `prefetch: 1`; its first message is the probe | probe ok → closed; failed → open, longer |
 
 - **What counts as a failure is the application's call**: each dependency has
-  a `classify` over its call's Exit. For the third party: 2xx `ok`; 429
+  a `classify` over its call's Exit. For the third party, `byHttpStatus`: 2xx `ok`; 429
   `throttled`; any other 4xx but 408 `client_error` (up, refused this request:
   never trips); 5xx, 408, no connection and the SDK's timeout `failed`.
 - **A `client_error` is parked at once** (`work.parked`,
@@ -209,7 +209,7 @@ application written against it alone. Payments charge the third party, then
 record in PostgreSQL; refunds only record.
 
 ```ts
-const ThirdParty = Consumer.Dependency("payments-api", { classify: byStatus });
+const ThirdParty = Consumer.Dependency("payments-api", { classify: byHttpStatus });
 const Database = Consumer.Dependency("ledger", { classify: bySqlError, breaker: { maxDelaySeconds: 300 } });
 const json = Consumer.accept(
   { "application/json": Schema.fromJsonString(Schema.Unknown) },
