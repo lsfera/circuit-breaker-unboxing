@@ -1,16 +1,16 @@
 # Per-API egress circuit breaker events
 
-Fourth and last step of the series. Articles 1–3 stop a fleet of consumers
+Fifth and last step of the series. Articles 1–4 stop a fleet of consumers
 hammering one flaky third party with nothing but RabbitMQ and Prometheus:
 `article/03-rabbitmq-coordination` (cockatiel, coordinated through the broker)
-and `article/02-rabbitmq-only-breaker` (the breaker held by the broker) lose no
+and `article/04-rabbitmq-only-breaker` (the breaker held by the broker) lose no
 work, send one probe at a time, redrive what was dead-lettered, give on-call one
 fleet verdict, and back off on a `429`, in about 2,200 lines.
 
 This article is the design at platform level. It costs about four times the
 code and 19 containers: Envoy for egress, two aggregators with a lease in Redis,
 and a published event stream. Build it only when you need something articles
-1–3 cannot give:
+1–4 cannot give:
 
 - **other systems act on the verdict** — a producer that stops accepting work,
   a status page, billing. They need a gapless per-API event sequence, not a
@@ -22,7 +22,7 @@ and a published event stream. Build it only when you need something articles
   service;
 - **tens to thousands of APIs**, each with its own breaker.
 
-If none of those applies, stop at article 3.
+If none of those applies, stop at article 3 or 4.
 
 ## The problem
 
