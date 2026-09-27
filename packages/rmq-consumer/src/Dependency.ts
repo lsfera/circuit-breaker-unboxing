@@ -6,7 +6,7 @@ import * as Telemetry from "./Telemetry.ts";
 
 /**
  * A dependency an action calls — a third party, a database — with its own breaker, probe permit and timeout.
- * Wrapping an effect in it runs the effect under the timeout, judges its Exit with the application's `classify`,
+ * Wrapping an effect in it runs the effect under the timeout, judges what it returned with the application's `classify`,
  * tells this dependency's breaker, and halts the action on anything but `ok`, so later dependencies are not called.
  */
 
@@ -140,7 +140,8 @@ export type AnyDependency = Dependency<any, any, any>;
 export const make = <const Name extends string, A, E>(
   name: Name,
   options: {
-    readonly classify: (exit: Exit.Exit<A, E>) => Verdict;
+    /** The effect's value or its own error. A defect or the timeout never reaches it: both are `failed`. */
+    readonly classify: (result: Result.Result<A, E>) => Verdict;
     readonly timeout?: Duration.Input;
     /** This dependency's own breaker settings; anything left out follows the application's `BREAKER_*`. */
     readonly breaker?: BreakerOverrides;
@@ -154,17 +155,16 @@ export const make = <const Name extends string, A, E>(
     (error) => new Error(`dependency ${name}: invalid breaker settings: ${error.message}`),
   );
 
-  // The SDK's own failures are judged before the application's `classify` sees anything.
   const judge = (exit: Exit.Exit<A, E | Cause.TimeoutError>): Verdict =>
     Exit.match(exit, {
-      onSuccess: () => options.classify(exit as Exit.Exit<A, E>),
+      onSuccess: (value) => options.classify(Result.succeed(value)),
       onFailure: (cause) =>
         O.match(Cause.findErrorOption(cause), {
           onNone: (): Verdict => ({ outcome: "failed", reason: "defect" }),
           onSome: (error) =>
             Cause.isTimeoutError(error)
               ? { outcome: "failed", reason: "timeout" }
-              : options.classify(exit as Exit.Exit<A, E>),
+              : options.classify(Result.fail(error as E)),
         }),
     });
 

@@ -1,4 +1,4 @@
-import { Cause, Config, Context, Effect, Exit, Layer, Match, Option, Redacted, Schema } from "effect";
+import { Config, Context, Effect, Layer, Match, Option, Redacted, Result, Schema } from "effect";
 import { Flag } from "effect/unstable/cli";
 import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest } from "effect/unstable/http";
 import { SqlClient, SqlError } from "effect/unstable/sql";
@@ -67,8 +67,8 @@ class Ledger extends Context.Service<
 }
 
 /** 2xx ok; 429 full, not broken; any other 4xx but 408 refused this request; the rest, and no answer, is failing. */
-const byHttpStatus = (exit: Exit.Exit<number, HttpClientError.HttpClientError>): Consumer.Verdict =>
-  Exit.match(exit, {
+const byHttpStatus = (result: Result.Result<number, HttpClientError.HttpClientError>): Consumer.Verdict =>
+  Result.match(result, {
     onSuccess: (status) => ({
       reason: String(status),
       outcome:
@@ -84,25 +84,21 @@ const byHttpStatus = (exit: Exit.Exit<number, HttpClientError.HttpClientError>):
   });
 
 /** Contention means "fewer at once"; a row the schema refuses is this message's fault; anything else is the database failing. */
-const bySqlError = (exit: Exit.Exit<void, SqlError.SqlError>): Consumer.Verdict =>
-  Exit.match(exit, {
+const bySqlError = (result: Result.Result<void, SqlError.SqlError>): Consumer.Verdict =>
+  Result.match(result, {
     onSuccess: () => ({ outcome: "ok", reason: "ok" }),
-    onFailure: (cause) =>
-      Option.match(Cause.findErrorOption(cause), {
-        onNone: () => ({ outcome: "failed", reason: "defect" }),
-        onSome: ({ reason }) => ({
-          reason: reason._tag,
-          outcome: Match.value(reason._tag).pipe(
-            Match.when(
-              Match.is("DeadlockError", "SerializationError", "LockTimeoutError", "StatementTimeoutError"),
-              () => "throttled" as const,
-            ),
-            Match.when("ConstraintError", () => "client_error" as const),
-            // A connection or authentication failure, a missing table (SqlSyntaxError), anything unknown.
-            Match.orElse(() => "failed" as const),
-          ),
-        }),
-      }),
+    onFailure: ({ reason }) => ({
+      reason: reason._tag,
+      outcome: Match.value(reason._tag).pipe(
+        Match.when(
+          Match.is("DeadlockError", "SerializationError", "LockTimeoutError", "StatementTimeoutError"),
+          () => "throttled" as const,
+        ),
+        Match.when("ConstraintError", () => "client_error" as const),
+        // A connection or authentication failure, a missing table (SqlSyntaxError), anything unknown.
+        Match.orElse(() => "failed" as const),
+      ),
+    }),
   });
 
 const ThirdParty = Consumer.Dependency("payments-api", { classify: byHttpStatus });

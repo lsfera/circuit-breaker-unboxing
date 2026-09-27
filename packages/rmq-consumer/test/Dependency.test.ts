@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Cause, Effect, Exit, Fiber, Option as O } from "effect";
+import { Cause, Effect, Exit, Fiber, Option as O, Result } from "effect";
 import type { ProbeVerdict } from "../src/Breaker.ts";
 import * as Dependency from "../src/Dependency.ts";
 import type { Caller, Registration, Verdict } from "../src/Dependency.ts";
@@ -10,16 +10,16 @@ import type { Caller, Registration, Verdict } from "../src/Dependency.ts";
  * it halts the action. No broker, no real dependency.
  */
 
-const byNumber = (exit: Exit.Exit<number, string>): Verdict =>
-  Exit.match(exit, {
+const byNumber = (result: Result.Result<number, string>): Verdict =>
+  Result.match(result, {
     onSuccess: (n) => ({ outcome: n === 200 ? "ok" : n === 429 ? "throttled" : n === 422 ? "client_error" : "failed", reason: String(n) }),
     onFailure: () => ({ outcome: "failed", reason: "error" }),
   });
 
 const Thing = Dependency.make("thing", { classify: byNumber, timeout: "20 millis" });
 const Dupe = Dependency.make("dupe", {
-  classify: (exit: Exit.Exit<number, string>): Verdict =>
-    Exit.isFailure(exit) ? { outcome: "ok", reason: "duplicate" } : { outcome: "ok", reason: "ok" },
+  classify: (result: Result.Result<number, string>): Verdict =>
+    Result.isFailure(result) ? { outcome: "ok", reason: "duplicate" } : { outcome: "ok", reason: "ok" },
 });
 
 type Breaker = { readonly phase: "open" } | { readonly phase: "closed"; readonly streak: number } | { readonly phase: "half-open" };

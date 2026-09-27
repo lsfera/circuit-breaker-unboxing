@@ -38,7 +38,7 @@ export type Metadata = DeliveryInfo;
 /**
  * A dependency the action calls, with its own breaker, probe permit and timeout (2s unless given). Its breaker
  * follows the application's `BREAKER_*` settings except for what it sets itself (`breaker`). Wrapping an
- * effect in it runs the effect under the timeout, judges its Exit with `classify`, tells this dependency's breaker,
+ * effect in it runs the effect under the timeout, judges its value or error with `classify`, tells this dependency's breaker,
  * and halts the action on anything but `ok`. Its name labels metrics and names its queues.
  */
 export const Dependency = Dep.make;
