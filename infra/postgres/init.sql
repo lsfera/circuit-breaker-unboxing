@@ -21,3 +21,8 @@ CREATE TABLE refunds (
   n           integer NOT NULL,
   recorded_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- For infra/chaos-app.mjs, which reads one run's rows by `message_id LIKE '<run>:%'`. The primary key's btree
+-- follows the database collation, which a LIKE prefix cannot use; without these the read scans the whole ledger.
+CREATE INDEX payments_message_id_prefix ON payments (message_id text_pattern_ops);
+CREATE INDEX refunds_message_id_prefix ON refunds (message_id text_pattern_ops);

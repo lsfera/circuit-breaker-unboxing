@@ -121,6 +121,12 @@ Facts about this environment, each learned by losing time to it (2026-09-12/13):
   hadn't; it was still running, just orphaned from the tool's tracking). If a
   background command needs its own long-lived process, let
   `run_in_background: true` do the only backgrounding.
+- **`docker exec` returns after ~520 ms, exit 0, output truncated** (seen 2026-09-26/27, Docker
+  Desktop): anything slower loses its later output silently, while the process keeps running in the
+  container. It broke chaos-app's ledger read once the table passed ~15M rows (`recorded 0`, every
+  scenario FAIL, data intact); fixed by `text_pattern_ops` prefix indexes in `infra/postgres/init.sql`.
+  Test: `docker exec <c> sh -c 'sleep 2; echo done'` prints nothing. Keep exec'd commands fast, or write
+  to a file in the container and `cat` it. It also explains the profiling quirks below.
 - **Profiling a live replica (2026-09-26):** `docker exec <c> kill -USR1 1`
   opens PID 1's inspector on 127.0.0.1:9229 inside the container; a CDP
   script run there (`docker exec -d`) drives `Profiler.start/stop`. Output of
