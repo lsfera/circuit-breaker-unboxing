@@ -185,7 +185,7 @@ services:
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
       # The home dashboard for a signed-in user. The anonymous Viewer role cannot be granted access to it, so an
       # anonymous visit to :3000 still lands on Welcome: use the direct link in the README.
-      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/in-process-breaker.json
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/system-monitor.json
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro

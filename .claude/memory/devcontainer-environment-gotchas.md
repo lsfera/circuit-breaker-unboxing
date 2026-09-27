@@ -70,7 +70,8 @@ Facts about this environment, each learned by losing time to it (2026-09-12/13):
   an already-provisioned dashboard file (distinct from the uid-rename
   collision this same file doesn't cover): the container needs a restart to
   pick the change up, confirmed 2026-09-18 adding a panel to
-  `in-process-breaker.json` without changing its uid.
+  the dashboard file (then `in-process-breaker.json`, now `system-monitor.json`)
+  without changing its uid.
 - **Two processes declaring the same RabbitMQ exchange must agree on
   `durable`,** or the second one's declare is a connection-closing `406
   PRECONDITION-FAILED` — and `@egress/rmq`'s `declareTopicExchange` defaults

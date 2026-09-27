@@ -1,6 +1,6 @@
 {
- "title": "In-process breaker, held by RabbitMQ",
- "uid": "in-process-breaker",
+ "title": "System monitor",
+ "uid": "system-monitor",
  "schemaVersion": 39,
  "version": 1,
  "editable": true,

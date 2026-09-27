@@ -634,7 +634,7 @@ published on `localhost`, except `alert-sink`'s.
 - RabbitMQ management UI: <http://rabbitmq:15672> (guest/guest) — watch each
   consumer's `<key>.work` depth and `<key>.work.dead` growth
   (`payments-provider`, `refunds-provider`).
-- Grafana: <http://grafana:3000/d/in-process-breaker>
+- Grafana: <http://grafana:3000/d/system-monitor>
   Panels: breaker state per replica and dependency; work, dead-letter and
   parked queue depth and active consumers, per consumer; calls to each
   dependency by outcome; failed and refused calls by dependency and reason;

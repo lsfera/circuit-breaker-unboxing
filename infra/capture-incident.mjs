@@ -25,7 +25,7 @@ const FLAKY = process.env.FLAKY_UPSTREAM ?? "http://flaky-upstream:8080";
 const PROMETHEUS = process.env.PROMETHEUS ?? "http://prometheus:9090";
 // Must be shorter than the quiet time before the run, or the previous incident shows at the left edge.
 const WINDOW = flag("window", "1m");
-const DASHBOARD = `${GRAFANA}/d/in-process-breaker/in-process-breaker-e28094-five-not-one?kiosk&from=now-${WINDOW}&to=now&refresh=1s`;
+const DASHBOARD = `${GRAFANA}/d/system-monitor/system-monitor?kiosk&from=now-${WINDOW}&to=now&refresh=1s`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const { chromium } = await import(process.env.PLAYWRIGHT_CORE ?? "playwright-core");
