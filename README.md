@@ -209,6 +209,45 @@ application written against it alone. Payments charge the third party, then
 record in PostgreSQL; refunds only record.
 
 ```ts
+/** 2xx ok; 429 full, not broken; any other 4xx but 408 refused this request; the rest, and no answer, is failing. */
+const byHttpStatus = (exit: Exit.Exit<number, HttpClientError.HttpClientError>): Consumer.Verdict =>
+  Exit.match(exit, {
+    onSuccess: (status) => ({
+      reason: String(status),
+      outcome:
+        status >= 200 && status < 300
+          ? "ok"
+          : status === 429
+            ? "throttled"
+            : status >= 400 && status < 500 && status !== 408
+              ? "client_error"
+              : "failed",
+    }),
+    onFailure: () => ({ outcome: "failed", reason: "network" }),
+  });
+
+/** Contention means "fewer at once"; a row the schema refuses is this message's fault; anything else is the database failing. */
+const bySqlError = (exit: Exit.Exit<void, SqlError.SqlError>): Consumer.Verdict =>
+  Exit.match(exit, {
+    onSuccess: () => ({ outcome: "ok", reason: "ok" }),
+    onFailure: (cause) =>
+      Option.match(Cause.findErrorOption(cause), {
+        onNone: () => ({ outcome: "failed", reason: "defect" }),
+        onSome: ({ reason }) => ({
+          reason: reason._tag,
+          outcome: Match.value(reason._tag).pipe(
+            Match.when(
+              Match.is("DeadlockError", "SerializationError", "LockTimeoutError", "StatementTimeoutError"),
+              () => "throttled" as const,
+            ),
+            Match.when("ConstraintError", () => "client_error" as const),
+            // A connection or authentication failure, a missing table (SqlSyntaxError), anything unknown.
+            Match.orElse(() => "failed" as const),
+          ),
+        }),
+      }),
+  });
+
 const ThirdParty = Consumer.Dependency("payments-api", { classify: byHttpStatus });
 const Database = Consumer.Dependency("ledger", { classify: bySqlError, breaker: { maxDelaySeconds: 300 } });
 const json = Consumer.accept(
@@ -235,8 +274,8 @@ Consumer.run({
 ```
 
 - **Explicit reading and judging.** Negotiation has no default; each media type
-  maps to a Schema. `bySqlError` maps contention to `throttled`, a violated
-  constraint to `client_error`, the rest to `failed`.
+  maps to a Schema. The classifiers above are the application's, not the SDK's;
+  `bySqlError` reads the SQLSTATE class Effect puts on `SqlError.reason`.
 - **One breaker per dependency.** A breaker registers or withdraws; one Gate per
   consumer derives its subscription from the dependencies it lists (any open:
   none; any half-open: prefetch 1; else full).
