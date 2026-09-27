@@ -3,10 +3,8 @@
 *Part 2b of the circuit-breaker series. Part 2 put a breaker inside each
 consumer. This one moves everything that breaker remembered into the broker.*
 
-*Since this was written the consumer has become an SDK: one breaker per
-dependency, each able to set its own threshold and hold ceiling, used by an
-application that calls a third party and a PostgreSQL ledger. The mechanism
-below is unchanged; the README covers what was built on it.*
+*Since written, the consumer has become an SDK with one breaker per
+dependency; the README covers what was built on this.*
 
 The breaker in part 2 was a library object. Its state — closed, open,
 half-open, how long until the next probe — lived in the memory of five
@@ -19,9 +17,9 @@ dead-letter queue grew by **2,745**.
 
 Nothing was wrong with those 2,745 messages. An open breaker rejects locally
 and requeues, a requeue spends one of the message's four delivery attempts,
-and a message that is rejected four times is dead-lettered. I did not instrument the
-old build to watch it happen; fifty real failures cannot account for 2,745
-dead letters, and that is the mechanism the numbers point to.
+and a message rejected four times is dead-lettered. Fifty real failures
+cannot account for 2,745 dead letters; that is the mechanism the numbers point
+to (I did not instrument the old build to watch it).
 
 The fix is not a better hold. It is to stop rejecting. An open breaker should
 receive nothing, and the thing that ends the silence should be a message the
@@ -137,9 +135,7 @@ breaker to close and the queue to empty — about 45,000 messages each.
 | `delay-survives-broker-restart` | a 100 s delay across a broker restart |
 | `partial` | 60% of calls fail — informational, no correctness claim |
 
-Scenarios added later (`kill-permit-holder`, `restart-during-probe`,
-`redrive-failover`, `overload`) and the application's own suite, with faults
-in either dependency, are in the README.
+Later scenarios and the application's own suite are in the README.
 
 Every replica's log is then read back and each transition checked against the
 machine (closed → open → half-open → closed or open). Not one illegal
@@ -147,14 +143,11 @@ transition in any scenario.
 
 ### Results
 
-Same scenarios, same load, one run each. One rule shapes them: a failure that
-follows another failure at the same dependency on the same replica, and any
-failed probe, is `release`d, which hands the message back with no strike
-against its four delivery attempts. A failure that stands alone, a poison
-message between successes, is still charged, and dead-lettered once its
-attempts are spent. It is a heuristic, and it trades some poison-message
-protection during an outage for not dead-lettering healthy messages while the
-breaker is still opening.
+One run each. One rule shapes them: a failed probe, or a failure that
+follows another at the same dependency, is `release`d, with no strike against
+the message's four attempts. A failure that stands alone is still charged. It
+trades some poison-message protection during an outage for not dead-lettering
+healthy messages while the breaker is still opening.
 
 | | sent | processed | duplicates | lost | dead-lettered | openings | peak tokens | longest hold | all closed after restore |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -165,39 +158,18 @@ breaker is still opening.
 | `delay-survives-broker-restart` | 1 | 1 | 0 | 0 | 0 | — | — | 100 s | — |
 | `partial` (informational) | 44,505 | 44,494 | 0 | 0 | 11 | 83 | 5 | 15 s | 13 s |
 
-The same scenarios again on 2026-09-21, after the dependencies moved to the latest
-(Effect rc.116), one run each; every graded scenario passes again
-([the run](runs/chaos-breaker-rc116.json)):
+A rerun after the Effect rc.116 upgrade passed the same way
+([the run](runs/chaos-breaker-rc116.json)).
 
-| | sent | processed | duplicates | lost | dead-lettered | openings | peak tokens | longest hold | all closed after restore |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `outage` | 47,035 | 47,035 | 0 | 0 | **0** | 30 | 5 | 32 s | 25 s |
-| `outage-hang` | 48,617 | 48,617 | 0 | 0 | **0** | 29 | 5 | 32 s | 34 s |
-| `kill-open-replica` | 44,989 | 44,989 | 0 | 0 | **0** | 31 | 5 | 28 s | 15 s |
-| `kill-broker-while-open` | 42,857 | 42,855 | 0 | 0 | **0** | 30 | 5 | 32 s | 25 s |
-| `delay-survives-broker-restart` | 1 | 1 | 0 | 0 | 0 | — | — | 100.8 s | — |
-| `partial` (informational) | 45,721 | 45,709 | 0 | 0 | 12 | 67 | 5 | 32 s | 19 s |
+A killed replica comes back closed, and the token addressed to its
+predecessor goes to a queue nobody reads: wake queues are named by a fresh
+random id per process, not the hostname a restarted container keeps, which
+would let a stale token wake it early (reasoned, not tested).
 
-In `kill-broker-while-open` the publisher sent 42,857 messages and the broker
-confirmed 42,845. The 12 it never confirmed were in flight when the broker
-restarted; 10 of them reached the queue anyway and were processed, and 2 did not.
-Nothing confirmed was lost, which is the bar, but a publisher that restarts the
-broker under itself cannot say more than that about its last few messages. The
-first table's run had none in flight.
-
-A killed replica comes back closed and starts over, and the token addressed to
-its dead predecessor goes to a queue nobody reads. That is deliberate: each
-process names its wake queue with a fresh random id rather than the container's
-hostname, because a restarted container keeps its hostname and would otherwise
-be woken early by a stale token. I reasoned that out and did not test the
-alternative.
-
-The claim the design rests on — an open breaker has no consumer — was checked by
-comparing the broker's own consumer count on the work queue with the number of
-replicas not open, sampled once a second: it matched in 47 of 56 samples in
-`outage`, and in fewer (37 of 61) when calls hang for two seconds. The
-mismatches are the gap between a consumer being cancelled and a Prometheus
-gauge, scraped every two seconds, noticing. It is a sanity check, not a proof.
+The broker's consumer count on the work queue matched the number of replicas
+not open in 47 of 56 one-second samples in `outage` (37 of 61 when calls hang),
+the misses being scrape lag: a sanity check that an open breaker has no
+consumer, not a proof.
 
 ## The incident on screen
 
@@ -205,15 +177,10 @@ A 24-second total outage against the running stack, recorded from the Grafana
 dashboard on 2026-09-24, at the compose producer's ordinary 200/s. The
 dead-letter and parked queues were emptied first, so both lines start at zero.
 
-Two panels were added for the breaker itself: the broker's consumer count on the
-work queue, which now *is* the fleet's state, and the wake tokens sitting in the
-delay chain, one line per level. The later additions have their own panels:
-- the fleet view on top (a Prometheus rule, open while half the replicas are);
-- parked-queue depth and redrives;
-- probe-permit races lost;
-- the concurrency limit each replica learned from `429`s at the time (now one
-  per consumer, fed by any `throttled` answer), at the bottom. A `503` outage
-  sends none, so it stays at 20 throughout.
+The panels that matter here: the broker's consumer count on the work queue,
+which now *is* the fleet's state, and the wake tokens in the delay chain, one
+line per level. The concurrency limit at the bottom stays at 20: a `503`
+outage teaches it nothing.
 
 The [recording](media/incident.webm) runs the whole incident, start to finish.
 
@@ -237,44 +204,31 @@ because the holds have grown to 8–15 s; the replicas do not yet know.
 ![restored, replicas still holding](media/3-restored.png)
 
 **4 · Recovered.** The breakers came back at different moments: 0.2, 1.3, 2.2,
-3.4 and 3.5 s after the restore, as each hold ended (the replicas' logs). The
-holds happened to end just after the restore; in other runs the last replica
-closed 10 s or more after it. The fleet view closed with them. The backlog drained as they did. No dead letters appeared,
-so there was nothing to redrive or park.
+3.4 and 3.5 s after the restore, as each hold ended; in other runs the last
+closed 10 s or more after it. The backlog drained as they did, and no dead
+letters appeared.
 
 ![recovered](media/4-recovered.png)
 
 ## What it costs, and what it doesn't fix
 
 - **A long hold is a late recovery.** A hold of *h* seconds means a replica
-  notices the third party is back up to *h* seconds late. In the recording the
-  holds happened to end just after the restore, and the last breaker closed
-  3.5 s after it; in the chaos runs above the last one closed 15 to 34 s after
-  it. With a 24-hour ceiling, a day-long outage can leave a replica dark for
-  most of another day. The ceiling is how late you are willing to find out,
-  not only how gently you want to probe, and it is now chosen per dependency:
-  the ledger caps its hold at 300 s, because while our own database is down
-  every consumer waits, and the third party keeps the day.
-- **A lost token is a stuck breaker.** If someone deletes a replica's wake
-  queue, or purges a delay level, that replica stays open until it restarts.
-  Nothing re-sends the token. I left this out deliberately: a re-send timer
-  needs token identity to discard the late duplicate, and I would rather
-  document the hole than half-close it.
-- **It does not see a partial failure.** At a 60% failure rate a breaker that
-  counts consecutive failures barely notices: it opened 83 times, flapping,
-  and 11 healthy messages were still dead-lettered. Nothing was lost, but the
-  dead-letter queue grew. That is the case a failure-*rate* breaker exists
-  for; the series tried one and dropped it, because it cost 7,000–9,000 good
-  calls to avoid about 750 bad ones (article 3 reports it). The redrive added
-  since (README, *Shared through the broker*) brings such messages back: in
-  the next run of this scenario, the 6 it dead-lettered were all redriven.
-- **Five replicas are still five breakers.** They trip at their own moments
-  and come back at their own moments — the recovery in the recording is
-  spread from 0.2 to 3.5 s after the restore, and over 10 s or more in other
-  runs. What has changed is that the state now lives in one place. A
-  fleet-wide verdict exists since, as a Prometheus rule (README, *The fleet
-  view*), but it only feeds alerts: no replica acts on it. Acting on one is
-  article 4's platform-level design.
+  notices the recovery up to *h* seconds late (16–27 s after the restore in
+  the chaos runs). With a 24-hour ceiling, a day-long outage can leave a
+  replica dark for most of another day. The ceiling is how late you are
+  willing to find out, and it is now set per dependency: the ledger caps its
+  hold at 300 s.
+- **A lost token is a stuck breaker.** Delete a wake queue or purge a delay
+  level, and that replica stays open until it restarts. A re-send timer would
+  need token identity to discard the late duplicate, so the hole is documented
+  rather than half-closed.
+- **It does not see a partial failure.** At 60% failures it flapped (83
+  openings) and dead-lettered 11 healthy messages. A failure-rate breaker was
+  tried and dropped: it cost 7,000–9,000 good calls to avoid about 750 bad
+  ones (article 3). The redrive added since brings such messages back.
+- **Five replicas are still five breakers.** They trip and recover at their
+  own moments. The fleet view (a Prometheus rule) only feeds alerts; replicas
+  acting on one verdict is article 4's platform-level design.
 - **One run each.** Every number above is a single run, not a distribution.
 
 ## Reproduce
@@ -286,13 +240,8 @@ node infra/chaos-breaker.mjs                 # all scenarios, saved under histor
 node infra/chaos-breaker.mjs --list          # or pick some with --scenarios=a,b
 ```
 
-The scripts reach the services by their compose names, as the devcontainer
-does; from the host, set `BROKER`, `FLAKY_UPSTREAM`, `PROMETHEUS` and (for the
-chaos drivers) `RABBITMQ_MANAGEMENT` to `amqp://guest:guest@localhost:5672`,
-`http://localhost:8080`, `http://localhost:9090` and
-`http://guest:guest@localhost:15672`. The recording is
-`infra/capture-incident.mjs`, which needs `playwright-core` (not a dependency
-of this repo). The chaos run above is
-kept in [docs/runs/](runs/) as `chaos-breaker-after-fix.json`, with the
-per-second series behind the table; `chaos-breaker-before-fix.json` is an
-earlier run, from before failures were settled by the rule above.
+The scripts use the compose service names; from the host, point `BROKER`,
+`FLAKY_UPSTREAM`, `PROMETHEUS` and `RABBITMQ_MANAGEMENT` at `localhost`. The
+recording is `infra/capture-incident.mjs` (needs `playwright-core`). The run
+above is [`runs/chaos-breaker-after-fix.json`](runs/chaos-breaker-after-fix.json);
+`chaos-breaker-before-fix.json` predates the release rule.
