@@ -28,7 +28,7 @@ import type { Negotiate } from "./Negotiation.ts";
 
 export type { Outcome } from "./Breaker.ts";
 export type { Declared, Negotiate, Parser } from "./Negotiation.ts";
-export { accept } from "./Negotiation.ts";
+export { accept, bytes, text } from "./Negotiation.ts";
 export type { Verdict } from "./Dependency.ts";
 export { Halted, Rejected } from "./Dependency.ts";
 

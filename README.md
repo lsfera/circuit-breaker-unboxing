@@ -246,7 +246,7 @@ const bySqlError = (result: Result.Result<void, SqlError.SqlError>): Consumer.Ve
 const ThirdParty = Consumer.Dependency("payments-api", { classify: byHttpStatus });
 const Database = Consumer.Dependency("ledger", { classify: bySqlError, breaker: { maxDelaySeconds: 300 } });
 const json = Consumer.accept(
-  { "application/json": Schema.fromJsonString(Schema.Unknown) },
+  { "application/json": Consumer.text(Schema.fromJsonString(Schema.Unknown)) },
   { undeclared: "application/json", type: "egress.work" },
 );
 
@@ -269,8 +269,11 @@ Consumer.run({
 ```
 
 - **Explicit reading and judging.** Negotiation has no default; each media type
-  maps to a Schema. The classifiers above are the application's, not the SDK's;
-  `bySqlError` reads the SQLSTATE class Effect puts on `SqlError.reason`.
+  maps to a Schema over the body's bytes: `Consumer.text(schema)` for a text
+  format, `Consumer.bytes(decode)` for a binary one. Parking and redrive
+  republish the bytes as they came, with their declared format. The classifiers
+  above are the application's, not the SDK's; `bySqlError` reads the SQLSTATE
+  class Effect puts on `SqlError.reason`.
 - **One breaker per dependency.** A breaker registers or withdraws; one Gate per
   consumer derives its subscription from the dependencies it lists (any open:
   none; any half-open: prefetch 1; else full).

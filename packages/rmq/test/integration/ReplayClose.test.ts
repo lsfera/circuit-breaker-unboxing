@@ -45,7 +45,7 @@ test("a connection the broker closes during topology replay is reconnected, not 
               { discard: true },
             );
             const last = `${prefix}.${QUEUES - 1}`;
-            yield* rmq.consume(last, (body) => void seen.push(body));
+            yield* rmq.consume(last, (body) => void seen.push(body.toString()));
             const pub = yield* rmq.publisherToQueue(last);
 
             yield* Effect.promise(() =>

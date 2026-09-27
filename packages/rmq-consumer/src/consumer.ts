@@ -1,5 +1,5 @@
 import { Array as Arr, Clock, Context, Effect, Metric, Option as O, Queue, Random, Ref, Result, Schedule, Semaphore } from "effect";
-import { Rmq } from "@egress/rmq/Client.ts";
+import { carry, Rmq } from "@egress/rmq/Client.ts";
 import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
 import {
   deadLetterQueueFor,
@@ -305,12 +305,9 @@ const runConsumer = Effect.fnUntraced(function* (
    * `MAX_REDRIVES` times for the same answer. If the park itself fails, dead-lettering keeps it, and the
    * redrive parks it in the end.
    */
-  const park = (body: string, delivery: DeliveryInfo, reason: string): Effect.Effect<Settlement> =>
+  const park = (body: Uint8Array, delivery: DeliveryInfo, reason: string): Effect.Effect<Settlement> =>
     rmq
-      .send(parkedPub, body, {
-        messageId: O.getOrUndefined(delivery.messageId),
-        headers: { [PARKED_REASON_HEADER]: reason },
-      })
+      .send(parkedPub, body, carry(delivery, { [PARKED_REASON_HEADER]: reason }))
       .pipe(
         Effect.as<Settlement>("accept"),
         Effect.orElseSucceed((): Settlement => "discard"),
@@ -318,7 +315,7 @@ const runConsumer = Effect.fnUntraced(function* (
 
   // A body this consumer cannot read, or that is not a message of its contract, was never published for it:
   // park it unread rather than spend the delivery budget on something no retry can fix.
-  const unreadable = (reason: Unreadable, body: string, delivery: DeliveryInfo) =>
+  const unreadable = (reason: Unreadable, body: Uint8Array, delivery: DeliveryInfo) =>
     Metric.update(Metric.withAttributes(Telemetry.discarded, { ...attributes, reason }), 1).pipe(
       Effect.andThen(
         warnAtMostOncePerSecond(
@@ -331,7 +328,7 @@ const runConsumer = Effect.fnUntraced(function* (
       Effect.andThen(park(body, delivery, `unreadable-${reason}`)),
     );
 
-  const dispose = (body: string, delivery: DeliveryInfo, settled: Settled): Effect.Effect<Settlement> =>
+  const dispose = (body: Uint8Array, delivery: DeliveryInfo, settled: Settled): Effect.Effect<Settlement> =>
     settled.disposition === "park"
       ? warnAtMostOncePerSecond(() => `${log}: parking message_id ${declared(delivery.messageId)}: ${settled.reason}`).pipe(
           Effect.andThen(park(body, delivery, settled.reason)),
@@ -358,7 +355,7 @@ const runConsumer = Effect.fnUntraced(function* (
         }),
     });
 
-  const act = (payload: unknown, body: string, delivery: DeliveryInfo) =>
+  const act = (payload: unknown, body: Uint8Array, delivery: DeliveryInfo) =>
     Semaphore.withPermit(
       slots,
       setInFlight(1).pipe(
@@ -377,7 +374,7 @@ const runConsumer = Effect.fnUntraced(function* (
     );
 
   const readBody = read(spec.negotiate, spec.decode);
-  const handle = (body: string, delivery: DeliveryInfo): Effect.Effect<Settlement, never, any> =>
+  const handle = (body: Uint8Array, delivery: DeliveryInfo): Effect.Effect<Settlement, never, any> =>
     Result.match(readBody(body, delivery), {
       onFailure: (reason) => unreadable(reason, body, delivery),
       onSuccess: (payload) => act(payload, body, delivery),

@@ -55,7 +55,7 @@ test("a rejected delivery dead-letters, and a classic queue counts no attempts",
       });
 
       const deadLettered: string[] = [];
-      yield* rmq.consume(dead, (body) => void deadLettered.push(body));
+      yield* rmq.consume(dead, (body) => void deadLettered.push(body.toString()));
 
       // Released a fixed number of times, then rejected. `seen` is an in-process counter because the broker-side one
       // is what is under test, and it stops this looping forever if delivery_count never moves.
@@ -112,7 +112,8 @@ test("a dead-lettered message says which queue it came from", async (t) => {
       yield* rmq.declareQueue(control, options);
 
       const seen: Array<{ body: string; queue: string | null; reason: string | null }> = [];
-      yield* rmq.consume(dead, (body, delivery) => {
+      yield* rmq.consume(dead, (bytes, delivery) => {
+        const body = bytes.toString();
         seen.push({
           body,
           queue: O.getOrUndefined(delivery.deadLetter)?.queue ?? null,
@@ -217,7 +218,7 @@ test("a durable queue keeps its messages across a broker restart", async (t) => 
       yield* rmq.declareQueue(durable, { durable: true });
 
       const kept: string[] = [];
-      yield* rmq.consume(durable, (body) => void kept.push(body));
+      yield* rmq.consume(durable, (body) => void kept.push(body.toString()));
       yield* waitFor(() => kept.length >= 5);
       return kept;
     }),
@@ -257,7 +258,8 @@ test("a traceparent survives dead-lettering, and only a republish that carries i
 
       // Two independent messages, each dead-lettered once and replayed once: one alone, one carrying the header.
       const deadSeen = new Map<string, number>();
-      yield* rmq.consume(dead, (body, delivery) => {
+      yield* rmq.consume(dead, (bytes, delivery) => {
+        const body = bytes.toString();
         const n = (deadSeen.get(body) ?? 0) + 1;
         deadSeen.set(body, n);
         if (n > 1) return "accept" as const;
@@ -268,7 +270,8 @@ test("a traceparent survives dead-lettering, and only a republish that carries i
       });
 
       const workSeen = new Map<string, number>();
-      yield* rmq.consume(work, (body, delivery) => {
+      yield* rmq.consume(work, (bytes, delivery) => {
+        const body = bytes.toString();
         const n = (workSeen.get(body) ?? 0) + 1;
         workSeen.set(body, n);
         if (n === 2) replayed.push({ how: body, parent: O.isSome(delivery.parent) });
@@ -321,7 +324,8 @@ test("a message id survives dead-lettering, and only a redrive republish that ca
 
       // Two messages, each dead-lettered once and replayed once: one carrying the id, one dropping it (a careless republish).
       const deadSeen = new Map<string, number>();
-      yield* rmq.consume(dead, (body, delivery) => {
+      yield* rmq.consume(dead, (bytes, delivery) => {
+        const body = bytes.toString();
         const n = (deadSeen.get(body) ?? 0) + 1;
         deadSeen.set(body, n);
         if (n > 1) return "accept" as const;
@@ -331,7 +335,8 @@ test("a message id survives dead-lettering, and only a redrive republish that ca
       });
 
       const workSeen = new Map<string, number>();
-      yield* rmq.consume(work, (body, delivery) => {
+      yield* rmq.consume(work, (bytes, delivery) => {
+        const body = bytes.toString();
         const n = (workSeen.get(body) ?? 0) + 1;
         workSeen.set(body, n);
         if (n === 2) replayed.push({ how: body, id: delivery.messageId });
@@ -367,7 +372,8 @@ test("the work queue parks a message at the delivery limit, and a redrive republ
 
       const parked: string[] = [];
       let replayed = false;
-      yield* rmq.consume(dead, (body, delivery) => {
+      yield* rmq.consume(dead, (bytes, delivery) => {
+        const body = bytes.toString();
         parked.push(O.getOrUndefined(delivery.deadLetter)?.reason ?? "unknown");
         if (replayed) return "accept" as const;
         replayed = true;
@@ -434,7 +440,7 @@ test("the dead-letter queue keeps a message through more returns than a default 
       }
 
       const received: string[] = [];
-      yield* rmq.consume(dead, (body) => void received.push(body));
+      yield* rmq.consume(dead, (body) => void received.push(body.toString()));
       yield* waitFor(() => received.length > 0);
       return received;
     }),

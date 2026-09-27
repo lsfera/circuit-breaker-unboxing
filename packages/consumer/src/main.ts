@@ -3,6 +3,7 @@ import { Flag } from "effect/unstable/cli";
 import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest } from "effect/unstable/http";
 import { SqlClient, SqlError } from "effect/unstable/sql";
 import { PgClient } from "@effect/sql-pg";
+import protobuf from "protobufjs";
 import * as Consumer from "@egress/rmq-consumer";
 
 /**
@@ -105,8 +106,26 @@ const ThirdParty = Consumer.Dependency("payments-api", { classify: byHttpStatus 
 // waits, so a day-long hold would leave the fleet dark long after it is back: five minutes at most.
 const Database = Consumer.Dependency("ledger", { classify: bySqlError, breaker: { maxDelaySeconds: 300 } });
 
-const json = Consumer.accept(
-  { "application/json": Schema.fromJsonString(Schema.Unknown) },
+/**
+ * The work message as protobuf, `message Work { string api_id = 1; int64 n = 2; }`, defined at runtime rather than
+ * generated. `defaults`, because proto3 leaves a zero off the wire and `n` starts at 0; `longs: Number`, because the
+ * contract's `n` is a number, not a `Long`.
+ */
+const WorkProto = protobuf.Type.fromJSON("Work", {
+  fields: { apiId: { type: "string", id: 1 }, n: { type: "int64", id: 2 } },
+});
+
+/**
+ * JSON, or protobuf: each message is read by the format it declares, and either way the contract decides whether it
+ * is a payment. A body its parser cannot read is parked as malformed.
+ */
+const formats = Consumer.accept(
+  {
+    "application/json": Consumer.text(Schema.fromJsonString(Schema.Unknown)),
+    "application/x-protobuf": Consumer.bytes((body) =>
+      WorkProto.toObject(WorkProto.decode(body), { longs: Number, defaults: true }),
+    ),
+  },
   { undeclared: "application/json", type: "egress.work" },
 );
 
@@ -117,7 +136,7 @@ const keyOf = (metadata: Consumer.Metadata) =>
     onSome: Effect.succeed,
   });
 
-const payments = Consumer.For(Payment, json).bind(
+const payments = Consumer.For(Payment, formats).bind(
   Effect.fnUntraced(function* (payment, metadata) {
     const key = yield* keyOf(metadata);
     // Halts here unless the charge was ok, so only an accepted charge is recorded.
@@ -127,7 +146,7 @@ const payments = Consumer.For(Payment, json).bind(
   [ThirdParty, Database],
 );
 
-const refunds = Consumer.For(Refund, json).bind(
+const refunds = Consumer.For(Refund, formats).bind(
   Effect.fnUntraced(function* (refund, metadata) {
     const key = yield* keyOf(metadata);
     yield* Database((yield* Ledger).refund(key, refund));

@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Effect, Option as O } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
-import type { GotMessage, RmqService } from "@egress/rmq/Client.ts";
+import type { Body, Format, GotMessage, RmqService } from "@egress/rmq/Client.ts";
+import { TRACEPARENT } from "@egress/rmq/Trace.ts";
 import { REDRIVE_COUNT_HEADER } from "@egress/rmq/WorkQueue.ts";
 import * as Redrive from "../src/Redrive.ts";
 
@@ -53,6 +54,7 @@ test("a negative or fractional count is not a count: it buys no extra redrives",
 const fakeRedriveRmq = (dead: ReadonlyArray<GotMessage>) => {
   const queue = [...dead];
   const sent: Record<string, Array<{ body: string; headers: Record<string, string>; messageId: string | undefined }>> = {};
+  const raw: Array<{ body: Body; format: Format | undefined }> = [];
   const unimplemented =
     (op: string) =>
     (..._args: ReadonlyArray<unknown>) =>
@@ -68,7 +70,8 @@ const fakeRedriveRmq = (dead: ReadonlyArray<GotMessage>) => {
     publisherToQueue: (queueName) => Effect.succeed({ exchange: "", routingKey: queueName, format: {}, mandatory: true }),
     send: (pub, body, options) =>
       Effect.sync(() => {
-        (sent[pub.routingKey] ??= []).push({ body, headers: options?.headers ?? {}, messageId: options?.messageId });
+        (sent[pub.routingKey] ??= []).push({ body: Buffer.from(body).toString(), headers: options?.headers ?? {}, messageId: options?.messageId });
+        raw.push({ body, format: options?.format });
       }),
     sendBatch: unimplemented("sendBatch"),
     cancelConsumer: unimplemented("cancelConsumer"),
@@ -78,15 +81,23 @@ const fakeRedriveRmq = (dead: ReadonlyArray<GotMessage>) => {
     isConnected: Effect.succeed(true),
     resetConnection: Effect.sync(() => {}),
   });
-  return { rmq, sent };
+  return { rmq, sent, raw };
 };
 
-const message = (body: string, redriveCount?: number, messageId?: string): GotMessage => ({
-  body,
+const message = (body: string, redriveCount?: number, messageId?: string, declared: Partial<GotMessage> = {}): GotMessage => ({
+  deliveryCount: 0,
+  deadLetter: O.none(),
+  contentType: O.none(),
+  contentEncoding: O.none(),
+  type: O.none(),
+  publishedAt: O.none(),
+  parent: O.none(),
+  body: Buffer.from(body),
   properties: redriveCount === undefined ? {} : { [REDRIVE_COUNT_HEADER]: String(redriveCount) },
   messageId: O.fromNullishOr(messageId),
   ack: Effect.sync(() => {}),
   nack: Effect.sync(() => {}),
+  ...declared,
 });
 
 const run = <A>(effect: Effect.Effect<A, unknown, Rmq>, rmq: RmqService) =>
@@ -120,6 +131,28 @@ test("a redriven message carries its original message_id forward, so the third p
   );
 
   assert.equal(sent["payments-provider.work"]![0]!.messageId, "run:7");
+});
+
+test("a redriven message is still the message it was: its bytes, declared format and trace go with it", async () => {
+  const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+  const { rmq, sent, raw } = fakeRedriveRmq([
+    message("a", 1, "run:8", {
+      body: Buffer.from([0x1f, 0x8b, 0xff]),
+      contentType: O.some("application/json"),
+      contentEncoding: O.some("gzip"),
+      type: O.some("egress.work"),
+      properties: { [REDRIVE_COUNT_HEADER]: "1", [TRACEPARENT]: traceparent, "x-first-death-queue": "payments-provider.work" },
+    }),
+  ]);
+  await run(
+    Redrive.runPass({ apiId: "payments-provider", isClosed: Effect.succeed(true), onOutcome: () => Effect.void }),
+    rmq,
+  );
+
+  assert.deepEqual(raw, [
+    { body: Buffer.from([0x1f, 0x8b, 0xff]), format: { contentType: "application/json", contentEncoding: "gzip", type: "egress.work" } },
+  ]);
+  assert.deepEqual(sent["payments-provider.work"]![0]!.headers, { [TRACEPARENT]: traceparent, [REDRIVE_COUNT_HEADER]: "2" });
 });
 
 test("a message already at MAX_REDRIVES is parked instead of moved", async () => {

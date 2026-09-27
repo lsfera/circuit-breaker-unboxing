@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { Context, Data, Deferred, Effect, Layer, Match, Option as O, Predicate, Scope, Tracer } from "effect";
+import { Context, Data, Deferred, Effect, Layer, Match, Option as O, Predicate, Record as Rec, Scope, Tracer } from "effect";
 import * as amqp from "amqplib";
 import { parentFrom, TRACEPARENT, traceparent } from "./Trace.ts";
 import type { ChannelModel, ConfirmChannel, ConsumeMessage, Channel } from "amqplib";
@@ -37,29 +37,43 @@ export type Publisher = {
 /**
  * What a publish may carry beyond its body. `headers` become message headers. `messageId` is the AMQP
  * `message_id`: set it when the message's identity must outlive one publish (a retry key); a republish
- * carries it forward. Left out, `send` invents one.
+ * carries it forward. Left out, `send` invents one. `format`, when given, replaces the publisher's.
  */
 export type SendOptions = {
   readonly headers?: Record<string, string>;
   readonly messageId?: string;
+  readonly format?: Format;
 };
 
+/** Text is sent as UTF-8; bytes are sent as they are. */
+export type Body = string | Uint8Array;
+
 /** One message of a `sendBatch`. */
-export type BatchMessage = SendOptions & { readonly body: string };
+export type BatchMessage = SendOptions & { readonly body: Body };
 
 /**
  * One message fetched by `get`, held unsettled until `ack`/`nack` runs — `ack` drops it, `nack` requeues it.
  * `Settlement`'s `requeue`/`release` split doesn't apply here: just "done with it" or "put it back".
  */
-export type GotMessage = {
-  readonly body: string;
-  /** Headers as strings, the same shape as `DeliveryInfo.properties`. */
-  readonly properties: Readonly<Record<string, string>>;
-  /** The AMQP `message_id`, so a caller that republishes this message carries the same idempotency key forward. */
-  readonly messageId: O.Option<string>;
+export type GotMessage = DeliveryInfo & {
+  readonly body: Buffer;
   readonly ack: Effect.Effect<void>;
   readonly nack: Effect.Effect<void>;
 };
+
+/**
+ * What a republish carries of the message it moves, so it is still the same message: its `message_id` (the
+ * idempotency key), its declared format, and its trace. Broker annotations are not carried; `headers` are added.
+ */
+export const carry = (from: DeliveryInfo, headers: Record<string, string>): SendOptions => ({
+  messageId: O.getOrUndefined(from.messageId),
+  format: {
+    contentType: O.getOrUndefined(from.contentType),
+    contentEncoding: O.getOrUndefined(from.contentEncoding),
+    type: O.getOrUndefined(from.type),
+  },
+  headers: { ...Rec.filter(from.properties, (_, key) => key === TRACEPARENT), ...headers },
+});
 
 /** The broker returned a mandatory message it could not route to any queue. */
 export class Unroutable extends Error {}
@@ -170,7 +184,7 @@ export interface RmqService {
   readonly consume: (
     queue: string,
     onMessage: (
-      body: string,
+      body: Buffer,
       delivery: DeliveryInfo,
     ) => void | Settlement | Promise<void | Settlement>,
     options?: { readonly prefetch?: number },
@@ -191,7 +205,7 @@ export interface RmqService {
    * `options.headers` become message headers. Always persistent: ignored on a transient queue, the
    * difference between keeping a message across a restart and appearing to on a durable one.
    */
-  readonly send: (pub: Publisher, body: string, options?: SendOptions) => Effect.Effect<void, RmqError>;
+  readonly send: (pub: Publisher, body: Body, options?: SendOptions) => Effect.Effect<void, RmqError>;
   /**
    * Publishes every message back to back on the confirm channel, in order, then waits for all their confirms:
    * one round trip for the batch rather than one per message. Fails if any message was nacked or unroutable;
@@ -295,11 +309,15 @@ const quietly = (promise: Promise<unknown>): Promise<void> => promise.then(() =>
 const inSequence = <A>(items: Iterable<A>, run: (item: A) => Promise<unknown>): Promise<unknown> =>
   Array.from(items).reduce<Promise<unknown>>((done, item) => done.then(() => run(item)), Promise.resolve());
 
+/** A body as amqplib publishes it; bytes are wrapped, not copied. */
+const bytes = (body: Body): Buffer =>
+  Predicate.isString(body) ? Buffer.from(body, "utf8") : Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+
 /** Headers as amqplib hands them back (values of unknown type) to the string-valued shape every caller here wants. */
 const stringifyHeaders = (headers: Record<string, unknown>): Readonly<Record<string, string>> =>
   Object.fromEntries(Object.entries(headers).map(([k, v]) => [k, String(v)]));
 
-const describe = (delivery: ConsumeMessage): DeliveryInfo => {
+const describe = (delivery: Pick<ConsumeMessage, "properties">): DeliveryInfo => {
   const headers = delivery.properties.headers ?? {};
   const header = (name: string) => O.liftPredicate(headers[name], Predicate.isString);
   const deadLetter = lazily(() =>
@@ -472,7 +490,7 @@ export const makeRmq = Effect.fnUntraced(function* (
     entry.outstanding += 1;
     // The executor turns a synchronous throw into a rejection, so it never escapes into amqplib's callback.
     void new Promise<void | Settlement>((resolve) =>
-      resolve(entry.onMessage(message.content.toString("utf8"), describe(message))),
+      resolve(entry.onMessage(message.content, describe(message))),
     )
       .then(
         (outcome) => settle(ch, message, outcome ?? "accept"),
@@ -752,7 +770,7 @@ export const makeRmq = Effect.fnUntraced(function* (
    * a span; outside one nothing is added (see Trace.ts). The id ties a broker's `basic.return` to its publish.
    */
   const propertiesFor = (pub: Publisher, tp: O.Option<string>, options: SendOptions): amqp.Options.Publish => ({
-    ...pub.format,
+    ...(options.format ?? pub.format),
     persistent: true,
     mandatory: pub.mandatory,
     messageId: options.messageId ?? randomUUID(),
@@ -834,9 +852,8 @@ export const makeRmq = Effect.fnUntraced(function* (
             void quietly(ch.close());
           });
         return O.some({
-          body: msg.content.toString("utf8"),
-          properties: stringifyHeaders(msg.properties.headers ?? {}),
-          messageId: O.liftPredicate(msg.properties.messageId, Predicate.isString),
+          ...describe(msg),
+          body: msg.content,
           ack: settleOnce(() => ch.ack(msg)),
           nack: settleOnce(() => ch.nack(msg, false, true)),
         });
@@ -847,13 +864,13 @@ export const makeRmq = Effect.fnUntraced(function* (
     publisherToQueue: (queue, format = {}) => Effect.succeed({ exchange: "", routingKey: queue, format, mandatory: true }),
     send: (pub, body, options) =>
       Effect.flatMap(traceparent, (tp) =>
-        wrap("send", () => publish(pub, Buffer.from(body, "utf8"), propertiesFor(pub, tp, options ?? {}))),
+        wrap("send", () => publish(pub, bytes(body), propertiesFor(pub, tp, options ?? {}))),
       ),
     // Every `publish` is issued before any is awaited: they reach the channel in order and their confirms pipeline.
     sendBatch: (pub, messages) =>
       Effect.flatMap(traceparent, (tp) =>
         wrap("sendBatch", () =>
-          Promise.all(messages.map((m) => publish(pub, Buffer.from(m.body, "utf8"), propertiesFor(pub, tp, m)))),
+          Promise.all(messages.map((m) => publish(pub, bytes(m.body), propertiesFor(pub, tp, m)))),
         ),
       ).pipe(Effect.asVoid),
     // Each teardown forgets its consumer first, so a recovery does not bring back one we retired.

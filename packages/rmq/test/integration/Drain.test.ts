@@ -29,7 +29,8 @@ test("draining a consumer settles what it holds, redelivers none of it, and take
       yield* Effect.forEach(["a", "b", "c", "d", "e"], (m) => rmq.send(pub, m));
       const consumer = yield* rmq.consume(
         "drain.work",
-        async (body, delivery) => {
+        async (bytes, delivery) => {
+          const body = bytes.toString();
           seen.push(body);
           delivery.deliveryCount > 0 && redelivered.push(body);
           await new Promise((r) => setTimeout(r, 300));
@@ -49,7 +50,7 @@ test("draining a consumer settles what it holds, redelivers none of it, and take
     Effect.gen(function* () {
       const rmq = yield* Rmq;
       const left: string[] = [];
-      yield* rmq.consume("drain.work", (body) => void left.push(body), { prefetch: 10 });
+      yield* rmq.consume("drain.work", (body) => void left.push(body.toString()), { prefetch: 10 });
       yield* waitFor(() => left.length >= 5 - seen.length);
       yield* Effect.sleep(300);
       return left;

@@ -1,5 +1,5 @@
 import { Effect, Option as O, Schema } from "effect";
-import { Rmq } from "@egress/rmq/Client.ts";
+import { carry, Rmq } from "@egress/rmq/Client.ts";
 import type { GotMessage, RmqError } from "@egress/rmq/Client.ts";
 import {
   deadLetterQueueFor,
@@ -57,12 +57,11 @@ export const runPass = Effect.fnUntraced(function* (opts: RedriveOptions) {
   const parkedPub = yield* rmq.publisherToQueue(parkedQueueFor(opts.apiId));
 
   const move = (got: GotMessage) => {
-    const messageId = O.getOrUndefined(got.messageId);
     const decision = nextRedrive(got.properties[REDRIVE_COUNT_HEADER]);
     const [publish, outcome] =
       decision.destination === "work"
-        ? [rmq.send(workPub, got.body, { messageId, headers: { [REDRIVE_COUNT_HEADER]: String(decision.count) } }), "moved" as const]
-        : [rmq.send(parkedPub, got.body, { messageId, headers: { [PARKED_REASON_HEADER]: "redriven-too-often" } }), "parked" as const];
+        ? [rmq.send(workPub, got.body, carry(got, { [REDRIVE_COUNT_HEADER]: String(decision.count) })), "moved" as const]
+        : [rmq.send(parkedPub, got.body, carry(got, { [PARKED_REASON_HEADER]: "redriven-too-often" })), "parked" as const];
     return publish.pipe(
       Effect.andThen(got.ack),
       Effect.andThen(opts.onOutcome(outcome)),
