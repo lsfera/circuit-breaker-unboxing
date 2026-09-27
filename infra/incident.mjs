@@ -34,7 +34,7 @@ const RATE = Number(process.env.RATE ?? "1.0");
 // and starves the queue's actual drain rate below the arrival rate — that is
 // what makes the backlog itself grow.
 const MODE = process.env.MODE; // unset = "error" (flaky-upstream's default)
-// Article 4: a third party with a ceiling instead of a failure rate — at
+// A third party with a ceiling instead of a failure rate — at
 // most CAPACITY requests in flight, each taking DELAY_MS, the rest told 429.
 const CAPACITY = Number(process.env.CAPACITY ?? "0");
 const DELAY_MS = Number(process.env.DELAY_MS ?? "0");
@@ -143,7 +143,7 @@ const scalar = async (query) => {
 const lag = { startedAt: 0, firstReplicaOpenAt: undefined, verdictOpenAt: undefined };
 
 /**
- * Since article 4: ms after the third party was restored that (a) the first
+ * Milliseconds after the third party was restored that (a) the first
  * and last replica's own breaker closed, (b) the fleet read closed, and (c)
  * the dead-letter queue first got smaller — i.e. the first redrive move.
  */
@@ -200,7 +200,7 @@ const pollBreakers = async (label) => {
 };
 
 /**
- * Since article 4: the whole incident's calls by outcome, straight from the
+ * The whole incident's calls by outcome, straight from the
  * consumers' own counters (a delta between two readings, so whatever ran
  * before is excluded), and how many polled seconds the fleet verdict spent
  * open. "failed" is the third party actually being hit and failing, "open" is
@@ -217,7 +217,7 @@ const callTotals = async () => {
 };
 const verdictOpenTicks = { open: 0, total: 0 };
 
-/** Since article 4: the fleet's summed concurrency limit, one reading a tick — how far the replicas let themselves be pushed down, and back. */
+/** The fleet's summed concurrency limit, one reading a tick — how far the replicas let themselves be pushed down, and back. */
 const limits = { faultOn: false, min: undefined, samples: [], recoveredAt: undefined };
 const fleetLimit = async () => {
   const query = encodeURIComponent("sum(egress_consumer_concurrency_limit)");

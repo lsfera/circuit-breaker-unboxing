@@ -206,7 +206,7 @@
    "id": 12,
    "type": "timeseries",
    "title": "Concurrency limit per replica",
-   "description": "How many third-party calls each replica currently lets itself have open, learned from the third party's 429s (article 4): multiplied down when it says slow down, grown back one slot per limit's-worth of 200s. It starts at MAX_IN_FLIGHT and, against a third party that is merely full, settles near that replica's share of the third party's real capacity. Nothing moves it for a 5xx \u2014 that is the breaker's business.",
+   "description": "How many third-party calls each replica currently lets itself have open, learned from the third party's 429s: multiplied down when it says slow down, grown back one slot per limit's-worth of 200s. It starts at MAX_IN_FLIGHT and, against a third party that is merely full, settles near that replica's share of the third party's real capacity. Nothing moves it for a 5xx \u2014 that is the breaker's business.",
    "gridPos": { "x": 0, "y": 43, "w": 24, "h": 8 },
    "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
    "targets": [

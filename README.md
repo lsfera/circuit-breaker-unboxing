@@ -26,9 +26,10 @@ it (*A 429 is backpressure*, below).
 
 For a fleet of consumers calling a third party, this is where the series
 stops needing new infrastructure. Article 4
-(`article/04-platform-control-plane`) is the design at platform level, for
-when other systems must act on the verdict or many services share one egress
-path.
+(`article/04-rabbitmq-only-breaker`) keeps the breaker's own state in the
+broker; article 5 (`article/05-platform-control-plane`) is the design at
+platform level, for when other systems must act on the verdict or many
+services share one egress path.
 
 ```mermaid
 flowchart LR

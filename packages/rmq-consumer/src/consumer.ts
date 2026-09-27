@@ -33,7 +33,7 @@ import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
  * starts either on a transition into Closed or on a fixed clock (`REDRIVE_SWEEP_MS`), since a message can
  * dead-letter without any transition happening at all.
  *
- * Article 4 adds a third thing beside the breaker rather than in it: a concurrency limit learned from the
+ * A third thing sits beside the breaker rather than in it: a concurrency limit learned from the
  * third party's own `429`s (Limiter.ts), for the case the breaker has no good answer to — a third party that
  * is full rather than broken.
  */
@@ -49,7 +49,7 @@ export type ConsumerConfig = {
   /**
    * Adapt the concurrent-call limit to the third party's `429`s. `None`: a
    * `429` is just a failed call like any other non-2xx and `maxInFlight` never
-   * moves — the behaviour before article 4.
+   * moves.
    */
   readonly limit: O.Option<Limiter.LimiterConfig>;
 };
@@ -110,7 +110,7 @@ export const runConsumer = Effect.fnUntraced(function* (cfg: ConsumerConfig) {
   const throttling = O.isSome(cfg.limit);
   const breaker = Breaker.make(cfg.breaker, throttling);
 
-  // Article 4: how many of the `maxInFlight` prefetched messages may be in a
+  // How many of the `maxInFlight` prefetched messages may be in a
   // call at once. Without a `limit` config the semaphore never resizes, so it
   // admits exactly what the consumer's own prefetch already did.
   const limit = O.map(cfg.limit, (c) => new Limiter.AdaptiveLimit(c));

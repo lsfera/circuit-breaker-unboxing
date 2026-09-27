@@ -12,8 +12,7 @@
  * and the compose producer running, and reaches the services by name.
  * Screenshots: steady, mid-outage, restored, recovered, client-error.
  *
- * The client_error phase is this branch's own addition (02-rabbitmq-only-
- * breaker's original has no classify/client_error concept): a 503 outage alone
+ * The client_error phase is there because a 503 outage alone
  * never puts a second line on "Failed and refused calls, by HTTP status," and
  * never shows client_error's whole point — the third party answering, refusing
  * one specific request, and every breaker staying CLOSED through it.
@@ -55,7 +54,7 @@ const allClosed = async () => {
 };
 
 mkdirSync(OUT, { recursive: true });
-// Tall enough for this branch's own panel count (10, vs. 02-rabbitmq-only-breaker's 8) so the
+// Tall enough for this branch's panel count (10) so the
 // redrive/parked-queue/status panels aren't below the fold; screenshots use fullPage regardless.
 const size = { width: 1600, height: Number(flag("height", 1900)) };
 const browser = await chromium.launch({ executablePath });
