@@ -1,5 +1,5 @@
 // The fake third party: one server per port, several ports per API (only payments-provider is used in this
-// scenario). Failure injection is documented in the README ("Injecting a failure"): every field of a POST to
+// scenario). Failure injection is documented in the README ("Running it"): every field of a POST to
 // `/__fail` is optional and a POST replaces the whole behaviour, so `{}` restores a healthy endpoint.
 import { createServer, STATUS_CODES } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
