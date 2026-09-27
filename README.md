@@ -113,11 +113,11 @@ back where it started, one probe permit left. Every graded scenario passes,
 about 45,000 messages each (`docs/runs/chaos-breaker-sdk.json`; a subset again
 on Effect rc.117).
 
-![Grafana mid-outage: fleet open, five breakers open, wake tokens in the delay chain, work queue filling, dead-letter queue flat, probe-permit races lost](docs/media/2-mid-outage.png)
+![Grafana through a 24 s outage: the fleet and every breaker open, consumers on the work queue fall to zero, wake tokens in the delay chain, dead-letter queue flat, then every breaker closes again](docs/media/incident.gif)
 
-12 s into a 24 s outage ([recording](docs/media/incident.webm)): consumers on
-the work queue fall to zero, one wake token per open breaker, the dead-letter
-line flat. After the restore every breaker closed within 4 s.
+A 24 s outage at 4× speed ([full recording](docs/media/incident.webm)):
+consumers on the work queue fall to zero, one wake token per open breaker, the
+dead-letter line flat. After the restore every breaker closed within 4 s.
 
 ## Shared through the broker
 
