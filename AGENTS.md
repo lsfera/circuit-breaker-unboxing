@@ -9,11 +9,10 @@ reshaped substantially. Before writing Effect code:
 
 1. Read [`repos/effect/LLMS.md`](repos/effect/LLMS.md) completely — Effect's
    own guide for agents, for exactly this version.
-2. Read [`agent-patterns/effect-3-to-4.md`](agent-patterns/effect-3-to-4.md)
-   for the v3 idioms that have already come up here, and what they are now, and
-   [`agent-patterns/effect-guide-in-this-repo.md`](agent-patterns/effect-guide-in-this-repo.md)
+2. Read [`agent-patterns/effect-guide-in-this-repo.md`](agent-patterns/effect-guide-in-this-repo.md)
    for where this repository departs from the guide in step 1 — where the two
-   disagree, the repository's decision wins.
+   disagree, the repository's decision wins. For a v3 name, the rename map is
+   [`repos/effect/migration/v3-to-v4.md`](repos/effect/migration/v3-to-v4.md).
 3. For any API you are not certain of, read its source and its tests in
    `repos/effect` rather than guessing. The tests show behaviour the
    docstrings do not.
@@ -46,8 +45,7 @@ version describes APIs this code cannot use.
 
 **When sources disagree, the vendored code wins** — over a skill, a blog
 post, or memory. This is not hypothetical: a project skill taught four Schema
-and DateTime APIs that do not exist in this version, and was deleted for it
-(see `agent-patterns/effect-3-to-4.md`).
+and DateTime APIs that do not exist in this version, and was deleted for it.
 
 **Searching.** `repos/` is tracked, so a search of the whole workspace
 returns Effect's 3,976 files alongside this project's. Scope searches for
