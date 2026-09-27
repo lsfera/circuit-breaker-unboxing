@@ -66,21 +66,20 @@ class Ledger extends Context.Service<
     ).pipe(Layer.provide(PgClient.layer({ url })));
 }
 
-/** 2xx ok; 429 full, not broken; any other 4xx but 408 refused this request; the rest, and no answer, is failing. */
+/** 2xx ok; 429 full, not broken; any other 4xx but 408 refused this request; the rest, and a request that got no response, failing. */
 const byHttpStatus = (result: Result.Result<number, HttpClientError.HttpClientError>): Consumer.Verdict =>
   Result.match(result, {
     onSuccess: (status) => ({
       reason: String(status),
-      outcome:
-        status >= 200 && status < 300
-          ? "ok"
-          : status === 429
-            ? "throttled"
-            : status >= 400 && status < 500 && status !== 408
-              ? "client_error"
-              : "failed",
+      outcome: Match.value(status).pipe(
+        Match.when((s) => s >= 200 && s < 300, () => "ok" as const),
+        Match.when(429, () => "throttled" as const),
+        Match.when((s) => s >= 400 && s < 500 && s !== 408, () => "client_error" as const),
+        Match.orElse(() => "failed" as const),
+      ),
     }),
-    onFailure: () => ({ outcome: "failed", reason: "network" }),
+    // A transport failure, or one of ours such as an invalid URL: the tag says which.
+    onFailure: ({ reason }) => ({ outcome: "failed", reason: reason._tag }),
   });
 
 /** Contention means "fewer at once"; a row the schema refuses is this message's fault; anything else is the database failing. */

@@ -275,7 +275,7 @@
    "id": 8,
    "type": "timeseries",
    "title": "Failed and refused calls, by dependency and reason",
-   "description": "egress_consumer_calls_total for outcome failed or client_error, by status: the HTTP status the third party answered with, or timeout / network when it never did. A 4xx other than 408 and 429 is a client_error: dead-lettered at once and not counted toward tripping. Everything else here counts.",
+   "description": "egress_consumer_calls_total for outcome failed or client_error, by dependency and reason: the third party's HTTP status, the ledger's SqlError reason, timeout, or the HttpClientError reason when no response came. A client_error is parked at once and never counts toward tripping; everything else here does.",
    "gridPos": {
     "x": 0,
     "y": 36,
