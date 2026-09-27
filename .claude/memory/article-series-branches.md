@@ -5,20 +5,21 @@ metadata:
   type: project
 ---
 
-The branch lineup, as of 2026-09-24:
+The branch lineup, as of 2026-09-27 (renumbered that day at the user's request: 02-rabbitmq-only-breaker → 04, old 04 → 05):
 
 - 01-base-scenario
 - 02-in-process-breaker
-- 02-rabbitmq-only-breaker: the breaker held by RabbitMQ (delay-chain token), kept as 02 by the user's choice. Since 2026-09-24 it carries everything 03 has (permit, redrive, fleet-view rule, the 429 classification and Limiter.ts), each measured again on this design, plus a same-harness comparison with 03 in its README.
-- 03-rabbitmq-coordination: probe permit, counted attempts and redrive, the fleet view as Prometheus rules (infra/monitoring/rules.yml, with a 10s freshness filter), and, merged in from 04 on 2026-09-24, the 429 work: `throttled` classification, the AIMD limit (Limiter.ts), and the failure-rate negative result.
-- 04-platform-control-plane: created 2026-09-24 from master; master was then deleted (it is 04's parent, faef7e072), and `main` is now an empty orphan branch (one empty commit) set as init.defaultBranch. The last article: Envoy + aggregators + published per-API events, framed as "scaling the design at platform level", with entry criteria (other systems act on the verdict, visible hosts for DEGRADED, shared egress for many services, many APIs). The user's assessment: for a consumer-only daemon 03 / 02-rabbitmq-only are the right compromise; master is ~4× the code and only pays off at platform level.
+- 03-rabbitmq-coordination (below)
+- 04-rabbitmq-only-breaker: the breaker held by RabbitMQ (delay-chain token); was 02-rabbitmq-only-breaker. Now "A reliability framework with RabbitMQ": the consumer SDK, one breaker per dependency, the PostgreSQL ledger app, broker-alarm alerting. Since 2026-09-24 it carries everything 03 has (permit, redrive, fleet-view rule, the 429 classification and Limiter.ts), each measured again on this design, plus a same-harness comparison with 03 in its README.
+- 03-rabbitmq-coordination, in full: probe permit, counted attempts and redrive, the fleet view as Prometheus rules (infra/monitoring/rules.yml, with a 10s freshness filter), and, merged in from 04 on 2026-09-24, the 429 work: `throttled` classification, the AIMD limit (Limiter.ts), and the failure-rate negative result.
+- 05-platform-control-plane (04 until 2026-09-27): created 2026-09-24 from master; master was then deleted (it is its parent, faef7e072), and `main` is now an empty orphan branch (one empty commit) set as init.defaultBranch. The last article: Envoy + aggregators + published per-API events, framed as "scaling the design at platform level", with entry criteria (other systems act on the verdict, visible hosts for DEGRADED, shared egress for many services, many APIs). The user's assessment: for a consumer-only daemon 03 / 04 (the RabbitMQ-held breaker) are the right compromise; master is ~4× the code and only pays off at platform level.
 - (old) 04-429-backpressure: merged into 03 and ported to 02-rabbitmq-only-breaker on 2026-09-24, then deleted at the user's request (was 27443d8d1; reflog only).
 
 History:
 
 - 2026-09-23: old 05+06 and old 07+08 were merged, and the bounded-queue article was dropped. The user holds that a bounded queue is an anti-pattern.
 - 2026-09-24: old 03+04 were merged. The user's reason: both use RabbitMQ features the project already had.
-- 2026-09-24: the aggregator was dropped from articles 1–3; it returns only as article 4 (master), the platform-level design.
+- 2026-09-24: the aggregator was dropped from articles 1–3; it returns only as article 4 (master), the platform-level design — article 5 since 2026-09-27.
 - 2026-09-24: 04 was renamed 04-429-backpressure, then merged into 03.
 - 2026-09-24: the failure-rate breaker (EitherBreaker) was dropped. It cost 7,000–9,000 good calls to avoid ~750 bad ones, and its table now opens the shedding article.
 

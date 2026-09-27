@@ -1,6 +1,6 @@
 ---
 name: consumer-sdk-design
-description: "How the user shaped the consumer SDK (2026-09-25/26, branch article/02-rabbitmq-only-breaker) — the API decisions they made one by one, and what the exercise exposed."
+description: "How the user shaped the consumer SDK (2026-09-25/26, branch article/02-rabbitmq-only-breaker, renamed 04-rabbitmq-only-breaker on 2026-09-27) — the API decisions they made one by one, and what the exercise exposed."
 metadata:
   node_type: memory
   type: project

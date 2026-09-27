@@ -10,10 +10,10 @@
 - [Reliability testing preferences](reliability-testing-preferences.md) — correctness = no loss + empty DLQ, stop-fix-relaunch, subagents, RabbitMQ-sourced metrics, plain explanations.
 - [Devcontainer rebuild](devcontainer-rebuild.md) — what survives rebuilding the devcontainer (workspace, volumes, Docker Desktop) and what is lost (~/.claude transcripts, login, user settings, a global skill).
 - [Use rtk for command output](use-rtk-for-command-output.md) — wrap git/grep/pnpm/etc with `rtk <subcommand>` for condensed output; check `rtk --help`.
-- [RabbitMQ-only breaker variant](rabbitmq-only-breaker-variant.md) — branch article/02-rabbitmq-only-breaker: open state as a delay-chain token; now at parity with 03 incl. the 429 work, compared on one harness.
+- [RabbitMQ-only breaker variant](rabbitmq-only-breaker-variant.md) — branch article/04-rabbitmq-only-breaker (was 02-rabbitmq-only): open state as a delay-chain token; now at parity with 03 incl. the 429 work, compared on one harness.
 - [Incident-report limits-grid gotcha](incident-report-limits-grid-gotcha.md) — ol.limits li needs exactly one child div; a sibling badge breaks the grid, bit twice.
 - [RabbitMQ reject-publish nacks](rabbitmq-reject-publish-nacks.md) — reject-publish nacks the loser; x-max-length counts only ready msgs; cockatiel half-opens inside execute() (permit never gated 03/04 until fixed 09-24).
 - [Chaos-test new components](chaos-test-new-components.md) — every new article-series component needs fault-injection-under-load; also holds the 2026-09-19 ADR-compliance pass (kill-broker fault, redrive sweep, fleet-known-replicas gauge).
-- [Article series branches](article-series-branches.md) — 01–03 plus 02-rabbitmq-only, then 04 = old master (platform level, entry criteria); main is an empty default branch; cherry-pick forward to port.
+- [Article series branches](article-series-branches.md) — 01–03, 04 = the RabbitMQ-held breaker (was 02-rabbitmq-only), 05 = old master (platform level, entry criteria); main is an empty default branch; cherry-pick forward to port.
 - [Consumer SDK design](consumer-sdk-design.md) — For/bind/run, per-dependency breakers, explicit negotiation, no HTTP in the SDK, app flags; the user decided each.
 - [Lean docs](lean-docs.md) — README/docs stay lean: corrections replace, reruns go to docs/runs, pointers not summaries.

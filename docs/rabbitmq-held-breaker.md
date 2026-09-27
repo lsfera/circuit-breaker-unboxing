@@ -1,6 +1,6 @@
 # A circuit breaker with no memory: keeping the open state in RabbitMQ
 
-*Part 2b of the circuit-breaker series. Part 2 put a breaker inside each
+*Part 4 of the circuit-breaker series. Part 2 put a breaker inside each
 consumer. This one moves everything that breaker remembered into the broker.*
 
 *Since written, the consumer has become an SDK with one breaker per
@@ -228,7 +228,7 @@ letters appeared.
   ones (article 3). The redrive added since brings such messages back.
 - **Five replicas are still five breakers.** They trip and recover at their
   own moments. The fleet view (a Prometheus rule) only feeds alerts; replicas
-  acting on one verdict is article 4's platform-level design.
+  acting on one verdict is article 5's platform-level design.
 - **One run each.** Every number above is a single run, not a distribution.
 
 ## Reproduce

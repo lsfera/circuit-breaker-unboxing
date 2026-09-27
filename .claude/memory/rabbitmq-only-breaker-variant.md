@@ -1,6 +1,6 @@
 ---
 name: rabbitmq-only-breaker-variant
-description: Branch article/02-rabbitmq-only-breaker — the in-process breaker rebuilt so its open state lives in RabbitMQ (delay chain), what was measured, and what it has carried since 2026-09-24.
+description: Branch article/04-rabbitmq-only-breaker (02-rabbitmq-only-breaker until 2026-09-27) — the in-process breaker rebuilt so its open state lives in RabbitMQ (delay chain), what was measured, and what it has carried since 2026-09-24.
 metadata:
   type: project
 ---
