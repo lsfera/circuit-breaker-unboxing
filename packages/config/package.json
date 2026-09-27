@@ -2,7 +2,7 @@
   "name": "@egress/config",
   "private": true,
   "type": "module",
-  "description": "How every process here reads its settings: one declaration per process, decoded at boot, and a value the process cannot use stops it before it opens a socket — see docs/decisions/008-configuration-is-a-boundary.md.",
+  "description": "How every process here reads its settings: one declaration per process, decoded at boot, and a value the process cannot use stops it before it opens a socket.",
   "exports": {
     "./Settings.ts": "./src/Settings.ts"
   },

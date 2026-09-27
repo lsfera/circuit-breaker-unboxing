@@ -35,16 +35,16 @@ Two traps met while applying these:
   a function that runs only when called.
 - **`Schema.UnknownFromJsonString` is `@internal`** in this version
   (`Schema.ts:9208`). Use the public `Schema.fromJsonString(Schema.Unknown)`.
-  Decoding in two steps is what keeps ADR 006's distinction between
-  `malformed-json` and `schema-mismatch`.
+  Decoding in two steps (`read` in `packages/rmq-consumer/src/Negotiation.ts`)
+  keeps a body that does not parse an answer, not an exception.
 
 ## Where the repository wins
 
 | The guide says | This repository does | Because |
 | --- | --- | --- |
-| Define errors with `Schema.TaggedError` | `Data.TaggedError` — `RmqError`, `CoordinationUnavailable`, `CheckpointFenced`, `DeliveryFailed`, `StatsUnavailable` | [ADR 006](../docs/decisions/006-representing-absence.md) settles failures in the error channel as `Data.TaggedError`s recovered with `catchTag`. None of them crosses a process boundary, so a schema for their encoding would buy nothing. `RmqError` also overrides `message`, which `Data.TaggedError` prints. |
-| Tracing-relevant functions use `Effect.fn("name")`, which opens a span | `Effect.fnUntraced`; spans are opened explicitly with `Effect.withSpan` at chosen boundaries | [ADR 003](../docs/decisions/003-tracing.md) keeps tracing to `work.publish`, `work.call` and `work.redrive`, joined across the broker, with tail sampling behind them. A span for every service function would be volume the collector discards. |
-| Export telemetry with the lightweight `Otlp` modules in new projects | `@effect/opentelemetry/NodeSdk` | [ADR 003](../docs/decisions/003-tracing.md). The guide itself allows NodeSdk when integrating with an existing OpenTelemetry setup, and this stack has one: the collector and its sampling policies. |
+| Define errors with `Schema.TaggedError` | `Data.TaggedError` — `RmqError`, `Halted`, `Rejected`, `Fatal` | Failures stay in the error channel as `Data.TaggedError`s, matched by class (`Settle.ts` reads `Halted` and `Rejected`). None of them crosses a process boundary, so a schema for their encoding would buy nothing. `RmqError` also overrides `message`, which `Data.TaggedError` prints. |
+| Tracing-relevant functions use `Effect.fn("name")`, which opens a span | `Effect.fnUntraced`; spans are opened explicitly with `Effect.withSpan` at chosen boundaries | Spans are kept to chosen boundaries (`work.publish` in the producer), with sampling left to a collector at the tail. A span for every service function would be volume the collector discards. |
+| Export telemetry with the lightweight `Otlp` modules in new projects | `@effect/opentelemetry/NodeSdk` | The guide itself allows NodeSdk when integrating with an existing OpenTelemetry setup, and tracing here is built to export to one: a collector that samples at the tail (`packages/tracing/src/Tracing.ts`). |
 | Test with `@effect/vitest` and `it.effect` | `node:test` running Effect programs, with `TestClock` from `effect/testing` | The repository's test runner. `packages/aggregator/test/ConsoleFrames.test.ts` is a worked example. |
 | `Effect.catch` rather than `Effect.catchCause` | `catchCause` in six places that deliberately absorb defects too | Each one guards the control loop or the delivery path from something outside it, and a comment says so: a sink must never stall a tick (`Events.ts`, `AmqpControlPlaneSink.ts`), an unreachable outbox must not fail a tick, a drain pass stops at its first failure of any kind, and a daemon's control handler logs and carries on (`daemon.ts`). Where a defect is caught, the cause is logged rather than dropped. |
 | Prefer combinators and folds to loops | Four loops in `FleetSource.ts`'s simulator, and sequential `await` loops in `rmq/Client.ts` | The simulator mutates per-host ejection state across N simulated requests, and commit `df95b85` left it on purpose: a fold would move the mutation into a closure rather than remove it. The client's loops are inside amqplib's Promise callbacks, where order is the point. |

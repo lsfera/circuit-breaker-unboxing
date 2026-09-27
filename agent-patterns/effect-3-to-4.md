@@ -37,8 +37,7 @@ keep and `Result.fail(anything)` to skip
 ([`Array.ts:3803`](../repos/effect/packages/effect/src/Array.ts),
 [`Stream.ts:4176`](../repos/effect/packages/effect/src/Stream.ts)). Returning
 an `Option` does not compile; converting it back to an `Option`-shaped helper
-is the wrong fix. See `packages/subscriber/src/subscriber.ts` and
-[ADR 006](../docs/decisions/006-representing-absence.md).
+is the wrong fix.
 
 ## Where this repository's own material disagrees
 

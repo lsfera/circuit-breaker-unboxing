@@ -630,8 +630,8 @@ export const makeRmq = Effect.fnUntraced(function* (
               // About five minutes of trying before the process gives up.
               maxRetries: 60,
               // amqplib listens for a new connection's `error` only once setup has finished, so an error during
-              // the replay — a missed heartbeat, a fatal close — had no listener and crashed the process
-              // (ADR 005). With one, the replay's pending calls reject and recovery schedules another attempt.
+              // the replay — a missed heartbeat, a fatal close — had no listener and crashed the process.
+              // With one, the replay's pending calls reject and recovery schedules another attempt.
               setup: (model: ChannelModel) => {
                 model.on("error", (error: Error) => void warn(`connection error during setup: ${error.message}`));
                 return setup(model);

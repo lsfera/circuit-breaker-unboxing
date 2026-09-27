@@ -5,7 +5,7 @@ import { broker, brokerExec, skipIfNoDocker, startBroker, stopBroker, waitFor } 
 import { Rmq } from "../../src/Client.ts";
 
 /**
- * ADR 005's open gap: amqplib's recovery opens a new connection and runs the
+ * The gap this guards: amqplib's recovery opens a new connection and runs the
  * setup hook (topology replay) before it listens for that connection's
  * `error`. A broker that closes the connection during the replay emits
  * `error` with no listener, which Node throws, and the process exits instead
