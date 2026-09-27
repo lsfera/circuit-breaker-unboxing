@@ -1,4 +1,4 @@
-# In-process breaker, held by RabbitMQ — five, not one
+# A reliability framework with RabbitMQ
 
 One producer, one broker, a fleet of competing-consumer daemons — each one
 wrapping its calls to the third party in its own circuit breaker. Where
