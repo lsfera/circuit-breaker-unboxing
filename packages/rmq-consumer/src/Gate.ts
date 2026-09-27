@@ -13,7 +13,7 @@ export type Mode = "none" | "probe" | "full";
 export const modeOf = (registrations: ReadonlyArray<O.Option<Registration>>): Mode =>
   Arr.some(registrations, O.isNone)
     ? "none"
-    : Arr.some(registrations, (r) => O.isSome(r) && r.value.phase === "half-open")
+    : Arr.some(registrations, O.exists((r) => r.phase === "half-open"))
       ? "probe"
       : "full";
 

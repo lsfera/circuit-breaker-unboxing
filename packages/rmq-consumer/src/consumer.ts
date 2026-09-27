@@ -236,8 +236,7 @@ const runConsumer = Effect.fnUntraced(function* (
             apiId: spec.key,
             // This replica's own view, not the fleet's: see README.md's "Limits it accepts".
             isClosed,
-            onOutcome: (outcome) =>
-              void runInContext(Metric.update(Metric.withAttributes(Telemetry.redrives, { ...attributes, outcome }), 1)),
+            onOutcome: (outcome) => Metric.update(Metric.withAttributes(Telemetry.redrives, { ...attributes, outcome }), 1),
           }).pipe(Effect.ensuring(Ref.set(redriving, false))),
     ),
     Effect.catch((err) => Effect.logWarning(`${log}: redrive pass failed`, err)),
@@ -343,11 +342,27 @@ const runConsumer = Effect.fnUntraced(function* (
           ).pipe(Effect.as(settled.disposition))
         : Effect.succeed(settled.disposition);
 
+  // A span only for a delivery that carries a trace: the producer's sampler decides, never this process.
+  const traced = (delivery: DeliveryInfo) => <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    O.match(delivery.parent, {
+      onNone: () => effect,
+      onSome: (parent) =>
+        Effect.withSpan(effect, "work.process", {
+          parent,
+          attributes: {
+            "messaging.system": "rabbitmq",
+            "messaging.operation.name": "process",
+            "messaging.destination.name": workQueue,
+            "messaging.message.id": O.getOrUndefined(delivery.messageId),
+          },
+        }),
+    });
+
   const act = (payload: unknown, body: string, delivery: DeliveryInfo) =>
     Semaphore.withPermit(
       slots,
       setInFlight(1).pipe(
-        Effect.andThen(Effect.exit(Effect.suspend(() => spec.action(payload, delivery)))),
+        Effect.andThen(Effect.exit(Effect.suspend(() => spec.action(payload, delivery)).pipe(traced(delivery)))),
         Effect.ensuring(setInFlight(-1)),
       ),
     ).pipe(

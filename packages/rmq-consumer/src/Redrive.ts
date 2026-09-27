@@ -1,4 +1,4 @@
-import { Effect, Option as O } from "effect";
+import { Effect, Option as O, Schema } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
 import type { GotMessage, RmqError } from "@egress/rmq/Client.ts";
 import {
@@ -20,13 +20,16 @@ export type RedriveDecision =
   | { readonly destination: "work"; readonly count: number }
   | { readonly destination: "parked" };
 
+const decodeCount = Schema.decodeUnknownOption(
+  Schema.FiniteFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+);
+
 /**
- * `header` is `REDRIVE_COUNT_HEADER` as the broker hands it back. Anything that does not parse counts as 0
- * rather than being trusted: trusting it is how a poison message would redrive forever.
+ * `header` is `REDRIVE_COUNT_HEADER` as the broker hands it back. Anything but a whole count counts as 0 rather
+ * than being trusted: trusting it is how a poison message would redrive forever.
  */
 export const nextRedrive = (header: string | undefined): RedriveDecision => {
-  const parsed = header === undefined ? 0 : Number(header);
-  const count = (Number.isFinite(parsed) ? parsed : 0) + 1;
+  const count = O.getOrElse(decodeCount(header), () => 0) + 1;
   return count > MAX_REDRIVES ? { destination: "parked" } : { destination: "work", count };
 };
 
@@ -39,7 +42,7 @@ export type RedriveOptions = {
   readonly apiId: string;
   /** Re-read before every message: a pass stops the moment this replica's breaker leaves closed. */
   readonly isClosed: Effect.Effect<boolean>;
-  readonly onOutcome: (outcome: RedriveOutcome) => void;
+  readonly onOutcome: (outcome: RedriveOutcome) => Effect.Effect<void>;
 };
 
 /**
@@ -47,7 +50,7 @@ export type RedriveOptions = {
  * in between duplicates (the idempotency key rides along as `message_id`), where the reverse order would lose
  * the message. Whatever a pass does not reach stays where it was.
  */
-export const runPass = Effect.fn(function* (opts: RedriveOptions) {
+export const runPass = Effect.fnUntraced(function* (opts: RedriveOptions) {
   const rmq = yield* Rmq;
   const deadQueue = deadLetterQueueFor(opts.apiId);
   const workPub = yield* rmq.publisherToQueue(workQueueFor(opts.apiId));
@@ -62,7 +65,7 @@ export const runPass = Effect.fn(function* (opts: RedriveOptions) {
         : [rmq.send(parkedPub, got.body, { messageId, headers: { [PARKED_REASON_HEADER]: "redriven-too-often" } }), "parked" as const];
     return publish.pipe(
       Effect.andThen(got.ack),
-      Effect.andThen(Effect.sync(() => opts.onOutcome(outcome))),
+      Effect.andThen(opts.onOutcome(outcome)),
     );
   };
 

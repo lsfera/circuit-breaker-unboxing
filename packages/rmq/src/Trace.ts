@@ -15,7 +15,7 @@ const TRACEPARENT_RE = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
 /** The current span as a `traceparent`, or `None` when nothing is traced (the common case): absence is a value, not a failure. */
 export const traceparent: Effect.Effect<O.Option<string>> = Effect.map(
   Effect.option(Effect.currentSpan),
-  O.map((span) => `00-${span.traceId}-${span.spanId}-01`),
+  O.map((span) => `00-${span.traceId}-${span.spanId}-${span.sampled ? "01" : "00"}`),
 );
 
 /**
@@ -24,6 +24,9 @@ export const traceparent: Effect.Effect<O.Option<string>> = Effect.map(
  */
 export const parentFrom = (header: string): O.Option<Tracer.ExternalSpan> =>
   O.fromNullOr(TRACEPARENT_RE.exec(header)).pipe(
-    O.map(([, traceId, spanId]) => Tracer.externalSpan({ traceId: traceId!, spanId: spanId! })),
+    // Bit 0 of the flags is `sampled`: an unsampled root must stay unsampled past the broker.
+    O.map(([, traceId, spanId, flags]) =>
+      Tracer.externalSpan({ traceId: traceId!, spanId: spanId!, sampled: (parseInt(flags!, 16) & 1) === 1 }),
+    ),
   );
 

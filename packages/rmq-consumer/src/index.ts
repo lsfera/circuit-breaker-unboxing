@@ -1,4 +1,4 @@
-import { Config, Data, Deferred, Effect, Layer, Option as O, Predicate, Schema } from "effect";
+import { Config, Effect, Layer, Option as O, Predicate, Schema } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { HttpRouter } from "effect/unstable/http";
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import { launchWithRmq, Rmq } from "@egress/rmq/Client.ts";
 import type { DeliveryInfo } from "@egress/rmq/Client.ts";
 import { MAX_DELAY_SECONDS } from "@egress/rmq/DelayedDelivery.ts";
-import { brokerFlag, metricsPortFlag, PositiveInt, VERSION } from "@egress/config/Settings.ts";
+import { brokerFlag, metricsPortFlag, PositiveInt, setting, VERSION } from "@egress/config/Settings.ts";
 import { MetricsRoute } from "@egress/tracing/Metrics.ts";
 import { TracingLive } from "@egress/tracing/Tracing.ts";
 import { runApplication } from "./consumer.ts";
@@ -96,29 +96,19 @@ const OpenFraction = Schema.Finite.check(
  */
 export const flags = {
   broker: brokerFlag("Broker to consume work from"),
-  maxInFlight: Flag.Int("max-in-flight").pipe(
-    Flag.withSchema(PositiveInt),
-    Flag.withFallbackConfig(Config.schema(PositiveInt, "MAX_IN_FLIGHT")),
+  maxInFlight: setting(Flag.Int("max-in-flight"), PositiveInt, "MAX_IN_FLIGHT").pipe(
     Flag.withDefault(20),
     Flag.withDescription("Concurrent actions each consumer allows itself"),
   ),
-  breakerThreshold: Flag.Int("breaker-threshold").pipe(
-    Flag.withSchema(PositiveInt),
-    Flag.withFallbackConfig(Config.schema(PositiveInt, "BREAKER_THRESHOLD")),
+  breakerThreshold: setting(Flag.Int("breaker-threshold"), PositiveInt, "BREAKER_THRESHOLD").pipe(
     Flag.withDefault(5),
     Flag.withDescription("Consecutive failures at a dependency before its breaker opens, for a dependency that sets none of its own"),
   ),
-  breakerInitialDelaySeconds: Flag.Int("breaker-initial-delay-seconds").pipe(
-    Flag.withSchema(PositiveInt),
-    Flag.withFallbackConfig(Config.schema(PositiveInt, "BREAKER_INITIAL_DELAY_SECONDS")),
+  breakerInitialDelaySeconds: setting(Flag.Int("breaker-initial-delay-seconds"), PositiveInt, "BREAKER_INITIAL_DELAY_SECONDS").pipe(
     Flag.withDefault(1),
     Flag.withDescription("First hold after a breaker opens, before its half-open probe, for a dependency that sets none of its own"),
   ),
-  breakerMaxDelaySeconds: Flag.Int("breaker-max-delay-seconds").pipe(
-    Flag.withSchema(PositiveInt.check(Schema.isLessThanOrEqualTo(MAX_DELAY_SECONDS))),
-    Flag.withFallbackConfig(
-      Config.schema(PositiveInt.check(Schema.isLessThanOrEqualTo(MAX_DELAY_SECONDS)), "BREAKER_MAX_DELAY_SECONDS"),
-    ),
+  breakerMaxDelaySeconds: setting(Flag.Int("breaker-max-delay-seconds"), Dep.MaxDelaySeconds, "BREAKER_MAX_DELAY_SECONDS").pipe(
     Flag.withDefault(86_400),
     Flag.withDescription(`Ceiling a hold grows to, for a dependency that sets none of its own; the delay chain counts to ${MAX_DELAY_SECONDS}`),
   ),
@@ -134,27 +124,16 @@ export const flags = {
       "Shrink a consumer's concurrent-action limit when a dependency answers throttled and grow it back while it answers ok; off, throttled is a plain failure and the limit stays at MAX_IN_FLIGHT",
     ),
   ),
-  limitMin: Flag.Int("limit-min").pipe(
-    Flag.withSchema(PositiveInt),
-    Flag.withFallbackConfig(Config.schema(PositiveInt, "LIMIT_MIN")),
+  limitMin: setting(Flag.Int("limit-min"), PositiveInt, "LIMIT_MIN").pipe(
     Flag.withDefault(1),
     Flag.withDescription("Floor the adaptive limit never goes below; setting it to MAX_IN_FLIGHT keeps throttled handling but stops the limit adapting"),
   ),
-  limitDecrease: Flag.Finite("limit-decrease").pipe(
-    Flag.withSchema(OpenFraction),
-    Flag.withFallbackConfig(Config.schema(OpenFraction, "LIMIT_DECREASE")),
+  limitDecrease: setting(Flag.Finite("limit-decrease"), OpenFraction, "LIMIT_DECREASE").pipe(
     Flag.withDefault(0.7),
     Flag.withDescription("What the limit is multiplied by on a throttled answer (once per round trip, not once per answer)"),
   ),
   metricsPort: metricsPortFlag,
 };
-
-/** Why this process stopped, when it stops itself rather than losing the broker. */
-class Fatal extends Data.TaggedError("Fatal")<{ readonly reason: string }> {
-  override get message(): string {
-    return this.reason;
-  }
-}
 
 /** What the SDK's flags decode to. */
 export type Settings = Command.Command.Config.Infer<typeof flags>;
@@ -186,48 +165,30 @@ export const command = <const C extends Record<string, Registration<any>>, const
   const consumers = Object.entries(app.consumers).map(([key, registration]) => registration.spec(key));
 
   return Command.make(name, { sdk: flags, app: (app.flags ?? {}) as F }, ({ sdk: settings, app: own }) => {
-    const fatal = Deferred.makeUnsafe<never, Fatal>();
-    const stop = (reason: string) => Effect.asVoid(Deferred.fail(fatal, new Fatal({ reason })));
     const services = Predicate.isFunction(app.layer) ? app.layer(own as Command.Command.Config.Infer<F>) : app.layer;
-
-    const Application = Layer.effectDiscard(
-      Effect.forkScoped(
-        Effect.orDie(
-          runApplication({
-            name,
-            maxInFlight: settings.maxInFlight,
-            replicaId: settings.replicaId,
-            breaker: {
-              consecutiveFailures: settings.breakerThreshold,
-              initialDelaySeconds: settings.breakerInitialDelaySeconds,
-              maxDelaySeconds: settings.breakerMaxDelaySeconds,
-            },
-            limit: settings.adaptiveLimit
-              ? O.some({
-                  min: Math.min(settings.limitMin, settings.maxInFlight),
-                  max: settings.maxInFlight,
-                  decrease: settings.limitDecrease,
-                })
-              : O.none(),
-            consumers,
-          }),
-        ).pipe(
-          Effect.catchDefect((defect) =>
-            Effect.logFatal(`${name} died, restarting the process`, defect).pipe(
-              Effect.andThen(stop(`${name} died`)),
-            ),
-          ),
-        ),
-      ),
-    ).pipe(Layer.provide(services as Layer.Layer<any, unknown>));
-
     return launchWithRmq(
-      HttpRouter.serve(Layer.provideMerge(Application, MetricsRoute)).pipe(
-        Layer.provide(NodeHttpServer.layer(createServer, { port: settings.metricsPort })),
-        Layer.provide(TracingLive(name)),
-        Layer.provideMerge(Rmq.layer(settings.broker)),
-      ),
-      Deferred.await(fatal),
+      Layer.mergeAll(
+        HttpRouter.serve(MetricsRoute).pipe(Layer.provide(NodeHttpServer.layer(createServer, { port: settings.metricsPort }))),
+        services,
+      ).pipe(Layer.provideMerge(TracingLive(name)), Layer.provideMerge(Rmq.layer(settings.broker))),
+      runApplication({
+        name,
+        maxInFlight: settings.maxInFlight,
+        replicaId: settings.replicaId,
+        breaker: {
+          consecutiveFailures: settings.breakerThreshold,
+          initialDelaySeconds: settings.breakerInitialDelaySeconds,
+          maxDelaySeconds: settings.breakerMaxDelaySeconds,
+        },
+        limit: settings.adaptiveLimit
+          ? O.some({
+              min: Math.min(settings.limitMin, settings.maxInFlight),
+              max: settings.maxInFlight,
+              decrease: settings.limitDecrease,
+            })
+          : O.none(),
+        consumers,
+      }),
     );
   });
 };

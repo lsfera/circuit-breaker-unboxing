@@ -20,30 +20,23 @@ export const permitQueueFor = (scope: string): string => `${scope}.probe-permit`
 const PERMIT_QUEUE_OPTIONS = { args: { "x-max-length": 1, "x-overflow": "reject-publish" } } as const;
 
 /** Publish a token, and treat the broker refusing it (one is already there) as success. */
-const offer = (scope: string) =>
-  Effect.gen(function* () {
-    const rmq = yield* Rmq;
-    const pub = yield* rmq.publisherToQueue(permitQueueFor(scope));
-    yield* rmq.send(pub, "permit").pipe(Effect.ignore);
-  });
+const offer = Effect.fnUntraced(function* (scope: string) {
+  const rmq = yield* Rmq;
+  yield* rmq.send(yield* rmq.publisherToQueue(permitQueueFor(scope)), "permit");
+}, (effect) => Effect.ignore(effect));
 
 /** Every replica seeds at startup; all but the first are refused. */
-export const seed = Effect.fn(function* (scope: string) {
+export const seed = Effect.fnUntraced(function* (scope: string) {
   const rmq = yield* Rmq;
   yield* rmq.declareQueue(permitQueueFor(scope), PERMIT_QUEUE_OPTIONS);
   yield* offer(scope);
 });
 
 /** The permit if it is free, as the effect that hands it back; `None` if another replica holds it. */
-export const take = (scope: string): Effect.Effect<O.Option<Effect.Effect<void>>, RmqError, Rmq> =>
-  Effect.gen(function* () {
-    const rmq = yield* Rmq;
-    const got = yield* rmq.get(permitQueueFor(scope));
-    return O.map(got, (token) =>
-      offer(scope).pipe(
-        Effect.ignore,
-        Effect.andThen(token.ack),
-        Effect.provideService(Rmq, rmq),
-      ),
-    );
-  });
+export const take = Effect.fnUntraced(function* (
+  scope: string,
+): Effect.fn.Return<O.Option<Effect.Effect<void>>, RmqError, Rmq> {
+  const rmq = yield* Rmq;
+  const got = yield* rmq.get(permitQueueFor(scope));
+  return O.map(got, (token) => offer(scope).pipe(Effect.andThen(token.ack), Effect.provideService(Rmq, rmq)));
+});

@@ -1,4 +1,4 @@
-import { Config, Option as O, Schema } from "effect";
+import { Config, Schema } from "effect";
 import { Flag } from "effect/unstable/cli";
 import manifest from "../../../package.json" with { type: "json" };
 
@@ -16,33 +16,27 @@ export const VERSION: string = manifest.version;
  */
 export const PositiveInt = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)));
 
+/**
+ * A flag with the environment behind it, both decoded by `schema`, so a bad value is refused whichever side it came
+ * from and the message names that side.
+ */
+export const setting = <I, A>(flag: Flag.Flag<I>, schema: Schema.Codec<A, I>, env: string): Flag.Flag<A> =>
+  flag.pipe(Flag.withSchema(schema), Flag.withFallbackConfig(Config.schema(schema, env)));
+
 /** A port as a *schema*, for the template parser below: `Config.Port` is the config reader, not the schema it reads with. */
 const Port = Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 1, maximum: 65535 })));
 
 /** `host:port`, both halves required — a bare host is rejected rather than given a default port. */
 const BrokerAddress = Schema.TemplateLiteralParser([Schema.NonEmptyString, ":", Port]);
 
-type BrokerAddress = { readonly host: string; readonly port: number };
+const toAddress = ([host, , port]: typeof BrokerAddress.Type) => ({ host, port });
 
 /** The environment side of the address. */
-export const brokerAddress = (name: string): Config.Config<BrokerAddress> =>
-  Config.schema(BrokerAddress, name).pipe(
-    Config.map(([host, , port]) => ({ host, port })),
-  );
-
-const decodeBroker = Schema.decodeUnknownOption(BrokerAddress);
-
-/** The flag side of the same address, undecorated: composing one declaration keeps "what an address is" from being restated per entry point. */
-export const rmqFlag = Flag.String("rmq").pipe(
-  Flag.filterMap(
-    (raw) => O.map(decodeBroker(raw), ([host, , port]) => ({ host, port })),
-    (raw) => `expected host:port, got ${raw}`,
-  ),
-);
+export const brokerAddress = (name: string) => Config.map(Config.schema(BrokerAddress, name), toAddress);
 
 export const brokerFlag = (description: string) =>
-  rmqFlag.pipe(
-    Flag.withFallbackConfig(brokerAddress("RMQ")),
+  setting(Flag.String("rmq"), BrokerAddress, "RMQ").pipe(
+    Flag.map(toAddress),
     Flag.withDefault({ host: "127.0.0.1", port: 5672 }),
     Flag.withDescription(description),
   );

@@ -1,4 +1,4 @@
-import { Cause, Context, Data, Deferred, Duration, Effect, Exit, Match, Metric, Option as O, Ref, Result, Schema } from "effect";
+import { Cause, Context, Data, Deferred, Duration, Effect, Exit, Metric, Option as O, Ref, Result, Schema } from "effect";
 import { PositiveInt } from "@egress/config/Settings.ts";
 import { MAX_DELAY_SECONDS } from "@egress/rmq/DelayedDelivery.ts";
 import type { BreakerConfig, Outcome, ProbeVerdict, Report } from "./Breaker.ts";
@@ -19,11 +19,13 @@ export type Registration =
   | { readonly phase: "half-open"; readonly verdict: (v: ProbeVerdict) => Effect.Effect<void> };
 
 /** What asking for a dependency's probe permit found. */
-export type PermitAnswer =
-  | { readonly _tag: "Taken"; readonly giveBack: Effect.Effect<void> }
+export type PermitAnswer = Data.TaggedEnum<{
+  Taken: { readonly giveBack: Effect.Effect<void> };
   /** Another probe in this process holds it; `settled` waits for that probe's call, which is the breaker's verdict. */
-  | { readonly _tag: "HeldHere"; readonly settled: Effect.Effect<void> }
-  | { readonly _tag: "HeldElsewhere" };
+  HeldHere: { readonly settled: Effect.Effect<void> };
+  HeldElsewhere: {};
+}>;
+export const PermitAnswer = Data.taggedEnum<PermitAnswer>();
 
 /** The live side of one dependency, provided by the application runner. */
 export type Guard = {
@@ -43,28 +45,25 @@ export type Guard = {
 export const localPermit = Effect.fnUntraced(function* (take: Effect.Effect<O.Option<Effect.Effect<void>>>) {
   const holder = yield* Ref.make(O.none<Deferred.Deferred<void>>());
   return Effect.uninterruptibleMask((restore) =>
-    Effect.flatMap(Deferred.make<void>(), (mine) =>
-      Effect.flatMap(
-        Ref.modify(holder, (current) => [current, O.orElse(current, () => O.some(mine))] as const),
-        O.match({
-          onSome: (theirs): Effect.Effect<PermitAnswer> =>
-            Effect.succeed({ _tag: "HeldHere", settled: Deferred.await(theirs) }),
-          onNone: (): Effect.Effect<PermitAnswer> => {
-            const free = Ref.set(holder, O.none()).pipe(Effect.andThen(Deferred.succeed(mine, undefined)));
-            return restore(take).pipe(
-              Effect.onInterrupt(() => free),
-              Effect.flatMap(
-                O.match({
-                  onNone: () => Effect.as(free, { _tag: "HeldElsewhere" } as PermitAnswer),
-                  onSome: (giveBack) =>
-                    Effect.succeed<PermitAnswer>({ _tag: "Taken", giveBack: Effect.ensuring(giveBack, free) }),
+    Effect.gen(function* () {
+      const mine = yield* Deferred.make<void>();
+      const theirs = yield* Ref.modify(holder, (current) => [current, O.orElse(current, () => O.some(mine))] as const);
+      const free = Ref.set(holder, O.none()).pipe(Effect.andThen(Deferred.succeed(mine, undefined)));
+      return yield* O.match(theirs, {
+        onSome: (held) => Effect.succeed(PermitAnswer.HeldHere({ settled: Deferred.await(held) })),
+        onNone: () =>
+          restore(take).pipe(
+            Effect.onInterrupt(() => free),
+            Effect.flatMap(
+              (token): Effect.Effect<PermitAnswer> =>
+                O.match(token, {
+                  onNone: () => Effect.as(free, PermitAnswer.HeldElsewhere()),
+                  onSome: (giveBack) => Effect.succeed(PermitAnswer.Taken({ giveBack: Effect.ensuring(giveBack, free) })),
                 }),
-              ),
-            );
-          },
-        }),
-      ),
-    ),
+            ),
+          ),
+      });
+    }),
   );
 });
 
@@ -113,11 +112,14 @@ export const CurrentCaller = Context.Reference<Caller>("@egress/rmq-consumer/Dep
 
 const DEFAULT_TIMEOUT = Duration.seconds(2);
 
+/** A breaker's hold ceiling: at most what the delay chain can count. */
+export const MaxDelaySeconds = PositiveInt.check(Schema.isLessThanOrEqualTo(MAX_DELAY_SECONDS));
+
 /** What a dependency may set of its own breaker; the rest comes from the application's `BREAKER_*` defaults. */
 const BreakerOverrides = Schema.Struct({
   consecutiveFailures: Schema.optionalKey(PositiveInt),
   initialDelaySeconds: Schema.optionalKey(PositiveInt),
-  maxDelaySeconds: Schema.optionalKey(PositiveInt.check(Schema.isLessThanOrEqualTo(MAX_DELAY_SECONDS))),
+  maxDelaySeconds: Schema.optionalKey(MaxDelaySeconds),
 });
 export type BreakerOverrides = typeof BreakerOverrides.Type;
 const decodeOverrides = Schema.decodeUnknownResult(BreakerOverrides);
@@ -206,7 +208,7 @@ export const make = <const Name extends string, A, E>(
     caller: Caller,
   ) =>
     Effect.flatMap(g.takePermit, (permit) =>
-      Match.valueTags(permit, {
+      PermitAnswer.$match(permit, {
         HeldElsewhere: () =>
           verdict("no-permit").pipe(
             Effect.andThen(Metric.update(Metric.withAttributes(Telemetry.permitLost, { dependency: name }), 1)),

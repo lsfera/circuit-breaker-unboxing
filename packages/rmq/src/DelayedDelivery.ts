@@ -54,8 +54,9 @@ export const declare = Effect.fnUntraced(function* () {
   const levels = Arr.makeBy(LEVELS, (n) => n);
   const nextOf = (level: number): string => (level === 0 ? DELIVERY_EXCHANGE : levelName(level - 1));
 
-  yield* rmq.declareTopicExchange(DELIVERY_EXCHANGE, { durable: true });
-  const exchanges = yield* Effect.forEach(levels, (n) => rmq.declareTopicExchange(levelName(n), { durable: true }));
+  yield* Effect.forEach([DELIVERY_EXCHANGE, ...Arr.map(levels, levelName)], (name) =>
+    rmq.declareTopicExchange(name, { durable: true }),
+  );
   yield* Effect.forEach(levels, (n) =>
     Effect.gen(function* () {
       const queue = yield* rmq.declareQueue(levelName(n), {
@@ -67,8 +68,8 @@ export const declare = Effect.fnUntraced(function* () {
           "x-overflow": "reject-publish",
         },
       });
-      yield* rmq.bind(`${wildcards(wordOf(n))}1.#`, exchanges[n], queue);
-      yield* rmq.bindExchange(`${wildcards(wordOf(n))}0.#`, exchanges[n], nextOf(n));
+      yield* rmq.bind(`${wildcards(wordOf(n))}1.#`, levelName(n), queue);
+      yield* rmq.bindExchange(`${wildcards(wordOf(n))}0.#`, levelName(n), nextOf(n));
     }),
   );
 });

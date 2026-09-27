@@ -28,10 +28,11 @@ export type Disposition = Settlement | "park";
  */
 export const decide = (outcome: Outcome, role: Role = "work", streak = 1): Disposition =>
   Match.value(outcome).pipe(
-    Match.when("ok", (): Disposition => "accept"),
-    Match.when("client_error", (): Disposition => "park"),
-    Match.when("throttled", (): Disposition => "release"),
-    Match.when("failed", (): Disposition => (role === "probe" || streak > 1 ? "release" : "requeue")),
+    Match.withReturnType<Disposition>(),
+    Match.when("ok", () => "accept"),
+    Match.when("client_error", () => "park"),
+    Match.when("throttled", () => "release"),
+    Match.when("failed", () => (role === "probe" || streak > 1 ? "release" : "requeue")),
     Match.exhaustive,
   );
 
@@ -40,14 +41,10 @@ export type Settled = { readonly disposition: Disposition; readonly reason: stri
 
 const halted = (h: Halted): Settled =>
   Match.value(h.stop).pipe(
+    Match.withReturnType<Settled>(),
     // `open` and `no-permit` made no call: nothing was learned about the message.
-    Match.when(Match.is("open", "no-permit"), (): Settled => ({ disposition: "release", reason: h.stop })),
-    Match.orElse(
-      (outcome): Settled => ({
-        disposition: decide(outcome, h.role, h.streak),
-        reason: `refused-${h.dependency}-${h.reason}`,
-      }),
-    ),
+    Match.when(Match.is("open", "no-permit"), () => ({ disposition: "release", reason: h.stop })),
+    Match.orElse((outcome) => ({ disposition: decide(outcome, h.role, h.streak), reason: `refused-${h.dependency}-${h.reason}` })),
   );
 
 /**
@@ -62,9 +59,10 @@ export const settle = (exit: Exit.Exit<unknown, unknown>): Settled =>
         onNone: (): Settled => ({ disposition: "requeue", reason: "defect" }),
         onSome: (error) =>
           Match.value(error).pipe(
+            Match.withReturnType<Settled>(),
             Match.when(Match.instanceOf(Halted), halted),
-            Match.when(Match.instanceOf(Rejected), (r): Settled => ({ disposition: "park", reason: `rejected-${r.reason}` })),
-            Match.orElse((): Settled => ({ disposition: "requeue", reason: "unwrapped-error" })),
+            Match.when(Match.instanceOf(Rejected), (r) => ({ disposition: "park", reason: `rejected-${r.reason}` })),
+            Match.orElse(() => ({ disposition: "requeue", reason: "unwrapped-error" })),
           ),
       }),
   });

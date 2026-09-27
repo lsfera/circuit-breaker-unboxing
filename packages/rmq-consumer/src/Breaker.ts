@@ -93,17 +93,16 @@ export const supervise = <Handle>(cfg: BreakerConfig, io: Io<Handle>): Effect.Ef
     return v;
   });
 
-  const open = (attempt: number): Effect.Effect<void, RmqError> =>
-    Effect.gen(function* () {
-      yield* io.onPhase("open");
-      const woken = yield* io.hold(holdSeconds(cfg, attempt, yield* Random.next), attempt);
-      yield* Match.value(yield* probe).pipe(
-        Match.when("ok", () => Effect.void),
-        Match.when("failed", () => open(woken + 1)),
-        Match.when("no-permit", () => open(woken)),
-        Match.exhaustive,
-      );
-    });
+  const open = Effect.fnUntraced(function* (attempt: number): Effect.fn.Return<void, RmqError> {
+    yield* io.onPhase("open");
+    const woken = yield* io.hold(holdSeconds(cfg, attempt, yield* Random.next), attempt);
+    yield* Match.value(yield* probe).pipe(
+      Match.when("ok", () => Effect.void),
+      Match.when("failed", () => open(woken + 1)),
+      Match.when("no-permit", () => open(woken)),
+      Match.exhaustive,
+    );
+  });
 
   return Effect.forever(closed.pipe(Effect.andThen(open(0))));
 };

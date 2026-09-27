@@ -39,6 +39,11 @@ test("a header that doesn't parse is treated as zero, not trusted", () => {
   assert.deepEqual(Redrive.nextRedrive("not-a-number"), { destination: "work", count: 1 });
 });
 
+test("a negative or fractional count is not a count: it buys no extra redrives", () => {
+  assert.deepEqual(Redrive.nextRedrive("-100"), { destination: "work", count: 1 });
+  assert.deepEqual(Redrive.nextRedrive("2.5"), { destination: "work", count: 1 });
+});
+
 /**
  * A fake dead-letter queue and its two destinations, all in memory — no
  * broker, matching Breaker.test.ts. `get`
@@ -60,15 +65,7 @@ const fakeRedriveRmq = (dead: ReadonlyArray<GotMessage>) => {
     consume: unimplemented("consume"),
     get: () => Effect.sync(() => (queue.length === 0 ? O.none() : O.some(queue.shift()!))),
     publisherToExchange: unimplemented("publisherToExchange"),
-    publisherToQueue: (queueName) =>
-      Effect.succeed({
-        exchange: "",
-        routingKey: queueName,
-        contentType: O.none(),
-        contentEncoding: O.none(),
-        type: O.none(),
-        mandatory: true,
-      }),
+    publisherToQueue: (queueName) => Effect.succeed({ exchange: "", routingKey: queueName, format: {}, mandatory: true }),
     send: (pub, body, options) =>
       Effect.sync(() => {
         (sent[pub.routingKey] ??= []).push({ body, headers: options?.headers ?? {}, messageId: options?.messageId });
@@ -102,7 +99,7 @@ test("a pass drains the dead queue onto work, incrementing the redrive count", a
     Redrive.runPass({
       apiId: "payments-provider",
       isClosed: Effect.succeed(true),
-      onOutcome: (o) => outcomes.push(o),
+      onOutcome: (o) => Effect.sync(() => void outcomes.push(o)),
     }),
     rmq,
   );
@@ -118,7 +115,7 @@ test("a pass drains the dead queue onto work, incrementing the redrive count", a
 test("a redriven message carries its original message_id forward, so the third party sees the same idempotency key", async () => {
   const { rmq, sent } = fakeRedriveRmq([message("a", undefined, "run:7")]);
   await run(
-    Redrive.runPass({ apiId: "payments-provider", isClosed: Effect.succeed(true), onOutcome: () => {} }),
+    Redrive.runPass({ apiId: "payments-provider", isClosed: Effect.succeed(true), onOutcome: () => Effect.void }),
     rmq,
   );
 
@@ -132,7 +129,7 @@ test("a message already at MAX_REDRIVES is parked instead of moved", async () =>
     Redrive.runPass({
       apiId: "payments-provider",
       isClosed: Effect.succeed(true),
-      onOutcome: (o) => outcomes.push(o),
+      onOutcome: (o) => Effect.sync(() => void outcomes.push(o)),
     }),
     rmq,
   );
@@ -152,7 +149,7 @@ test("a pass stops the instant the gate closes, leaving the rest of the queue un
       // Open (not closed) from the very first check this pass makes past
       // the first message it moves — a real breaker reopening mid-pass.
       isClosed: Effect.sync(() => closedAfter-- > 0),
-      onOutcome: (o) => outcomes.push(o),
+      onOutcome: (o) => Effect.sync(() => void outcomes.push(o)),
     }),
     rmq,
   );

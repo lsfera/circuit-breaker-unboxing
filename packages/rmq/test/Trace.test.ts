@@ -22,3 +22,9 @@ test("what traceparent writes, parentFrom reads back", async () => {
   const read = O.flatMap(header, parentFrom);
   assert.equal(O.isSome(read), true, String(O.getOrUndefined(header)));
 });
+
+test("an unsampled span stays unsampled across the broker", async () => {
+  const header = await Effect.runPromise(traceparent.pipe(Effect.withSpan("publish", { sampled: false })));
+  assert.deepEqual(O.map(O.flatMap(header, parentFrom), (p) => p.sampled), O.some(false));
+  assert.deepEqual(O.map(parentFrom(`00-${TRACE}-${SPAN}-01`), (p) => p.sampled), O.some(true));
+});
