@@ -31,9 +31,6 @@ const BrokerAddress = Schema.TemplateLiteralParser([Schema.NonEmptyString, ":", 
 
 const toAddress = ([host, , port]: typeof BrokerAddress.Type) => ({ host, port });
 
-/** The environment side of the address. */
-export const brokerAddress = (name: string) => Config.map(Config.schema(BrokerAddress, name), toAddress);
-
 export const brokerFlag = (description: string) =>
   setting(Flag.String("rmq"), BrokerAddress, "RMQ").pipe(
     Flag.map(toAddress),

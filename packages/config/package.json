@@ -11,5 +11,8 @@
   },
   "dependencies": {
     "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "catalog:"
   }
 }
