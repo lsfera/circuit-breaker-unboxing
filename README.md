@@ -107,7 +107,7 @@ infra/
   monitoring/, rabbitmq.conf  scrape config and dashboard; the broker's watermark
 ```
 
-**Effect 4 (4.0.0-rc.116)**; see `AGENTS.md`. No build step: Node runs the
+**Effect 4 (4.0.0-rc.117)**; see `AGENTS.md`. No build step: Node runs the
 `src/*.ts` directly.
 
 ```bash
