@@ -1,22 +1,15 @@
 /**
  * The work-queue shape a producer and a competing-consumer fleet share: a durable work queue with a dead-letter
- * destination, the broker's own delivery-limit budget, and the idempotency-key convention a caller and a fake
- * third party agree on.
+ * destination, the broker's own delivery-limit budget, and the message identity that serves as idempotency key.
  */
 
 import { Schema } from "effect";
 
 /**
- * The payments idempotency key as the third party receives it: an HTTP header. A retry that reuses the key
- * keeps the third party from charging twice. On the broker it is the AMQP `message_id`: assigned once
- * (`workMessageId`), and a republish must carry it explicitly or the replay is a new message with a new key.
- */
-export const IDEMPOTENCY_KEY_HTTP_HEADER = "x-idempotency-key";
-
-/**
- * A work message's identity: unique to the producer run, stable for the life of the message. `n` alone restarts
- * at zero with each process, so a restarted producer would reuse the key of different work and a third party
- * would drop it as a duplicate. The last `:` splits run from sequence (the fake third party's audit reads it).
+ * A work message's identity, its AMQP `message_id` and the idempotency key the application hands the third party.
+ * A republish must carry it explicitly, or the replay is a new message with a new key. Unique to the producer
+ * run, stable for the life of the message. `n` alone restarts at zero with each process, so a restarted producer
+ * would reuse the key of different work and a third party would drop it as a duplicate. The last `:` splits run from sequence (the fake third party's audit reads it).
  */
 export const workMessageId = (run: string, n: number): string => `${run}:${n}`;
 
