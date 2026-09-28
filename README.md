@@ -1,16 +1,13 @@
 # Per-API egress circuit breaker events
 
-Fifth and last step of the series. Articles 1–4 stop a fleet of consumers
-hammering one flaky third party with nothing but RabbitMQ and Prometheus:
-`article/03-rabbitmq-coordination` (cockatiel, coordinated through the broker)
-and `article/04-rabbitmq-only-breaker` (the breaker held by the broker) lose no
-work, send one probe at a time, redrive what was dead-lettered, give on-call one
-fleet verdict, and back off on a `429`, in about 2,200 lines.
-
-This article is the design at platform level. It costs about four times the
-code and 19 containers: Envoy for egress, two aggregators with a lease in Redis,
-and a published event stream. Build it only when you need something articles
-1–4 cannot give:
+The last step of the series: the design at **platform level**. Articles 1–4
+stop a fleet of consumers hammering one flaky third party with nothing but
+RabbitMQ and Prometheus (`article/03-rabbitmq-coordination`,
+`article/04-rabbitmq-only-breaker`): no lost work, one probe at a time, a redrive,
+one fleet verdict and backoff on a `429`, in about 2,200 lines. This costs about
+four times the code and 19 containers (Envoy for egress, two aggregators with a
+lease in Redis, a published event stream). Build it only when you need something
+articles 1–4 cannot give:
 
 - **other systems act on the verdict** — a producer that stops accepting work,
   a status page, billing. They need a gapless per-API event sequence, not a
@@ -22,13 +19,13 @@ and a published event stream. Build it only when you need something articles
   service;
 - **tens to thousands of APIs**, each with its own breaker.
 
-If none of those applies, stop at article 3 or 4.
+If none applies, stop at article 3 or 4.
 
 ## The problem
 
 For each third-party API, publish an event when it starts failing and when it
-recovers, to subscribers who were not in the request path. Three constraints
-follow, and every design lives or dies on them:
+recovers, to subscribers outside the request path. Every design lives or dies on
+three constraints:
 
 - **One verdict per API, not one per proxy.** Each egress replica samples the
   upstream on its own. That is right for protection and wrong for
@@ -116,28 +113,20 @@ fencing, checkpoints and the outbox.
 
 ```bash
 pnpm install
-pnpm run check       # vendored-version check, typecheck, unit tests
-pnpm run test:rmq    # needs Docker: the AMQP client against a real broker
-pnpm run test:redis  # needs Docker: coordination and the outbox against a real Redis
-pnpm start           # one aggregator over a simulated fleet, console on :8088
-```
-
-The whole stack — three Envoy replicas, two aggregators, Redis, RabbitMQ, the
-producer, five daemons, Prometheus, Alertmanager and Grafana:
-
-```bash
-docker compose up --build -d
-pnpm run demo:envoy  # drives an incident through the aggregators' own routes
+pnpm start                                        # one aggregator over a simulated fleet, console on :8088
+docker compose up --build -d                      # HOST_WORKSPACE_FOLDER: this repo's path on the Docker host
+pnpm run demo:envoy                               # an incident, driven through the aggregators' own routes
 node infra/chaos-load.mjs --profiles=low --faults=flaky-full-cycle,kill-leader
 ```
 
-`HOST_WORKSPACE_FOLDER` must be this repository's path on the Docker host, not
-inside a devcontainer: the fixtures are bind-mounted. Console on `:8088` and
-`:8089`, Grafana on `:3000`, Prometheus on `:9090`, RabbitMQ on `:15672`.
-
-Effect 4 (`4.0.0-rc.117`, pinned) — read `AGENTS.md` before writing Effect
-code. No build step: every package runs from `src/*.ts` through Node's type
-stripping, which makes `tsc --noEmit` load-bearing.
+The stack is three Envoy replicas, two aggregators, Redis, RabbitMQ, the
+producer, five daemons, Prometheus, Alertmanager and Grafana. From the
+devcontainer, by service name (from the host, `localhost` with the published
+port):
+- Console <http://aggregator:8088> and <http://aggregator-2:8088> (`:8088`, `:8089` on the host)
+- Grafana <http://grafana:3000/d/egress-circuit-breaker>
+- Prometheus <http://prometheus:9090>
+- RabbitMQ <http://rabbitmq:15672> (guest/guest)
 
 ## Measured
 
@@ -187,13 +176,22 @@ packages/
   domain/        pure: the event schema, the breaker state machine, supersedes()
   aggregator/    tick loop, coordination (lease, fencing, checkpoints), outbox,
                  webhook and AMQP sinks, Envoy push/poll sources, console, /metrics
-  rmq/           Effect client over amqplib; queue names, arguments and codecs
+  rmq/           amqplib in Effect; queue names, arguments and codecs
   rmq-consumer/  the daemon: pure policy and reducer, Attempts, Limiter, Redrive
-  rmq-producer/  steady load onto the work queue, message_id as idempotency key
+  rmq-producer/  the load onto the work queue, message_id as idempotency key
   subscriber/    a standalone consumer of the event stream
-  config/        settings, decoded at boot
-  tracing/       OpenTelemetry, off unless OTEL_EXPORTER_OTLP_ENDPOINT is set
+  config/        settings declared once, decoded at boot
+  tracing/       OpenTelemetry when OTEL_EXPORTER_OTLP_ENDPOINT is set
   demo/          drives the demo incident over HTTP
 infra/           envoy.yaml, flaky-upstream, chaos harnesses, monitoring
 docs/            architecture, high availability, measurements, decisions/
+```
+
+**Effect 4 (4.0.0-rc.117)**; see `AGENTS.md`. No build step: Node runs the
+`src/*.ts` directly, which makes `tsc --noEmit` load-bearing.
+
+```bash
+pnpm run check       # vendored version, typecheck, unit tests
+pnpm run test:rmq    # needs Docker: against a real broker
+pnpm run test:redis  # needs Docker: coordination and the outbox against a real Redis
 ```
