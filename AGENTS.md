@@ -48,7 +48,7 @@ post, or memory. This is not hypothetical: a project skill taught four Schema
 and DateTime APIs that do not exist in this version, and was deleted for it.
 
 **Searching.** `repos/` is tracked, so a search of the whole workspace
-returns Effect's 3,976 files alongside this project's. Scope searches for
+returns Effect's 4,000-odd files alongside this project's. Scope searches for
 project code to `packages/`, `infra/`, `scripts/` or `docs/`, and search
 `repos/effect` deliberately.
 
