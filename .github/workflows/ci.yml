@@ -10,8 +10,9 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, 'article/*']
   pull_request:
+    branches: [main, 'article/*']
   workflow_dispatch:
 
 jobs:
