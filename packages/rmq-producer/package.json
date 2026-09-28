@@ -11,6 +11,7 @@
     "@egress/config": "workspace:*",
     "@egress/rmq": "workspace:*",
     "@egress/tracing": "workspace:*",
-    "effect": "catalog:"
+    "effect": "catalog:",
+    "protobufjs": "7.6.6"
   }
 }

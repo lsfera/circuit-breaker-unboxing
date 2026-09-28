@@ -195,9 +195,9 @@ export const containerIn = async (phase, dependency) => {
 // ---- load and time ------------------------------------------------------------
 
 /** A forked `chaos-publisher.mjs` onto `<api>.work`, at a rate changed over IPC; `stop` returns its confirmed bitmap. */
-export const startPublisher = (run, api, rate) => {
+export const startPublisher = (run, api, rate, format = "json") => {
   const child = fork(new URL("./chaos-publisher.mjs", import.meta.url).pathname, [], {
-    env: { ...process.env, RUN_ID: run, QUEUE: `${api}.work`, API_ID: api, AMQP_URL: BROKER },
+    env: { ...process.env, RUN_ID: run, QUEUE: `${api}.work`, API_ID: api, AMQP_URL: BROKER, FORMAT: format },
   });
   const setRate = (r) => child.send({ type: "rate", rate: r });
   const stop = () =>

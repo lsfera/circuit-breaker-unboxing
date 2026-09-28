@@ -5,17 +5,29 @@
  * confirms, then sends back a bitmap with bit n set for every message confirmed and not returned unroutable: the
  * set the harness checks against what the upstream processed. It reconnects when the broker goes away; what was
  * in flight at that moment is never confirmed, which is the honest answer.
+ *
+ * FORMAT picks how bodies are written: `json` (the default), `protobuf`, or `mixed`, which alternates the two so
+ * one run puts both of the consumer's parsers under the same load.
  */
 
 import { createRequire } from "node:module";
 
 const amqp = createRequire(new URL("../packages/rmq/package.json", import.meta.url))("amqplib");
+const protobuf = createRequire(new URL("../packages/rmq-producer/package.json", import.meta.url))("protobufjs");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const RUN = process.env.RUN_ID;
 const QUEUE = process.env.QUEUE;
 const API = process.env.API_ID;
 const URL_ = process.env.AMQP_URL ?? "amqp://guest:guest@rabbitmq:5672";
+const FORMAT = process.env.FORMAT ?? "json";
+
+// The same message packages/rmq-producer writes: `message Work { string api_id = 1; int64 n = 2; }`.
+const Work = protobuf.Type.fromJSON("Work", { fields: { apiId: { type: "string", id: 1 }, n: { type: "int64", id: 2 } } });
+const asJson = (i) => [Buffer.from(JSON.stringify({ apiId: API, n: i })), "application/json"];
+const asProtobuf = (i) => [Buffer.from(Work.encode({ apiId: API, n: i }).finish()), "application/x-protobuf"];
+const encode = { json: asJson, protobuf: asProtobuf, mixed: (i) => (i % 2 === 0 ? asJson(i) : asProtobuf(i)) }[FORMAT];
+if (!encode) throw new Error(`FORMAT must be json, protobuf or mixed, got ${FORMAT}`);
 
 let bits = new Uint8Array(1 << 18);
 const mark = (i) => {
@@ -79,10 +91,11 @@ const publishLoop = async () => {
       const i = n++;
       sentAtRate++;
       const key = `${RUN}:${i}`;
+      const [body, contentType] = encode(i);
       const ok = ch.sendToQueue(
         QUEUE,
-        Buffer.from(JSON.stringify({ apiId: API, n: i })),
-        { persistent: true, mandatory: true, messageId: key, contentType: "application/json", type: "egress.work" },
+        body,
+        { persistent: true, mandatory: true, messageId: key, contentType, type: "egress.work" },
         (err) => {
           if (err) nacked++;
           else if (unroutable.has(key)) unroutable.delete(key);

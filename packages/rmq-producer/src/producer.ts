@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Duration, Effect, Schedule } from "effect";
+import protobuf from "protobufjs";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
   deadLetterQueueFor,
@@ -11,6 +12,7 @@ import {
   workQueueFor,
   workQueueOptions,
 } from "@egress/rmq/WorkQueue.ts";
+import type { WorkMessage } from "@egress/rmq/WorkQueue.ts";
 
 /**
  * The load half of the scenario: a steady stream onto `<apiId>.work`. Fixed rate, and it never reacts to the
@@ -18,9 +20,21 @@ import {
  * the fleet has to survive.
  */
 
+/** `message Work { string api_id = 1; int64 n = 2; }`, what a consumer reading `application/x-protobuf` expects. */
+const WorkProto = protobuf.Type.fromJSON("Work", {
+  fields: { apiId: { type: "string", id: 1 }, n: { type: "int64", id: 2 } },
+});
+
+/** How a body is written, and the `content_type` that says so. */
+const FORMATS = {
+  json: { contentType: WORK_CONTENT_TYPE, encode: encodeWorkMessage },
+  protobuf: { contentType: "application/x-protobuf", encode: (m: WorkMessage) => WorkProto.encode(m).finish() },
+} as const;
+
 type ProducerConfig = {
   readonly apiId: string;
   readonly ratePerSecond: number;
+  readonly format: keyof typeof FORMATS;
 };
 
 export const runProducer = Effect.fnUntraced(function* (cfg: ProducerConfig) {
@@ -30,7 +44,8 @@ export const runProducer = Effect.fnUntraced(function* (cfg: ProducerConfig) {
   // redeclare is a hard error, not a merge.
   yield* rmq.declareQueue(deadLetterQueueFor(cfg.apiId), deadLetterQueueOptions());
   yield* rmq.declareQueue(queue, workQueueOptions(cfg.apiId));
-  const publisher = yield* rmq.publisherToQueue(queue, { contentType: WORK_CONTENT_TYPE, type: WORK_MESSAGE_TYPE });
+  const { contentType, encode } = FORMATS[cfg.format];
+  const publisher = yield* rmq.publisherToQueue(queue, { contentType, type: WORK_MESSAGE_TYPE });
 
   // One batch per 100ms rather than a timer per message; nothing downstream can tell the difference.
   const perTick = Math.max(1, Math.round(cfg.ratePerSecond / 10));
@@ -44,7 +59,7 @@ export const runProducer = Effect.fnUntraced(function* (cfg: ProducerConfig) {
   // edges only; `lost` still ends the process.
   let failing = false;
 
-  yield* Effect.log(`${cfg.apiId}/producer: up — ${cfg.ratePerSecond}/s onto ${queue}`);
+  yield* Effect.log(`${cfg.apiId}/producer: up — ${cfg.ratePerSecond}/s of ${cfg.format} onto ${queue}`);
 
   yield* Effect.gen(function* () {
     // One batch per tick: published back to back on the confirm channel and confirmed together, one round trip
@@ -52,7 +67,7 @@ export const runProducer = Effect.fnUntraced(function* (cfg: ProducerConfig) {
     // consumer sends: a redelivery is the same message with the same id.
     const batch = Array.from({ length: perTick }, () => {
       const n = sent++;
-      return { body: encodeWorkMessage({ apiId: cfg.apiId, n }), messageId: workMessageId(run, n) };
+      return { body: encode({ apiId: cfg.apiId, n }), messageId: workMessageId(run, n) };
     });
     const published = yield* rmq.sendBatch(publisher, batch).pipe(
       // The root of every trace: the sampler decides here alone (`@egress/rmq` stamps a traceparent only when a span

@@ -6,6 +6,7 @@
  *   node infra/chaos-app.mjs                          # every scenario
  *   node infra/chaos-app.mjs --scenarios=db-down,upstream-outage
  *   node infra/chaos-app.mjs --list
+ *   node infra/chaos-app.mjs --format=mixed           # bodies alternate JSON and protobuf (or --format=protobuf)
  *
  * Correctness, per message. Every message carries `message_id: <run>:<n>`; the publishers report which n the broker
  * confirmed, the fake third party which n it charged, and the ledger which n it recorded. Payments: a confirmed n
@@ -43,6 +44,7 @@ const SETTLE_S = Number(flag("settle", 8));
 const FAULT_S = Number(flag("fault-seconds", 40));
 const RECOVERY_TIMEOUT_S = Number(flag("recovery-timeout", 240));
 const DRAIN_TIMEOUT_S = Number(flag("drain-timeout", 180));
+const FORMAT = String(flag("format", "json"));
 const OUT = flag("out", `history/runs/chaos-app-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
 
 // ---- reading the system ------------------------------------------------------------
@@ -112,8 +114,8 @@ const scenario = async (name, fault) => {
   const t0 = Date.now();
   const ctx = { series, t0, runs, started };
   const publishers = {
-    payments: startPublisher(runs.payments, PAYMENTS, PAYMENTS_RATE),
-    refunds: startPublisher(runs.refunds, REFUNDS, REFUNDS_RATE),
+    payments: startPublisher(runs.payments, PAYMENTS, PAYMENTS_RATE, FORMAT),
+    refunds: startPublisher(runs.refunds, REFUNDS, REFUNDS_RATE, FORMAT),
   };
 
   await observe(series, t0, SETTLE_S);
@@ -499,7 +501,7 @@ const main = async () => {
     await setFailure({});
     await Promise.all(PRODUCERS.map((p) => exec("docker", ["start", p]).catch(() => {})));
     mkdirSync(dirname(OUT), { recursive: true });
-    writeFileSync(OUT, JSON.stringify({ at: new Date().toISOString(), results }, null, 2));
+    writeFileSync(OUT, JSON.stringify({ at: new Date().toISOString(), format: FORMAT, results }, null, 2));
     console.log(`\nwrote ${OUT}`);
   }
   const graded = results.filter((r) => !r.void);

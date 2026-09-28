@@ -260,6 +260,9 @@ importers:
       effect:
         specifier: 'catalog:'
         version: 4.0.0-rc.117
+      protobufjs:
+        specifier: 7.6.6
+        version: 7.6.6
 
   packages/tracing:
     dependencies:

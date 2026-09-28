@@ -30,6 +30,11 @@ const flags = {
     Flag.withDefault(200),
     Flag.withDescription("Messages published per second, regardless of circuit state"),
   ),
+  format: Flag.Literals("format", ["json", "protobuf"]).pipe(
+    Flag.withFallbackConfig(Config.Literals(["json", "protobuf"], "WORK_FORMAT")),
+    Flag.withDefault("json"),
+    Flag.withDescription("How each body is written: JSON, or protobuf (`message Work { string api_id = 1; int64 n = 2; }`)"),
+  ),
   metricsPort: metricsPortFlag,
 };
 

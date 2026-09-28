@@ -98,13 +98,14 @@ services:
     networks: [default, devcontainer]
     deploy: *limits-producer
 
-  # The same producer for the refunds consumer, at a lower rate.
+  # The same producer for the refunds consumer, at a lower rate, writing protobuf: the consumer reads either format.
   rmq-producer-refunds:
     <<: *rmq-node
     environment:
       <<: *rmq-node-env
       API_ID: refunds-provider
       RATE_PER_SECOND: ${REFUNDS_RATE_PER_SECOND:-50}
+      WORK_FORMAT: ${REFUNDS_WORK_FORMAT:-protobuf}
 
   # One service, scaled: `docker compose up -d --scale rmq-consumer=N` is the whole of resizing the fleet. Every
   # replica is anonymous and runs the consumer application (packages/consumer), with one circuit breaker per
