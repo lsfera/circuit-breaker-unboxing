@@ -15,14 +15,15 @@ really four answers that a library happens to give together:
 With the four pulled apart, each can be given a better answer than the default.
 This series does that one step at a time on the same system: a producer, a
 RabbitMQ work queue and a fleet of competing consumers calling a flaky third
-party. Each step is a branch with its own code and measurements.
+party. Each step is a branch with its own code and measurements, and each link
+below opens that branch's README, which holds its diagram.
 
 | | Where the state lives | What open does | Measured in an outage |
 | --- | --- | --- | --- |
-| [01 · No breaker](diagrams/01-base-scenario.md) | nowhere | nothing: every message spends its 3 attempts | ≈ 4,000 dead-lettered in 20 s |
-| [02 · A breaker in every process](diagrams/02-in-process-breaker.md) | each replica's memory | rejects locally, spending the message's attempts | 1,577–2,246 dead-lettered in 15 s; ~27 openings for one outage |
-| [03 · Coordinated through the broker](diagrams/03-rabbitmq-coordination.md) | each replica, plus a shared probe permit | releases the message without spending an attempt | 0 dead-lettered in 40 s; one probe at a time instead of 6 |
-| [04 · Held by the broker](diagrams/04-rabbitmq-only-breaker.md) | RabbitMQ: a consumer on or off, a token in a delay chain | stops consuming; the work waits in the queue | 0 dead-lettered where cockatiel lost 2,745 |
+| [01 · No breaker](../../blob/article/01-base-scenario/README.md) | nowhere | nothing: every message spends its 3 attempts | ≈ 4,000 dead-lettered in 20 s |
+| [02 · A breaker in every process](../../blob/article/02-in-process-breaker/README.md) | each replica's memory | rejects locally, spending the message's attempts | 1,577–2,246 dead-lettered in 15 s; ~27 openings for one outage |
+| [03 · Coordinated through the broker](../../blob/article/03-rabbitmq-coordination/README.md) | each replica, plus a shared probe permit | releases the message without spending an attempt | 0 dead-lettered in 40 s; one probe at a time instead of 6 |
+| [04 · Held by the broker](../../blob/article/04-rabbitmq-only-breaker/README.md) | RabbitMQ: a consumer on or off, a token in a delay chain | stops consuming; the work waits in the queue | 0 dead-lettered where cockatiel lost 2,745 |
 
 Two things carry through the steps:
 
