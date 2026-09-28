@@ -1,12 +1,6 @@
-- [How the user works on /workspace](rmq-control-plane-design.md) — one commit per request with a narrative body, measure before claiming, the full verification standard, reaching the stack.
-- [Effect style: composition, not if/loops](effect-functional-style.md) — Option/Result combinators and Effect constructs instead of if/for, but never convoluted; check APIs against repos/effect.
-- [Essential comments, not narrative](essential-comments-not-narrative.md) — comments carry invariants and gotchas; history goes in git log and docs/decisions.
-- [Open threads on /workspace](egress-breaker-open-threads.md) — ADR 015 steps 3–5, the v3-era skill, offers not taken up; check before starting new work.
-- [Devcontainer gotchas](devcontainer-environment-gotchas.md) — host suspends corrupt timing runs, git subtree path, pkill self-kill, 600s tool cap, RabbitMQ ignores cgroup memory.
-- [Egress breaker session record](egress-breaker-session-record.md) — article source material: the early build-out and the later measurements that overturned beliefs.
-- [Chaos & reliability work, 2026-09-13/14](chaos-reliability-work-2026-09-13.md) — harness, 3 bugs fixed 09-14, 1 new one found (main.ts hangs forever), open decisions; now committed.
-- [Chaos & reliability work, 2026-09-17/18](chaos-reliability-work-2026-09-17.md) — first live chaos-load run: consumer-rebuild bug, full ADR 017 split-brain arc, closed to 0s, then simplified away.
-- [Check before building](check-before-building.md) — verify a library/protocol doesn't already solve it (read the real source) before hand-building infra like heartbeats or retries.
-- [Reliability testing preferences](reliability-testing-preferences.md) — correctness = no loss + empty DLQ, stop-fix-relaunch, subagents, RabbitMQ-sourced metrics, plain explanations.
-- [Devcontainer rebuild](devcontainer-rebuild.md) — what survives rebuilding the devcontainer (workspace, volumes, Docker Desktop) and what is lost (~/.claude transcripts, login, user settings, a global skill).
-- [Use rtk for command output](use-rtk-for-command-output.md) — wrap git/grep/pnpm/etc with `rtk <subcommand>` for condensed output; check `rtk --help`.
+- [Working style](working-style.md) — one commit per request, measure before claiming, this branch's verification standard, the chaos bar.
+- [Code style](code-style.md) — simple Effect composition, essential comments, lean and checked docs.
+- [Project state](project-state.md) — the article branches, what 01 holds, Renovate on main, settled positions, open items.
+- [RabbitMQ facts](rabbitmq-facts.md) — measured broker behaviours the docs and argument names hide.
+- [Devcontainer](devcontainer.md) — host suspends, git subtree, service names, docker exec; what a rebuild keeps.
+- [Session record](egress-breaker-session-record.md) — article source material the user asked to keep.
