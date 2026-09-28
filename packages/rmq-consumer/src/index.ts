@@ -133,7 +133,10 @@ export const flags = {
   metricsPort: metricsPortFlag,
 };
 
-type Application<C extends Record<string, Registration<any>>, F extends Command.Command.Config> = {
+/** What the SDK's flags decode to. */
+export type Settings = Command.Command.Config.Infer<typeof flags>;
+
+export type Application<C extends Record<string, Registration<any>>, F extends Command.Command.Config> = {
   /** A key names that consumer's queues: `<key>.work` and its dead-letter, parked and redrive-trigger queues. */
   readonly consumers: C;
   /** The application's own settings, parsed with the SDK's and listed in the same `--help`. */
