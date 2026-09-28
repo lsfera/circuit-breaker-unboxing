@@ -5,10 +5,11 @@ metadata:
   type: project
 ---
 
-**Branches** (no remote; deleted branches live only in the reflog; `main` is an empty orphan):
+**Branches** (no remote yet; deleted branches live only in the reflog):
 01-base-scenario, 02-in-process-breaker, 03-rabbitmq-coordination, 04-rabbitmq-only-breaker (the breaker
 held by RabbitMQ as a delay-chain token; the consumer SDK, a PostgreSQL ledger app, JSON + protobuf),
-05-platform-control-plane (old master: Envoy + aggregators, "scaling at platform level"). They share no
+05-platform-control-plane (old master: Envoy + aggregators, "scaling at platform level"). `main` holds only `.gitignore` and `renovate.json`, which updates every
+`article/*` branch (effect/@effect/* excluded: they move with the subtree). They share no
 ancestry but the repos/effect subtree, so changes move by cherry-pick along 01→03; 05 is structurally different.
 `.claude/memory` is tracked, so this note exists only where committed.
 
