@@ -4,8 +4,7 @@
   "type": "module",
   "description": "Drives the demo script over HTTP against a running aggregator and narrates published transitions. No dependency on the other packages — it only speaks HTTP.",
   "scripts": {
-    "start": "node src/driver.ts",
-    "demo:envoy": "AGGREGATOR=http://127.0.0.1:8088 FAILURE_MODE=envoy FLAKY_UPSTREAM=http://127.0.0.1 node src/driver.ts"
+    "start": "node src/driver.ts"
   },
   "dependencies": {
     "@egress/config": "workspace:*",
