@@ -1,4 +1,7 @@
 # The base scenario
+> [Main overview](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/main/README.md) | [Next: 02 · A breaker in every process](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/02-in-process-breaker/README.md)
+
+
 
 A producer, a broker, and a fleet of competing consumers calling a third party
 directly, with **no circuit breaker**: each consumer judges only its own last
@@ -114,3 +117,5 @@ infra/
 pnpm run check       # vendored version, typecheck, unit tests
 pnpm run test:rmq    # needs Docker: against a real broker
 ```
+
+> [Main overview](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/main/README.md) | [Next: 02 · A breaker in every process](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/02-in-process-breaker/README.md)
