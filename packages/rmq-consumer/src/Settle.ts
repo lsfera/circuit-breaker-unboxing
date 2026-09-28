@@ -10,7 +10,7 @@ import type { Role } from "./Dependency.ts";
  */
 
 /** A settlement, or `park`: publish to `work.parked`, then accept. */
-export type Disposition = Settlement | "park";
+type Disposition = Settlement | "park";
 
 /**
  * `client_error` is parked at once: a retry or redrive gets the same answer. A `failed` is charged to the message

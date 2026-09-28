@@ -49,7 +49,7 @@ export type SendOptions = {
 export type Body = string | Uint8Array;
 
 /** One message of a `sendBatch`. */
-export type BatchMessage = SendOptions & { readonly body: Body };
+type BatchMessage = SendOptions & { readonly body: Body };
 
 /**
  * One message fetched by `get`, held unsettled until `ack`/`nack` runs — `ack` drops it, `nack` requeues it.
@@ -76,7 +76,7 @@ export const carry = (from: DeliveryInfo, headers: Record<string, string>): Send
 });
 
 /** The broker returned a mandatory message it could not route to any queue. */
-export class Unroutable extends Error {}
+class Unroutable extends Error {}
 
 /** True when this failure is the broker handing a mandatory message back as unroutable. */
 export const isUnroutable = (error: RmqError): boolean => error.cause instanceof Unroutable;

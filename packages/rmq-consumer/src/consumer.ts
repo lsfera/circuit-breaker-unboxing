@@ -37,7 +37,7 @@ export type ConsumerSpec = {
   readonly dependencies: ReadonlyArray<AnyDependency>;
 };
 
-export type ApplicationConfig = {
+type ApplicationConfig = {
   /** Names the dependencies' queues (wake queues, permits) and prefixes every log line. */
   readonly name: string;
   /** Each consumer's concurrent actions, applied as its prefetch. */

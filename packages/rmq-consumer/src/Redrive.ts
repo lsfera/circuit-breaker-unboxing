@@ -41,9 +41,9 @@ export const REDRIVE_COUNT_HEADER = "x-egress-redrive-count";
  * Redrives before a message is treated as poison rather than unlucky. Each one grants a fresh
  * `WORK_DELIVERY_LIMIT`, so this bounds outages survived, not attempts.
  */
-export const MAX_REDRIVES = 5;
+const MAX_REDRIVES = 5;
 
-export type RedriveDecision =
+type RedriveDecision =
   | { readonly destination: "work"; readonly count: number }
   | { readonly destination: "parked" };
 
@@ -65,7 +65,7 @@ const MAX_PER_PASS = 200;
 
 export type RedriveOutcome = "moved" | "parked";
 
-export type RedriveOptions = {
+type RedriveOptions = {
   readonly apiId: string;
   /** Re-read before every message: a pass stops the moment this replica's breaker leaves closed. */
   readonly isClosed: Effect.Effect<boolean>;

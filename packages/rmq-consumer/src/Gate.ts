@@ -8,7 +8,7 @@ import type { Registration } from "./Dependency.ts";
  * prefetch. A breaker never touches a subscription itself: it registers, and every Gate that lists it reconciles.
  */
 
-export type Mode = "none" | "probe" | "full";
+type Mode = "none" | "probe" | "full";
 
 export const modeOf = (registrations: ReadonlyArray<O.Option<Registration>>): Mode =>
   Arr.some(registrations, O.isNone)
@@ -17,7 +17,7 @@ export const modeOf = (registrations: ReadonlyArray<O.Option<Registration>>): Mo
       ? "probe"
       : "full";
 
-export type GateIo<Subscription> = {
+type GateIo<Subscription> = {
   readonly subscribe: (mode: "probe" | "full") => Effect.Effect<Subscription, RmqError>;
   /** Stop the subscription and return once what it holds has settled. */
   readonly retire: (subscription: Subscription) => Effect.Effect<void>;
