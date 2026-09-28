@@ -15,8 +15,21 @@ really four answers that a library happens to give together:
 With the four pulled apart, each can be given a better answer than the default.
 This series does that one step at a time on the same system: a producer, a
 RabbitMQ work queue and a fleet of competing consumers calling a flaky third
-party. Each step is a branch with its own code and measurements, and each link
-below opens that branch's README, which holds its diagram.
+party:
+
+```mermaid
+flowchart LR
+  producer["Producer"] --> queue[("payments-provider.work")]
+  queue --> c1["consumer 1"]
+  queue --> c2["consumer 2"]
+  queue --> c3["consumer N"]
+  c1 --> api[("Third-party API\n(flaky-upstream)")]
+  c2 --> api
+  c3 --> api
+```
+
+Each step is a branch with its own code and measurements, and each link below
+opens that branch's README, which holds its diagram.
 
 | | Where the state lives | What open does | Measured in an outage |
 | --- | --- | --- | --- |
