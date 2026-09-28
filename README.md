@@ -40,11 +40,11 @@ opens that branch's README, which holds its diagram.
 
 | | Where the state lives | What open does | Measured in an outage |
 | --- | --- | --- | --- |
-| [01 · No breaker](../../blob/article/01-base-scenario/README.md) | nowhere | nothing: every message spends its 3 attempts | ≈ 4,000 dead-lettered in 20 s |
-| [02 · A breaker in every process](../../blob/article/02-in-process-breaker/README.md) | each replica's memory | rejects locally, spending the message's attempts | 1,577–2,246 dead-lettered in 15 s; ~27 openings for one outage |
-| [03 · Coordinated through the broker](../../blob/article/03-rabbitmq-coordination/README.md) | each replica, plus a shared probe permit | releases the message without spending an attempt | 0 dead-lettered in 40 s; one probe at a time instead of 6 |
-| [04 · Held by the broker](../../blob/article/04-rabbitmq-only-breaker/README.md) | RabbitMQ: a consumer on or off, a token in a delay chain | stops consuming; the work waits in the queue | 0 dead-lettered where cockatiel lost 2,745 |
-| [05 · A platform control plane](../../blob/article/05-platform-control-plane/README.md) | Envoy per replica, and one verdict per API in an aggregator | Envoy ejects hosts; the fleet stops consuming | 0 lost, 0 dead-lettered across ten chaos faults |
+| [01 · No breaker](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/01-base-scenario/README.md) | nowhere | nothing: every message spends its 3 attempts | ≈ 4,000 dead-lettered in 20 s |
+| [02 · A breaker in every process](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/02-in-process-breaker/README.md) | each replica's memory | rejects locally, spending the message's attempts | 1,577–2,246 dead-lettered in 15 s; ~27 openings for one outage |
+| [03 · Coordinated through the broker](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/03-rabbitmq-coordination/README.md) | each replica, plus a shared probe permit | releases the message without spending an attempt | 0 dead-lettered in 40 s; one probe at a time instead of 6 |
+| [04 · Held by the broker](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/04-rabbitmq-only-breaker/README.md) | RabbitMQ: a consumer on or off, a token in a delay chain | stops consuming; the work waits in the queue | 0 dead-lettered where cockatiel lost 2,745 |
+| [05 · A platform control plane](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/05-platform-control-plane/README.md) | Envoy per replica, and one verdict per API in an aggregator | Envoy ejects hosts; the fleet stops consuming | 0 lost, 0 dead-lettered across ten chaos faults |
 
 Two things carry through the steps:
 
@@ -69,3 +69,11 @@ Effect 4 renamed and reshaped much of Effect 3, which most examples online
 still use, so each branch vendors the exact Effect source it runs against in
 `repos/effect`. Each branch's README says how to start its stack with
 `docker compose`.
+
+**RabbitMQ 4.3 or later.** Every branch runs `rabbitmq:4.3` (tested on 4.3.5),
+and articles 3–5 depend on it. From 4.3, a message handed back with a requeuing
+`nack` no longer counts toward the queue's `x-delivery-limit`, while a `reject`
+still does. That difference is how those articles return a message the third
+party never saw without spending one of its delivery attempts. On an older
+broker every return counts, and a message waiting out an open breaker is
+dead-lettered untried.
