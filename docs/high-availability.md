@@ -65,7 +65,7 @@ stands down each tick (`is_leader` 0) instead of hanging, and the healthy one
 holds the lease throughout.
 
 **Liveness is not leadership.** `/livez` is the tick loop (three tick intervals
-or 5 s). `/readyz` waits for one completed pass and is true on the standby too:
+or 5 s, whichever is longer). `/readyz` waits for one completed pass and is true on the standby too:
 marking a standby unready would take the pair out of rotation during a rolling
 deploy.
 

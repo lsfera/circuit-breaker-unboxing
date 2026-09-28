@@ -25,11 +25,11 @@ off, and an unrecognised `--source` silently meant the simulator.
 
 - `@egress/config` holds the shared pieces: `PositiveInt` (zero capacity is the
   same stall as `NaN`), the `host:port` broker address, the metrics port.
-- `read` returns an `Effect` failing with `SettingsUnreadable`; each `main.ts`
-  wraps its graph in `Layer.unwrap`. A library never calls `process.exit`.
-- Every entry point is a CLI command: unknown flags fail with a suggestion,
-  `--help` lists everything, and container settings fall back to their
-  environment variable (`Flag.withFallbackConfig`).
+- Every entry point is a CLI command (`Command.run`): unknown flags fail with a
+  suggestion, `--help` lists everything, and container settings fall back to
+  their environment variable (`Flag.withFallbackConfig`). A value that does not
+  decode fails the command before its handler runs. A library never calls
+  `process.exit`.
 - Pure cores still take configuration as arguments; that is what keeps them
   testable with plain assertions.
 

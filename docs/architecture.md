@@ -121,7 +121,7 @@ through one Envoy address. Each learns the circuit from its own queue on
 
 | Circuit | The fleet |
 |---|---|
-| `CLOSED` | everyone consumes; after an outage, a ramp of 1 → ¼ → ½ → all, 5 s per rung |
+| `CLOSED` | everyone consumes; after an outage, a ramp of the floor daemon alone → ¼ → ½ → all, 5 s per rung |
 | `DEGRADED` | half the fleet, chosen by each daemon's position in a hash space, plus one elected "floor" daemon so a small fleet never lands on nobody |
 | `OPEN` | nobody consumes; the work waits in the queue |
 | `HALF_OPEN` | the daemon elected on `probe-trigger` takes exactly one message |
@@ -160,6 +160,8 @@ attempt budget; after five redrives a message is parked as poison. A dead letter
 that did not come from the work queue — a control event or trigger that would
 not decode — is parked, never replayed.
 
-Every queue dead-letters to `work.dead`; the dead-letter and parked queues have
+The work, control and election queues dead-letter to `work.dead`; the `floor`
+queue does not, since an event nobody took there is worthless within its 30 s
+TTL. The dead-letter and parked queues are terminal and have
 `x-delivery-limit: -1`, because a quorum queue's default of 20 would drop a
 message at its limit.

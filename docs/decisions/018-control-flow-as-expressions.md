@@ -38,5 +38,5 @@ connection, a consumer's acks went unread until the alarm cleared (measured:
 
 ## Evidence
 
-The broker integration suite (now 28 tests) passes before and after, including
+The broker integration suite (28 tests at the time) passes before and after, including
 negative controls for `Unroutable` and the throwing handler.

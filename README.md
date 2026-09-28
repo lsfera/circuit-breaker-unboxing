@@ -4,8 +4,8 @@ The last step of the series: the design at **platform level**. Articles 1–4
 stop a fleet of consumers hammering one flaky third party with nothing but
 RabbitMQ and Prometheus (`article/03-rabbitmq-coordination`,
 `article/04-rabbitmq-only-breaker`): no lost work, one probe at a time, a redrive,
-one fleet verdict and backoff on a `429`, in about 2,200 lines. This costs about
-four times the code and 19 containers (Envoy for egress, two aggregators with a
+one fleet verdict and backoff on a `429`, in 2,200–2,900 lines. This costs about
+three times the code and 19 containers (Envoy for egress, two aggregators with a
 lease in Redis, a published event stream). Build it only when you need something
 articles 1–4 cannot give:
 
@@ -120,7 +120,8 @@ node infra/chaos-load.mjs --profiles=low --faults=flaky-full-cycle,kill-leader
 ```
 
 The stack is three Envoy replicas, two aggregators, Redis, RabbitMQ, the
-producer, five daemons, Prometheus, Alertmanager and Grafana. From the
+producer, five daemons, the fake third party and a traffic generator, and
+Prometheus, Alertmanager, an alert sink and Grafana. From the
 devcontainer, by service name (from the host, `localhost` with the published
 port):
 - Console <http://aggregator:8088> and <http://aggregator-2:8088> (`:8088`, `:8089` on the host)
