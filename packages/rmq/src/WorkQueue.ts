@@ -20,13 +20,6 @@ export const workMessageId = (run: string, n: number): string => `${run}:${n}`;
 export const WorkMessage = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
 export type WorkMessage = typeof WorkMessage.Type;
 
-/**
- * The AMQP `content_type` and `type` a work publisher declares. RabbitMQ neither validates nor uses them; what a
- * consumer reads is its own negotiation (`accept` in `@egress/rmq-consumer`).
- */
-export const WORK_CONTENT_TYPE = "application/json";
-export const WORK_MESSAGE_TYPE = "egress.work";
-
 const WorkMessageJson = Schema.fromJsonString(WorkMessage);
 export const encodeWorkMessage = Schema.encodeSync(WorkMessageJson);
 

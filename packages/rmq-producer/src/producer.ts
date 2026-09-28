@@ -6,8 +6,6 @@ import {
   deadLetterQueueFor,
   deadLetterQueueOptions,
   encodeWorkMessage,
-  WORK_CONTENT_TYPE,
-  WORK_MESSAGE_TYPE,
   workMessageId,
   workQueueFor,
   workQueueOptions,
@@ -25,9 +23,12 @@ const WorkProto = protobuf.Type.fromJSON("Work", {
   fields: { apiId: { type: "string", id: 1 }, n: { type: "int64", id: 2 } },
 });
 
-/** How a body is written, and the `content_type` that says so. */
+/**
+ * How a body is written, and the `content_type` that says so. RabbitMQ neither validates nor uses it, nor `type`;
+ * what a consumer reads is its own negotiation (`accept` in `@egress/rmq-consumer`).
+ */
 const FORMATS = {
-  json: { contentType: WORK_CONTENT_TYPE, encode: encodeWorkMessage },
+  json: { contentType: "application/json", encode: encodeWorkMessage },
   protobuf: { contentType: "application/x-protobuf", encode: (m: WorkMessage) => WorkProto.encode(m).finish() },
 } as const;
 
@@ -45,7 +46,7 @@ export const runProducer = Effect.fnUntraced(function* (cfg: ProducerConfig) {
   yield* rmq.declareQueue(deadLetterQueueFor(cfg.apiId), deadLetterQueueOptions());
   yield* rmq.declareQueue(queue, workQueueOptions(cfg.apiId));
   const { contentType, encode } = FORMATS[cfg.format];
-  const publisher = yield* rmq.publisherToQueue(queue, { contentType, type: WORK_MESSAGE_TYPE });
+  const publisher = yield* rmq.publisherToQueue(queue, { contentType, type: "egress.work" });
 
   // One batch per 100ms rather than a timer per message; nothing downstream can tell the difference.
   const perTick = Math.max(1, Math.round(cfg.ratePerSecond / 10));
