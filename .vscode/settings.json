@@ -1,0 +1,29 @@
+{
+	"editor.inlineSuggest.enabled": true,
+	"claudeCode.environmentVariables": [
+		{
+			"name": "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
+			"value": "1"
+		}
+	],
+	"json.schemaDownload.trustedDomains": {
+		"https://biomejs.dev/schema": true
+	},
+	"editor.codeActionsOnSave": {
+		"source.organizeImports.biome": "explicit",
+		"source.fixAll.biome": "explicit"
+	},
+	"todo-tree.ripgrep.ripgrep": "/usr/bin/rg",
+	"js/ts.preferences.autoImportFileExcludePatterns": [
+		"repos/**"
+	],
+	"files.watcherExclude": {
+		"repos/**": true
+	},
+	"search.exclude": {
+		"repos/**": true
+	},
+	"files.exclude": {
+		"repos/**": true
+	}
+}
