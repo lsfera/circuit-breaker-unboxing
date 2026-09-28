@@ -1,4 +1,7 @@
 # A reliability framework with RabbitMQ
+> [Main overview](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/main/README.md) | [Next: 05 · A platform control plane](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/05-platform-control-plane/README.md)
+
+
 
 A producer, a broker, and a fleet of competing consumers, each calling its
 dependencies through circuit breakers that keep **no state in the process**:
@@ -406,3 +409,5 @@ docs/            the write-up, its media, saved runs
 pnpm run check       # vendored version, typecheck, unit tests
 pnpm run test:rmq    # needs Docker: against a real broker
 ```
+
+> [Main overview](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/main/README.md) | [Next: 05 · A platform control plane](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/05-platform-control-plane/README.md)
