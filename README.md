@@ -1,4 +1,4 @@
-# What a circuit breaker is made of
+# Abstracting over the circuit breaker
 
 "Add a circuit breaker" usually means adding a library to every service that calls
 the flaky dependency. Written that way, the breaker looks like one thing. It is
