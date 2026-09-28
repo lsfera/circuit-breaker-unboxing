@@ -1,4 +1,7 @@
 # Per-API egress circuit breaker events
+> [Main overview](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/main/README.md)
+
+
 
 The last step of the series: the design at **platform level**. Articles 1–4
 stop a fleet of consumers hammering one flaky third party with nothing but
@@ -196,3 +199,5 @@ pnpm run check       # vendored version, typecheck, unit tests
 pnpm run test:rmq    # needs Docker: against a real broker
 pnpm run test:redis  # needs Docker: coordination and the outbox against a real Redis
 ```
+
+> [Main overview](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/main/README.md)
