@@ -337,10 +337,11 @@ REFUNDS_WORK_FORMAT=json docker compose up -d rmq-producer-refunds   # refunds d
 ```
 
 From the devcontainer, by service name (from the host, `localhost`):
-RabbitMQ <http://rabbitmq:15672> (guest/guest), Grafana
-<http://grafana:3000/d/system-monitor>, Prometheus <http://prometheus:9090>,
-Alertmanager <http://alertmanager:9093>, alert-sink
-<http://alert-sink:9095/alerts> (devcontainer only).
+- RabbitMQ <http://rabbitmq:15672> (guest/guest), 
+- Grafana <http://grafana:3000/d/system-monitor>, 
+- Prometheus <http://prometheus:9090>,
+- Alertmanager <http://alertmanager:9093>, 
+- alert-sink <http://alert-sink:9095/alerts> (devcontainer only).
 
 `flaky-upstream` is the third party; a POST replaces its behaviour, `{}`
 restores it, and `/__audit?run=*` counts what it answered 200:
