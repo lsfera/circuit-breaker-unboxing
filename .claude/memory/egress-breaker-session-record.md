@@ -70,7 +70,7 @@ wrote code that worked the first time."
    eventually `x-single-active-consumer` for `HALF_OPEN` prober election,
    with the key nuance that SAC has to be scoped to a dedicated coordination
    queue, not the primary work queue. Full detail is in
-   [[rmq-control-plane-design]] — held as a design, explicitly not built
+   `docs/architecture.md` — held as a design, explicitly not built
    into the repo yet, at the user's request.
 
 5. **The topology-hiding principle, stated then implemented.** Mid-design,
@@ -260,7 +260,7 @@ wrote code that worked the first time."
 
 ## Threads still open (useful if the article continues past this point)
 
-- The RabbitMQ control-plane design ([[rmq-control-plane-design]]) is fully
+- The RabbitMQ control-plane design (`docs/architecture.md`) is fully
   worked out but not built.
 - The Redis backing this session's `docker compose up` demo is one
   `redis:7-alpine` container with no persistence/replication configured —
@@ -300,4 +300,4 @@ throughline:
   the installed tag, and the first thing it caught was one of the repo's own
   skills teaching four Effect 3 APIs.
 
-Related: [[egress-breaker-open-threads]].
+Related: [[project-state]].
