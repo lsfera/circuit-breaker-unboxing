@@ -72,6 +72,25 @@ dead-letter queue stays at 0 through the outage and recovery; the price is
 backlog, 6,920 at peak. Only the `422`s park, 1,985 in 10 s, each on its first
 delivery.
 
+## What the broker hardens
+
+Most of the reliability here is RabbitMQ 4.3 behaviour, configured rather than
+coded (`ControlPlane.ts`, `Client.ts`, `infra/rabbitmq.conf`). The system
+leans on each of these:
+
+| RabbitMQ feature | what it buys | since |
+| --- | --- | --- |
+| quorum queues, persistent messages | work survives a broker restart (`kill-broker`: 0 unaccounted) | 01 |
+| publisher confirms, `mandatory` | a message counts as sent only once the broker holds it; an unroutable one fails the publish instead of vanishing | 01 |
+| manual acks, `prefetch` = `MAX_IN_FLIGHT` | nothing leaves the queue until settled; a dead replica's deliveries go back; prefetch is the concurrency limit | 01 |
+| `x-delivery-limit` (3) | the attempt budget lives on the queue, so it survives a message moving between replicas | 01 |
+| dead-lettering, `at-least-once` with `x-overflow: reject-publish` | exhausted work lands in `work.dead` and is never dropped in transit; `x-delivery-limit: -1` there, since the default 20 would drop at its cap | 01 |
+| requeuing `nack` isn't counted, `reject` is | `release` for work never tried, `requeue` for a real failed call | **03** |
+| `x-max-length: 1` + `reject-publish` | a one-token queue as the fleet-wide probe permit | **03** |
+| `x-single-active-consumer` | leader election for the redrive, with failover on disconnect | **03** |
+| 1 s heartbeat | a one-sided partition is noticed in seconds, not the 60 s default | 01 |
+| a fixed memory watermark (1 GiB of 2), `connection.blocked` | flow control refuses publishes before the OOM killer takes the broker; publishing and consuming use separate connections, so an alarm doesn't stall acks | 01 |
+
 ## The breaker
 
 As in article 2: 5 failures in a row trip it; half-open after a 1–30 s
