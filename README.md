@@ -1,4 +1,7 @@
 # In-process breaker: five, not one
+> [Main overview](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/main/README.md) | [Next: 03 · Coordinated through the broker](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/03-rabbitmq-coordination/README.md)
+
+
 
 A producer, a broker, and a fleet of competing consumers, each wrapping its
 calls to the third party in its own
@@ -156,3 +159,5 @@ infra/
 pnpm run check       # vendored version, typecheck, unit tests (Breaker.test.ts against the real library)
 pnpm run test:rmq    # needs Docker: against a real broker
 ```
+
+> [Main overview](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/main/README.md) | [Next: 03 · Coordinated through the broker](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/03-rabbitmq-coordination/README.md)
