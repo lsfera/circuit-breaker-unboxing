@@ -1,7 +1,11 @@
 # The base scenario
 
-One producer, one broker, a fleet of competing-consumer daemons calling a
-third party directly.
+A producer, a broker, and a fleet of competing consumers calling a third party
+directly, with **no circuit breaker**: each consumer judges only its own last
+call, hands a failure back to the broker (`requeue`), and the broker's
+`x-delivery-limit` (3 attempts) dead-letters whatever keeps failing. The
+articles that follow build on this; `article/02-in-process-breaker` adds a
+breaker.
 
 ```mermaid
 flowchart LR
@@ -14,160 +18,99 @@ flowchart LR
   c3 --> api
 ```
 
-Each daemon decides for itself, per message, whether its own last call
-worked. A failed call is handed back to the broker (`requeue`); the broker's
-own `x-delivery-limit` (3 attempts) dead-letters it once that budget is
-spent.
+## What an outage does
+
+**Measured**, 200 msg/s, five consumers (`pnpm run incident`, one run each):
+
+| outage | waiting in the work queue | dead-lettered | backlog cleared after restore |
+| --- | ---: | ---: | ---: |
+| 20 s, `error` | 0 | ≈ 4,000 | 0.0 s |
+| 20 s, `mode=hang` | 3,720 | 200 | 0.4 s |
+| 120 s, `mode=hang` | 22,620 | 1,500 | 1.2 s |
+
+- **Work is lost as fast as the fleet can spend attempts.** An `error` answer is
+  instant, so every message spends its 3 attempts as it arrives: about 200/s
+  dead-lettered, nothing waiting.
+- **A hang spends them slowly.** Each attempt holds one of 100 in-flight slots
+  (5 consumers × `MAX_IN_FLIGHT` 20) for the 2 s timeout: about 10/s
+  dead-lettered, while the other ~190/s pile up and drain in a second once the
+  third party recovers. The backlog grows until then, or until the broker runs
+  out of room. (The 120 s run started with 4,517 already dead-lettered,
+  subtracted.)
+- **No duplicates**: 0 across 22,848 processed calls over five incidents. The
+  producer stamps each message's `message_id` (`<run>:<n>`) once, and the
+  consumer sends it as the idempotency header, so a redelivery repeats the same
+  request.
+
+![Grafana during a 20 s error-mode outage: the dead-letter queue climbs to 4,019 while the work queue stays empty](docs/media/incident-error-mode.gif)
+
+A 20 s `error` outage (3.71× real time, [full recording](docs/media/incident-error-mode.webm)):
+the dead-letter queue climbs to 4,019 while the work queue stays empty.
+
+## What it cannot overcome
+
+None of these is a bug in `packages/rmq-consumer`; each follows from having no
+breaker.
+
+- **No shared verdict**: each replica judges only its own last call.
+- **Nothing backs off**: the producer keeps its rate and consumers call at full
+  concurrency, so a dead third party is hit as hard as a healthy one.
+- **Dead letters have no way back**: they stay in `payments-provider.work.dead`
+  until a human replays them, mixed with deliveries the consumer refused
+  (malformed, no `message_id`).
+- **Slow down and broken look alike**: `Upstream.ts` reduces a timeout, a
+  refused connection, a 503 and a 429 to the same `"failed"`.
+- **Nothing announces the outage**: you notice only by watching Grafana.
+- **Replicas can't be compared**: the dashboard sums them, so one sick consumer
+  and a sick third party look the same.
 
 ## Running it
 
-The compose file bind-mounts config from the repo through
-`HOST_WORKSPACE_FOLDER`. It defaults to `.`, so on Linux and Windows there is
-nothing to set. On macOS, where Docker runs in a VM, set it to this repo's path
-*on the Mac* (inside a devcontainer, that is not the path you see).
-
 ```bash
 pnpm install
-docker compose up -d
-docker compose up -d --scale rmq-consumer=12   # resize the fleet, no restart needed
-```
-
-- RabbitMQ management UI: <http://localhost:15672> (guest/guest) — watch
-  `payments-provider.work`'s depth climb during an outage and drain once it
-  ends.
-- Grafana: <http://localhost:3000/d/base-scenario>
-  Panels: work-queue depth, dead-letter-queue depth, calls by outcome,
-  active consumers. Plain `:3000` lands on Grafana's Welcome screen, not this
-  dashboard — use the direct link, or `Dashboards` in the left nav.
-- Prometheus: <http://localhost:9090>.
-
-## Injecting a failure
-
-`flaky-upstream` stands in for the third party. Every field is optional and a
-POST replaces the whole behaviour, so `{}` restores health:
-
-```bash
-curl -X POST localhost:8080/__fail -d '{"rate":1.0}'                # 503s
-curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"hang"}'  # never answers
-curl -X POST localhost:8080/__fail -d '{"rate":1.0,"mode":"reset"}' # drops the connection
-curl -X POST localhost:8080/__fail -d '{"delayMs":1500}'            # slow, still correct
-curl -X POST localhost:8080/__fail -d '{}'                          # healthy again
-```
-
-Every call answered 200 is recorded by its idempotency key (`<run>:<n>`), so you
-can check what got through: `curl 'localhost:8080/__audit?run=*'` for totals, or
-`?run=<id>` for one run's processed and duplicate counts.
-
-## The incident script
-
-```bash
-pnpm run incident
-MODE=hang node infra/incident.mjs
-```
-
-Injects a full failure, watches the work and dead-letter queues for a fixed
-window (over AMQP, straight from the broker), restores the third party, and
-reports peak backlog, total dead-lettered, time to drain, and a
-processed/duplicate count from `flaky-upstream`'s audit trail.
-
-### What it measured
-
-A 20s outage at 200 msg/s with five consumers. In the recording below
-(recorded 2026-09-24, 3.71× real time, also as
-[video](docs/media/incident-error-mode.webm)) the dead-letter queue climbs to
-4,019 while the work queue stays empty:
-
-![Grafana during a 20s error-mode outage](docs/media/incident-error-mode.gif)
-
-| `mode=hang` outage | Waiting in work queue | Dead-lettered | Backlog cleared after restore |
-| --- | ---: | ---: | ---: |
-| 20s | 3,720 | 200 | 0.4s |
-| 120s | 22,620 | 1,500 | 1.2s |
-
-For comparison, an `error` outage of 20s dead-letters ≈ 4,000 with nothing
-waiting, and drains in 0.0s.
-
-Both modes lose work at the rate the fleet can burn through delivery attempts,
-and that rate is very different. With `error` an attempt is instant, so every
-message uses its 3 attempts as fast as it arrives: about 200/s dead-lettered,
-nothing waiting. With `mode=hang` an attempt holds one of the 100 in-flight
-slots (5 consumers × `MAX_IN_FLIGHT=20`) for the full 2s client timeout, so the
-fleet burns through attempts slowly: a steady ≈ 10 messages/s dead-lettered
-(200 more every 20s, the whole 120s), while the other ≈ 190/s pile up in the
-work queue. Those are not lost yet — after 120s only 1,500 of ≈ 24,000 arrivals
-are dead-lettered — and they drain in about a second once the third party
-recovers. The two do not converge with a longer outage: the backlog keeps
-growing until the third party comes back or the broker runs out of room. (One
-run each. The 120s run started with 4,517 messages already in the dead-letter
-queue, subtracted above; `incident.mjs` prints the queue's absolute depth.)
-
-Duplicates: 0 across 22,848 processed calls over five incidents. The producer
-stamps each message once with an AMQP `message_id` of `<run>:<n>`, and the
-consumer sends it as the third party's idempotency header, so a broker
-redelivery repeats the same request.
-
-### What this branch cannot overcome
-
-There is no circuit breaker here. Each limit below follows from that, none is a
-bug in `packages/rmq-consumer`.
-
-1. **No coordination between consumers.** Each replica decides for itself
-   whether its own last call worked; there is no shared verdict on the third
-   party's health.
-2. **Nothing backs off.** The producer publishes at a fixed rate and consumers
-   call at full concurrency regardless of outcome, so a dead third party is
-   hit as hard as a healthy one for the whole outage.
-3. **Dead-lettered work has no way back.** The 4,000 messages above stay in
-   `payments-provider.work.dead` until a human replays them. That queue also
-   holds deliveries the daemon refuses (malformed body, no `message_id`), so
-   replaying starts with telling what is worth replaying.
-4. **A timeout and a real failure look identical.** `Upstream.ts` reduces a
-   timeout, a refused connection, a 503 and a 429 to the same `"failed"`, so
-   "slow down" cannot be told from "broken".
-5. **Nothing announces the outage.** Metrics leave each process, but no event
-   does; the only way to notice is to be watching Grafana.
-6. **No comparison between replicas.** Prometheus scrapes each replica, but the
-   dashboard sums them, so "one consumer is unhealthy" and "the third party is
-   unhealthy" are indistinguishable.
-
-## Load
-
-The producer's rate is configurable and never reacts to anything:
-
-```bash
+docker compose up -d                              # HOST_WORKSPACE_FOLDER: this repo's path on the host (macOS)
+docker compose up -d --scale rmq-consumer=12      # resize the fleet
 RATE_PER_SECOND=500 docker compose up -d rmq-producer
 ```
 
-Combine with `--scale rmq-consumer=N` and `infra/incident.mjs`'s `RATE`/
-`WINDOW_MS` env vars to drive a specific incident shape.
+From the devcontainer, by service name (from the host, `localhost`):
+- RabbitMQ <http://rabbitmq:15672> (guest/guest)
+- Grafana <http://grafana:3000/d/base-scenario>
+- Prometheus <http://prometheus:9090>
+
+`flaky-upstream` is the third party; a POST replaces its behaviour, `{}`
+restores it, and `/__audit?run=*` counts what it answered 200:
+
+```bash
+curl -X POST flaky-upstream:8080/__fail -d '{"rate":1.0}'                  # 503s
+curl -X POST flaky-upstream:8080/__fail -d '{"rate":1.0,"mode":"hang"}'    # never answers
+curl -X POST flaky-upstream:8080/__fail -d '{"rate":1.0,"mode":"reset"}'   # drops the connection
+curl -X POST flaky-upstream:8080/__fail -d '{"delayMs":1500}'              # slow, still correct
+curl -X POST flaky-upstream:8080/__fail -d '{}'                            # healthy
+```
+
+`pnpm run incident` drives one outage and reports peak backlog, dead letters,
+time to drain and duplicates (`MODE=hang`, `RATE`, `WINDOW_MS` shape it).
 
 ## Layout
 
 ```
 packages/
-  config/      @egress/config — settings declared once, decoded at boot
-  rmq/         @egress/rmq — Effect wrapper over amqplib, plus the generic
-               work-queue naming/options a producer and a consumer fleet share
-  rmq-producer/  the load: a steady stream onto <apiId>.work in confirmed batches,
-                 never backing off
-  rmq-consumer/  the naive competing-consumer fleet, see src/consumer.ts
-  tracing/     the /metrics HTTP route every process serves; OpenTelemetry
-               tracing is wired but off unless OTEL_EXPORTER_OTLP_ENDPOINT is set
+  config/        settings declared once, decoded at boot
+  rmq/           amqplib in Effect, work-queue conventions
+  rmq-producer/  the load, in confirmed batches, never backing off
+  rmq-consumer/  the naive competing-consumer fleet (consumer.ts)
+  tracing/       /metrics, and OpenTelemetry when OTEL_EXPORTER_OTLP_ENDPOINT is set
 infra/
-  flaky-upstream.mjs   the fake third party: configurable failures, an audit trail
-  rabbitmq.conf        the broker's flow-control watermark
-  incident.mjs         drives one incident, reports what happened
-  monitoring/          Prometheus scrape config and the Grafana dashboard
-docker-compose.yml     the whole stack
+  flaky-upstream.mjs          the fake third party, with an audit trail
+  incident.mjs                drives one incident
+  monitoring/, rabbitmq.conf  scrape config and dashboard; the broker's watermark
 ```
 
-Built on **Effect 4 (4.0.0-rc.116)** — see `AGENTS.md` for why that version
-matters when writing Effect code here. No build step: every package runs
-straight off its `src/*.ts` through Node's built-in type stripping.
-
-## Verification
+**Effect 4 (4.0.0-rc.116)**; see `AGENTS.md`. No build step: Node runs the
+`src/*.ts` directly.
 
 ```bash
-pnpm run check       # vendored-version check, typecheck, unit tests
-pnpm run test:rmq    # optional — needs Docker: AMQP behaviour against a real broker
+pnpm run check       # vendored version, typecheck, unit tests
+pnpm run test:rmq    # needs Docker: against a real broker
 ```
