@@ -61,9 +61,9 @@ article 3, and pays only when other systems act on the verdict.
 
 ## About the code
 
-Every branch is TypeScript on [Effect 4](https://effect.website) (a release
-candidate: rc.116 on articles 1–3, rc.117 on 4–5), talking to RabbitMQ through
-`amqplib`. There is no build step: Node 26 runs the `.ts` sources directly, so
+Every branch is TypeScript on [Effect 4](https://effect.website) (release
+candidate rc.117 on every article), talking to RabbitMQ through `amqplib`.
+There is no build step: Node 26 runs the `.ts` sources directly, so
 `pnpm run check` (typecheck and unit tests) is the only compile the code gets.
 Effect 4 renamed and reshaped much of Effect 3, which most examples online
 still use, so each branch vendors the exact Effect source it runs against in
