@@ -61,7 +61,7 @@ flowchart LR
 ## What the broker hardens
 
 Most of the reliability here is RabbitMQ 4.3 behaviour, configured rather than
-coded (`WorkQueue.ts`, `DelayedDelivery.ts`, `Client.ts`, `infra/rabbitmq.conf`).
+coded (`WorkQueue.ts`, `DelayedDelivery.ts`, `Permit.ts`, `Redrive.ts`, `Client.ts`, `infra/rabbitmq.conf`).
 The system leans on each of these:
 
 | RabbitMQ feature | what it buys | since |

@@ -1,20 +1,47 @@
 import { Effect, Option as O, Schema } from "effect";
 import { carry, Rmq } from "@egress/rmq/Client.ts";
 import type { GotMessage, RmqError } from "@egress/rmq/Client.ts";
-import {
-  deadLetterQueueFor,
-  MAX_REDRIVES,
-  parkedQueueFor,
-  PARKED_REASON_HEADER,
-  REDRIVE_COUNT_HEADER,
-  workQueueFor,
-} from "@egress/rmq/WorkQueue.ts";
+import { deadLetterQueueFor, workQueueFor } from "@egress/rmq/WorkQueue.ts";
 
 /**
  * Replays `<api>.work.dead` onto the work queue once the third party is back, and parks what has been redriven
  * too often to be anything but poison. Who runs a pass (the single-active-consumer election) and when (a close,
  * startup, a sweep) is `consumer.ts`'s business.
  */
+
+/**
+ * The redrive election: `x-single-active-consumer` delivers to one bound consumer and holds the rest as backups,
+ * promoting one if the active one disconnects. Nothing is published on it but the trigger itself.
+ */
+export const redriveTriggerQueueFor = (apiId: string): string => `${apiId}.redrive-trigger`;
+
+export const redriveTriggerQueueOptions = () => ({
+  args: { "x-queue-type": "quorum", "x-single-active-consumer": true },
+  durable: true,
+});
+
+/**
+ * Poison, parked for a human: what the consumer cannot read, what the third party refused, and what the redrive
+ * gave up on after `MAX_REDRIVES`. Terminal, like the dead-letter queue.
+ */
+export const parkedQueueFor = (apiId: string): string => `${apiId}.work.parked`;
+
+/** Why a message was parked: `refused-<status>`, `unreadable-<format|malformed|keyless>`, or `redriven-too-often`. */
+export const PARKED_REASON_HEADER = "x-egress-parked-reason";
+
+export const parkedQueueOptions = () => ({
+  args: { "x-queue-type": "quorum", "x-delivery-limit": -1 },
+  durable: true,
+});
+
+/** Stamped on a redriven message; absent means it has never been redriven. */
+export const REDRIVE_COUNT_HEADER = "x-egress-redrive-count";
+
+/**
+ * Redrives before a message is treated as poison rather than unlucky. Each one grants a fresh
+ * `WORK_DELIVERY_LIMIT`, so this bounds outages survived, not attempts.
+ */
+export const MAX_REDRIVES = 5;
 
 export type RedriveDecision =
   | { readonly destination: "work"; readonly count: number }

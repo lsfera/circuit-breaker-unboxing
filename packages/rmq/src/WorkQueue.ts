@@ -1,15 +1,7 @@
 /**
  * The work-queue shape a producer and a competing-consumer fleet share: a durable work queue with a dead-letter
- * destination, the broker's own delivery-limit budget, and the message identity that serves as idempotency key.
+ * destination and the broker's own delivery-limit budget.
  */
-
-/**
- * A work message's identity, its AMQP `message_id` and the idempotency key the application hands the third party.
- * A republish must carry it explicitly, or the replay is a new message with a new key. Unique to the producer
- * run, stable for the life of the message. `n` alone restarts at zero with each process, so a restarted producer
- * would reuse the key of different work and a third party would drop it as a duplicate. The last `:` splits run from sequence (the fake third party's audit reads it).
- */
-export const workMessageId = (run: string, n: number): string => `${run}:${n}`;
 
 /** The primary competing-consumer work queue daemons drain. */
 export const workQueueFor = (apiId: string): string => `${apiId}.work`;
@@ -29,40 +21,6 @@ const deadLetterArgs = (apiId: string): Record<string, unknown> => ({
 
 /** Identical to `deadLetterArgs` today; named separately because here it is designed behaviour, not a backstop. */
 const workQueueArgs = deadLetterArgs;
-
-/**
- * The redrive election: `x-single-active-consumer` delivers to one bound consumer and holds the rest as backups,
- * promoting one if the active one disconnects. Nothing is published here but the trigger itself.
- */
-export const redriveTriggerQueueFor = (apiId: string): string => `${apiId}.redrive-trigger`;
-
-export const redriveTriggerQueueOptions = () => ({
-  args: { "x-queue-type": "quorum", "x-single-active-consumer": true },
-  durable: true,
-});
-
-/**
- * Poison, parked for a human: what the consumer cannot read, what the third party refused, and what the redrive
- * gave up on after `MAX_REDRIVES`. Terminal, like the dead-letter queue.
- */
-export const parkedQueueFor = (apiId: string): string => `${apiId}.work.parked`;
-
-/** Why a message was parked: `refused-<status>`, `unreadable-<format|malformed|keyless>`, or `redriven-too-often`. */
-export const PARKED_REASON_HEADER = "x-egress-parked-reason";
-
-export const parkedQueueOptions = () => ({
-  args: { "x-queue-type": "quorum", "x-delivery-limit": -1 },
-  durable: true,
-});
-
-/** Stamped on a redriven message; absent means it has never been redriven. */
-export const REDRIVE_COUNT_HEADER = "x-egress-redrive-count";
-
-/**
- * Redrives before a message is treated as poison rather than unlucky. Each one grants a fresh
- * `WORK_DELIVERY_LIMIT`, so this bounds outages survived, not attempts.
- */
-export const MAX_REDRIVES = 5;
 
 /**
  * Counted returns (`requeue`) the broker allows: a message is delivered `WORK_DELIVERY_LIMIT + 1` times, and the

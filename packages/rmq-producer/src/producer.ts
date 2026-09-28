@@ -5,7 +5,6 @@ import { Rmq } from "@egress/rmq/Client.ts";
 import {
   deadLetterQueueFor,
   deadLetterQueueOptions,
-  workMessageId,
   workQueueFor,
   workQueueOptions,
 } from "@egress/rmq/WorkQueue.ts";
@@ -15,6 +14,15 @@ import {
  * third party: arrivals do not stop when it degrades, and a producer that backed off would hide the backlog
  * the fleet has to survive.
  */
+
+/**
+ * A work message's identity, its AMQP `message_id` and the idempotency key the application hands the third party.
+ * A republish must carry it explicitly, or the replay is a new message with a new key. Unique to the producer
+ * run, stable for the life of the message. `n` alone restarts at zero with each process, so a restarted producer
+ * would reuse the key of different work and a third party would drop it as a duplicate. The last `:` splits run
+ * from sequence (the fake third party's audit reads it).
+ */
+const workMessageId = (run: string, n: number): string => `${run}:${n}`;
 
 /**
  * What the producer publishes. A consumer declares its own contract (`packages/consumer`), which must accept this

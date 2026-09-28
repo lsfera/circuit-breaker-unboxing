@@ -4,8 +4,8 @@ import { Effect, Option as O } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
 import type { Body, Format, GotMessage, RmqService } from "@egress/rmq/Client.ts";
 import { TRACEPARENT } from "@egress/rmq/Trace.ts";
-import { REDRIVE_COUNT_HEADER } from "@egress/rmq/WorkQueue.ts";
 import * as Redrive from "../src/Redrive.ts";
+import { REDRIVE_COUNT_HEADER } from "../src/Redrive.ts";
 
 /**
  * `nextRedrive` is the one decision in Redrive.ts with no broker in it —

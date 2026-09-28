@@ -4,11 +4,6 @@ import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
 import {
   deadLetterQueueFor,
   deadLetterQueueOptions,
-  PARKED_REASON_HEADER,
-  parkedQueueFor,
-  parkedQueueOptions,
-  redriveTriggerQueueFor,
-  redriveTriggerQueueOptions,
   workQueueFor,
   workQueueOptions,
 } from "@egress/rmq/WorkQueue.ts";
@@ -208,16 +203,16 @@ const runConsumer = Effect.fnUntraced(function* (
   yield* rmq.declareQueue(workQueue, workQueueOptions(spec.key));
   // Every replica declares the parked queue, even those never elected: every process that might touch a
   // queue has to agree on its arguments.
-  yield* rmq.declareQueue(parkedQueueFor(spec.key), parkedQueueOptions());
-  const parkedPub = yield* rmq.publisherToQueue(parkedQueueFor(spec.key));
+  yield* rmq.declareQueue(Redrive.parkedQueueFor(spec.key), Redrive.parkedQueueOptions());
+  const parkedPub = yield* rmq.publisherToQueue(Redrive.parkedQueueFor(spec.key));
 
   const isClosed = Effect.map(
     Effect.forEach(spec.dependencies, (d) => Ref.get(cellOf(cells, d))),
     Arr.every((c) => c.phase === "closed"),
   );
 
-  const redriveQueue = redriveTriggerQueueFor(spec.key);
-  yield* rmq.declareQueue(redriveQueue, redriveTriggerQueueOptions());
+  const redriveQueue = Redrive.redriveTriggerQueueFor(spec.key);
+  yield* rmq.declareQueue(redriveQueue, Redrive.redriveTriggerQueueOptions());
   const redriveTriggerPub = yield* rmq.publisherToQueue(redriveQueue);
   const triggerRedrive = rmq.send(redriveTriggerPub, "redrive").pipe(
     Effect.catch((err) => Effect.logWarning(`${log}: redrive trigger publish failed`, err)),
@@ -303,7 +298,7 @@ const runConsumer = Effect.fnUntraced(function* (
    */
   const park = (body: Uint8Array, delivery: DeliveryInfo, reason: string): Effect.Effect<Settlement> =>
     rmq
-      .send(parkedPub, body, carry(delivery, { [PARKED_REASON_HEADER]: reason }))
+      .send(parkedPub, body, carry(delivery, { [Redrive.PARKED_REASON_HEADER]: reason }))
       .pipe(
         Effect.as<Settlement>("accept"),
         Effect.orElseSucceed((): Settlement => "discard"),
