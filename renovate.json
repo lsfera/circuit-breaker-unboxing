@@ -1,0 +1,18 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "baseBranchPatterns": ["/^article\\//"],
+  "minimumReleaseAge": "3 days",
+  "packageRules": [
+    {
+      "description": "Moves only with its vendored copy in repos/effect (git subtree pull), which `pnpm run check` enforces: by hand, per AGENTS.md.",
+      "matchPackageNames": ["effect", "/^@effect\\//"],
+      "enabled": false
+    },
+    {
+      "description": "One PR per branch for everything that should not break anything.",
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "non-major"
+    }
+  ]
+}
