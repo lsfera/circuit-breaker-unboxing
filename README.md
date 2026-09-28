@@ -31,6 +31,13 @@ flowchart LR
 Each step is a branch with its own code and measurements, and each link below
 opens that branch's README, which holds its diagram.
 
+> **A note on the rabbit hole.** Each branch digs one level deeper into the
+> breaker, and most of the digging is into RabbitMQ: delivery limits, one-token
+> queues, single active consumers, messages that expire into other queues. It is
+> easy to keep going past the point where it pays, so you don't have to read to
+> the bottom. Articles 3 and 4 are where most consumer fleets can stop; article 5
+> is for when the verdict has to leave the fleet.
+
 | | Where the state lives | What open does | Measured in an outage |
 | --- | --- | --- | --- |
 | [01 · No breaker](../../blob/article/01-base-scenario/README.md) | nowhere | nothing: every message spends its 3 attempts | ≈ 4,000 dead-lettered in 20 s |
