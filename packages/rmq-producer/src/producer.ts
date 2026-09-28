@@ -1,22 +1,27 @@
 import { randomUUID } from "node:crypto";
-import { Duration, Effect, Schedule } from "effect";
+import { Duration, Effect, Schedule, Schema } from "effect";
 import protobuf from "protobufjs";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
   deadLetterQueueFor,
   deadLetterQueueOptions,
-  encodeWorkMessage,
   workMessageId,
   workQueueFor,
   workQueueOptions,
 } from "@egress/rmq/WorkQueue.ts";
-import type { WorkMessage } from "@egress/rmq/WorkQueue.ts";
 
 /**
  * The load half of the scenario: a steady stream onto `<apiId>.work`. Fixed rate, and it never reacts to the
  * third party: arrivals do not stop when it degrades, and a producer that backed off would hide the backlog
  * the fleet has to survive.
  */
+
+/**
+ * What the producer publishes. A consumer declares its own contract (`packages/consumer`), which must accept this
+ * shape: `n` an integer, since it keeps the idempotency key stable across a redelivery.
+ */
+const WorkMessage = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
+type WorkMessage = typeof WorkMessage.Type;
 
 /** `message Work { string api_id = 1; int64 n = 2; }`, what a consumer reading `application/x-protobuf` expects. */
 const WorkProto = protobuf.Type.fromJSON("Work", {
@@ -28,7 +33,7 @@ const WorkProto = protobuf.Type.fromJSON("Work", {
  * what a consumer reads is its own negotiation (`accept` in `@egress/rmq-consumer`).
  */
 const FORMATS = {
-  json: { contentType: "application/json", encode: encodeWorkMessage },
+  json: { contentType: "application/json", encode: Schema.encodeSync(Schema.fromJsonString(WorkMessage)) },
   protobuf: { contentType: "application/x-protobuf", encode: (m: WorkMessage) => WorkProto.encode(m).finish() },
 } as const;
 

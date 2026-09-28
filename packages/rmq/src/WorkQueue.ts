@@ -3,8 +3,6 @@
  * destination, the broker's own delivery-limit budget, and the message identity that serves as idempotency key.
  */
 
-import { Schema } from "effect";
-
 /**
  * A work message's identity, its AMQP `message_id` and the idempotency key the application hands the third party.
  * A republish must carry it explicitly, or the replay is a new message with a new key. Unique to the producer
@@ -12,16 +10,6 @@ import { Schema } from "effect";
  * would reuse the key of different work and a third party would drop it as a duplicate. The last `:` splits run from sequence (the fake third party's audit reads it).
  */
 export const workMessageId = (run: string, n: number): string => `${run}:${n}`;
-
-/**
- * What the producer publishes. A consumer declares its own contract (`packages/consumer`), which must accept this
- * shape: `n` an integer, since it keeps the idempotency key stable across a redelivery.
- */
-export const WorkMessage = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
-export type WorkMessage = typeof WorkMessage.Type;
-
-const WorkMessageJson = Schema.fromJsonString(WorkMessage);
-export const encodeWorkMessage = Schema.encodeSync(WorkMessageJson);
 
 /** The primary competing-consumer work queue daemons drain. */
 export const workQueueFor = (apiId: string): string => `${apiId}.work`;
