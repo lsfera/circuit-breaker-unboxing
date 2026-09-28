@@ -1,4 +1,6 @@
 # Abstracting over the circuit breaker
+> [Start with 01 · No breaker](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/01-base-scenario/README.md)
+
 
 "Add a circuit breaker" usually means adding a library to every service that calls
 the flaky dependency. Written that way, the breaker looks like one thing. It is
@@ -77,3 +79,5 @@ still does. That difference is how those articles return a message the third
 party never saw without spending one of its delivery attempts. On an older
 broker every return counts, and a message waiting out an open breaker is
 dead-lettered untried.
+
+> [Start with 01 · No breaker](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/01-base-scenario/README.md)
