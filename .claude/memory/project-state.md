@@ -23,8 +23,8 @@ code of 03 and only pays at platform level. Terminal quorum queues keep `x-deliv
 [[rabbitmq-facts]]).
 
 **Open:**
-- This branch is on Effect rc.116 (04/05 are on rc.117); rc.118 and amqplib 2.1.0 were held back on 2026-09-28
-  by pnpm's release-age cooldown. Upgrade with a subtree pull per [[devcontainer]].
+- Effect rc.118 and amqplib 2.1.0 were held back on 2026-09-28 by pnpm's release-age cooldown; upgrade once
+  they are a day old (subtree pull per [[devcontainer]]).
 - Three Effect skills were deleted on 2026-09-13 for teaching Effect 3; don't recreate them.
 - ~120 MiB of unreferenced Effect history in `.git` from subtree pulls; `git gc` prunes it.
 
