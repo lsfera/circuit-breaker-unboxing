@@ -3,14 +3,9 @@ import { Rmq } from "@egress/rmq/Client.ts";
 import type { RmqError } from "@egress/rmq/Client.ts";
 
 /**
- * The fleet-wide probe permit: one token in a queue that holds at most one ready message (`x-max-length: 1`,
- * `x-overflow: reject-publish`). A half-open replica calls the third party only while it holds the token, so
- * however many breakers wake at once, one probe reaches the network at a time.
- *
- * The length limit counts only *ready* messages, not one held unacked: a seed published while a probe holds
- * the token is accepted and makes a second one. So the token goes back as a fresh publish followed by an ack of
- * the held one, never a requeuing nack. The publish is refused while another token is ready, which collapses a
- * duplicate on its next return, and a crash between the two leaves two tokens rather than none.
+ * The fleet's probe permit: one token in a queue of at most one ready message, so one probe reaches the dependency
+ * at a time. The limit counts only ready messages, so the token goes back as a publish then an ack of the held
+ * one, never a requeue: a duplicate is refused on its next return, and a crash between leaves two tokens, not none.
  */
 
 /** `scope` is `<application>.<dependency>`: one permit per dependency, shared by the fleet. */

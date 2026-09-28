@@ -1,30 +1,16 @@
 /**
- * Chaos for the RabbitMQ-held breaker: real faults, injected under a traffic spike, each judged first on
- * correctness and then on what the breaker did.
+ * Chaos for the RabbitMQ-held breaker: real faults under a traffic spike, judged on correctness, then on the breaker.
  *
  *   node infra/chaos-breaker.mjs                      # every scenario
  *   node infra/chaos-breaker.mjs --scenarios=outage,kill-broker-while-open
  *   node infra/chaos-breaker.mjs --list
  *
- * Correctness is judged per message, not from broker counters: every message carries `message_id: <run>:<n>`,
- * the publisher reports which n the broker confirmed, the flaky upstream reports which n it answered 200, and
- * after the fleet drains `unprocessed = confirmed ∧ ¬processed` is either parked in the dead-letter queue or
- * lost. The bar is that nothing is lost and the dead-letter queue has not grown; the upstream's audit counts
- * exact duplicates too.
+ * Correctness is per message (`message_id: <run>:<n>`): every n the broker confirmed and the upstream never answered
+ * 200 is dead-lettered or lost. The bar: nothing lost, the dead-letter queue back where it started, one probe permit,
+ * every replica's transitions legal, and the broker's consumer count matching the replicas not open. Runs against
+ * either design (`held`, or article 3's `cockatiel`), detected from the logs.
  *
- * Then the breaker: every replica's log is read back and each transition checked against the machine (closed →
- * open → half-open → closed | open), and the broker's own consumer count on the work queue is compared with the
- * number of replicas that are not open, which is the claim the design rests on. Every scenario also ends
- * with exactly one probe permit in the broker, and the dead-letter queue back where it started.
- *
- * Runs against either breaker design in this series, detected from the replicas' logs: `held` (this branch: the
- * open state is a token in the broker) or `cockatiel` (article 3: an in-process breaker, run by that branch's
- * compose file). Scenarios that only mean something for one design say so and are skipped for the other.
- *
- * Assumes `docker compose up -d`, a shell that reaches the services by name and can run `docker`. It kills real
- * containers and restarts the broker, so do not point it at anything you care about. The compose producer is
- * stopped for a run (all traffic comes from one forked publisher) and started again at the end, along with
- * anything a scenario killed.
+ * Kills real containers and restarts the broker; stops the compose producer for the run.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";

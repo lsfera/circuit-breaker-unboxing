@@ -17,10 +17,8 @@ import type { AnyDependency, Gated } from "./Dependency.ts";
 import type { Negotiate } from "./Negotiation.ts";
 
 /**
- * The consumer SDK. An application declares its contracts, what it does with each message, and the dependencies
- * that work calls; the SDK runs the rest — one breaker per dependency whose open state lives in RabbitMQ, the
- * fleet's probe permits, the redrive of dead letters, a concurrency limit learned from `throttled` answers, parking,
- * metrics and tracing:
+ * The consumer SDK: an application declares contracts, actions and dependencies; the SDK runs breakers, probe
+ * permits, redrive, the adaptive limit, parking, metrics and tracing.
  *
  *   const payments = Consumer.For(Payment, negotiate).bind((payment, metadata) => …, [ThirdParty, Database]);
  *   Consumer.run({ consumers: { "payments-provider": payments }, layer });

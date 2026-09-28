@@ -9,13 +9,7 @@ import { MetricsRoute } from "@egress/tracing/Metrics.ts";
 import { TracingLive } from "@egress/tracing/Tracing.ts";
 import { runProducer } from "./producer.ts";
 
-/**
- * The producer, its own component rather than a role inside the daemon process:
- *
- *   node src/main.ts
- *
- * It shares nothing with the fleet and never reads breaker state, which is the point of the scenario.
- */
+/** The producer (`node src/main.ts`). It shares nothing with the fleet and never reads breaker state. */
 
 /** Every setting this process takes, declared once — flags with the environment behind them. */
 const flags = {

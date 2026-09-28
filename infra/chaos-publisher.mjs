@@ -1,13 +1,7 @@
 /**
- * The chaos harness's load generator, forked by infra/chaos-breaker.mjs: publishes onto the work queue at a rate
- * the parent changes over IPC, and remembers exactly which messages the broker confirmed. Every message carries
- * `message_id: <run>:<n>`, which the daemons use as the idempotency key. On `stop` it waits for outstanding
- * confirms, then sends back a bitmap with bit n set for every message confirmed and not returned unroutable: the
- * set the harness checks against what the upstream processed. It reconnects when the broker goes away; what was
- * in flight at that moment is never confirmed, which is the honest answer.
- *
- * FORMAT picks how bodies are written: `json` (the default), `protobuf`, or `mixed`, which alternates the two so
- * one run puts both of the consumer's parsers under the same load.
+ * The chaos harnesses' load generator: publishes `message_id: <run>:<n>` at a rate the parent sets over IPC, and on
+ * `stop` returns a bitmap of every n the broker confirmed (unroutable excluded). What was in flight when the broker
+ * went away is never confirmed. FORMAT: `json` (default), `protobuf`, or `mixed` (alternating).
  */
 
 import { createRequire } from "node:module";

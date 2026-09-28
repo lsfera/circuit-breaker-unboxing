@@ -27,13 +27,9 @@ import type { Settled } from "./Settle.ts";
 import * as Telemetry from "./Telemetry.ts";
 
 /**
- * One application: several consumers, each draining its own `<key>.work` with its own contract and action, and
- * the dependencies those actions call, each behind its own breaker (Breaker.ts) whose open state is a token in
- * the broker's delay chain. A dependency is supervised once per process, however many consumers call it, and its
- * breaker gates every consumer that lists it (Gate.ts). Nothing here knows about the other replicas: five
- * replicas are five breakers per dependency. Shared through the broker: one probe permit per dependency
- * (Permit.ts), and each consumer's redrive of `<key>.work.dead`, run by whichever replica RabbitMQ elects on its
- * redrive-trigger queue (Redrive.ts).
+ * One application: consumers, each draining its own `<key>.work`, and one breaker per dependency per process, gating
+ * every consumer that lists it (Gate.ts). Replicas share only what the broker holds: a probe permit per dependency
+ * (Permit.ts) and each consumer's redrive, run by the replica RabbitMQ elects (Redrive.ts).
  */
 
 export type ConsumerSpec = {

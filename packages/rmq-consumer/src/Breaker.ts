@@ -2,20 +2,16 @@ import { Deferred, Effect, Match, Random, Ref } from "effect";
 import type { Consumer, RmqError } from "@egress/rmq/Client.ts";
 
 /**
- * A circuit breaker whose open state is a message. Nothing is timed in this process: tripping withdraws the
- * breaker's registration, so no consumer that depends on it receives deliveries and the queue simply holds the
- * work. The way back is a token sent through the delay chain (`@egress/rmq/DelayedDelivery`), addressed to this
- * replica; its arrival is the half-open timer, and it carries how many probes have failed so far, which grows the
- * hold. The only memory a replica keeps is that one message in flight and the counter that decides to trip.
+ * A circuit breaker whose open state is a message. Tripping withdraws its registration, so its consumers get no
+ * deliveries and the queue holds the work; a token sent to this replica through the delay chain is the half-open
+ * timer, and carries the failed-probe count that grows the hold.
  *
- *   closed     registered for full prefetch; N calls fail in a row -> trip
- *   open       not registered; a token is in the chain for `holdSeconds`
- *   half-open  the token is back: registered for prefetch 1, so exactly one message is the probe.
- *              It succeeds -> closed, fails -> open again with a longer hold. Its call needs the fleet's
- *              one probe permit (Permit.ts); without it no call is made -> open again, same hold.
+ *   closed     registered at full prefetch; N failures in a row -> open
+ *   open       unregistered; the token waits `holdSeconds` in the chain
+ *   half-open  registered at prefetch 1, so one message is the probe: ok -> closed, failed -> open with a longer
+ *              hold, no fleet permit (Permit.ts) -> open with the same hold
  *
- * Every consumer-shaped thing is passed in (`Io`), so the machine is exercised without a broker. One breaker
- * guards one dependency; Gate.ts turns the registrations of a consumer's dependencies into its RabbitMQ consumer.
+ * The world is passed in (`Io`), so the machine runs without a broker.
  */
 
 export type BreakerConfig = {

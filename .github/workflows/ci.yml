@@ -1,11 +1,5 @@
-# The repo's claim is that things are verified rather than reasoned about, so
-# the checks that back that claim have to run on their own, on every push.
-#
-# Two jobs, split by what they need rather than by speed: `check` needs
-# nothing but Node and is the gate; `integration` needs a Docker daemon,
-# because it starts a real broker through Testcontainers. It's opt-in locally
-# (`pnpm run test:rmq`) for exactly that reason — which makes it the suite
-# most likely to rot unnoticed, and therefore the one most worth running here.
+# `check` needs only Node and is the gate. `integration` needs Docker for a real broker (Testcontainers); it is
+# opt-in locally (`pnpm run test:rmq`), so it is the suite most likely to rot unnoticed.
 name: CI
 
 on:
@@ -21,20 +15,15 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      # Version comes from package.json#packageManager, same as `corepack
-      # enable` uses in docker-compose.yml — one source of truth for which
-      # pnpm builds this workspace.
+      # pnpm's version comes from package.json#packageManager.
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
-          # The floor from package.json#engines, not "latest": the line the
-          # images run, so CI type-checks against the Node that ships.
+          # package.json#engines: the Node the images run.
           node-version: '26'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # `tsc --noEmit` is load-bearing here rather than cosmetic — with no
-      # build step it is the only thing that ever type-checks the source, and
-      # Effect's guarantees are type-level.
+      # With no build step, this is the only type-check the source ever gets.
       - run: pnpm run check
 
   integration:
@@ -50,20 +39,9 @@ jobs:
           node-version: '26'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # The broker properties this repo depends on — quorum delivery limits,
-      # dead-letter provenance, durability — each pinned against a real
-      # RabbitMQ.
       - run: pnpm run test:rmq
 
-  # An image that builds is not an image that runs, and the difference is not
-  # theoretical: the first build of this Dockerfile produced a container that
-  # exited on its first import with EACCES on its own source, because COPY
-  # preserves the host's file mode and this workspace has files at 0600. A
-  # build-only job would have been green for it. There is no single-container
-  # boot check here — every process in this branch needs a real broker to do
-  # anything, so `docker compose config` plus the compose-driven verification
-  # in the incident script is what actually exercises the image; a follow-up
-  # could bring rabbitmq up in this job too and repeat that check standalone.
+  # Builds the image only; every process needs a broker to run, so booting it is left to the compose stack.
   image:
     name: the application image builds
     runs-on: ubuntu-latest
@@ -73,7 +51,5 @@ jobs:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
       - run: docker build -t egress-breaker:ci .
-      # Compose references the same image and pins every other one by digest,
-      # so a malformed file or a digest that no longer resolves fails here
-      # rather than at `docker compose up` on someone's machine.
+      # Fails on a malformed compose file or a pinned digest that no longer resolves.
       - run: docker compose config > /dev/null

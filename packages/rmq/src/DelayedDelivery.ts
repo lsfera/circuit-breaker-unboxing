@@ -3,19 +3,11 @@ import { Rmq } from "./Client.ts";
 import type { Publisher, RmqError, SendOptions } from "./Client.ts";
 
 /**
- * Delivery held in the broker for up to about 36 hours, with nothing but RabbitMQ doing the holding: the
- * binary-counter chain of NServiceBus's RabbitMQ transport
- * (https://docs.particular.net/transports/rabbitmq/delayed-delivery), at one-second resolution and `LEVELS`
- * levels instead of 28.
- *
- * Level `n` is a queue whose messages all expire after exactly 2^n seconds and dead-letter into level `n-1`'s
- * exchange; level 0 dead-letters into the delivery exchange. A delay of `d` seconds is `d` written in binary,
- * one word per level, and every level's exchange asks whether its bit is set: set, the message waits in this
- * level's queue; clear, it is passed straight down. Every message in a queue shares one TTL, so the next to
- * expire is always the head, which per-queue TTL handles exactly and a queue of mixed TTLs would not.
- *
- * The routing key is `<LEVELS bits, high first>.<destination>`, and the destination is whatever `#.<destination>`
- * a queue bound on the delivery exchange. Nothing here knows what a breaker is.
+ * Delivery held in RabbitMQ for up to about 36 hours: NServiceBus's binary-counter chain
+ * (https://docs.particular.net/transports/rabbitmq/delayed-delivery) at one-second resolution. Level `n` holds
+ * everything for exactly 2^n seconds, then dead-letters it into level `n-1` (level 0 into the delivery exchange).
+ * The routing key is the delay in binary, high bit first, then `.<destination>`: each level keeps a message whose
+ * bit is set and passes the rest down. One TTL per queue, so the head always expires first.
  */
 
 /** 2^17 - 1 seconds is 36.4 hours, the first power of two past a day. */

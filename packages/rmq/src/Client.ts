@@ -101,15 +101,9 @@ export class RmqError extends Data.TaggedError("RmqError")<{
 type QueueArgs = Record<string, unknown>;
 
 /**
- * What a handler asks the broker to do with its delivery.
- *
- * - `accept` — drop it; the default when a handler returns nothing.
- * - `requeue` — back on the queue with no delay, counted toward a quorum queue's `x-delivery-limit`
- *   (see `settle`), so an unbounded requeue on a failing dependency hot-loops, then dead-letters.
- *   Use `release` if the message did not fail.
- * - `discard` — reject without requeue: dead-lettered where a target is declared, dropped otherwise.
- * - `release` — back on the queue like `requeue` but not counted: for a delivery held only for
- *   backpressure (a local concurrency-limiter 503), not because the work failed.
+ * What a handler asks the broker to do with its delivery: `accept` (the default) drops it; `requeue` puts it back,
+ * counted toward `x-delivery-limit`; `release` puts it back uncounted, for a message that did not fail; `discard`
+ * dead-letters it where a target is declared and drops it otherwise.
  */
 export type Settlement = "accept" | "requeue" | "discard" | "release";
 
@@ -257,13 +251,9 @@ const wrap = <A>(operation: string, promise: () => Promise<A>) =>
   Effect.tryPromise({ try: promise, catch: (cause) => new RmqError({ operation, cause }) });
 
 /**
- * Settling a delivery whose channel has closed throws `IllegalOperationError`. With a deferred ack that
- * is routine (a consumer retired with calls in flight) and moot: the broker requeues every unacked
- * delivery when the channel goes.
- *
- * `reject` for `requeue` but `nack` for `release`, deliberately: from RabbitMQ 4.3 a requeuing `nack`
- * does not count toward a quorum queue's `x-delivery-limit` while a requeuing `reject` does. `requeue`
- * needs the count (a failed call is an attempt); `release` needs it not to (the message was never tried).
+ * `reject` for `requeue` but `nack` for `release`: from RabbitMQ 4.3 a requeuing `reject` counts toward
+ * `x-delivery-limit` and a requeuing `nack` does not. A throw means the channel is gone, and the broker already
+ * has the delivery back.
  */
 const settle = (channel: Channel, message: ConsumeMessage, outcome: Settlement) => {
   try {
@@ -356,16 +346,9 @@ const describe = (delivery: Pick<ConsumeMessage, "properties">): DeliveryInfo =>
 };
 
 /**
- * One AMQP connection that repairs itself, released with the surrounding scope. Separate from
- * `Rmq.layer` because a connection is not always process-lifetime.
- *
- * amqplib's own `recovery` reopens the socket and nothing else: channels are not recreated and consumers
- * not re-registered. This records every queue, exchange, binding and live consumer and rebuilds them
- * from `setup`, in order: topology first (a transient queue does not survive a broker restart, so its
- * consumer would fail NOT_FOUND), then the publish channel, then consumers.
- *
- * Bounded: past `maxRetries` recovery gives up and `lost` fails, which `launchWithRmq` turns into a
- * stopped process for the restart policy to pick up.
+ * A connection that repairs itself, released with the scope. amqplib's `recovery` reopens only the socket, so this
+ * records every queue, exchange, binding and consumer and rebuilds them in `setup`: topology first, then consumers.
+ * Past `maxRetries`, `lost` fails.
  */
 export const makeRmq = Effect.fnUntraced(function* (
   opts: RmqConnectOptions,
@@ -500,13 +483,8 @@ export const makeRmq = Effect.fnUntraced(function* (
   };
 
   /**
-   * Put a consumer back after its channel closed under it. amqplib recovers *connections*; a channel that
-   * dies alone (protocol error, queue deleted, settle on a known tag) takes its consumer with it and leaves
-   * the connection healthy, so nothing else would notice and the caller's handle would still look live.
-   *
-   * Unbounded on purpose: every failure seen here either stops itself (a deleted queue makes `attach` reject
-   * and leaves no channel to close again) or makes progress. An attempt budget was worse than none, since
-   * an idle queue never resets it. If a genuine spin turns up, add a delay, not a limit.
+   * Put a consumer back after its channel died alone, which amqplib does not notice. Unbounded on purpose: a
+   * deleted queue makes `attach` reject and stops it, and a budget would never reset on an idle queue.
    */
   const rebuild = (entry: Live) =>
     // Retired deliberately: both teardown paths forget their consumer, and closing the connection forgets all.
@@ -565,12 +543,8 @@ export const makeRmq = Effect.fnUntraced(function* (
     topology.size === 0 ? Promise.resolve() : replay(open);
 
   /**
-   * Runs after every successful connect of the consuming connection, before it is handed out. Uses the
-   * model it is given, not the recovering wrapper, which is not serving connections yet and would deadlock.
-   *
-   * Nothing here publishes, on purpose: a broker alarm blocks a connection by ceasing to read from it, so a
-   * consumer on a connection that had published holds its prefetch window unacked for the whole alarm
-   * (https://www.rabbitmq.com/docs/alarms — use separate connections to produce and consume).
+   * Runs on every connect, before the connection is handed out; uses `model`, since the recovering wrapper would
+   * deadlock. Never publishes: an alarm blocks a publishing connection, and its consumers with it.
    */
   const setup = async (model: ChannelModel) => {
     currentModel = model;

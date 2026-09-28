@@ -1,12 +1,8 @@
 /**
- * The vendored Effect source must be the version this repository runs, or it misleads: `repos/effect` is the
- * reference for how an Effect API behaves, and a bumped catalog with the subtree left behind describes a library
- * the code no longer compiles against, and is trusted all the same.
+ * Fails unless every `effect`/`@effect/*` dependency in packages/* (catalog resolved) equals the same package's
+ * version under repos/effect: a vendored copy behind the pin describes a library the code no longer runs.
  *
  *   node scripts/check-vendored.mjs
- *
- * Every `effect` and `@effect/*` dependency in packages/*, with `catalog:` resolved through pnpm-workspace.yaml,
- * must equal the version of the package of the same name under repos/effect.
  */
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";

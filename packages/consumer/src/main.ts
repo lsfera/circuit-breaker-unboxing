@@ -7,13 +7,8 @@ import protobuf from "protobufjs";
 import * as Consumer from "@egress/rmq-consumer";
 
 /**
- * The consumer application:
- *
- *   node src/main.ts
- *
- * Payments are charged at the third party, then recorded in the ledger; refunds are only recorded. The third party
- * and the ledger each sit behind their own breaker, so a third-party outage stops payments and leaves refunds
- * running, and a ledger outage stops both.
+ * The consumer application (`node src/main.ts`). Payments are charged at the third party, then recorded in the
+ * ledger; refunds are only recorded. A third-party outage stops payments only; a ledger outage stops both.
  */
 
 /** The two contracts this application agrees with its producers. The same shape today; each is its own contract. */
@@ -107,18 +102,14 @@ const ThirdParty = Consumer.Dependency("payments-api", { classify: byHttpStatus 
 const Database = Consumer.Dependency("ledger", { classify: bySqlError, breaker: { maxDelaySeconds: 300 } });
 
 /**
- * The work message as protobuf, `message Work { string api_id = 1; int64 n = 2; }`, defined at runtime rather than
- * generated. `defaults`, because proto3 leaves a zero off the wire and `n` starts at 0; `longs: Number`, because the
- * contract's `n` is a number, not a `Long`.
+ * `message Work { string api_id = 1; int64 n = 2; }`, defined at runtime. `defaults`: proto3 leaves a zero off the
+ * wire, and `n` starts at 0. `longs: Number`: the contract's `n` is a number, not a `Long`.
  */
 const WorkProto = protobuf.Type.fromJSON("Work", {
   fields: { apiId: { type: "string", id: 1 }, n: { type: "int64", id: 2 } },
 });
 
-/**
- * JSON, or protobuf: each message is read by the format it declares, and either way the contract decides whether it
- * is a payment. A body its parser cannot read is parked as malformed.
- */
+/** Each message is read by the format it declares; either way, the contract decides whether it is a payment. */
 const formats = Consumer.accept(
   {
     "application/json": Consumer.text(Schema.fromJsonString(Schema.Unknown)),

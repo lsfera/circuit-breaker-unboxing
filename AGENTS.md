@@ -65,6 +65,10 @@ git subtree pull --prefix=repos/effect https://github.com/Effect-TS/effect.git e
 pnpm run check
 ```
 
+pnpm refuses a release younger than its `minimumReleaseAge`, and naming the
+version explicitly makes it write a `minimumReleaseAgeExclude` entry into
+`pnpm-workspace.yaml`. Don't keep that entry: wait until the release is old enough.
+
 ## Agent patterns
 
 [`agent-patterns/`](agent-patterns/) holds notes derived from the vendored

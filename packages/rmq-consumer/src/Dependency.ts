@@ -35,12 +35,8 @@ export type Guard = {
 };
 
 /**
- * The fleet's permit (`take`: the effect that hands it back, or `None` if another replica holds it), taken by one
- * probe of this process at a time. Every consumer that lists a half-open dependency probes it, so one replica can
- * have several probes at once. Were a sibling's lost race reported as `no-permit`, it would reach the breaker
- * before the call the permit holder is making, every time, and the hold would never grow. A sibling waits for the
- * holder instead: released at once, its message would come straight back to its prefetch-1 consumer, and round
- * again for as long as the holder's call takes.
+ * The fleet's permit (`take`), taken by one probe of this process at a time. A sibling probe waits for the holder's
+ * call rather than reporting `no-permit`, which would reach the breaker first every time and stop the hold growing.
  */
 export const localPermit = Effect.fnUntraced(function* (take: Effect.Effect<O.Option<Effect.Effect<void>>>) {
   const holder = yield* Ref.make(O.none<Deferred.Deferred<void>>());

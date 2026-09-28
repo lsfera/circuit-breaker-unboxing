@@ -34,12 +34,12 @@ connection with channels that churn. Do not re-derive from an older description.
   (`--source=sim --apis=1000 --replicas=10`), or the live stack — and say
   plainly what was not measured. Several commit bodies exist because a first
   reading was wrong and the measurement corrected it.
-- **The verification standard**: `pnpm run check` (vendored-version check,
-  typecheck, 100 unit tests), `pnpm run test:rmq` (16 broker tests,
-  Testcontainers), `pnpm run test:redis` (9), then the running compose stack —
-  `node infra/instrument.mjs demo` drives an incident inside the declared
-  resource limits. Docs changes also get the site built and
-  `scripts/check-site-links.mjs` + `scripts/check-diagrams.mjs`.
+- **The verification standard** (article/04, 2026-09-28): `pnpm run check`
+  (vendored-version check, typecheck, unit tests), `pnpm run test:rmq` (broker
+  tests, Testcontainers), then rebuild the image and run
+  `node infra/chaos-app.mjs` (add `--format=mixed` for JSON+protobuf); a
+  scenario marked VOID (host suspended) is rerun alone. The site and diagram
+  checks were removed with the prune (62732c02f), and mermaid/jsdom with them.
   `HOST_WORKSPACE_FOLDER` must stay as `/etc/environment` sets it — exporting
   it to `/workspace` breaks bind mounts.
 - Containers run a **built image** (`egress-breaker:dev`), so source changes

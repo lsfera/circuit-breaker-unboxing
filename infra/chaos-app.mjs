@@ -1,25 +1,17 @@
 /**
- * Chaos for the consumer application (packages/consumer): both consumers under load, faults injected into either
- * dependency — the third party, or the PostgreSQL ledger — and each run judged first on correctness, then on what
- * each dependency's breaker did.
+ * Chaos for the consumer application: both consumers under load, faults in the third party or the ledger, judged on
+ * correctness, then on each dependency's breakers.
  *
  *   node infra/chaos-app.mjs                          # every scenario
  *   node infra/chaos-app.mjs --scenarios=db-down,upstream-outage
  *   node infra/chaos-app.mjs --list
  *   node infra/chaos-app.mjs --format=mixed           # bodies alternate JSON and protobuf (or --format=protobuf)
  *
- * Correctness, per message. Every message carries `message_id: <run>:<n>`; the publishers report which n the broker
- * confirmed, the fake third party which n it charged, and the ledger which n it recorded. Payments: a confirmed n
- * never charged is dead-lettered or lost, and the ledger must be exact — every charged n recorded once, and nothing
- * recorded that was not charged. Refunds: a confirmed n never recorded is dead-lettered or lost. The bar is nothing
- * lost, both dead-letter queues back where they started, nothing parked, one probe permit per dependency, and every
- * replica's transitions legal for each dependency.
+ * Correctness is per message (`message_id: <run>:<n>`), from what the publishers confirmed, the third party charged
+ * and the ledger recorded. The bar: nothing lost, the ledger exact, dead-letter queues back where they started,
+ * nothing parked, one probe permit per dependency, every replica's transitions legal.
  *
- * Then behaviour, per scenario: which dependency's breakers opened, and whether each consumer kept consuming.
- *
- * Assumes `docker compose up -d` on this branch, and a shell that reaches the services by name and can run `docker`.
- * It stops, kills and pauses real containers, so do not point it at anything you care about. Both compose producers
- * are stopped for a run and started again at the end.
+ * Stops, kills and pauses real containers; stops both compose producers for the run.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";

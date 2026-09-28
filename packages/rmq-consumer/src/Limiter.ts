@@ -1,20 +1,7 @@
 /**
- * How many calls this replica lets itself have open at once, learned from
- * the third party instead of configured: additive increase, multiplicative
- * decrease — the rule TCP uses to find a link's capacity without being told
- * it.
- *
- * A breaker answers "is it broken?" with two states, and a third party that
- * is merely *full* answers 429 to exactly the calls that exceeded what it can
- * serve while serving the rest. The breaker's only responses to that are to
- * keep pushing or to stop everything. This is the third one: push exactly as
- * hard as it will take. It reacts only to an explicit "slow down" (`429`) — a
- * 5xx says broken, which is the breaker's business, and shrinking the limit
- * on a coin-flip failure that has nothing to do with load would only throw
- * capacity away (see README.md).
- *
- * Pure state, no clock and no I/O: `consumer.ts` owns the semaphore this
- * sizes. The limit is a float so the increase can be a fraction of a slot.
+ * How many calls this replica has open at once, learned rather than configured: additive increase, multiplicative
+ * decrease, as TCP does. Only `throttled` ("full") shrinks it; a failure says broken, which is the breaker's business.
+ * Pure state: `consumer.ts` owns the semaphore this sizes. A float, so an increase can be a fraction of a slot.
  */
 
 export type LimiterConfig = {
@@ -42,11 +29,8 @@ export class AdaptiveLimit {
   }
 
   /**
-   * Which decrease a call was started under; hand it back to `throttled`.
-   * A burst of calls that were all already in flight when the limit was
-   * exceeded all get the same 429, and shrinking once per 429 would collapse
-   * the limit to `min` in a single round trip. Only a call started after the
-   * last decrease can vouch that the *new* limit is still too high.
+   * The decrease a call started under; hand it back to `throttled`. Calls already in flight when the limit was
+   * exceeded all get the same 429, and shrinking once per 429 would collapse the limit in one round trip.
    */
   get epoch(): number {
     return this.era;

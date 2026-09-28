@@ -13,18 +13,10 @@ import type { Role } from "./Dependency.ts";
 export type Disposition = Settlement | "park";
 
 /**
- * Whether a dependency's answer is accepted, handed back to the broker or parked. `client_error` skips the delivery
- * budget and the release/requeue split entirely: it is parked at once, because a retry or a redrive gets the same
- * answer.
- *
- * A `failed` is charged to the message (`requeue` counts toward the queue's delivery budget) only when it stands
- * alone. One that follows another failure at the same dependency (`streak` above 1) or is a probe is evidence about
- * the dependency, not the message, and is `release`d with no strike: the breaker needs `consecutiveFailures` calls
- * to open and its consumer takes a round trip to stop, and in that window the same few messages are redelivered
- * again and again, so charging them would dead-letter healthy messages. A message that fails between successes (a
- * poison message on a healthy dependency) is still charged, and still parked.
- *
- * `throttled` is `release`d too: the dependency answered "not right now", which says nothing about the message.
+ * `client_error` is parked at once: a retry or redrive gets the same answer. A `failed` is charged to the message
+ * (`requeue`, counted toward the delivery limit) only when it stands alone. A probe's, or one in a streak, is
+ * evidence about the dependency and is `release`d; charged, the messages redelivered while the breaker opens would
+ * be dead-lettered healthy. `throttled` is `release`d: "not now" says nothing about the message.
  */
 export const decide = (outcome: Outcome, role: Role = "work", streak = 1): Disposition =>
   Match.value(outcome).pipe(

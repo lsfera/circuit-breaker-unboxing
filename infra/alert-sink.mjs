@@ -1,15 +1,6 @@
 /**
- * The other end of Alertmanager's webhook, so "the alert reached a human" is
- * something you can watch happen rather than infer.
- *
- * It prints one line per alert and keeps the last hundred for inspection at
- * /alerts, which is enough to prove routing works end to end without this repo
- * holding anyone's Slack token. Replace the receiver in
- * infra/monitoring/alertmanager.yml with a real integration and this container
- * goes away.
- *
- * Same shape as flaky-upstream.mjs: node builtins only, no dependencies, one
- * file bind-mounted into a stock Node image.
+ * The other end of Alertmanager's webhook: prints one line per alert and keeps the last hundred at /alerts. Swap the
+ * receiver in infra/monitoring/alertmanager.yml for a real integration and this goes away.
  */
 
 import { createServer } from "node:http";

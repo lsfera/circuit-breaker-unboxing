@@ -285,8 +285,9 @@ Consumer.run({
 
 **Chaos**: `node infra/chaos-app.mjs`, both consumers under a spike, a fault in
 either dependency for about 40 s. Graded per message plus the ledger: every
-charge recorded once, nothing recorded without a charge. All eight pass
-(`docs/runs/chaos-app-rc117.json`).
+charge recorded once, nothing recorded without a charge. All eight pass, with
+bodies alternating JSON and protobuf (`--format=mixed`,
+`docs/runs/chaos-app-mixed-formats.json`).
 
 | scenario | fault | what happens |
 | --- | --- | --- |
@@ -306,7 +307,8 @@ charge recorded once, nothing recorded without a charge. All eight pass
   the SDK has none.
 - **A probe runs the whole action**: a half-open ledger is probed by a payment
   that charges first.
-- **The contract is declared twice**, by the producer and the application.
+- **The contract is declared twice**, by the producer and the application,
+  once per format.
 - **One `MAX_IN_FLIGHT` for every consumer**, and breaker tuning lives in code.
 
 ## Limits it accepts
@@ -331,6 +333,7 @@ pnpm install
 docker compose up -d                              # HOST_WORKSPACE_FOLDER: this repo's path on the host (macOS)
 docker compose up -d --scale rmq-consumer=12      # resize the fleet
 RATE_PER_SECOND=500 docker compose up -d rmq-producer
+REFUNDS_WORK_FORMAT=json docker compose up -d rmq-producer-refunds   # refunds default to protobuf
 ```
 
 From the devcontainer, by service name (from the host, `localhost`):
@@ -360,7 +363,7 @@ duplicates, openings and how far the replicas agreed (`MODE=hang`,
 packages/
   config/        settings declared once, decoded at boot
   rmq/           amqplib in Effect, work-queue conventions, the delay chain
-  rmq-producer/  the load, in confirmed batches
+  rmq-producer/  the load, in confirmed batches, JSON or protobuf (--format)
   rmq-consumer/  the SDK: Breaker, Dependency, Gate, Negotiation, Settle,
                  Permit, Redrive, Limiter, run by consumer.ts
   consumer/      the application (main.ts)

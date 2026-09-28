@@ -39,9 +39,8 @@ const Utf8 = fromBytes(Schema.String, "UTF-8 text", (body) => utf8.decode(body))
 export const text = (parser: Schema.Codec<unknown, string, never, unknown>): Parser => Utf8.pipe(Schema.decodeTo(parser));
 
 /**
- * A parser for a binary format from its decoder, such as protobuf's `fromBinary` or msgpack's `decode`. The decoder
- * gets a plain `Uint8Array` view, never Node's `Buffer`: protobufjs reads a `Buffer` on a fast path that cuts a
- * truncated string short instead of throwing, so a truncated body would decode as a different message.
+ * A parser for a binary format from its decoder, such as protobuf's `fromBinary`. The decoder gets a plain
+ * `Uint8Array` view, never a `Buffer`: protobufjs 7's `Buffer` path read a truncated string as a shorter one.
  */
 export const bytes = (decode: (body: Uint8Array) => unknown): Parser =>
   fromBytes(Schema.Unknown, "a body its decoder reads", (body) =>
