@@ -24,6 +24,7 @@ below opens that branch's README, which holds its diagram.
 | [02 · A breaker in every process](../../blob/article/02-in-process-breaker/README.md) | each replica's memory | rejects locally, spending the message's attempts | 1,577–2,246 dead-lettered in 15 s; ~27 openings for one outage |
 | [03 · Coordinated through the broker](../../blob/article/03-rabbitmq-coordination/README.md) | each replica, plus a shared probe permit | releases the message without spending an attempt | 0 dead-lettered in 40 s; one probe at a time instead of 6 |
 | [04 · Held by the broker](../../blob/article/04-rabbitmq-only-breaker/README.md) | RabbitMQ: a consumer on or off, a token in a delay chain | stops consuming; the work waits in the queue | 0 dead-lettered where cockatiel lost 2,745 |
+| [05 · A platform control plane](../../blob/article/05-platform-control-plane/README.md) | Envoy per replica, and one verdict per API in an aggregator | Envoy ejects hosts; the fleet stops consuming | 0 lost, 0 dead-lettered across ten chaos faults |
 
 Two things carry through the steps:
 
@@ -34,7 +35,6 @@ Two things carry through the steps:
   2, 52–59 real failures cost 1,577–2,246 dead letters, because every call an
   open breaker turned away still spent one of the message's delivery attempts.
 
-Article 5 (`article/05-platform-control-plane`) does the same at platform level:
-Envoy enforces, and an aggregator publishes one verdict per API as events. It
-costs about three times the code, and pays only when other systems act on the
-verdict.
+Article 5 moves the breaker to platform level: Envoy enforces, and an aggregator
+publishes one verdict per API as events. It costs about three times the code of
+article 3, and pays only when other systems act on the verdict.
