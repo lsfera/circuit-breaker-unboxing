@@ -1,6 +1,0 @@
-- [Working style](working-style.md) — one commit per request, measure before claiming, the 05 verification standard, the chaos bar.
-- [Code style](code-style.md) — simple Effect composition, essential comments, lean and checked docs.
-- [Project state](project-state.md) — the article branches, what 05 holds, Renovate on main, settled positions, open items.
-- [RabbitMQ facts](rabbitmq-facts.md) — measured broker behaviours the docs and argument names hide.
-- [Devcontainer](devcontainer.md) — host suspends, git subtree, service names, docker exec; what a rebuild keeps.
-- [Session record](egress-breaker-session-record.md) — article source material the user asked to keep.
