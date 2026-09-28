@@ -1,5 +1,5 @@
 # Abstracting over the circuit breaker
-> [Start with 01 · No breaker](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/01-base-scenario/README.md)
+> [Start with 01 · Baseline(no breaker)](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/01-base-scenario/README.md)
 
 
 "Add a circuit breaker" usually means adding a library to every service that calls
@@ -21,10 +21,19 @@ party:
 
 ```mermaid
 flowchart LR
-  producer["Producer"] --> queue[("payments-provider.work")]
-  queue --> c1["consumer 1"]
-  queue --> c2["consumer 2"]
-  queue --> c3["consumer N"]
+  producer["Producer"] --> queue[("RabbitMQ broker")]
+
+  subgraph competing_consumers["competing consumers"]
+    direction LR
+    c1["Consumer 1"]
+    c2["Consumer 2"]
+    c3["Consumer n"]
+  end
+
+  queue --> c1
+  queue --> c2
+  queue --> c3
+
   c1 --> api[("Third-party API\n(flaky-upstream)")]
   c2 --> api
   c3 --> api
@@ -80,4 +89,4 @@ party never saw without spending one of its delivery attempts. On an older
 broker every return counts, and a message waiting out an open breaker is
 dead-lettered untried.
 
-> [Start with 01 · No breaker](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/01-base-scenario/README.md)
+> [Start with 01 · Baseline(no breaker)](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/01-base-scenario/README.md)
