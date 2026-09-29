@@ -81,6 +81,15 @@ still use, so each branch vendors the exact Effect source it runs against in
 `repos/effect`. Each branch's README says how to start its stack with
 `docker compose`.
 
+Development uses the reusable [devcontainer-typescript](https://github.com/lsfera/devcontainer-typescript)
+environment: a Node 26 Dev Container with pnpm, Bun and Docker-outside-of-Docker.
+It mounts this repository at `/workspace` and installs dependencies on creation.
+Clone both repositories into the expected layout with:
+
+```sh
+git clone https://github.com/lsfera/devcontainer-typescript.git && cd devcontainer-typescript && mkdir -p ws && git clone https://github.com/lsfera/reasoning-over-circuit-breaker.git ws/circuit-breaker && ./up.sh circuit-breaker
+```
+
 **RabbitMQ 4.3 or later.** Every branch runs `rabbitmq:4.3` (tested on 4.3.5),
 and articles 3–5 depend on it. From 4.3, a message handed back with a requeuing
 `nack` no longer counts toward the queue's `x-delivery-limit`, while a `reject`
