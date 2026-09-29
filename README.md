@@ -1,5 +1,5 @@
 # Abstracting over the circuit breaker
-> [Start with 01 · Baseline(no breaker)](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/01-base-scenario/README.md)
+> [Start with 01 · Baseline(no breaker)](https://github.com/lsfera/circuit-breaker-unboxing/blob/article/01-base-scenario/README.md)
 
 
 "Add a circuit breaker" usually means adding a library to every service that calls
@@ -51,11 +51,11 @@ opens that branch's README, which holds its diagram.
 
 | | Where the state lives | What open does | Measured in an outage |
 | --- | --- | --- | --- |
-| [01 · No breaker](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/01-base-scenario/README.md) | nowhere | nothing: every message spends its 3 attempts | ≈ 4,000 dead-lettered in 20 s |
-| [02 · A breaker in every process](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/02-in-process-breaker/README.md) | each replica's memory | rejects locally, spending the message's attempts | 1,577–2,246 dead-lettered in 15 s; ~27 openings for one outage |
-| [03 · Coordinated through the broker](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/03-rabbitmq-coordination/README.md) | each replica, plus a shared probe permit | releases the message without spending an attempt | 0 dead-lettered in 40 s; one probe at a time instead of 6 |
-| [04 · Held by the broker](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/04-rabbitmq-only-breaker/README.md) | RabbitMQ: a consumer on or off, a token in a delay chain | stops consuming; the work waits in the queue | 0 dead-lettered where cockatiel lost 2,745 |
-| [05 · A platform control plane](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/05-platform-control-plane/README.md) | Envoy per replica, and one verdict per API in an aggregator | Envoy ejects hosts; the fleet stops consuming | 0 lost, 0 dead-lettered across ten chaos faults |
+| [01 · No breaker](https://github.com/lsfera/circuit-breaker-unboxing/blob/article/01-base-scenario/README.md) | nowhere | nothing: every message spends its 3 attempts | ≈ 4,000 dead-lettered in 20 s |
+| [02 · A breaker in every process](https://github.com/lsfera/circuit-breaker-unboxing/blob/article/02-in-process-breaker/README.md) | each replica's memory | rejects locally, spending the message's attempts | 1,577–2,246 dead-lettered in 15 s; ~27 openings for one outage |
+| [03 · Coordinated through the broker](https://github.com/lsfera/circuit-breaker-unboxing/blob/article/03-rabbitmq-coordination/README.md) | each replica, plus a shared probe permit | releases the message without spending an attempt | 0 dead-lettered in 40 s; one probe at a time instead of 6 |
+| [04 · Held by the broker](https://github.com/lsfera/circuit-breaker-unboxing/blob/article/04-rabbitmq-only-breaker/README.md) | RabbitMQ: a consumer on or off, a token in a delay chain | stops consuming; the work waits in the queue | 0 dead-lettered where cockatiel lost 2,745 |
+| [05 · A platform control plane](https://github.com/lsfera/circuit-breaker-unboxing/blob/article/05-platform-control-plane/README.md) | Envoy per replica, and one verdict per API in an aggregator | Envoy ejects hosts; the fleet stops consuming | 0 lost, 0 dead-lettered across ten chaos faults |
 
 Two things carry through the steps:
 
@@ -87,7 +87,7 @@ It mounts this repository at `/workspace` and installs dependencies on creation.
 Clone both repositories into the expected layout with:
 
 ```sh
-git clone https://github.com/lsfera/devcontainer-typescript.git && cd devcontainer-typescript && mkdir -p ws && git clone https://github.com/lsfera/reasoning-over-circuit-breaker.git ws/circuit-breaker && ./up.sh circuit-breaker
+git clone https://github.com/lsfera/devcontainer-typescript.git && cd devcontainer-typescript && mkdir -p ws && git clone https://github.com/lsfera/circuit-breaker-unboxing.git ws/circuit-breaker && ./up.sh circuit-breaker
 ```
 
 **RabbitMQ 4.3 or later.** Every branch runs `rabbitmq:4.3` (tested on 4.3.5),
@@ -98,4 +98,4 @@ party never saw without spending one of its delivery attempts. On an older
 broker every return counts, and a message waiting out an open breaker is
 dead-lettered untried.
 
-> [Start with 01 · Baseline(no breaker)](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/01-base-scenario/README.md)
+> [Start with 01 · Baseline(no breaker)](https://github.com/lsfera/circuit-breaker-unboxing/blob/article/01-base-scenario/README.md)
