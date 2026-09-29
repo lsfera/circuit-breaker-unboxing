@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Circuit Breaker: Unboxing</title>
+<meta name="description" content="Circuit breakers look simple until the caller is a fleet, not a single process. A reliability look at the pattern for competing consumers calling a third-party API.">
+<meta property="og:title" content="Circuit Breaker: Unboxing">
+<meta property="og:description" content="Circuit breakers look simple until the caller is a fleet, not a single process.">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://lsfera.github.io/circuit-breaker-unboxing/">
+<meta name="author" content="Luca Giordano">
+<link rel="canonical" href="https://lsfera.github.io/circuit-breaker-unboxing/">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=Inter:wght@400;600&family=JetBrains+Mono&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #fbfaf7; --fg: #1d1d1b; --muted: #6b6a66; --rule: #e4e1da;
+    --accent: #b4441f; --code-bg: #f1eee8; --card: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151514; --fg: #e8e6e1; --muted: #9a978f; --rule: #2e2d2a;
+      --accent: #f08a5d; --code-bg: #1f1e1c; --card: #1b1a19;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 19px/1.65 "Source Serif 4", Georgia, serif;
+  }
+  main { max-width: 42rem; margin: 0 auto; padding: 4rem 1rem 5rem; }
+  header.top {
+    max-width: 42rem; margin: 0 auto; padding: 1.25rem 1rem 0;
+    display: flex; justify-content: space-between; align-items: center;
+    font: 14px/1 Inter, system-ui, sans-serif; color: var(--muted);
+  }
+  header.top a { color: var(--muted); text-decoration: none; }
+  header.top a:hover { color: var(--accent); }
+  h1, h2, h3 { font-family: Inter, system-ui, sans-serif; line-height: 1.2; letter-spacing: -0.01em; }
+  h1 { font-size: 2.4rem; margin: 0 0 .5rem; }
+  h2 { font-size: 1.35rem; margin: 3rem 0 .75rem; padding-top: 1.5rem; border-top: 1px solid var(--rule); }
+  h3 { font-size: 1.05rem; margin: 2rem 0 .5rem; }
+  .byline { font: 14px/1.4 Inter, system-ui, sans-serif; color: var(--muted); margin-bottom: 2rem; }
+  .preamble { font-style: italic; color: var(--muted); border-left: 3px solid var(--accent); padding-left: 1rem; }
+  .lead { font-size: 1.15rem; }
+  a { color: var(--accent); text-underline-offset: 2px; }
+  strong { font-weight: 600; }
+  ul { padding-left: 1.25rem; }
+  li { margin: .35rem 0; }
+  code { font: .85em "JetBrains Mono", ui-monospace, monospace; background: var(--code-bg); padding: .1em .3em; border-radius: 3px; }
+  figure { margin: 1.75rem 0; padding: 1rem; background: var(--card); border: 1px solid var(--rule); border-radius: 8px; overflow-x: auto; }
+  figure .mermaid { display: flex; justify-content: center; }
+  .mermaid foreignObject { overflow: visible; }
+  figcaption { font: 14px/1.5 Inter, system-ui, sans-serif; color: var(--muted); margin-top: .75rem; }
+  .table-wrap { overflow-x: auto; margin: 1.5rem 0; }
+  table { border-collapse: collapse; width: 100%; font: 14px/1.45 Inter, system-ui, sans-serif; }
+  th, td { text-align: left; vertical-align: top; padding: .55rem .6rem; border-bottom: 1px solid var(--rule); }
+  th { color: var(--muted); font-weight: 600; }
+  td:first-child { white-space: nowrap; }
+  .sources li { font-size: .9rem; }
+  footer { max-width: 42rem; margin: 0 auto; padding: 0 1rem 3rem; font: 13px/1.5 Inter, system-ui, sans-serif; color: var(--muted); }
+  @media (max-width: 600px) {
+    body { font-size: 17px; }
+    main { padding-top: 2.5rem; }
+    h1 { font-size: 1.9rem; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <span>lsfera</span>
+  <a href="https://github.com/lsfera/circuit-breaker-unboxing">View the repository &rarr;</a>
+</header>
+
+<main>
+<article>
+<h1>Circuit Breaker: Unboxing</h1>
+<div class="byline">Luca Giordano · September 2026</div>
+
+<p class="preamble">A recent interview put me in front of this exact use case, and I gave an <a href="https://github.com/lsfera/circuit-breaker-unboxing/tree/article/02-in-process-breaker">average answer.</a> It kept nagging me in the days after, so I decided to dig deeper.</p>
+
+<p class="lead">Circuit breakers look simple until the caller is a fleet, not a single process. This article works through the pattern under a reliability lens, using this repository's egress breaker as the running example.</p>
+
+<h2>Definition</h2>
+<p>A circuit breaker stops a caller from making a request it already has reason to believe will fail. It sits between a caller and a dependency, watches recent outcomes, and switches among three states: <strong>closed</strong> (calls pass through, failures are counted), <strong>open</strong> (calls fail immediately, without touching the dependency), and <strong>half-open</strong> (a small number of probes test whether the dependency has recovered).</p>
+<p>The trip condition is a threshold on recent failures — a rate, a count, or both — never a single failure. The goal is not to catch one bad call. It is to stop sending load into a dependency that is already struggling, before every caller's own retries turn a slow degradation into an outage.</p>
+
+<figure>
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --> Closed
+  note left of Closed: calls pass through,<br/>successes keep it closed
+  Closed --> Open: failure threshold exceeded
+  Open --> HalfOpen: open timeout<br/>elapses
+  HalfOpen --> Closed: probe succeeds
+  HalfOpen --> Open: probe fails,<br/>backoff doubles
+</pre>
+<figcaption>Closed passes calls through and counts failures; open fails fast without touching the dependency; half-open spends a small number of probes deciding which way to go next.</figcaption>
+</figure>
+
+<h2>Anecdotal history</h2>
+<ul>
+  <li><strong>Origin:</strong> electrical engineering — a breaker trips on overcurrent to protect the wiring, fails fast on purpose, and needs a reset.</li>
+  <li><strong>2007:</strong> Michael Nygard's <a href="https://pragprog.com/titles/mnee2/release-it-second-edition/"><em>Release It!</em></a> names it as a software stability pattern: turn a slow downstream failure into a fast, cheap one.</li>
+  <li><strong>2012:</strong> Netflix's <a href="https://github.com/Netflix/Hystrix">Hystrix</a> makes it the default microservices library, with <a href="https://github.com/Netflix/Turbine">Turbine</a> aggregating dashboards fleet-wide.</li>
+  <li><strong>2018 on:</strong> Hystrix goes into maintenance; Resilience4j keeps the per-process model, while Envoy outlier detection (<a href="https://istio.io/latest/docs/tasks/traffic-management/circuit-breaking/">Istio</a>) and <a href="https://linkerd.io/2-edge/reference/circuit-breaking/">Linkerd</a> move the breaker into the proxy.</li>
+</ul>
+<p>This repository sits on the infrastructure side of that fork, which is where our shape of the problem starts.</p>
+
+<h2>Our shape of the problem</h2>
+<h3>The <a href="https://github.com/lsfera/circuit-breaker-unboxing/tree/article/01-base-scenario">base scenario</a></h3>
+
+<figure>
+<pre class="mermaid">
+flowchart LR
+  producer["Producer"] --> queue[("RabbitMQ broker")]
+
+  subgraph competing_consumers["competing consumers"]
+    direction LR
+    c1["Consumer 1"]
+    c2["Consumer 2"]
+    c3["Consumer n"]
+  end
+
+  queue --> c1
+  queue --> c2
+  queue --> c3
+
+  c1 --> api[("Third-party API<br/>(flaky-upstream)")]
+  c2 --> api
+  c3 --> api
+</pre>
+</figure>
+
+<p>One producer, one durable queue, a fleet of daemons competing for the same messages — no coordination between them by default — each making its own outbound call to a third party whose load balancer, health checks, and backend topology are entirely theirs. Every fact below follows from this picture.</p>
+
+<p>The textbook breaker assumes one caller and one dependency. We have neither:</p>
+<ul>
+  <li><strong>Caller:</strong> a fleet of competing consumers on one queue, uncoordinated by default.</li>
+  <li><strong>Dependency:</strong> a third party behind a load balancer we don't operate, configure, or get metrics from.</li>
+</ul>
+<p>Each breaks the textbook picture alone; together they compound.</p>
+
+<p><strong>Many callers, one opinion needed.</strong> A breaker per consumer means each forms its own view from its own sample. At our fleet's shape — five daemons, upstream failing 45% — they agree only <strong>17% of the time</strong> and send <strong>370 probes in five minutes</strong> at a fully-down upstream. Subscribers see one incident flap five times.</p>
+
+<p><strong>Their load balancer, not ours.</strong> Textbook enforcement (Envoy outlier detection, Hystrix) ejects the <em>specific host</em> that is failing. A third party's load balancer hides its hosts: we see one address. We can only detect at the aggregate level — choosing when to stop calling them, not which machine to avoid.</p>
+
+<p><strong>Whose failure is it, anyway.</strong> A request shed by our own egress path can look identical to a real upstream failure. This repository hit it directly: a healthy upstream, yet every 5xx callers saw came from the local proxy's concurrency shedding — 90,753 local errors in two minutes, with the upstream reporting zero. A breaker that can't tell the two apart trips on the wrong evidence.</p>
+
+<p>So this article does not stop at "add a breaker." There are many moving parts, and every decision comes at a cost. The analysis rests on three pillars:</p>
+<ul>
+  <li><strong>Correctness:</strong> trip on the right evidence, and give the fleet one verdict.</li>
+  <li><strong>Self-healing:</strong> detect recovery and resume traffic without a human.</li>
+  <li><strong>Operational complexity:</strong> what it costs to run, configure, and debug.</li>
+</ul>
+<p><em>Protecting</em> the request path and <em>telling the rest of the fleet</em> need different answers, at different places in the stack. The <a href="https://github.com/lsfera/circuit-breaker-unboxing">linked repository</a> weighs each mechanism against these pillars, one branch per step.</p>
+
+<h2>The steps in the repository</h2>
+<p>Each step is a branch with its own code, measurements and README.</p>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Step</th><th>Where the state lives</th><th>What open does</th><th>Measured in an outage</th></tr></thead>
+  <tbody>
+    <tr><td><a href="https://github.com/lsfera/circuit-breaker-unboxing/tree/article/01-base-scenario">01 · No breaker</a></td><td>nowhere</td><td>nothing: every message spends its 3 attempts</td><td>≈ 4,000 dead-lettered in 20 s</td></tr>
+    <tr><td><a href="https://github.com/lsfera/circuit-breaker-unboxing/tree/article/02-in-process-breaker">02 · In every process</a></td><td>each replica's memory</td><td>rejects locally, spending the message's attempts</td><td>1,577–2,246 dead-lettered in 15 s; ~27 openings for one outage</td></tr>
+    <tr><td><a href="https://github.com/lsfera/circuit-breaker-unboxing/tree/article/03-rabbitmq-coordination">03 · Coordinated by the broker</a></td><td>each replica, plus a shared probe permit</td><td>releases the message without spending an attempt</td><td>0 dead-lettered in 40 s; one probe at a time instead of 6</td></tr>
+    <tr><td><a href="https://github.com/lsfera/circuit-breaker-unboxing/tree/article/04-rabbitmq-only-breaker">04 · Held by the broker</a></td><td>RabbitMQ: a consumer on or off, a token in a delay chain</td><td>stops consuming; the work waits in the queue</td><td>0 dead-lettered where cockatiel lost 2,745</td></tr>
+    <tr><td><a href="https://github.com/lsfera/circuit-breaker-unboxing/tree/article/05-platform-control-plane">05 · Platform control plane</a></td><td>Envoy per replica, and one verdict per API in an aggregator</td><td>Envoy ejects hosts; the fleet stops consuming</td><td>0 lost, 0 dead-lettered across ten chaos faults</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2>Sources</h2>
+<ul class="sources">
+  <li>Michael T. Nygard, <a href="https://pragprog.com/titles/mnee2/release-it-second-edition/"><em>Release It!, Second Edition: Design and Deploy Production-Ready Software</em></a>, The Pragmatic Programmers. First edition published 2007 by Pragmatic Bookshelf.</li>
+  <li>Netflix, <a href="https://github.com/Netflix/Hystrix">Netflix/Hystrix</a> (GitHub). README: "no longer in active development, and is currently in maintenance mode" since 2018, final release 1.5.18.</li>
+  <li>Netflix, <a href="https://github.com/Netflix/Turbine">Netflix/Turbine</a> (GitHub), the SSE stream aggregator Hystrix dashboards were built on. Archived (read-only) December 19, 2025.</li>
+</ul>
+</article>
+</main>
+
+<footer>
+  Code and measurements: <a href="https://github.com/lsfera/circuit-breaker-unboxing">github.com/lsfera/circuit-breaker-unboxing</a>
+</footer>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  mermaid.initialize({ startOnLoad: false, theme: dark ? "dark" : "neutral", fontFamily: "Inter, system-ui, sans-serif" });
+  await document.fonts.ready;
+  await mermaid.run();
+</script>
+</body>
+</html>
