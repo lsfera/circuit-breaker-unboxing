@@ -376,3 +376,19 @@ test("a late failure does not un-mark a newer transition", () => {
   const staleFailure = reduce(newer, { _tag: "TriggerFailed", election: "probe", sequence: 9 }).next;
   assert.equal(staleFailure.probedSequence, 12);
 });
+
+const appliedBy = (state: DaemonState.DaemonState, type: typeof SEQUENCED_EVENT | typeof SNAPSHOT_EVENT, circuit: State, sequence: number, lease: O.Option<Lease> = O.none()) =>
+  reduce(state, { _tag: "CircuitChanged", type, lease, state: circuit, sequence, at: T0 }).next;
+
+test("an event stays current through a snapshot that repeats it", () => {
+  const halfOpen = appliedBy(start, SEQUENCED_EVENT, State.HALF_OPEN, 4);
+  const repeated = appliedBy(halfOpen, SNAPSHOT_EVENT, State.HALF_OPEN, 4);
+  assert.ok(DaemonState.isCurrent(repeated, halfOpen.applied));
+});
+
+test("an event is no longer current once a newer one is applied", () => {
+  const halfOpen = appliedBy(start, SEQUENCED_EVENT, State.HALF_OPEN, 4);
+  assert.ok(!DaemonState.isCurrent(appliedBy(halfOpen, SEQUENCED_EVENT, State.OPEN, 5), halfOpen.applied));
+  const newLeader = appliedBy(halfOpen, SNAPSHOT_EVENT, State.HALF_OPEN, 4, O.some({ epoch: "e2", counter: 1 }));
+  assert.ok(!DaemonState.isCurrent(newLeader, halfOpen.applied), "same sequence under another lease is another event");
+});

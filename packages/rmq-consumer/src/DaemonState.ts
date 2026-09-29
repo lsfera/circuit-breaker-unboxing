@@ -143,6 +143,24 @@ export const reduce = (
     }),
   });
 
+/**
+ * Whether the event that installed `applied` is still the one `state` is on: a
+ * trigger it owes is not worth publishing once a newer event has replaced it.
+ * By value, so a snapshot repeating the same event keeps it current.
+ */
+export const isCurrent = (state: DaemonState, applied: O.Option<Applied>): boolean =>
+  O.match(state.applied, {
+    onNone: () => O.isNone(applied),
+    onSome: (now) =>
+      O.match(applied, {
+        onNone: () => false,
+        onSome: (then) =>
+          now.sequence === then.sequence &&
+          O.getOrUndefined(O.map(now.lease, (l) => l.epoch)) === O.getOrUndefined(O.map(then.lease, (l) => l.epoch)) &&
+          O.getOrUndefined(O.map(now.lease, (l) => l.counter)) === O.getOrUndefined(O.map(then.lease, (l) => l.counter)),
+      }),
+  });
+
 /** Which connections are allowed to exist in this state. */
 type Connections = {
   readonly work: boolean;

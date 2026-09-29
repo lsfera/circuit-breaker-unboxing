@@ -43,8 +43,9 @@ import {
 import { decodeCircuitEvent, State, STATE_CODE } from "@egress/domain/Model.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 import { initialContract, observe } from "./Contract.ts";
+import { makeApplier, persist } from "./ControlEvents.ts";
 import { makeRedrive } from "./Redrive.ts";
-import { desired, initialState, plan, reduce } from "./DaemonState.ts";
+import { desired, initialState, isCurrent, plan, reduce } from "./DaemonState.ts";
 import { position } from "./DaemonPolicy.ts";
 import * as Attempts from "./Attempts.ts";
 import * as Limiter from "./Limiter.ts";
@@ -379,7 +380,10 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
     return seen <= UNDECODABLE_SAMPLE ? "discard" : "accept";
   };
 
-  /** Serializes reconciliation: two callbacks could otherwise both see "no work consumer". */
+  /**
+   * Serializes reconciliation: two callbacks could otherwise both see "no work consumer".
+   * Control events hold their own permit (`makeApplier`), always taken before this one.
+   */
   const gate = yield* Semaphore.make(1);
 
   const startWork = Effect.gen(function* () {
@@ -506,27 +510,37 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   });
 
   /** Order matters: apply, reconcile, log, and only then publish the triggers. */
-  const applyEvent = Effect.fnUntraced(function* (event: CircuitEvent) {
-    const { state: circuitState, sequence, reason } = event.data;
-    const at = yield* Clock.currentTimeMillis;
-    const { ignored, actions } = yield* dispatch({
-      _tag: "CircuitChanged",
-      type: event.type,
-      lease: O.fromUndefinedOr(event.data.lease),
-      state: circuitState,
-      sequence,
-      at,
-    });
-    yield* ignored
-      ? Effect.sync(() => void counts.stale++).pipe(
-          Effect.andThen(Effect.logWarning(`${label}: seq=${sequence} (${reason}, ${circuitState}) is stale, ignored`)),
-        )
-      : reconcile.pipe(
-          Effect.andThen(describe),
-          Effect.flatMap((d) => Effect.log(`${label}: seq=${sequence} (${reason}) ${d}`)),
-          Effect.andThen(performAll(actions)),
-        );
+  const applyInOrder = yield* makeApplier({
+    dispatch: (event: CircuitEvent) =>
+      Effect.flatMap(Clock.currentTimeMillis, (at) =>
+        dispatch({
+          _tag: "CircuitChanged",
+          type: event.type,
+          lease: O.fromUndefinedOr(event.data.lease),
+          state: event.data.state,
+          sequence: event.data.sequence,
+          at,
+        }),
+      ),
+    settle: (event) =>
+      persist(reconcile).pipe(
+        Effect.andThen(describe),
+        Effect.flatMap((d) => Effect.log(`${label}: seq=${event.data.sequence} (${event.data.reason}) ${d}`)),
+      ),
+    isCurrent: (next) => Effect.map(Ref.get(state), (now) => isCurrent(now, next.applied)),
+    publish: (action) => persist(perform(action)),
+    superseded: (action) => Effect.logDebug(`${label}: ${action._tag} superseded by a newer event, not published`),
   });
+
+  const applyEvent = (event: CircuitEvent) =>
+    Effect.flatMap(applyInOrder(event), (applied) => {
+      const { state: circuitState, sequence, reason } = event.data;
+      return applied
+        ? Effect.void
+        : Effect.sync(() => void counts.stale++).pipe(
+            Effect.andThen(Effect.logWarning(`${label}: seq=${sequence} (${reason}, ${circuitState}) is stale, ignored`)),
+          );
+    });
 
   yield* control.consume(controlQueue, (body) =>
     Result.match(decodeCircuitEvent(body), {
@@ -551,10 +565,16 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
           );
         }
 
-        forkInContext(
+        // Accepted even on failure: the next snapshot re-applies the state, and every daemon publishes
+        // the same triggers. Dead-lettering would only pile up one copy per daemon, with nothing to replay it into.
+        return runInContext(
           applyEvent(event).pipe(
+            Effect.as<Settlement>("accept"),
             Effect.catchCause((cause) =>
-              Effect.logError(`${label}: applying event failed`, cause),
+              Effect.logError(
+                `${label}: seq=${data.sequence} (${data.reason}) not applied in full; the next snapshot re-applies it`,
+                cause,
+              ).pipe(Effect.as<Settlement>("accept")),
             ),
           ),
         );

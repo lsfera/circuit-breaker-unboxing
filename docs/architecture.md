@@ -134,6 +134,16 @@ dedupes by sequence, settles it only once the action has run, and a daemon that
 dies mid-action leaves it for the next one promoted. The daemon never judges a
 probe; Envoy's outlier detection and the aggregator's quorum do.
 
+**Control events** are applied one at a time: the transition, then the
+reconcile of the daemon's channels. Only after that are the triggers the event
+owes published, so an `OPEN` never waits on a publish, and a trigger whose event
+a newer one has since replaced is dropped. Each step is retried in place for at
+most 5 s. The delivery is acked once the event is applied, and also when a step
+still fails. Nothing is undone and nothing dead-lettered, because the event is
+recovered elsewhere: the next snapshot re-applies the state, every daemon
+publishes the same triggers, and the floor's sweep replays `work.dead` while
+closed.
+
 **Per call**, the key is the message's `message_id`, assigned once by the
 producer and carried by every redelivery, retry and redrive. The outcome decides
 the delivery:
