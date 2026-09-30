@@ -80,7 +80,7 @@
 <h1>Circuit Breaker: Unboxing</h1>
 <div class="byline">Luca Giordano · September 2026</div>
 
-<p class="preamble">A recent interview put me in front of this exact use case, and I gave an <a href="https://github.com/lsfera/circuit-breaker-unboxing/tree/article/02-in-process-breaker">average answer.</a> It kept nagging me in the days after, so I decided to dig deeper.</p>
+<p class="preamble">A recent interview put me in front of this exact use case, and I gave an <a href="https://github.com/lsfera/circuit-breaker-unboxing/tree/article/02-in-process-breaker">average answer</a> that left a bad taste in my mouth. It kept nagging me in the days after, so I decided to dig deeper.</p>
 
 <p class="lead">Circuit breakers look simple until the caller is a fleet, not a single process. This article works through the pattern under a reliability lens, using this repository's egress breaker as the running example.</p>
 
@@ -144,11 +144,11 @@ flowchart LR
 </ul>
 <p>Each breaks the textbook picture alone; together they compound.</p>
 
-<p><strong>Many callers, one opinion needed.</strong> A breaker per consumer means each forms its own view from its own sample. At our fleet's shape — five daemons, upstream failing 45% — they agree only <strong>17% of the time</strong> and send <strong>370 probes in five minutes</strong> at a fully-down upstream. Subscribers see one incident flap five times.</p>
+<p><strong>Many callers, one opinion needed.</strong> A breaker per consumer means each forms its own view from its own sample. At our fleet's shape — five daemons — a 15-second outage opens their breakers <strong>about 27 times</strong> between them, and all five are in the same state only <strong>56% of the time</strong> (median of thirteen runs). One outage, many opinions.</p>
 
-<p><strong>Their load balancer, not ours.</strong> Textbook enforcement (Envoy outlier detection, Hystrix) ejects the <em>specific host</em> that is failing. A third party's load balancer hides its hosts: we see one address. We can only detect at the aggregate level — choosing when to stop calling them, not which machine to avoid.</p>
+<p><strong>Their load balancer, not ours.</strong> Proxy-level enforcement (Envoy outlier detection) ejects the <em>specific host</em> that is failing. A third party's load balancer hides its hosts: we see one address. We can only detect at the aggregate level — choosing when to stop calling them, not which machine to avoid.</p>
 
-<p><strong>Whose failure is it, anyway.</strong> A request shed by our own egress path can look identical to a real upstream failure. This repository hit it directly: a healthy upstream, yet every 5xx callers saw came from the local proxy's concurrency shedding — 90,753 local errors in two minutes, with the upstream reporting zero. A breaker that can't tell the two apart trips on the wrong evidence.</p>
+<p><strong>Whose failure is it, anyway.</strong> A request shed by our own egress path can look identical to a real upstream failure. This repository hit it directly: an upstream returning no errors, only 300 ms slower, yet every 5xx callers saw came from the local proxy's concurrency shedding — 90,753 local errors in two minutes. A breaker that can't tell the two apart trips on the wrong evidence.</p>
 
 <p>So this article does not stop at "add a breaker." There are many moving parts, and every decision comes at a cost. The analysis rests on three pillars:</p>
 <ul>
@@ -156,6 +156,11 @@ flowchart LR
   <li><strong>Self-healing:</strong> detect recovery and resume traffic without a human.</li>
   <li><strong>Operational complexity:</strong> what it costs to run, configure, and debug.</li>
 </ul>
+
+<figure>
+<img src="media/breaker-evolution.gif" width="1440" height="810" style="width:100%;height:auto;display:block" alt="Four frames of the same producer, work queue, consumers and third party. 1, no breaker: every consumer keeps calling and messages dead-letter, about 4,000 in 20 seconds. 2, a breaker in every process: one consumer open, one closed, one half-open, still 1,577 to 2,246 dead letters in 15 seconds. 3, the breaker moves into RabbitMQ: consumers stop consuming, one probe holds the permit, no dead letters. 4, platform: Envoy between consumers and the third party, an aggregator publishing one verdict per API to the consumers and to subscribers, no dead letters.">
+<figcaption>The same fleet, four places for the breaker: nowhere, in every process, in the broker (steps 03–04), and at platform level. The dead-letter counts are each step's measured outage.</figcaption>
+</figure>
 <p><em>Protecting</em> the request path and <em>telling the rest of the fleet</em> need different answers, at different places in the stack. The <a href="https://github.com/lsfera/circuit-breaker-unboxing">linked repository</a> weighs each mechanism against these pillars, one branch per step.</p>
 
 <h2>The steps in the repository</h2>
