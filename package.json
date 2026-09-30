@@ -11,7 +11,8 @@
     "test": "node --test 'packages/*/test/*.test.ts'",
     "test:rmq": "pnpm --filter @egress/rmq test:rmq",
     "typecheck": "tsc --noEmit",
-    "check:vendored": "node scripts/check-vendored.mjs",
+    "fetch:effect": "node scripts/fetch-effect.mjs",
+    "check:vendored": "node scripts/fetch-effect.mjs && node scripts/check-vendored.mjs",
     "check": "pnpm run check:vendored && pnpm run typecheck && pnpm run test",
     "incident": "node infra/incident.mjs"
   },
