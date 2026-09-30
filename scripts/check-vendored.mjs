@@ -48,8 +48,8 @@ for (const [name, where] of checked) console.log(`  ${name.padEnd(24)} ${where}`
 if (problems.length > 0) {
   console.error(`\n${problems.join("\n")}\n`);
   console.error(
-    "Move the subtree to the tag for the installed version:\n" +
-      "  git subtree pull --prefix=repos/effect https://github.com/Effect-TS/effect.git effect@<version> --squash",
+    "Every Effect package moves with the catalog's effect; pin them to the same version, then:\n" +
+      "  pnpm run fetch:effect",
   );
   process.exit(1);
 }

@@ -19,7 +19,9 @@ reshaped substantially. Before writing Effect code:
 
 ## Vendored repositories
 
-This project vendors external repositories under @repos/.
+This project keeps external repositories under @repos/ as reference. They are
+not committed: run `pnpm run fetch:effect` after cloning (`pnpm run check`
+runs it too).
 
 - Use vendored repositories as read-only reference material when working with
   related libraries.
@@ -30,10 +32,10 @@ This project vendors external repositories under @repos/.
   package dependencies.
 
 `repos/effect` is `Effect-TS/effect` at the tag `effect@4.0.0-rc.117`,
-vendored with `git subtree --squash`. It is **the installed version, not
-`main`**: `main` runs ahead of the releases (it was two release candidates
-ahead when this was first vendored), and reference material for a newer
-version describes APIs this code cannot use.
+fetched by `scripts/fetch-effect.mjs` as a shallow clone of that tag. It is
+**the installed version, not `main`**: `main` runs ahead of the releases (it
+was two release candidates ahead when this was first vendored), and reference
+material for a newer version describes APIs this code cannot use.
 
 | Installed package | Source | Tests |
 | --- | --- | --- |
@@ -47,22 +49,19 @@ version describes APIs this code cannot use.
 post, or memory. This is not hypothetical: a project skill taught four Schema
 and DateTime APIs that do not exist in this version, and was deleted for it.
 
-**Searching.** `repos/` is tracked, so a search of the whole workspace
-returns Effect's 4,000-odd files alongside this project's. Scope searches for
-project code to `packages/`, `infra/`, `scripts/` or `docs/`, and search
-`repos/effect` deliberately.
+**Searching.** `repos/` is gitignored, so searches that honour `.gitignore`
+(ripgrep, `git grep`) skip it. Search `repos/effect` deliberately, by naming
+the path.
 
-**Updating.** The vendored copy and the installed dependency move together.
-`pnpm run check` fails if any `effect` or `@effect/*` dependency differs from
-the vendored package of the same name. To move both:
+**Updating.** The fetched copy follows the catalog's `effect`. `pnpm run check`
+fetches the tag for it, then fails if any `effect` or `@effect/*` dependency
+differs from the fetched package of the same name. To move:
 
 ```bash
-# 1. bump the version in pnpm-workspace.yaml's catalog (and any direct pins),
-#    then `pnpm install`
-# 2. move the subtree to the matching tag
-git subtree pull --prefix=repos/effect https://github.com/Effect-TS/effect.git effect@<version> --squash
+# 1. bump every Effect version in pnpm-workspace.yaml's catalog (and any direct
+#    pins), then `pnpm install`
+# 2. `pnpm run check` — it replaces repos/effect with the new tag
 # 3. regenerate the agent-patterns notes the release touched
-pnpm run check
 ```
 
 pnpm refuses a release younger than its `minimumReleaseAge`, and naming the
