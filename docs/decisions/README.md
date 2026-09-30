@@ -23,3 +23,5 @@ measurement it rests on.
 | 016 | [The retry budget travels with the message](016-the-retry-budget-travels-with-the-message.md) | 1,570 messages dropped by the dead-letter queue's default limit |
 | 017 | [Detecting a lost control plane inside the lease](017-a-heartbeat-off-the-delivery-channel.md) | two-leader window from 4 s to 0 s |
 | 018 | [Control flow as expressions; the message says what it is](018-control-flow-as-expressions.md) | the broker suite before and after |
+| 019 | [What a daemon does when it does not know the circuit](019-a-daemon-that-does-not-know.md) | a daemon that assumed CLOSED at start and believed OPEN for ever |
+| 020 | [What one API costs the broker](020-what-one-api-costs-the-broker.md) | 0.93 MB per API on an idle node |

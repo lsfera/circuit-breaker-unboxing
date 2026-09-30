@@ -19,9 +19,20 @@ const ramping = (fraction: number) => ({ fraction, floor: true, rungSince: at(0)
 const stopped = { fraction: 0, floor: false, rungSince: at(0) };
 
 test("CLOSED at full strength stays at full strength", () => {
-  const state = DaemonPolicy.step(DaemonPolicy.initial(at(0)), State.CLOSED, at(0));
+  const state = DaemonPolicy.step(ramping(1), State.CLOSED, at(0));
   assert.equal(state.fraction, 1);
   assert.equal(state.floor, true);
+});
+
+test("a daemon starts idle, floor included, and its first CLOSED starts the ramp", () => {
+  assert.deepEqual(DaemonPolicy.initial(at(0)), stopped, "nobody works on a circuit nobody has heard");
+  const first = DaemonPolicy.step(DaemonPolicy.initial(at(0)), State.CLOSED, at(0));
+  assert.deepEqual(first, { fraction: 0, floor: true, rungSince: at(0) }, "the floor alone, as after an outage");
+});
+
+test("a silent control plane leaves a quarter of the fleet working, with no floor to elect", () => {
+  assert.deepEqual(DaemonPolicy.silent(at(0)), { fraction: DaemonPolicy.SILENT_FRACTION, floor: false, rungSince: at(0) });
+  assert.equal(DaemonPolicy.SILENT_FRACTION, 0.25);
 });
 
 test("DEGRADED halves the fleet, and keeps the floor so it can never be none of it", () => {

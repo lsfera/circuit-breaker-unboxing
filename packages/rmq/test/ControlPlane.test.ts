@@ -1,7 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { Result } from "effect";
+import { RECOVERY_BUDGET_MS } from "../src/Client.ts";
 import {
+  BROKER_CONSUMER_TIMEOUT_MS,
+  CONTROL_QUEUE_EXPIRES_MS,
   controlQueueOptions,
   deadLetterQueueOptions,
   decodeElectionTrigger,
@@ -154,4 +158,21 @@ test("every queue the fleet declares is durable", () => {
 test("the queues nobody reads after a daemon leaves still delete themselves", () => {
   assert.ok(Number(controlQueueOptions("api").args["x-expires"]) > 0);
   assert.ok(Number(floorQueueOptions().args["x-expires"]) > 0);
+});
+
+// ---------------------------------------------------------------------------
+// Constants that only hold together with the broker's own settings.
+// ---------------------------------------------------------------------------
+
+test("a daemon that reconnects within the client's recovery budget still finds its control queue", () => {
+  assert.ok(
+    RECOVERY_BUDGET_MS < CONTROL_QUEUE_EXPIRES_MS,
+    `recovery can take ${RECOVERY_BUDGET_MS} ms, but the queue expires after ${CONTROL_QUEUE_EXPIRES_MS} ms`,
+  );
+});
+
+test("the consumer_timeout the code assumes is the one the broker is configured with", () => {
+  const conf = readFileSync(new URL("../../../infra/rabbitmq.conf", import.meta.url), "utf8");
+  const configured = /^consumer_timeout\s*=\s*(\d+)\s*$/m.exec(conf)?.[1];
+  assert.equal(Number(configured), BROKER_CONSUMER_TIMEOUT_MS, "infra/rabbitmq.conf and ControlPlane.ts disagree");
 });

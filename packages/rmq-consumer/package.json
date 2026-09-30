@@ -5,7 +5,8 @@
   "description": "The RabbitMQ competing-consumer daemon fleet from docs/architecture.md: daemons that scale their own active count in reaction to this repo's circuit breaker events, delivered over the circuit.control exchange. The load that fills their queue is @egress/rmq-producer.",
   "scripts": {
     "test": "node --test 'test/*.test.ts'",
-    "daemon": "node src/main.ts"
+    "daemon": "node src/main.ts",
+    "test:rmq": "node --test 'test/integration/*.test.ts'"
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",

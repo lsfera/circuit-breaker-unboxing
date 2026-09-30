@@ -16,6 +16,26 @@ sequence numbers for the same API, which is the one thing the contract forbids.
   resumes from them rather than from `CLOSED` at zero. A save is refused unless
   its token is the current one.
 
+What an instance does each tick, from `Aggregator.ts`:
+
+```mermaid
+stateDiagram-v2
+  direction LR
+  [*] --> standby
+  standby --> leader: acquires the lease
+  leader --> leader: renews it, publishes, checkpoints
+  leader --> standby: lease lost, checkpoint fenced, or Redis unreachable
+  leader --> holding_off: sink not ready, or a transition not confirmed
+  holding_off --> standby: one lease TTL later
+```
+
+Stepping down for the broker releases the lease, so the standby takes over on
+its next tick, and holds off for a lease TTL so a flapping broker is not a fight
+over the lease every tick. An instance whose own sink is not ready does not try
+to acquire at all. Every way out of `leader` interrupts its in-flight publishes and
+resets the broker connection, so nothing unconfirmed lands after a successor
+has moved on.
+
 Two ways fencing went wrong before it was right:
 
 - **Per-key fencing** only stops a stale writer after someone else has written
@@ -59,6 +79,13 @@ A killed leader mid-incident at `sequence=127`: the standby took over, resumed
 the API from its checkpoint as `OPEN`, and published 128 onward with nothing
 published twice.
 
+**A burst of transitions**: a tick carries at most one transition per API. The
+leader delivers and checkpoints the first alone, which proves the lease still
+holds, then awaits the rest together (32 at a time) and starts no more once one
+has failed. A shared dependency failing across many APIs costs the tick two
+confirms' latency, not one per API, inside the loop that renews the lease, and
+a leader deposed mid-tick still publishes only one stale transition.
+
 **One-sided partition**: one aggregator cannot reach Redis, the other can. Every
 coordination call has a 1 s timeout under the 5 s lease, so the cut-off instance
 stands down each tick (`is_leader` 0) instead of hanging, and the healthy one
@@ -68,6 +95,21 @@ holds the lease throughout.
 or 5 s, whichever is longer). `/readyz` waits for one completed pass and is true on the standby too:
 marking a standby unready would take the pair out of rotation during a rolling
 deploy.
+
+## What each loss costs
+
+| What is lost | What stops | What carries on | Says so |
+|---|---|---|---|
+| The leader | nothing, after the lease TTL (≤ 5 s) | the standby publishes from the checkpoint | `NoLeaderElected` if both |
+| Both aggregators, or Redis | every event; the leader stands down without Redis | Envoy's local ejection; after 60 s each daemon falls back to a quarter of its fleet ([ADR 019](decisions/019-a-daemon-that-does-not-know.md)) | `NoLeaderElected`, `ControlLoopStalled`, `DaemonsOnFallback` |
+| RabbitMQ | work and control both; the leader steps down (its sink is not ready) | Envoy; daemons retry the connection for up to about 8 minutes, then restart | `NoLeaderElected` (the leader steps down), `egress_aggregator_control_plane_ready` at 0 |
+| One Envoy replica | its share of traffic and its vote | the quorum over the replicas still reporting ([ADR 009](decisions/009-what-the-quorum-is-a-quorum-of.md)) | `FleetShrunk` |
+| A daemon | its share of the work; its unacked deliveries return to the queue | the rest, by position; SAC promotes another floor or elected daemon | `FloorUnheld` only if no floor is re-elected within 2 minutes |
+| A webhook subscriber | its deliveries | the outbox, bounded at 500 per API | the outbox metrics |
+
+The daemons' reconnect budget (`RECOVERY_BUDGET_MS`) is shorter than their
+control queues' `x-expires`, so a daemon that recovers finds its queue; a test
+checks the two.
 
 ## The outbox
 

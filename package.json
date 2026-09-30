@@ -11,7 +11,7 @@
     "start": "node packages/aggregator/src/main.ts",
     "test": "node --test 'packages/*/test/*.test.ts'",
     "test:redis": "pnpm --filter @egress/aggregator test:redis",
-    "test:rmq": "pnpm --filter @egress/rmq test:rmq",
+    "test:rmq": "pnpm --filter @egress/rmq --filter @egress/rmq-consumer test:rmq",
     "typecheck": "tsc --noEmit",
     "check:diagrams": "node scripts/check-diagrams.mjs",
     "check:vendored": "node scripts/check-vendored.mjs",

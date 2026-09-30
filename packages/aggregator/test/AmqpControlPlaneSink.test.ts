@@ -196,3 +196,35 @@ test("a publish the broker never confirms counts as a failure", async () => {
     ),
   );
 });
+
+/**
+ * The aggregator delivers a tick's transitions together. One blip that fails
+ * every attempt in flight is one failure, not one per delivery: counted per
+ * delivery, two together reached the threshold, and every retry was refused as
+ * "known bad" without being tried.
+ */
+test("attempts that fail together count as one failure, so their retries are still tried", async () => {
+  const exits = await Effect.runPromise(
+    Effect.provide(
+      Effect.gen(function* () {
+        const connected = yield* Ref.make(true);
+        const calls = yield* Ref.make(0);
+        // The first two publishes are in flight together and fail together; everything after succeeds.
+        const sendResult = yield* Ref.make<Effect.Effect<void, RmqError>>(
+          Ref.getAndUpdate(calls, (n) => n + 1).pipe(
+            Effect.flatMap((n) => (n < 2 ? Effect.sleep("50 millis").pipe(Effect.andThen(failure())) : Effect.void)),
+          ),
+        );
+        const sink = yield* makeAmqpControlPlaneSink.pipe(
+          Effect.provideService(Rmq, fakeRmq(connected, sendResult)),
+        );
+        const a = yield* Effect.forkChild(sink.deliver(event(1)));
+        const b = yield* Effect.forkChild(sink.deliver(event(2)));
+        yield* TestClock.adjust(SETTLE);
+        return [yield* Fiber.await(a), yield* Fiber.await(b)];
+      }),
+      TestClock.layer(),
+    ),
+  );
+  assert.deepEqual(exits.map((e) => e._tag), ["Success", "Success"]);
+});

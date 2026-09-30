@@ -158,9 +158,19 @@ export const MAX_REDRIVES = 5;
 
 /**
  * A departed daemon's control queue would otherwise stay bound and fill for ever.
- * Ten minutes outlasts the client's ~5 minutes of reconnecting.
+ * Ten minutes outlasts the client's worst-case reconnect (`RECOVERY_BUDGET_MS`,
+ * about 8 minutes), so a daemon that recovers finds its queue. Changing it changes a
+ * queue argument: existing control queues must expire or be deleted first.
  */
 export const CONTROL_QUEUE_EXPIRES_MS = 600_000;
+
+/**
+ * The broker's `consumer_timeout`, pinned in infra/rabbitmq.conf rather than left
+ * to the default: an election trigger is held unacked for as long as its action
+ * runs, and a redrive's longest run (`REDRIVE_MAX_HOLD_MS`) must fit inside it.
+ * ControlPlane.test.ts checks the file says the same.
+ */
+export const BROKER_CONSUMER_TIMEOUT_MS = 1_800_000;
 
 /**
  * Single-active-consumer and bound to `circuit.control`, so every published event

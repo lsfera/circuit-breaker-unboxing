@@ -299,6 +299,29 @@ const describe = (delivery: ConsumeMessage): DeliveryInfo => {
 };
 
 /**
+ * How a lost connection is retried before `lost` fails. The connect timeout bounds
+ * each attempt to a fixed wall-clock time instead of the OS's ~135s SYN retries.
+ */
+export const RECOVERY = {
+  connectTimeoutMs: 5000,
+  initialDelayMs: 200,
+  maxDelayMs: 5000,
+  /** amqplib's default, stated so the budget below can count it: each delay is ±20%. */
+  jitter: 0.2,
+  maxRetries: 45,
+} as const;
+
+/**
+ * The longest recovery can take, when every attempt waits out the longest jittered
+ * delay and a connect that never answers (a blackholed broker): 45 × (6 + 5) s,
+ * about 8 minutes. A broker that refuses outright is given up on in about half
+ * that. Whatever the broker keeps for a daemon across a reconnect must outlast it —
+ * the control queue's `x-expires` (ControlPlane.test.ts checks the two).
+ */
+export const RECOVERY_BUDGET_MS =
+  RECOVERY.maxRetries * (RECOVERY.maxDelayMs * (1 + RECOVERY.jitter) + RECOVERY.connectTimeoutMs);
+
+/**
  * One AMQP connection that repairs itself, released with the surrounding scope. amqplib's own `recovery`
  * reopens the socket and nothing else — channels and consumers aren't recreated. This records every queue,
  * exchange, binding and live consumer and rebuilds them from `setup`, topology first (a transient queue
@@ -530,13 +553,12 @@ export const makeRmq = Effect.fnUntraced(function* (
             heartbeat: 1,
           },
           {
-            // Bounds every connect attempt to a fixed wall-clock time instead of the OS's ~135s SYN-retry timeout.
-            timeout: 5000,
+            timeout: RECOVERY.connectTimeoutMs,
             recovery: {
-              initialDelay: 200,
-              maxDelay: 5000,
-              // About five minutes of trying before the process gives up.
-              maxRetries: 60,
+              initialDelay: RECOVERY.initialDelayMs,
+              maxDelay: RECOVERY.maxDelayMs,
+              jitter: RECOVERY.jitter,
+              maxRetries: RECOVERY.maxRetries,
               // amqplib listens for a new connection's `error` only once setup has finished, so an error during
               // the replay — a missed heartbeat, a fatal close — had no listener and crashed the process
               // (ADR 005). With one, the replay's pending calls reject and recovery schedules another attempt.

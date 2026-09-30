@@ -72,3 +72,13 @@ export const controlStale = Metric.counter("egress_daemon_control_stale_total", 
     "out-ranks them: an older leader's lease, or a sequence behind the one applied. " +
     "Non-zero around a failover is a paused leader resuming; anywhere else it is worth a look.",
 });
+
+/** How much the daemon believes its circuit: the gauge's values, in one place. */
+export const CONTROL_KNOWLEDGE_CODE = { heard: 0, unheard: 1, silent: 2 } as const;
+
+export const controlKnowledge = Metric.gauge("egress_daemon_control_knowledge", {
+  description:
+    "Whether this daemon's circuit is worth believing (0=heard 1=unheard since start 2=silent). " +
+    "Unheard, it works nobody; silent — no control event for a minute — it falls back to a " +
+    "quarter of the fleet by position, whatever the last circuit said (ADR 019).",
+});

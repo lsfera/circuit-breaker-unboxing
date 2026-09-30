@@ -12,7 +12,6 @@ import {
 } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
-  ATTEMPTS_HEADER,
   CONTROL_EXCHANGE,
   CONTROL_EXCHANGE_OPTIONS,
   controlQueueFor,
@@ -23,15 +22,9 @@ import {
   floorQueueOptions,
   decodeElectionTrigger,
   encodeElectionTrigger,
-  decodeWorkMessage,
-  IDEMPOTENCY_KEY_HTTP_HEADER,
-  ORIGIN_QUEUE_HEADER,
-  ORIGIN_REASON_HEADER,
   parkedQueueFor,
   parkedQueueOptions,
-  readsWorkFormat,
   probeTriggerQueueFor,
-  REDRIVE_COUNT_HEADER,
   redriveTriggerQueueFor,
   routingKeyFor,
   sacQueueOptions,
@@ -44,14 +37,14 @@ import { decodeCircuitEvent, State, STATE_CODE } from "@egress/domain/Model.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 import { initialContract, observe } from "./Contract.ts";
 import { makeApplier, persist } from "./ControlEvents.ts";
+import { makeWorkCalls } from "./WorkCalls.ts";
 import { makeRedrive } from "./Redrive.ts";
-import { desired, initialState, isCurrent, plan, reduce } from "./DaemonState.ts";
+import { desired, initialState, isCurrent, isFloor, plan, reduce, SILENCE_MS } from "./DaemonState.ts";
 import { position } from "./DaemonPolicy.ts";
-import * as Attempts from "./Attempts.ts";
 import * as Limiter from "./Limiter.ts";
 import * as Tally from "./Tally.ts";
 import * as Telemetry from "./Telemetry.ts";
-import type { Consumer, DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
+import type { Consumer, Settlement } from "@egress/rmq/Client.ts";
 
 import type { ContractState } from "./Contract.ts";
 import type { Action, Command, DaemonState } from "./DaemonState.ts";
@@ -84,7 +77,8 @@ type DaemonConfig = {
 
 /** How often the daemon publishes counters, advances its ramp, and says it is alive. */
 const FLUSH_INTERVAL = Duration.seconds(1);
-const RAMP_INTERVAL = Duration.seconds(1);
+/** The clock that advances the ramp, notices silence and lapses the floor lease. */
+const TICK_INTERVAL = Duration.seconds(1);
 const HEARTBEAT_INTERVAL = Duration.seconds(15);
 /** The floor's sweep of the dead-letter queue, for dead letters no transition will redrive. */
 const SWEEP_INTERVAL = Duration.seconds(30);
@@ -121,17 +115,17 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   const controlQ = yield* control.declareQueue(controlQueue, controlQueueOptions(cfg.apiId));
   yield* control.bind(routingKeyFor(cfg.apiId), exchange, controlQ);
 
-  /**
-   * The floor (ADR 013). A lease, not a flag: SAC promotes silently, so a
-   * replacement learns it holds the floor from the next event, and the lease
-   * stops a dead holder's claim outliving it.
-   */
+  /** The floor (ADR 013): its queue is bound to `circuit.control`, so every event re-elects one daemon. */
   const floorQ = yield* control.declareQueue(floorQueueFor(cfg.apiId), floorQueueOptions());
   yield* control.bind(routingKeyFor(cfg.apiId), exchange, floorQ);
 
-  /** Everything decided, in one value (DaemonState.ts); `Ref.modify` keeps each transition atomic. */
-  const now = yield* Clock.currentTimeMillis;
-  const state = yield* Ref.make<DaemonState>(initialState(now));
+  /**
+   * Everything decided, in one value (DaemonState.ts): the circuit, how much it
+   * is worth, the ramp, the floor lease, the elections' marks. Written only
+   * through `dispatch`.
+   */
+  const startedAt = yield* Clock.currentTimeMillis;
+  const state = yield* Ref.make<DaemonState>(initialState(startedAt));
 
   /** The churning channels — the "actual" side `plan` compares the desired shape against. */
   const workConsumer = yield* Ref.make(O.none<Consumer>());
@@ -140,30 +134,15 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   /** Claimed atomically so two redrive passes never both start. */
   const redriveRunning = yield* Ref.make(false);
 
-  /** A graph, not a limit: prefetch bounds it. */
-  let inFlight = 0;
-
   const counts = Tally.zero();
+  const contract = yield* Ref.make<ContractState>(initialContract);
 
-  let contract: ContractState = initialContract;
-
-  /**
-   * `Date.now()`: refreshed from an AMQP callback and read synchronously. A minute
-   * is four snapshot intervals, so it lapses only when the control plane is silent.
-   */
-  const FLOOR_LEASE_MS = 60_000;
   const selfPosition = position(cfg.instanceId);
-  let floorUntil = 0;
-  const floorHeld = () => Date.now() < floorUntil;
-  const self = () => ({ position: selfPosition, isFloor: floorHeld() });
+  const selfIn = (s: DaemonState, now: number) => ({ position: selfPosition, isFloor: isFloor(s, now) });
 
   const workPublisher = yield* control.publisherToQueue(workQueue, WORK_FORMAT);
   const deadPublisher = yield* control.publisherToQueue(deadQueue);
   const parkedPublisher = yield* control.publisherToQueue(parkedQueue);
-
-  /** Jitter before releasing a 429, so a fleet shed together does not return together. Not tuned. */
-  const SHED_BACKOFF_MIN_MS = 100;
-  const SHED_BACKOFF_MAX_MS = 400;
 
   /**
    * Every AMQP callback runs its effects through these: a bare `Effect.run*` builds
@@ -173,190 +152,15 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   const runInContext = Effect.runPromiseWith(services);
   const forkInContext = Effect.runForkWith(services);
 
-  const limit = O.map(cfg.limit, (c) => new Limiter.AdaptiveLimit(c));
-  const initialSlots = O.match(limit, { onNone: () => cfg.maxInFlight, onSome: (l) => l.slots });
-  const slots = Semaphore.makeUnsafe(initialSlots);
-  yield* Metric.update(Metric.withAttributes(Telemetry.concurrencyLimit, attrs), initialSlots);
-  const resize = (to: number) =>
-    Semaphore.resize(slots, to).pipe(
-      Effect.andThen(Metric.update(Metric.withAttributes(Telemetry.concurrencyLimit, attrs), to)),
-    );
-
-  /** The key is the delivery's `message_id`, carried by every redelivery, retry and redrive. */
-  const fetchStatus = async (key: string): Promise<number | "error"> => {
-    inFlight++;
-    try {
-      const res = await fetch(`${cfg.egressAddr}${cfg.apiPath}`, {
-        signal: AbortSignal.timeout(2000),
-        headers: { [IDEMPOTENCY_KEY_HTTP_HEADER]: key },
-      });
-      // An unconsumed body holds its connection out of the pool.
-      await res.text().catch(() => {});
-      return res.status;
-    } catch {
-      // The shape of an outage, not an error: the aggregator judges health from Envoy.
-      return "error";
-    } finally {
-      inFlight--;
-    }
-  };
-
-  /**
-   * A delivery waiting for a slot stays unacked, so the limit only narrows what
-   * prefetch allows. Moved once per round trip (Limiter.ts's `epoch`).
-   */
-  const limitedStatus = (key: string): Promise<number | "error"> =>
-    O.match(limit, {
-      onNone: () => fetchStatus(key),
-      onSome: (l) =>
-        runInContext(
-          Semaphore.withPermit(
-            slots,
-            Effect.gen(function* () {
-              const startedIn = l.epoch;
-              const status = yield* Effect.promise(() => fetchStatus(key));
-              const before = l.slots;
-              yield* Effect.sync(() =>
-                Match.value(Attempts.classify(status)).pipe(
-                  Match.when("ok", () => l.succeeded()),
-                  Match.when("shed", () => l.throttled(startedIn)),
-                  Match.orElse(() => {}),
-                ),
-              );
-              yield* Effect.when(resize(l.slots), Effect.sync(() => l.slots !== before));
-              return status;
-            }),
-          ),
-        ),
-    });
-
-  /**
-   * Poison goes straight to the parked queue: through the dead-letter queue it came from the work queue, so the
-   * redrive would replay it `MAX_REDRIVES` times for the same answer. `otherwise` is the settlement if the park fails.
-   */
-  const park = (body: string, messageId: O.Option<string>, reason: string, otherwise: Settlement): Promise<Settlement> =>
-    runInContext(
-      control.send(parkedPublisher, body, {
-        messageId: O.getOrUndefined(messageId),
-        headers: { [ORIGIN_QUEUE_HEADER]: workQueue, [ORIGIN_REASON_HEADER]: reason },
-      }),
-    ).then(
-      (): Settlement => "accept",
-      (): Settlement => otherwise,
-    );
-
-  const attempt = async (body: string, delivery: DeliveryInfo, key: string): Promise<Settlement> => {
-    const status = await limitedStatus(key);
-    const outcome = Attempts.classify(status);
-
-    // Headers are only materialized when the call failed: the success path runs thousands of times a second.
-    const decision = Attempts.nextAttempt(
-      outcome,
-      outcome === "failed" ? delivery.properties[ATTEMPTS_HEADER] : undefined,
-    );
-    return Match.valueTags(decision, {
-      accept: async (): Promise<Settlement> => {
-        counts.ok++;
-        return "accept";
-      },
-
-      release: async (): Promise<Settlement> => {
-        // Backpressure, not a failure. `release` does not spend x-delivery-limit;
-        // `requeue` would, and a burst would dead-letter healthy work.
-        counts.shed++;
-        const jitter =
-          SHED_BACKOFF_MIN_MS + Math.random() * (SHED_BACKOFF_MAX_MS - SHED_BACKOFF_MIN_MS);
-        await new Promise((resolve) => setTimeout(resolve, jitter));
-        return "release";
-      },
-
-      park: async (): Promise<Settlement> => {
-        // Refused (4xx other than 408/429): a retry gets the same answer. Parked for a human.
-        counts.refused++;
-        return park(body, O.some(key), `refused-${status}`, "requeue");
-      },
-
-      republish: async (decision): Promise<Settlement> => {
-        // Republished, never requeued: a requeue cannot carry the attempt count.
-        counts.failed++;
-        const toDead = decision.destination === "dead";
-        const target = toDead ? deadPublisher : workPublisher;
-        const destinationQueue = toDead ? deadQueue : workQueue;
-        const headers: Record<string, string> = {
-          [ATTEMPTS_HEADER]: String(decision.attempts),
-          // Carried forward, or a redriven poison message would reset its count on every failure and never park.
-          ...O.match(O.fromNullishOr(delivery.properties[REDRIVE_COUNT_HEADER]), {
-            onNone: () => ({}),
-            onSome: (count) => ({ [REDRIVE_COUNT_HEADER]: count }),
-          }),
-          // A direct publish has no x-first-death-*; the redrive attributes it by these.
-          ...(toDead
-            ? { [ORIGIN_QUEUE_HEADER]: workQueue, [ORIGIN_REASON_HEADER]: "attempts-exhausted" }
-            : {}),
-        };
-        try {
-          const send = control.send(target, body, { messageId: key, headers });
-          await runInContext(
-            O.map(delivery.parent, (span) =>
-              send.pipe(
-                Effect.withSpan("work.retry", {
-                  attributes: {
-                    "messaging.system": "rabbitmq",
-                    "messaging.operation.name": "retry",
-                    "messaging.destination.name": destinationQueue,
-                    "egress.attempts": decision.attempts,
-                  },
-                }),
-                Effect.withParentSpan(span),
-              ),
-            ).pipe(O.getOrElse(() => send)),
-          );
-        } catch {
-          // x-delivery-limit is the backstop when a retry cannot be republished.
-          return "requeue";
-        }
-        return "accept";
-      },
-    });
-  };
-
-  /** Never published by this fleet: parked unread, not retried or redriven. */
-  const discard = (reason: "Format" | "Malformed" | "Keyless", body: string, delivery: DeliveryInfo): Promise<Settlement> => {
-    counts[`discarded${reason}`]++;
-    return park(body, delivery.messageId, `unreadable-${reason.toLowerCase()}`, "discard");
-  };
-
-  const call = (body: string, delivery: DeliveryInfo): Settlement | Promise<Settlement> =>
-    readsWorkFormat(delivery)
-      ? O.match(decodeWorkMessage(body), {
-          onNone: () => discard("Malformed", body, delivery),
-          onSome: () =>
-            O.match(delivery.messageId, {
-              onNone: () => discard("Keyless", body, delivery),
-              onSome: (key) => attempt(body, delivery, key),
-            }),
-        })
-      : discard("Format", body, delivery);
-
-  /** Traced only when the message carried a parent; the common case stays a plain call. */
-  const callEgress = (body: string, delivery: DeliveryInfo): Settlement | Promise<Settlement> =>
-    O.map(delivery.parent, (span) =>
-      runInContext(
-        Effect.promise(async () => call(body, delivery)).pipe(
-          Effect.tap((outcome) =>
-            Effect.annotateCurrentSpan({ "egress.settlement": outcome }),
-          ),
-          Effect.withSpan("work.call", {
-            attributes: {
-              "egress.api_id": cfg.apiId,
-              "egress.path": cfg.apiPath,
-              "egress.daemon": cfg.instanceId,
-            },
-          }),
-          Effect.withParentSpan(span),
-        ),
-      ),
-    ).pipe(O.getOrElse(() => call(body, delivery)));
+  const work = yield* makeWorkCalls({
+    cfg,
+    rmq: control,
+    counts,
+    attrs,
+    queues: { work: workQueue, dead: deadQueue },
+    publishers: { work: workPublisher, dead: deadPublisher, parked: parkedPublisher },
+    services,
+  });
 
   /**
    * Control events fan out to every daemon, so a version skew would flood the
@@ -381,15 +185,26 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   };
 
   /**
-   * Serializes reconciliation: two callbacks could otherwise both see "no work consumer".
-   * Control events hold their own permit (`makeApplier`), always taken before this one.
+   * The one serialization point. Whatever reconciles — a control event, the clock,
+   * a floor election — holds it from its transition to the end of its reconcile.
+   * The probe opens its channel under it; a redrive pass opens and closes its own
+   * outside it and only records the channel under it, so a reconcile in between
+   * misses it for at most a tick (the pass also stops on `isClosed`). Long work
+   * runs outside it: a redrive's passes, a trigger's publish, a probe's call.
    */
-  const gate = yield* Semaphore.make(1);
+  const transitions = yield* Semaphore.make(1);
+
+  /** One command in, one atomic transition out. */
+  const dispatch = (command: Command) =>
+    Ref.modify(state, (prior) => {
+      const transition = reduce(prior, command, cfg.redriveOnClose);
+      return [{ prior, ...transition }, transition.next] as const;
+    });
 
   const startWork = Effect.gen(function* () {
     const consumer = yield* control.consume(
       workQueue,
-      (body, delivery) => callEgress(body, delivery),
+      (body, delivery) => work.callEgress(body, delivery),
       { prefetch: cfg.maxInFlight },
     );
     yield* Ref.set(workConsumer, O.some(consumer));
@@ -403,29 +218,32 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
       ),
     );
 
-/** Make the channels match the state. `desired` and `plan` decide; this only acts. */
-  const reconcile = gate.withPermit(
-    Effect.gen(function* () {
-      const have = {
-        work: O.isSome(yield* Ref.get(workConsumer)),
-        probe: O.isSome(yield* Ref.get(probeConsumer)),
-        redrive: O.isSome(yield* Ref.get(redriveConsumer)),
-      };
-      const actions = plan(desired(yield* Ref.get(state), self()), have);
-      yield* Effect.all(
-        [
-          actions.startWork ? startWork : Effect.void,
-          actions.stopWork ? retire(workConsumer) : Effect.void,
-          actions.stopProbe ? retire(probeConsumer) : Effect.void,
-          actions.stopRedrive ? retire(redriveConsumer) : Effect.void,
-        ],
-        { discard: true },
-      );
-    }),
-  );
+  /**
+   * Make the channels match the state. `desired` and `plan` decide; this only acts.
+   * Called with `transitions` held; cheap when nothing is to change.
+   */
+  const reconcile = Effect.gen(function* () {
+    const have = {
+      work: O.isSome(yield* Ref.get(workConsumer)),
+      probe: O.isSome(yield* Ref.get(probeConsumer)),
+      redrive: O.isSome(yield* Ref.get(redriveConsumer)),
+    };
+    const now = yield* Clock.currentTimeMillis;
+    const current = yield* Ref.get(state);
+    const actions = plan(desired(current, selfIn(current, now)), have);
+    yield* Effect.all(
+      [
+        actions.startWork ? startWork : Effect.void,
+        actions.stopWork ? retire(workConsumer) : Effect.void,
+        actions.stopProbe ? retire(probeConsumer) : Effect.void,
+        actions.stopRedrive ? retire(redriveConsumer) : Effect.void,
+      ],
+      { discard: true },
+    );
+  });
 
   /** One message, one call, on a channel that exists only for this probe. */
-  const probeOnce = gate.withPermit(
+  const probeOnce = transitions.withPermit(
     Effect.flatMap(
       Ref.get(probeConsumer),
       O.match({
@@ -445,7 +263,7 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
                   onSome: (mine) => {
                     taken = true;
                     forkInContext(control.cancelConsumer(mine));
-                    return callEgress(body, delivery);
+                    return work.callEgress(body, delivery);
                   },
                 }),
               { prefetch: 1 },
@@ -468,22 +286,16 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
     deadQueue,
     parkedQueue,
     maxPerPass: cfg.redriveMax,
-    isClosed: Ref.get(state).pipe(Effect.map((s) => s.circuit === State.CLOSED)),
+    // Only a CLOSED the control plane said, and recently: a pass stops once it is not.
+    isClosed: Ref.get(state).pipe(Effect.map((s) => s.control === "heard" && s.circuit === State.CLOSED)),
     consumer: redriveConsumer,
-    gate,
+    gate: transitions,
     running: redriveRunning,
   });
 
   // Published by every daemon, so a trigger still arrives when some are down.
   const trigger = yield* control.publisherToQueue(probeQueue);
   const redriveTrigger = yield* control.publisherToQueue(redriveQueue);
-
-  /** One command in, one atomic transition out. `Ref.modify` because callers run concurrently. */
-  const dispatch = (command: Command) =>
-    Ref.modify(state, (prior) => {
-      const transition = reduce(prior, command, cfg.redriveOnClose);
-      return [{ prior, ...transition }, transition.next] as const;
-    });
 
   const perform = Match.typeTags<Action>()({
     PublishProbeTrigger: ({ sequence }) =>
@@ -498,19 +310,22 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
     Effect.forEach(actions, perform, { discard: true });
 
   const describe = Effect.gen(function* () {
-    const { circuit, policy } = yield* Ref.get(state);
+    const current = yield* Ref.get(state);
+    const { gaps, duplicates } = yield* Ref.get(contract);
+    const floor = isFloor(current, yield* Clock.currentTimeMillis);
     const active = O.isSome(yield* Ref.get(workConsumer));
     return (
-      `${circuit} target=${Math.round(policy.fraction * 100)}%${policy.floor ? "+floor" : ""} ` +
-      `self=${active ? "ACTIVE" : "idle"}${floorHeld() ? " (floor)" : ""} ` +
-      `calls ok=${counts.ok} failed=${counts.failed} inFlight=${inFlight} ` +
+      `${current.control === "heard" ? current.circuit : current.control.toUpperCase()} ` +
+      `target=${Math.round(current.policy.fraction * 100)}%${current.policy.floor ? "+floor" : ""} ` +
+      `self=${active ? "ACTIVE" : "idle"}${floor ? " (floor)" : ""} ` +
+      `calls ok=${counts.ok} failed=${counts.failed} inFlight=${work.inFlight()} ` +
       `control=${[...counts.byType.values()].reduce((a, b) => a + b, 0)} ` +
-      `gaps=${contract.gaps} dup=${contract.duplicates}`
+      `gaps=${gaps} dup=${duplicates}`
     );
   });
 
   /** Order matters: apply, reconcile, log, and only then publish the triggers. */
-  const applyInOrder = yield* makeApplier({
+  const applyInOrder = makeApplier(transitions, {
     dispatch: (event: CircuitEvent) =>
       Effect.flatMap(Clock.currentTimeMillis, (at) =>
         dispatch({
@@ -520,7 +335,14 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
           state: event.data.state,
           sequence: event.data.sequence,
           at,
-        }),
+        }).pipe(
+          // The one way out of `unheard` or `silent` is an applied event, so it is said here.
+          Effect.tap(({ prior, next }) =>
+            prior.control !== "heard" && next.control === "heard"
+              ? Effect.log(`${label}: control plane heard${prior.control === "silent" ? " again" : ""}`)
+              : Effect.void,
+          ),
+        ),
       ),
     settle: (event) =>
       persist(reconcile).pipe(
@@ -532,15 +354,33 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
     superseded: (action) => Effect.logDebug(`${label}: ${action._tag} superseded by a newer event, not published`),
   });
 
-  const applyEvent = (event: CircuitEvent) =>
-    Effect.flatMap(applyInOrder(event), (applied) => {
-      const { state: circuitState, sequence, reason } = event.data;
-      return applied
-        ? Effect.void
-        : Effect.sync(() => void counts.stale++).pipe(
-            Effect.andThen(Effect.logWarning(`${label}: seq=${sequence} (${reason}, ${circuitState}) is stale, ignored`)),
-          );
-    });
+  const applyEvent = (event: CircuitEvent) => {
+    const { data, type } = event;
+    return Ref.modify(contract, (before) => {
+      const after = observe(before, type, O.fromUndefinedOr(data.lease), data.sequence);
+      return [after.gaps > before.gaps ? O.some(before) : O.none<ContractState>(), after] as const;
+    }).pipe(
+      Effect.flatMap(
+        O.match({
+          onNone: () => Effect.void,
+          onSome: (before) =>
+            Effect.logWarning(
+              `${label}: sequence gap — expected ${O.getOrElse(O.map(before.last, (l) => l.sequence + 1), () => 0)}, got ${data.sequence} (${type}, ${data.state}, ${data.reason})`,
+            ),
+        }),
+      ),
+      Effect.andThen(applyInOrder(event)),
+      Effect.flatMap((applied) =>
+        applied
+          ? Effect.void
+          : Effect.sync(() => void counts.stale++).pipe(
+              Effect.andThen(
+                Effect.logWarning(`${label}: seq=${data.sequence} (${data.reason}, ${data.state}) is stale, ignored`),
+              ),
+            ),
+      ),
+    );
+  };
 
   yield* control.consume(controlQueue, (body) =>
     Result.match(decodeCircuitEvent(body), {
@@ -551,19 +391,8 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
             : "control message that does not match the published schema",
         ),
       onSuccess: (event) => {
-        const { data, type } = event;
-        if (data.apiId !== cfg.apiId) return; // belt and braces; the binding already filters
-        Tally.observed(counts, type);
-
-        const before = contract;
-        contract = observe(contract, type, O.fromUndefinedOr(data.lease), data.sequence);
-        if (contract.gaps > before.gaps) {
-          forkInContext(
-            Effect.logWarning(
-              `${label}: sequence gap — expected ${O.getOrElse(O.map(before.last, (l) => l.sequence + 1), () => 0)}, got ${data.sequence} (${type}, ${data.state}, ${data.reason})`,
-            ),
-          );
-        }
+        if (event.data.apiId !== cfg.apiId) return; // belt and braces; the binding already filters
+        Tally.observed(counts, event.type);
 
         // Accepted even on failure: the next snapshot re-applies the state, and every daemon publishes
         // the same triggers. Dead-lettering would only pile up one copy per daemon, with nothing to replay it into.
@@ -572,7 +401,7 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
             Effect.as<Settlement>("accept"),
             Effect.catchCause((cause) =>
               Effect.logError(
-                `${label}: seq=${data.sequence} (${data.reason}) not applied in full; the next snapshot re-applies it`,
+                `${label}: seq=${event.data.sequence} (${event.data.reason}) not applied in full; the next snapshot re-applies it`,
                 cause,
               ).pipe(Effect.as<Settlement>("accept")),
             ),
@@ -582,16 +411,33 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
     }),
   );
 
+  /** A clock-driven command, and the reconcile its state may call for. */
+  const onClock = (command: (at: number) => Command) =>
+    transitions.withPermit(
+      Effect.gen(function* () {
+        const at = yield* Clock.currentTimeMillis;
+        const { prior, next } = yield* dispatch(command(at));
+        // Always: the floor lease lapses with time, not with a transition.
+        yield* reconcile;
+        return { prior, next };
+      }),
+    );
+
   // Nothing is read from the body: the delivery *is* the election result.
-  yield* control.consume(floorQueueFor(cfg.apiId), () => {
-    floorUntil = Date.now() + FLOOR_LEASE_MS;
-  });
+  yield* control.consume(floorQueueFor(cfg.apiId), () =>
+    runInContext(
+      onClock((at) => ({ _tag: "FloorElected", at })).pipe(
+        Effect.asVoid,
+        Effect.catchCause((cause) => Effect.logError(`${label}: acting on the floor election failed`, cause)),
+      ),
+    ),
+  );
 
   /**
    * Settled only after the action runs. On failure the sequence is un-marked and
    * the trigger requeued after a pause; if the daemon dies, SAC hands the unacked
-   * trigger to the next. A redrive may hold it 20 minutes, inside RabbitMQ's
-   * 30-minute delivery timeout.
+   * trigger to the next. A redrive holds it at most `REDRIVE_MAX_HOLD`, inside the
+   * broker's `consumer_timeout` (Redrive.test.ts checks the two).
    */
   const onTrigger =
     (what: "probe" | "redrive", command: (sequence: number) => Command) =>
@@ -630,12 +476,13 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
     onTrigger("redrive", (sequence) => ({ _tag: "RedriveTriggered", sequence })),
   );
 
-  // CLOSED until the next snapshot says otherwise.
-  yield* reconcile;
+  // Idle until the first event (ADR 019): nothing to start, but a restart may find a stale channel ref.
+  yield* transitions.withPermit(reconcile);
   yield* Effect.log(
     `${label}: up — position=${selfPosition.toFixed(3)} maxInFlight=${cfg.maxInFlight} ` +
       `limit=${O.match(cfg.limit, { onNone: () => "off", onSome: (l) => `${l.min}-${l.max} x${l.decrease}` })} ` +
-      `egress=${cfg.egressAddr}${cfg.apiPath} work=${workQueue} control=${controlQueue}`,
+      `egress=${cfg.egressAddr}${cfg.apiPath} work=${workQueue} control=${controlQueue}; ` +
+      `idle until the control plane is heard`,
   );
 
   /** Counts are flushed once a second: a fiber per metric write would be the costliest thing on the message path. */
@@ -658,20 +505,25 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
   ] as const;
 
   const flush = Effect.gen(function* () {
-    const { circuit, policy } = yield* Ref.get(state);
+    const current = yield* Ref.get(state);
+    const now = yield* Clock.currentTimeMillis;
 
     yield* Effect.all(
       [
-        Metric.update(Metric.withAttributes(Telemetry.circuitState, attrs), STATE_CODE[circuit]),
-        Metric.update(Metric.withAttributes(Telemetry.targetFraction, attrs), policy.fraction),
-        Metric.update(Metric.withAttributes(Telemetry.floorHeld, attrs), floorHeld() ? 1 : 0),
+        Metric.update(Metric.withAttributes(Telemetry.circuitState, attrs), STATE_CODE[current.circuit]),
+        Metric.update(Metric.withAttributes(Telemetry.targetFraction, attrs), current.policy.fraction),
+        Metric.update(Metric.withAttributes(Telemetry.floorHeld, attrs), isFloor(current, now) ? 1 : 0),
+        Metric.update(
+          Metric.withAttributes(Telemetry.controlKnowledge, attrs),
+          Telemetry.CONTROL_KNOWLEDGE_CODE[current.control],
+        ),
       ],
       { discard: true },
     );
 
-    const current = Tally.snapshot(counts, contract);
-    const delta = Tally.since(published, current);
-    published = current;
+    const snapshot = Tally.snapshot(counts, yield* Ref.get(contract));
+    const delta = Tally.since(published, snapshot);
+    published = snapshot;
 
     yield* Effect.forEach(
       counters,
@@ -686,27 +538,41 @@ export const runDaemon = Effect.fnUntraced(function* (cfg: DaemonConfig) {
 
   yield* Effect.forkScoped(Effect.repeat(flush, Schedule.spaced(FLUSH_INTERVAL)));
 
-  /** The ramp is time-gated, so something must tick it. */
-  const advanceRamp = Effect.gen(function* () {
-    const at = yield* Clock.currentTimeMillis;
-    const { prior, next } = yield* dispatch({ _tag: "RampTick", at });
-    if (next.policy.fraction === prior.policy.fraction && next.policy.floor === prior.policy.floor) {
-      return;
-    }
-    yield* reconcile;
-    yield* Effect.log(
-      `${label}: ramp ${Math.round(prior.policy.fraction * 100)}% -> ` +
-        `${Math.round(next.policy.fraction * 100)}% ${yield* describe}`,
-    );
-  });
+  /** The ramp is time-gated, silence is noticed by time, and the floor lease lapses with it: something must tick. */
+  const tick = onClock((at) => ({ _tag: "ClockTick", at })).pipe(
+    Effect.flatMap(({ prior, next }) =>
+      // A tick only ever moves into `silent`; the way back is an event (the applier logs it).
+      next.control === "silent" && prior.control !== "silent"
+        ? describe.pipe(
+            Effect.flatMap((d) =>
+              Effect.logWarning(
+                `${label}: no control event for ${SILENCE_MS / 1000}s — the circuit is no longer believed; ` +
+                  `falling back to ${Math.round(next.policy.fraction * 100)}% of the fleet (ADR 019) ${d}`,
+              ),
+            ),
+          )
+        : next.policy.fraction !== prior.policy.fraction || next.policy.floor !== prior.policy.floor
+          ? describe.pipe(
+              Effect.flatMap((d) =>
+                Effect.log(
+                  `${label}: ramp ${Math.round(prior.policy.fraction * 100)}% -> ` +
+                    `${Math.round(next.policy.fraction * 100)}% ${d}`,
+                ),
+              ),
+            )
+          : Effect.void,
+    ),
+    Effect.catchCause((cause) => Effect.logError(`${label}: clock tick failed`, cause)),
+  );
 
-  yield* Effect.forkScoped(Effect.repeat(advanceRamp, Schedule.spaced(RAMP_INTERVAL)));
+  yield* Effect.forkScoped(Effect.repeat(tick, Schedule.spaced(TICK_INTERVAL)));
 
-  /** The reducer keeps this to the floor and CLOSED; Redrive.ts makes it a no-op while a pass runs. */
+  /** The reducer keeps this to a heard CLOSED and the floor; Redrive.ts makes it a no-op while a pass runs. */
   const sweep = Effect.gen(function* () {
-    const { actions } = yield* dispatch({ _tag: "SweepTick", isFloor: floorHeld() });
+    const at = yield* Clock.currentTimeMillis;
+    const { actions } = yield* dispatch({ _tag: "SweepTick", at });
     yield* performAll(actions);
-  });
+  }).pipe(Effect.catchCause((cause) => Effect.logError(`${label}: sweep failed`, cause)));
 
   yield* Effect.forkScoped(Effect.repeat(sweep, Schedule.spaced(SWEEP_INTERVAL)));
 

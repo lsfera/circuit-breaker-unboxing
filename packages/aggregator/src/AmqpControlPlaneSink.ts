@@ -67,7 +67,7 @@ export const makeAmqpControlPlaneSink: Effect.Effect<SinkImpl, RmqError, Rmq> = 
     );
 
     const publish = (event: CircuitEvent, isRetry: boolean) =>
-      (isRetry ? knownBad : Effect.map(rmq.isConnected, (connected) => !connected)).pipe(
+      Effect.flatMap(Clock.currentTimeMillis, (startedAt) => (isRetry ? knownBad : Effect.map(rmq.isConnected, (connected) => !connected)).pipe(
         Effect.flatMap((bad) =>
           bad
             ? Effect.fail(
@@ -91,14 +91,21 @@ export const makeAmqpControlPlaneSink: Effect.Effect<SinkImpl, RmqError, Rmq> = 
                     Effect.fail(new DeliveryFailed({ sink: "amqp", apiId: event.data.apiId, cause: "no publish confirm within 2s" })),
                 }),
                 // Counted per attempt, before DELIVERY_RETRY decides, so readiness can flip mid-delivery.
+                // The streak is attempts in sequence: one already under way when another failed
+                // (the aggregator delivers a tick's transitions together) fails of the same cause
+                // and is not counted again, or one blip would read as two and skip every retry.
                 Effect.tapError(() =>
                   Clock.currentTimeMillis.pipe(
-                    Effect.flatMap((now) => Ref.update(consecutiveFailures, ({ count }) => ({ count: count + 1, lastAt: now }))),
+                    Effect.flatMap((now) =>
+                      Ref.update(consecutiveFailures, (streak) =>
+                        startedAt >= streak.lastAt ? { count: streak.count + 1, lastAt: now } : streak,
+                      ),
+                    ),
                   ),
                 ),
               ),
         ),
-      );
+      ));
 
     /** One publish and its confirm, retried per DELIVERY_RETRY; only attempts after the first count as retries. */
     const attempt = Effect.fnUntraced(function* (event: CircuitEvent) {

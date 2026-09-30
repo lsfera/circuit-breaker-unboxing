@@ -303,7 +303,8 @@ services:
     # Restarting is what makes the crash-fast stance coherent. Less reaches it
     # than it used to: the AMQP client reconnects and rebuilds its own topology
     # and consumers (docs/decisions/005-connection-recovery.md), so this covers
-    # what recovery cannot — a broker unreachable for about five minutes, and
+    # what recovery cannot — a broker unreachable for longer than recovery tries
+    # (RECOVERY_BUDGET_MS in packages/rmq/src/Client.ts, about 8 minutes), and
     # any unhandled defect. Without a policy here, "fatal" just meant "stays
     # dead".
     restart: unless-stopped

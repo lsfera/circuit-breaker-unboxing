@@ -18,9 +18,28 @@ export type DaemonPolicyState = {
   readonly rungSince: number;
 };
 
+/**
+ * Before the first event: nobody works, the floor included. A daemon that starts
+ * mid-outage must not spend attempt budgets against a failing upstream while it
+ * waits for a snapshot (ADR 019). The first CLOSED starts the ramp from the floor.
+ */
 export const initial = (now: number): DaemonPolicyState => ({
-  fraction: 1,
-  floor: true,
+  fraction: 0,
+  floor: false,
+  rungSince: now,
+});
+
+/**
+ * With the control plane silent, a quarter of the fleet by position works. No
+ * floor: its election rides on the events that stopped. Envoy still ejects and
+ * sheds locally, so this is load a failing upstream can refuse, and zero would
+ * be a fleet stalled for as long as the silence lasts (ADR 019).
+ */
+export const SILENT_FRACTION = 0.25;
+
+export const silent = (now: number): DaemonPolicyState => ({
+  fraction: SILENT_FRACTION,
+  floor: false,
   rungSince: now,
 });
 

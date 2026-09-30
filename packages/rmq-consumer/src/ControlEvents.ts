@@ -1,4 +1,5 @@
-import { Duration, Effect, Option as O, Schedule, Semaphore } from "effect";
+import { Duration, Effect, Option as O, Schedule } from "effect";
+import type { Semaphore } from "effect/Semaphore";
 import type { Action } from "./DaemonState.ts";
 
 /** Between attempts at one step of a control event. */
@@ -22,7 +23,8 @@ type Dispatched<S> = {
 
 /**
  * Control events move the state one at a time: transition, then `settle`
- * (reconcile), under one permit, so the channels always follow the newest event.
+ * (reconcile), under the daemon's one permit (`lock`), so the channels always
+ * follow the newest event.
  *
  * The triggers they owe are published after the permit, so an OPEN never waits
  * on a publish: each only if `isCurrent` still says its event is the one applied.
@@ -32,15 +34,15 @@ type Dispatched<S> = {
  * Nothing is undone on failure. Every daemon publishes the same triggers, and the
  * next snapshot re-applies the state. Succeeds with whether the event was applied.
  */
-export const makeApplier = <A, S, E, R, E2, R2>(options: {
+export const makeApplier = <A, S, E, R, E2, R2>(lock: Semaphore, options: {
   readonly dispatch: (event: A) => Effect.Effect<Dispatched<S>>;
   readonly settle: (event: A) => Effect.Effect<void, E, R>;
   readonly isCurrent: (next: S) => Effect.Effect<boolean>;
   readonly publish: (action: Action) => Effect.Effect<void, E2, R2>;
   readonly superseded?: (action: Action) => Effect.Effect<void>;
 }) =>
-  Effect.map(Semaphore.make(1), (gate) => (event: A) =>
-    gate.withPermit(
+  (event: A) =>
+    lock.withPermit(
       Effect.flatMap(options.dispatch(event), (dispatched) =>
         dispatched.ignored
           ? Effect.succeed(O.none<Dispatched<S>>())
@@ -61,4 +63,4 @@ export const makeApplier = <A, S, E, R, E2, R2>(options: {
             ).pipe(Effect.as(true)),
         }),
       ),
-    ));
+    );

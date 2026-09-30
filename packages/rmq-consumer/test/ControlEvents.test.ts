@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Deferred, Duration, Effect, Fiber, Option as O, Ref } from "effect";
+import { Deferred, Duration, Effect, Fiber, Option as O, Ref, Semaphore } from "effect";
 import { TestClock } from "effect/testing";
 import { SEQUENCED_EVENT, State } from "@egress/domain/Model.ts";
 import { APPLY_BUDGET, APPLY_RETRY, makeApplier, persist } from "../src/ControlEvents.ts";
@@ -54,7 +54,7 @@ test("a newer event waits until the older one has reconciled", async () => {
       const releaseFirst = yield* Deferred.make<void>();
       const firstSettling = yield* Deferred.make<void>();
 
-      const apply = yield* makeApplier({
+      const apply = makeApplier(yield* Semaphore.make(1), {
         dispatch: (event: Event) =>
           Effect.tap(dispatch(event), () => Effect.sync(() => log.push(`dispatch ${event.sequence}`))),
         settle: (event) =>
@@ -92,7 +92,7 @@ test("an OPEN does not wait on the publish an earlier event owes", async () => {
     Effect.gen(function* () {
       const { dispatch, isCurrent } = yield* makeDaemon;
       const publishing = yield* Deferred.make<void>();
-      const apply = yield* makeApplier({
+      const apply = makeApplier(yield* Semaphore.make(1), {
         dispatch,
         settle: () => Effect.void,
         isCurrent,
@@ -119,7 +119,7 @@ test("a trigger is not published once a newer event has replaced the one that ow
       const superseded: Array<string> = [];
       const checking = yield* Deferred.make<void>();
       const releaseCheck = yield* Deferred.make<void>();
-      const apply = yield* makeApplier({
+      const apply = makeApplier(yield* Semaphore.make(1), {
         dispatch,
         settle: () => Effect.void,
         // The first event's check is held until the newer event has landed.
@@ -150,7 +150,7 @@ test("a transient publish failure is retried in place", async () => {
     Effect.gen(function* () {
       const { dispatch, isCurrent } = yield* makeDaemon;
       let attempts = 0;
-      const apply = yield* makeApplier({
+      const apply = makeApplier(yield* Semaphore.make(1), {
         dispatch,
         settle: () => Effect.void,
         isCurrent,
@@ -169,7 +169,7 @@ test("a step that keeps failing gives up after its retries, leaving the transiti
     Effect.gen(function* () {
       const { state, dispatch, isCurrent } = yield* makeDaemon;
       let attempts = 0;
-      const apply = yield* makeApplier({
+      const apply = makeApplier(yield* Semaphore.make(1), {
         dispatch,
         settle: () => Effect.void,
         isCurrent,
@@ -194,7 +194,7 @@ test("a publish that never settles gives up within the budget", async () => {
   const exit = await withTestClock(
     Effect.gen(function* () {
       const { dispatch, isCurrent } = yield* makeDaemon;
-      const apply = yield* makeApplier({
+      const apply = makeApplier(yield* Semaphore.make(1), {
         dispatch,
         settle: () => Effect.void,
         isCurrent,
@@ -211,7 +211,7 @@ test("a stale event neither reconciles nor publishes", async () => {
     Effect.gen(function* () {
       const { dispatch, isCurrent } = yield* makeDaemon;
       const log: Array<string> = [];
-      const apply = yield* makeApplier({
+      const apply = makeApplier(yield* Semaphore.make(1), {
         dispatch,
         settle: (event: Event) => Effect.sync(() => void log.push(`settle ${event.sequence}`)),
         isCurrent,

@@ -62,16 +62,33 @@ sends its node identifier only in a stream's first message.
 ## The aggregator decides
 
 Per tick (250 ms) the leader folds every replica's report into one pure
-`Breaker` per API. A replica votes `DOWN`, `DEGRADED` or `OK` from its own view;
-a candidate state needs 60% of reporting replicas and must hold for 2 s before
-it is published. Replicas silent for 5 s stop counting.
+`Breaker` per API, publishes the transitions — at most one per API, so their
+confirms are awaited together — and checkpoints the confirmed ones. A replica
+votes `DOWN`, `DEGRADED` or `OK` from its own view. `OPEN` needs 60% of
+reporting replicas voting `DOWN`, `DEGRADED` 60% voting either, and anything
+less is `CLOSED`. A verdict must hold for 2 s before it is published, and
+leaving `CLOSED` or `DEGRADED` also needs 3 s in it; only the backoff moves
+`OPEN`, and a probe closes after 3 healthy ticks. Replicas silent for 5 s stop
+counting.
 
+```mermaid
+stateDiagram-v2
+  direction LR
+  [*] --> CLOSED
+  CLOSED --> DEGRADED: 60% vote DEGRADED or DOWN
+  CLOSED --> OPEN: 60% vote DOWN
+  DEGRADED --> OPEN: 60% vote DOWN
+  DEGRADED --> CLOSED: healthy for the close hold
+  OPEN --> HALF_OPEN: backoff elapsed
+  HALF_OPEN --> CLOSED: 3 healthy ticks in a row
+  HALF_OPEN --> DEGRADED: 60% vote DEGRADED or DOWN
+  HALF_OPEN --> OPEN: 60% vote DOWN, backoff doubled
 ```
-CLOSED ──partial ejection──▶ DEGRADED ──all ejected──▶ OPEN
-   ▲                                                   │ 4 s, doubling to 16 s
-   └──3 healthy observations── HALF_OPEN ◀──────────────┘
-                                   │ probe failed ──▶ OPEN
-```
+
+The `OPEN` backoff starts at 4 s, doubles on each failed probe up to 16 s, and
+resets only when a probe closes the breaker. The close hold is 2 s; a relapse
+into `DEGRADED` within 15 s of closing raises it to 8 s, doubling up to 30 s,
+and 15 s spent in `CLOSED` brings it back to 2 s.
 
 Its `OPEN` is **observational**: it publishes and never pushes config to Envoy
 ([ADR 002](decisions/002-enforcement-authority.md)). Enforcement is already
@@ -116,7 +133,9 @@ a durable outbox for other subscribers.
 ## The daemon fleet
 
 Five competing consumers drain `payments-provider.work` and call the third party
-through one Envoy address. Each learns the circuit from its own queue on
+through one Envoy address. Each API has its own queues and its own fleet, which
+costs an idle broker about 1 MB per API: tens of APIs per broker, a few hundred
+at most ([ADR 020](decisions/020-what-one-api-costs-the-broker.md)). Each learns the circuit from its own queue on
 `circuit.control` and decides for itself:
 
 | Circuit | The fleet |
@@ -125,6 +144,26 @@ through one Envoy address. Each learns the circuit from its own queue on
 | `DEGRADED` | half the fleet, chosen by each daemon's position in a hash space, plus one elected "floor" daemon so a small fleet never lands on nobody |
 | `OPEN` | nobody consumes; the work waits in the queue |
 | `HALF_OPEN` | the daemon elected on `probe-trigger` takes exactly one message |
+| *not yet heard* | nobody, until the first event or 60 s (then *silent*): a daemon started mid-outage does not assume `CLOSED` |
+| *silent* (no event for 60 s) | a quarter of the fleet by position, whatever the last event said, until the control plane is heard again ([ADR 019](decisions/019-a-daemon-that-does-not-know.md)) |
+
+How much a daemon believes its circuit is state too
+([ADR 019](decisions/019-a-daemon-that-does-not-know.md)); only an applied event
+counts as hearing the control plane:
+
+```mermaid
+stateDiagram-v2
+  direction LR
+  [*] --> unheard: start
+  unheard --> heard: first event
+  unheard --> silent: 60 s without one
+  heard --> silent: 60 s without an applied event
+  silent --> heard: next event
+```
+
+`unheard` works nobody; `heard` follows the table; `silent` works a quarter of
+the fleet by position, with no floor, probe, redrive or sweep. Coming back to
+`heard` on a `CLOSED` starts the ramp from the floor alone.
 
 The target is a fraction, not a count, so no daemon needs to know the fleet's
 size ([ADR 013](decisions/013-the-target-as-a-fraction.md)). Elections are
@@ -135,7 +174,10 @@ dies mid-action leaves it for the next one promoted. The daemon never judges a
 probe; Envoy's outlier detection and the aggregator's quorum do.
 
 **Control events** are applied one at a time: the transition, then the
-reconcile of the daemon's channels. Only after that are the triggers the event
+reconcile of the daemon's channels. Everything else that reconciles — the
+one-second clock (ramp, silence, the floor lease lapsing) and a floor election —
+takes the same single permit, and the probe opens its channel under it. Only
+after that are the triggers the event
 owes published, so an `OPEN` never waits on a publish, and a trigger whose event
 a newer one has since replaced is dropped. Each step is retried in place for at
 most 5 s. The delivery is acked once the event is applied, and also when a step
@@ -156,6 +198,23 @@ the delivery:
 | (no call) wrong format, not a work message, or no `message_id` | parked unread, stamped `unreadable-<reason>` |
 | 408, 5xx, no response | republished with `x-egress-attempts` + 1; the third goes to `work.dead` |
 
+One work message, from the producer to its end:
+
+```mermaid
+stateDiagram-v2
+  direction LR
+  [*] --> queued: published with a message_id
+  queued --> called: delivered
+  queued --> parked: unreadable, no call
+  called --> [*]: 2xx, acked
+  called --> queued: 429, released uncounted
+  called --> queued: 408, 5xx, no response — republished, attempts + 1
+  called --> dead: third failed attempt
+  called --> parked: other 4xx
+  dead --> queued: redrive, fresh attempt budget
+  dead --> parked: after five redrives
+```
+
 The attempt count travels in a header because a broker requeue cannot add one
 ([ADR 016](decisions/016-the-retry-budget-travels-with-the-message.md)); the
 queue's `x-delivery-limit: 3` is only the backstop for a delivery that never
@@ -164,9 +223,12 @@ trip of successes, never above `MAX_IN_FLIGHT`, which is also the consumer's
 prefetch ([ADR 011](decisions/011-the-ceiling-belongs-to-the-broker.md)).
 
 **Redrive.** On the transition to `CLOSED` the daemon elected on
-`redrive-trigger`, and every 30 s while closed the floor daemon, replays
+`redrive-trigger`, and every 30 s while a heard `CLOSED` lasts the floor daemon, replays
 `work.dead` onto the work queue in bounded passes (5,000 per pass, publish before ack). Each replay gets a fresh
-attempt budget; after five redrives a message is parked as poison. A dead letter
+attempt budget; after five redrives a message is parked as poison. The elected
+daemon holds its trigger unacked for the whole redrive, at most about 23 minutes,
+so the broker's `consumer_timeout` is pinned at 30 minutes in `infra/rabbitmq.conf`, and a
+test fails if the code's copy of it and the file disagree. A dead letter
 that did not come from the work queue — a control event or trigger that would
 not decode — is parked, never replayed.
 

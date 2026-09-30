@@ -92,8 +92,15 @@ groups:
       # 013), so an equality on counts would now fire constantly — while a
       # disagreement about the fraction itself is exactly the fault, with no
       # tolerance needed.
+      #
+      # Only daemons that have heard the control plane are compared: one still
+      # waiting for its first event reports 0 by design (ADR 019). A restarted
+      # daemon then ramps from the floor for 15 s while the rest sit at full
+      # strength, which the 2m `for` absorbs unless restarts keep overlapping.
       - alert: FleetDisagreesWithTarget
-        expr: max(egress_daemon_target_fraction) != min(egress_daemon_target_fraction)
+        expr: >-
+          max(egress_daemon_target_fraction and on(apiId, daemon) egress_daemon_control_knowledge == 0)
+          != min(egress_daemon_target_fraction and on(apiId, daemon) egress_daemon_control_knowledge == 0)
         for: 2m
         labels: { severity: warning }
         annotations:
@@ -107,8 +114,13 @@ groups:
       # fraction alone would select nobody. Without it a small fleet can stop
       # entirely on DEGRADED, which looks exactly like OPEN — see ADR 013. It
       # should be held by exactly one daemon whenever any work is wanted.
+      #
+      # Not while any daemon is silent (2): the floor is elected by the events
+      # that stopped, and DaemonsOnFallback says so once the silence has lasted.
       - alert: FloorUnheld
-        expr: max(egress_daemon_target_fraction) > 0 and sum(egress_daemon_floor_held) != 1
+        expr: >-
+          (max(egress_daemon_target_fraction) > 0 and sum(egress_daemon_floor_held) != 1)
+          unless on() max(egress_daemon_control_knowledge) == 2
         for: 2m
         labels: { severity: warning }
         annotations:
@@ -117,6 +129,22 @@ groups:
             Zero means a DEGRADED fleet could stop entirely and report nothing.
             More than one means the single-active-consumer election on
             <apiId>.floor is not doing what it is there for.
+
+      # A daemon that has heard no control event for a minute stops believing
+      # its circuit and works a quarter of the fleet by position, whatever the
+      # last event said (ADR 019). That is the fleet running without the
+      # breaker's fleet-wide verdict — Envoy still ejects locally — so it pages
+      # alongside NoLeaderElected / ControlLoopStalled, which usually say why.
+      - alert: DaemonsOnFallback
+        expr: max by (apiId) (egress_daemon_control_knowledge) == 2
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Daemons for {{ $labels.apiId }} have heard no control event for over a minute"
+          description: >-
+            They are running the silent fallback (a quarter of the fleet, no
+            floor, no probe, no redrive) until the aggregator publishes again.
+            Check the aggregators' leadership and their link to the broker.
 
       # A quorum is a fraction, and this is the denominator moving. Every
       # verdict this system publishes is `votes.DOWN / live.length` over the

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Duration, Effect, Layer, Option as O, Ref } from "effect";
+import { Duration, Effect, Fiber, Layer, Option as O, Ref } from "effect";
 import { TestClock } from "effect/testing";
 import { Aggregator } from "../src/Aggregator.ts";
 import {
@@ -92,11 +92,12 @@ const instanceLayer = (
   },
   sink: Layer.Layer<EventSink>,
   leaseTtlMs = 1000,
+  specs = SPECS,
 ) =>
   Aggregator.layer.pipe(
     Layer.provideMerge(
       Layer.mergeAll(
-        SimFleetLayer(SPECS, 5),
+        SimFleetLayer(specs, 5),
         EventBus.layer,
         sink,
         Layer.succeed(LeaderElection, coordination.leaderElection),
@@ -213,4 +214,111 @@ test("a second instance resumes at last-confirmed + 1 — the sequence the faile
     `B must publish exactly last-confirmed + 1 (${handoffSequence + 1}) — the sequence A ` +
       `attempted but never confirmed — not skip past it and not repeat ${handoffSequence}`,
   );
+});
+
+/**
+ * A tick holds at most one transition per API, so its confirms are independent.
+ * Awaited one after another, a shared dependency failing across many APIs would
+ * cost one confirm per API inside the loop that renews the lease. The first goes
+ * alone (its checkpoint proves the lease), the rest together: two confirms.
+ */
+test("the transitions of one tick are delivered together, not one confirm after another", async () => {
+  const MANY = ["a", "b", "c", "d"].map((apiId) => ({ apiId, endpoints: 6, rps: 900, failureRate: 0 }));
+  const CONFIRM = Duration.seconds(1);
+  const { widest, stalled } = await Effect.runPromise(
+    Effect.provide(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(T0);
+        const coordination = yield* makeInMemoryCoordination;
+        const SlowSink = Layer.succeed(EventSink, {
+          name: "slow",
+          deliver: (event: CircuitEvent) => (event.type === SEQUENCED_EVENT ? Effect.sleep(CONFIRM) : Effect.void),
+          deadLetters: Effect.succeed([]),
+          drainOutbox: Effect.succeed(0),
+          ready: Effect.succeed(true),
+          resetConnection: Effect.void,
+        });
+        return yield* Effect.gen(function* () {
+          const fleet = yield* FleetSource;
+          for (const { apiId } of MANY) yield* fleet.setFailureRate(apiId, 1);
+          const agg = yield* Aggregator;
+          let widest = 0;
+          let stalled = 0;
+          for (let i = 0; i < 40; i++) {
+            const tick = yield* Effect.forkChild(agg.tick);
+            // Two confirms' worth of time: the first transition alone, then the rest together.
+            yield* TestClock.adjust(Duration.times(CONFIRM, 2));
+            const done = tick.pollUnsafe();
+            if (done === undefined) {
+              stalled++;
+              yield* TestClock.adjust(Duration.times(CONFIRM, MANY.length));
+            }
+            const published = yield* Fiber.join(tick);
+            widest = Math.max(widest, published.filter((e) => e.type === SEQUENCED_EVENT).length);
+          }
+          return { widest, stalled };
+        }).pipe(
+          Effect.provide(
+            Aggregator.layer.pipe(
+              Layer.provideMerge(
+                Layer.mergeAll(
+                  SimFleetLayer(MANY, 5),
+                  EventBus.layer,
+                  SlowSink,
+                  Layer.succeed(LeaderElection, coordination.leaderElection),
+                  Layer.succeed(CheckpointStore, coordination.checkpointStore),
+                  Layer.succeed(HaSettings, { instanceId: "A", leaseTtlMs: 5000 }),
+                ),
+              ),
+            ),
+          ),
+          Effect.provideService(Config, CFG),
+        );
+      }),
+      TestClock.layer(),
+    ),
+  );
+  assert.ok(widest >= 3, `some tick must carry three or more transitions for this to test anything (widest: ${widest})`);
+  assert.equal(stalled, 0, "every tick finished within two confirms' time");
+});
+
+/**
+ * Past the first wave of concurrent deliveries, a failure stops the rest from
+ * starting: each would wait out its own confirm timeout against a broker that has
+ * already failed one, and the tick would outlive the lease.
+ */
+test("once a delivery has failed, no further delivery of that tick is started", async () => {
+  const MANY = Array.from({ length: 40 }, (_, i) => ({ apiId: `api-${i}`, endpoints: 6, rps: 900, failureRate: 0 }));
+  const { widestTick, stillLeader } = await Effect.runPromise(
+    Effect.provide(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(T0);
+        const coordination = yield* makeInMemoryCoordination;
+        const delivered = yield* Ref.make<ReadonlyArray<CircuitEvent>>([]);
+        const attempts = yield* Ref.make(0);
+        return yield* Effect.gen(function* () {
+          const fleet = yield* FleetSource;
+          for (const { apiId } of MANY) yield* fleet.setFailureRate(apiId, 1);
+          const agg = yield* Aggregator;
+          // The most delivery attempts any one tick made.
+          let widestTick = 0;
+          for (let i = 0; i < 60; i++) {
+            const before = yield* Ref.get(attempts);
+            yield* agg.tick;
+            widestTick = Math.max(widestTick, (yield* Ref.get(attempts)) - before);
+            yield* TestClock.adjust(Duration.millis(CFG.tickMs));
+          }
+          return { widestTick, stillLeader: yield* agg.isLeader };
+        }).pipe(
+          // The first transition is confirmed (it is the lease check); every one after it fails.
+          Effect.provide(instanceLayer("A", coordination, FailableSink(1, delivered, attempts), 1000, MANY)),
+          Effect.provideService(Config, CFG),
+        );
+      }),
+      TestClock.layer(),
+    ),
+  );
+  assert.ok(widestTick >= 2, `the transition tick must reach the concurrent deliveries (widest: ${widestTick})`);
+  assert.ok(widestTick < MANY.length, `a failed delivery must stop the rest (${widestTick} of ${MANY.length} attempted)`);
+  assert.equal(stillLeader, false);
 });

@@ -4,7 +4,8 @@ import { Option as O } from "effect";
 import { SEQUENCED_EVENT, SNAPSHOT_EVENT, State } from "@egress/domain/Model.ts";
 import type { Lease } from "@egress/domain/Model.ts";
 import * as DaemonState from "../src/DaemonState.ts";
-import { RAMP_DWELL_MS } from "../src/DaemonPolicy.ts";
+import { RAMP_DWELL_MS, SILENT_FRACTION } from "../src/DaemonPolicy.ts";
+import { FLOOR_LEASE_MS, SILENCE_MS } from "../src/DaemonState.ts";
 
 /** The daemon's decisions, with no broker, no connections and no runtime. */
 
@@ -125,31 +126,52 @@ test("a redrive trigger dedupes the same way — one replay per recovery", () =>
  * on, so it is a `Redrive` exactly when the floor is CLOSED and asks, and a
  * no-op every other time.
  */
+/** CLOSED as the control plane said it, and the same with this daemon elected as the floor. */
+const heardClosed = reduce(start, {
+  _tag: "CircuitChanged",
+  type: SEQUENCED_EVENT,
+  lease: O.none(),
+  state: State.CLOSED,
+  sequence: 1,
+  at: T0,
+}).next;
+const floorClosed = reduce(heardClosed, { _tag: "FloorElected", at: T0 }).next;
+
 test("a sweep asks for a redrive only from the floor, only while CLOSED", () => {
   assert.deepEqual(
-    reduce(start, { _tag: "SweepTick", isFloor: true }).actions,
+    reduce(floorClosed, { _tag: "SweepTick", at: T0 + 1000 }).actions,
     [{ _tag: "Redrive" }],
     "CLOSED and the floor: redrive",
   );
   assert.deepEqual(
-    reduce(start, { _tag: "SweepTick", isFloor: false }).actions,
+    reduce(heardClosed, { _tag: "SweepTick", at: T0 + 1000 }).actions,
     [],
     "CLOSED but not the floor: nothing",
   );
+  assert.deepEqual(
+    reduce(floorClosed, { _tag: "SweepTick", at: T0 + FLOOR_LEASE_MS }).actions,
+    [],
+    "a floor lease that has lapsed is not the floor",
+  );
+});
+
+test("a sweep does nothing on a CLOSED that was assumed rather than heard", () => {
+  const assumed = reduce(start, { _tag: "FloorElected", at: T0 }).next;
+  assert.deepEqual(reduce(assumed, { _tag: "SweepTick", at: T0 + 1000 }).actions, []);
 });
 
 test("a sweep does nothing outside CLOSED, whoever holds the floor", () => {
   for (const circuitState of [State.OPEN, State.DEGRADED, State.HALF_OPEN]) {
-    const notClosed = reduce(start, {
+    const notClosed = reduce(floorClosed, {
       _tag: "CircuitChanged",
-    type: SEQUENCED_EVENT,
-    lease: O.none(),
+      type: SEQUENCED_EVENT,
+      lease: O.none(),
       state: circuitState,
-      sequence: 1,
+      sequence: 2,
       at: T0,
     }).next;
     assert.deepEqual(
-      reduce(notClosed, { _tag: "SweepTick", isFloor: true }).actions,
+      reduce(notClosed, { _tag: "SweepTick", at: T0 + 1000 }).actions,
       [],
       `${circuitState} must not redrive even from the floor`,
     );
@@ -158,14 +180,14 @@ test("a sweep does nothing outside CLOSED, whoever holds the floor", () => {
 
 test("REDRIVE_ON_CLOSE off means a sweep never redrives either", () => {
   assert.deepEqual(
-    reduce(start, { _tag: "SweepTick", isFloor: true }, false).actions,
+    reduce(floorClosed, { _tag: "SweepTick", at: T0 + 1000 }, false).actions,
     [],
   );
 });
 
 test("a sweep never touches state — no sequence to dedupe on, and none is spent", () => {
-  const redriven = reduce(start, { _tag: "RedriveTriggered", sequence: 3 }).next;
-  const { next, actions } = reduce(redriven, { _tag: "SweepTick", isFloor: true });
+  const redriven = reduce(floorClosed, { _tag: "RedriveTriggered", sequence: 3 }).next;
+  const { next, actions } = reduce(redriven, { _tag: "SweepTick", at: T0 + 1000 });
   assert.deepEqual(actions, [{ _tag: "Redrive" }], "a sweep still asks for a redrive");
   assert.equal(next, redriven, "and the state, redrivenSequence included, is untouched");
 });
@@ -176,7 +198,7 @@ test("the ramp advances only while CLOSED, and only when the dwell has elapsed",
     lease: O.none(), state: State.OPEN, sequence: 1, at: T0 })
     .next;
   assert.equal(
-    reduce(open, { _tag: "RampTick", at: T0 + 60_000 }).next.policy.fraction,
+    reduce(open, { _tag: "ClockTick", at: T0 + SILENCE_MS - 1 }).next.policy.fraction,
     0,
     "OPEN is a level, not a ramp",
   );
@@ -192,10 +214,10 @@ test("the ramp advances only while CLOSED, and only when the dwell has elapsed",
   assert.equal(closed.policy.fraction, 0, "first rung on recovery is the elected daemon alone");
   assert.equal(closed.policy.floor, true);
 
-  const tooSoon = reduce(closed, { _tag: "RampTick", at: T0 + 1500 });
+  const tooSoon = reduce(closed, { _tag: "ClockTick", at: T0 + 1500 });
   assert.equal(tooSoon.next.policy.fraction, 0, "a rung is earned by being held");
 
-  const earned = reduce(closed, { _tag: "RampTick", at: T0 + 1000 + RAMP_DWELL_MS });
+  const earned = reduce(closed, { _tag: "ClockTick", at: T0 + 1000 + RAMP_DWELL_MS });
   assert.equal(earned.next.policy.fraction, 0.25);
 });
 
@@ -391,4 +413,104 @@ test("an event is no longer current once a newer one is applied", () => {
   assert.ok(!DaemonState.isCurrent(appliedBy(halfOpen, SEQUENCED_EVENT, State.OPEN, 5), halfOpen.applied));
   const newLeader = appliedBy(halfOpen, SNAPSHOT_EVENT, State.HALF_OPEN, 4, O.some({ epoch: "e2", counter: 1 }));
   assert.ok(!DaemonState.isCurrent(newLeader, halfOpen.applied), "same sequence under another lease is another event");
+});
+
+// ---------------------------------------------------------------------------
+// How much the circuit is worth: unheard, heard, silent (ADR 019).
+// ---------------------------------------------------------------------------
+
+const everyone = [
+  { position: 0, isFloor: true },
+  { position: 0, isFloor: false },
+  { position: 0.99, isFloor: true },
+];
+
+test("before any event nobody works, the floor included, whatever the assumed CLOSED says", () => {
+  assert.equal(start.control, "unheard");
+  for (const self of everyone) assert.equal(DaemonState.desired(start, self).work, false);
+});
+
+test("an unheard daemon ramps nothing on the clock: there is no CLOSED to ramp", () => {
+  const ticked = reduce(start, { _tag: "ClockTick", at: T0 + RAMP_DWELL_MS * 3 }).next;
+  assert.deepEqual(ticked.policy, start.policy);
+});
+
+test("the first event is heard, and a CLOSED starts from the floor alone", () => {
+  assert.equal(heardClosed.control, "heard");
+  assert.deepEqual({ fraction: heardClosed.policy.fraction, floor: heardClosed.policy.floor }, { fraction: 0, floor: true });
+  assert.equal(DaemonState.desired(heardClosed, { position: 0.99, isFloor: true }).work, true);
+  assert.equal(DaemonState.desired(heardClosed, { position: 0, isFloor: false }).work, false);
+});
+
+test("a daemon that never hears the control plane falls back once the silence is long enough", () => {
+  const justBefore = reduce(start, { _tag: "ClockTick", at: T0 + SILENCE_MS - 1 }).next;
+  assert.equal(justBefore.control, "unheard");
+  const silent = reduce(start, { _tag: "ClockTick", at: T0 + SILENCE_MS }).next;
+  assert.equal(silent.control, "silent");
+  assert.equal(silent.policy.fraction, SILENT_FRACTION);
+  assert.equal(silent.policy.floor, false);
+});
+
+test("silence overrides the last circuit heard: an OPEN or HALF_OPEN is no longer believed", () => {
+  for (const circuit of [State.OPEN, State.HALF_OPEN]) {
+    const heard = reduce(start, {
+      _tag: "CircuitChanged",
+      type: SEQUENCED_EVENT,
+      lease: O.none(),
+      state: circuit,
+      sequence: 1,
+      at: T0,
+    }).next;
+    const silent = reduce(heard, { _tag: "ClockTick", at: T0 + SILENCE_MS }).next;
+    assert.equal(silent.control, "silent");
+    const wants = (position: number) => DaemonState.desired(silent, { position, isFloor: false });
+    assert.equal(wants(SILENT_FRACTION / 2).work, true, `${circuit}, silent: a low position works`);
+    assert.equal(wants(0.99).work, false, `${circuit}, silent: a high one does not`);
+    assert.equal(wants(0).probe, false, "nor is a probe kept on a HALF_OPEN nobody confirms");
+    assert.equal(wants(0).redrive, false);
+  }
+});
+
+test("a silent daemon stays at the fallback, and the next event ramps it from the floor", () => {
+  const silent = reduce(heardClosed, { _tag: "ClockTick", at: T0 + SILENCE_MS }).next;
+  const later = reduce(silent, { _tag: "ClockTick", at: T0 + SILENCE_MS + RAMP_DWELL_MS * 3 }).next;
+  assert.deepEqual(later.policy, silent.policy, "no ramp on a CLOSED nobody has repeated");
+  const back = reduce(later, {
+    _tag: "CircuitChanged",
+    type: SNAPSHOT_EVENT,
+    lease: O.none(),
+    state: State.CLOSED,
+    sequence: 1,
+    at: T0 + SILENCE_MS * 2,
+  }).next;
+  assert.equal(back.control, "heard");
+  assert.deepEqual({ fraction: back.policy.fraction, floor: back.policy.floor }, { fraction: 0, floor: true });
+});
+
+test("a stale event is not evidence the control plane is alive", () => {
+  const newer = reduce(start, {
+    _tag: "CircuitChanged",
+    type: SEQUENCED_EVENT,
+    lease: O.none(),
+    state: State.OPEN,
+    sequence: 5,
+    at: T0,
+  }).next;
+  const stale = reduce(newer, {
+    _tag: "CircuitChanged",
+    type: SEQUENCED_EVENT,
+    lease: O.none(),
+    state: State.CLOSED,
+    sequence: 4,
+    at: T0 + SILENCE_MS - 1,
+  });
+  assert.equal(stale.ignored, true);
+  assert.equal(reduce(stale.next, { _tag: "ClockTick", at: T0 + SILENCE_MS }).next.control, "silent");
+});
+
+test("the floor is a lease: held from the election for FLOOR_LEASE_MS, then not", () => {
+  const elected = reduce(heardClosed, { _tag: "FloorElected", at: T0 + 10 }).next;
+  assert.equal(DaemonState.isFloor(elected, T0 + 10 + FLOOR_LEASE_MS - 1), true);
+  assert.equal(DaemonState.isFloor(elected, T0 + 10 + FLOOR_LEASE_MS), false);
+  assert.equal(DaemonState.isFloor(heardClosed, T0), false, "never elected, never the floor");
 });

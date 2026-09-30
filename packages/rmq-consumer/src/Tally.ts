@@ -8,7 +8,7 @@ import type { EventType } from "@egress/domain/Model.ts";
  */
 
 /** Bumped from AMQP callbacks and the egress call, which have no fiber to run an Effect in. */
-type Counts = {
+export type Counts = {
   ok: number;
   failed: number;
   /** Rejected by Envoy's adaptive-concurrency filter (429) before reaching the third party — backpressure, not a call failure. */

@@ -13,6 +13,7 @@ import {
 } from "effect";
 import * as Breaker from "@egress/domain/Breaker.ts";
 import { Config, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
+import type { DeliveryFailed } from "@egress/domain/Model.ts";
 import { CheckpointStore, HaSettings, LeaderElection } from "./Coordination.ts";
 import { EventBus, EventSink, snapshotEvent, stateChanged } from "./Events.ts";
 import { FleetSource } from "./FleetSource.ts";
@@ -146,6 +147,12 @@ const make = Effect.gen(function* () {
    * does not become a fight over the lease every tick.
    */
   const READINESS_HOLD_OFF_MS = ha.leaseTtlMs;
+
+  /**
+   * Transitions awaited at once in one tick. Bounded so a thousand APIs moving
+   * together do not open a thousand publishes on one confirm channel.
+   */
+  const DELIVERY_CONCURRENCY = 32;
 
   const lastTick = yield* Ref.make(0);
 
@@ -288,97 +295,143 @@ const make = Effect.gen(function* () {
         ];
       });
 
-      // Deliver each transition (awaiting the broker's confirm), then checkpoint it
-      // under this tick's token. A failed delivery or a fenced checkpoint stops
-      // publishing at once; the rest of this tick is dropped, and the next leader
-      // re-derives it. One window is not gapless: a crash between confirm and save
-      // lets the successor reuse the sequence, and its newer lease is what readers
-      // believe (docs/high-availability.md).
-      type Publishing = {
-        readonly publishable: ReadonlyArray<CircuitEvent>;
-        readonly stopped: boolean;
-      };
-      const { publishable } = yield* Effect.reduce(
-        events,
-        (): Publishing => ({ publishable: [], stopped: false }),
-        (acc, e): Effect.Effect<Publishing, CoordinationUnavailable> =>
-          acc.stopped
-            ? Effect.succeed(acc)
-            : e.type !== SEQUENCED_EVENT
-              ? Effect.succeed({ ...acc, publishable: Arr.append(acc.publishable, e) })
-              : Effect.gen(function* () {
-                  const delivery = yield* Effect.result(sink.deliver(e));
-                  return yield* Result.match(delivery, {
-                    onFailure: (err) =>
-                      Effect.as(
-                        Effect.all(
-                          [
-                            Effect.logWarning(
-                              `${ha.instanceId}: control plane did not confirm ` +
-                              `${err.apiId} sequence ${e.data.sequence} (${err.cause}) — ` +
-                              `stepping down rather than checkpoint an undelivered sequence`,
-                            ),
-                            releaseAndHoldOff(tickNow),
-                            demoteAndFence,
-                            Metric.update(Telemetry.isLeader, 0),
-                          ],
-                          { discard: true },
-                        ),
-                        { ...acc, stopped: true },
-                      ),
-                    onSuccess: () =>
-                      Effect.gen(function* () {
-                        const after = (yield* Ref.get(registry)).breakers.get(e.data.apiId);
-                        const checkpoint: Checkpoint = {
-                          state: e.data.state,
-                          reason: e.data.reason,
-                          sequence: e.data.sequence,
-                          changedAt: now,
-                          openBackoffMs: after?.openBackoffMs ?? cfg.openMs,
-                        };
-                        const fenced = yield* checkpoints
-                          .save(e.data.apiId, token, checkpoint)
-                          .pipe(
-                            Effect.as(false),
-                            Effect.catchTag("CheckpointFenced", (err) =>
-                              Effect.andThen(
-                                Effect.logWarning(
-                                  `lost leadership publishing ${e.data.apiId}: ` +
-                                  `token ${formatToken(err.attempted)} superseded by ` +
-                                  O.match(err.current, {
-                                    onNone: () => "an unreadable one",
-                                    onSome: formatToken,
-                                  }),
-                                ),
-                                Effect.succeed(true),
-                              ),
-                            ),
-                          );
-                        return yield* fenced
-                          ? Effect.as(
-                              Effect.all(
-                                [
-                                  demoteAndFence,
-                                  Metric.update(Telemetry.isLeader, 0),
-                                  Metric.update(
-                                    Metric.withAttributes(Telemetry.fencingConflicts, {
-                                      apiId: e.data.apiId,
-                                    }),
-                                    1,
-                                  ),
-                                ],
-                                { discard: true },
-                              ),
-                              { ...acc, stopped: true },
-                            )
-                          : Effect.succeed({
-                              ...acc,
-                              publishable: Arr.append(acc.publishable, e),
-                            });
+      // Deliver the transitions (awaiting the broker's confirms) and checkpoint what
+      // was confirmed under this tick's token; a failed delivery or a fenced
+      // checkpoint stops publishing, and what was not checkpointed is re-derived by
+      // the next leader. The first goes alone: its checkpoint proves the lease still
+      // holds, so a leader deposed mid-tick publishes one stale transition, as
+      // before, not one per API. The rest — at most one per API, so independent —
+      // are awaited together: a burst across many APIs costs one confirm's latency,
+      // not one per API, and none is started once one has failed. One window is not
+      // gapless: a crash between confirm and save lets the successor reuse the
+      // sequence, and its newer lease is what readers believe
+      // (docs/high-availability.md).
+      const checkpointOne = (e: CircuitEvent) =>
+        Effect.gen(function* () {
+          const after = (yield* Ref.get(registry)).breakers.get(e.data.apiId);
+          const checkpoint: Checkpoint = {
+            state: e.data.state,
+            reason: e.data.reason,
+            sequence: e.data.sequence,
+            changedAt: now,
+            openBackoffMs: after?.openBackoffMs ?? cfg.openMs,
+          };
+          return yield* checkpoints.save(e.data.apiId, token, checkpoint).pipe(
+            Effect.as(false),
+            Effect.catchTag("CheckpointFenced", (err) =>
+              Effect.as(
+                Effect.all(
+                  [
+                    Effect.logWarning(
+                      `lost leadership publishing ${e.data.apiId}: ` +
+                      `token ${formatToken(err.attempted)} superseded by ` +
+                      O.match(err.current, {
+                        onNone: () => "an unreadable one",
+                        onSome: formatToken,
                       }),
-                  });
-                }),
-      );
+                    ),
+                    Metric.update(Metric.withAttributes(Telemetry.fencingConflicts, { apiId: e.data.apiId }), 1),
+                  ],
+                  { discard: true },
+                ),
+                true,
+              ),
+            ),
+          );
+        });
+
+      /** Checkpoints in order, stopping at the first fence. */
+      type Checkpointing = {
+        readonly checkpointed: ReadonlyArray<CircuitEvent>;
+        readonly fenced: boolean;
+      };
+      const checkpointAll = (confirmed: ReadonlyArray<CircuitEvent>, from: Checkpointing) =>
+        Effect.reduce(
+          confirmed,
+          (): Checkpointing => from,
+          (acc, e): Effect.Effect<Checkpointing, CoordinationUnavailable> =>
+            acc.fenced
+              ? Effect.succeed(acc)
+              : Effect.map(checkpointOne(e), (isFenced) =>
+                  isFenced ? { ...acc, fenced: true } : { ...acc, checkpointed: Arr.append(acc.checkpointed, e) },
+                ),
+        );
+
+      type Failure = { readonly e: CircuitEvent; readonly err: DeliveryFailed };
+      const sequenced = events.filter((e) => e.type === SEQUENCED_EVENT);
+      const [head, ...rest] = sequenced;
+
+      const first = head === undefined
+        ? { progress: { checkpointed: [], fenced: false } as Checkpointing, failures: [] as ReadonlyArray<Failure> }
+        : yield* Effect.result(sink.deliver(head)).pipe(
+            Effect.flatMap((outcome) =>
+              Result.isFailure(outcome)
+                ? Effect.succeed({
+                    progress: { checkpointed: [], fenced: false } as Checkpointing,
+                    failures: [{ e: head, err: outcome.failure }] as ReadonlyArray<Failure>,
+                  })
+                : Effect.map(checkpointAll([head], { checkpointed: [], fenced: false }), (progress) => ({
+                    progress,
+                    failures: [] as ReadonlyArray<Failure>,
+                  })),
+            ),
+          );
+
+      const { checkpointed, fenced, failures } = first.progress.fenced || first.failures.length > 0
+        ? { ...first.progress, failures: first.failures }
+        : yield* Effect.gen(function* () {
+            const failedOnce = yield* Ref.make(false);
+            const delivered = yield* Effect.forEach(
+              rest,
+              (e) =>
+                Effect.flatMap(Ref.get(failedOnce), (failed) =>
+                  // Skipped, not attempted: the leader steps down and its successor re-derives it.
+                  failed
+                    ? Effect.succeed(O.none<{ e: CircuitEvent; outcome: Result.Result<void, DeliveryFailed> }>())
+                    : Effect.result(sink.deliver(e)).pipe(
+                        Effect.tap((outcome) => (Result.isFailure(outcome) ? Ref.set(failedOnce, true) : Effect.void)),
+                        Effect.map((outcome) => O.some({ e, outcome })),
+                      ),
+                ),
+              { concurrency: DELIVERY_CONCURRENCY },
+            );
+            const attempted = delivered.flatMap(O.toArray);
+            const confirmed = attempted.flatMap(({ e, outcome }) => (Result.isSuccess(outcome) ? [e] : []));
+            const failures: ReadonlyArray<Failure> = attempted.flatMap(({ e, outcome }) =>
+              Result.isFailure(outcome) ? [{ e, err: outcome.failure }] : [],
+            );
+            const progress = yield* checkpointAll(confirmed, first.progress);
+            return { ...progress, failures };
+          });
+
+      const stopped = fenced || failures.length > 0;
+      yield* fenced
+        ? Effect.all([demoteAndFence, Metric.update(Telemetry.isLeader, 0)], { discard: true })
+        : failures.length > 0
+          ? Effect.all(
+              [
+                Effect.forEach(
+                  failures,
+                  ({ e, err }) =>
+                    Effect.logWarning(
+                      `${ha.instanceId}: control plane did not confirm ` +
+                      `${err.apiId} sequence ${e.data.sequence} (${err.cause}) — ` +
+                      `stepping down rather than checkpoint an undelivered sequence`,
+                    ),
+                  { discard: true },
+                ),
+                releaseAndHoldOff(tickNow),
+                demoteAndFence,
+                Metric.update(Telemetry.isLeader, 0),
+              ],
+              { discard: true },
+            )
+          : Effect.void;
+
+      // A leader that stopped publishes no snapshots either: it has stepped down.
+      const publishable: ReadonlyArray<CircuitEvent> = stopped
+        ? checkpointed
+        : [...checkpointed, ...events.filter((e) => e.type !== SEQUENCED_EVENT)];
 
       // Every tick, so a dashboard mid-dwell does not look frozen.
       yield* Ref.get(registry).pipe(

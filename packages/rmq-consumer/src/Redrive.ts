@@ -60,6 +60,18 @@ const PASS_DEADLINE = Duration.seconds(60);
 const SETTLE_POLL = Duration.millis(20);
 const SETTLE_DEADLINE = Duration.seconds(10);
 
+/** Passes until drained, capped, so a backlog larger than one pass needs no second outage. */
+const REDRIVE_MAX_PASSES = 20;
+
+/**
+ * The longest one redrive can hold its election trigger unacked: every pass
+ * running to its deadline and then to its settle deadline, about 23 minutes. It
+ * must fit inside the broker's `consumer_timeout`, or the broker closes the
+ * channel mid-redrive and the trigger is redelivered (Redrive.test.ts).
+ */
+export const REDRIVE_MAX_HOLD_MS =
+  REDRIVE_MAX_PASSES * (Duration.toMillis(PASS_DEADLINE) + Duration.toMillis(SETTLE_DEADLINE));
+
 // Every message a pass does not move is handed back with `release`, never `requeue`:
 // nothing about it failed, and a counted return is a step towards a delivery limit.
 export const makeRedrive = (opts: RedriveOptions) => {
@@ -222,8 +234,6 @@ export const makeRedrive = (opts: RedriveOptions) => {
       : Effect.void;
     return { moved, strays, poisoned, reason };
   });
-  /** Passes until drained, capped, so a backlog larger than one pass needs no second outage. */
-  const REDRIVE_MAX_PASSES = 20;
   const passes = Effect.gen(function* () {
     // Debug: the sweep runs every 30s and usually finds nothing.
     yield* Effect.logDebug(

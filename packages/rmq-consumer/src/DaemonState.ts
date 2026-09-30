@@ -1,7 +1,7 @@
 import { Match, Option as O } from "effect";
 import { State, supersedes } from "@egress/domain/Model.ts";
 import type { Applied, EventType, Lease } from "@egress/domain/Model.ts";
-import { initial as initialPolicy, runsWork, step } from "./DaemonPolicy.ts";
+import { initial as initialPolicy, runsWork, silent, step } from "./DaemonPolicy.ts";
 import type { DaemonPolicyState } from "./DaemonPolicy.ts";
 
 /**
@@ -10,6 +10,13 @@ import type { DaemonPolicyState } from "./DaemonPolicy.ts";
  * they are the "actual" side `plan` compares against.
  */
 export type DaemonState = {
+  /**
+   * How much `circuit` is worth: nothing yet (`unheard`), the last event (`heard`),
+   * or stale because events stopped (`silent`) — see ADR 019.
+   */
+  readonly control: "unheard" | "heard" | "silent";
+  /** When an event was last applied, or the daemon started: what silence is measured from. */
+  readonly lastHeardAt: number;
   readonly circuit: State;
   /**
    * The event `circuit` came from. A stale one — a paused leader resuming, a
@@ -21,19 +28,37 @@ export type DaemonState = {
   readonly probedSequence: number;
   /** The same idea for the redrive election: one replay per recovery, not one per trigger message. */
   readonly redrivenSequence: number;
+  /**
+   * Until when this daemon holds the floor. A lease, not a flag: SAC promotes
+   * silently, so a replacement learns it holds the floor from the next event,
+   * and the lease stops a dead holder's claim outliving it (ADR 013).
+   */
+  readonly floorUntil: number;
 };
 
+/**
+ * Four snapshot intervals: one lost snapshot is noise, four is a control plane
+ * that has stopped. The floor lease is the same length, for the same reason.
+ */
+export const SILENCE_MS = 60_000;
+export const FLOOR_LEASE_MS = 60_000;
+
 export const initialState = (now: number): DaemonState => ({
-  // CLOSED until told otherwise: a daemon that starts mid-incident learns the
-  // real state from the aggregator's next snapshot.
+  control: "unheard",
+  lastHeardAt: now,
+  // Worth nothing until an event says otherwise: the policy, not this, keeps the daemon idle.
   circuit: State.CLOSED,
   applied: O.none(),
   policy: initialPolicy(now),
   probedSequence: -1,
   redrivenSequence: -1,
+  floorUntil: 0,
 });
 
-/** Everything that can move a daemon: two from the control plane, two from the broker's elections, two from its own clock. */
+/** Whether the broker's election of this daemon as the floor is still current. */
+export const isFloor = (state: DaemonState, now: number): boolean => now < state.floorUntil;
+
+/** Everything that can move a daemon: two from the control plane, three from the broker's elections, two from its own clock. */
 export type Command =
   | {
       readonly _tag: "CircuitChanged";
@@ -43,13 +68,16 @@ export type Command =
       readonly sequence: number;
       readonly at: number;
     }
-  | { readonly _tag: "RampTick"; readonly at: number }
+  /** Once a second: advances the ramp, and notices a control plane gone quiet. */
+  | { readonly _tag: "ClockTick"; readonly at: number }
+  /** A delivery on the floor queue: the broker elected this daemon. */
+  | { readonly _tag: "FloorElected"; readonly at: number }
   | { readonly _tag: "ProbeTriggered"; readonly sequence: number }
   | { readonly _tag: "RedriveTriggered"; readonly sequence: number }
   /** Un-marks the sequence so the redelivered trigger is acted on, not deduped. */
   | { readonly _tag: "TriggerFailed"; readonly election: "probe" | "redrive"; readonly sequence: number }
   /** On a timer: dead letters that arrive while CLOSED would otherwise never be replayed. */
-  | { readonly _tag: "SweepTick"; readonly isFloor: boolean };
+  | { readonly _tag: "SweepTick"; readonly at: number };
 
 /**
  * What the shell must do about a transition. Returned rather than performed,
@@ -84,6 +112,8 @@ export const reduce = (
         ? {
           next: {
             ...state,
+            control: "heard",
+            lastHeardAt: command.at,
             applied: O.some({ lease: command.lease, sequence: command.sequence }),
             circuit: command.state,
             policy: step(state.policy, command.state, command.at),
@@ -103,12 +133,21 @@ export const reduce = (
         }
         : ignore(state),
 
-    // Only while CLOSED: every other state is a level, not a ramp.
-    RampTick: (command): Transition => ({
+    // Silence first: a ramp on stale knowledge is still stale. Only a heard CLOSED
+    // ramps; every other state is a level.
+    ClockTick: (command): Transition => ({
       next:
-        state.circuit === State.CLOSED
-          ? { ...state, policy: step(state.policy, state.circuit, command.at) }
-          : state,
+        state.control !== "silent" && command.at - state.lastHeardAt >= SILENCE_MS
+          ? { ...state, control: "silent", policy: silent(command.at) }
+          : state.control === "heard" && state.circuit === State.CLOSED
+            ? { ...state, policy: step(state.policy, state.circuit, command.at) }
+            : state,
+      actions: [],
+      ignored: false,
+    }),
+
+    FloorElected: (command): Transition => ({
+      next: { ...state, floorUntil: command.at + FLOOR_LEASE_MS },
       actions: [],
       ignored: false,
     }),
@@ -132,11 +171,11 @@ export const reduce = (
       ignored: false,
     }),
 
-    // No sequence, no dedupe, no state change.
+    // No sequence, no dedupe, no state change. Not on a CLOSED that is stale or assumed.
     SweepTick: (command): Transition => ({
       next: state,
       actions:
-        redriveOnClose && state.circuit === State.CLOSED && command.isFloor
+        redriveOnClose && state.control === "heard" && state.circuit === State.CLOSED && isFloor(state, command.at)
           ? [{ _tag: "Redrive" }]
           : [],
       ignored: false,
@@ -171,13 +210,17 @@ type Connections = {
 export const desired = (
   state: DaemonState,
   self: { readonly position: number; readonly isFloor: boolean },
-): Connections => ({
-  // In HALF_OPEN only the elected prober calls; a low hash position must not race it.
-  work: state.circuit !== State.HALF_OPEN && runsWork(state.policy, self),
-  // Leaving HALF_OPEN or CLOSED retires the probe or the redrive.
-  probe: state.circuit === State.HALF_OPEN,
-  redrive: state.circuit === State.CLOSED,
-});
+): Connections => {
+  // A silent control plane's circuit is not believed: the policy alone decides.
+  const believed = state.control === "silent" ? O.none<State>() : O.some(state.circuit);
+  return {
+    // In HALF_OPEN only the elected prober calls; a low hash position must not race it.
+    work: !O.contains(believed, State.HALF_OPEN) && runsWork(state.policy, self),
+    // Leaving HALF_OPEN or CLOSED retires the probe or the redrive.
+    probe: O.contains(believed, State.HALF_OPEN),
+    redrive: O.contains(believed, State.CLOSED),
+  };
+};
 
 type Plan = {
   readonly startWork: boolean;
