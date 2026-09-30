@@ -9,3 +9,6 @@ node_modules/
 docs/runs/*.json
 !docs/runs/baseline-*.json
 *.tsbuildinfo
+
+# Reference source, fetched at the installed version by scripts/fetch-effect.mjs.
+repos/
