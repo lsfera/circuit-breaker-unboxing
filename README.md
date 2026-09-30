@@ -1,4 +1,6 @@
 # Abstracting over the circuit breaker
+> 📖 Read the full article: [Circuit Breaker: Unboxing](https://lsfera.github.io/circuit-breaker-unboxing/)
+>
 > [Start with 01 · Baseline(no breaker)](https://github.com/lsfera/circuit-breaker-unboxing/blob/article/01-base-scenario/README.md)
 
 
@@ -99,3 +101,5 @@ broker every return counts, and a message waiting out an open breaker is
 dead-lettered untried.
 
 > [Start with 01 · Baseline(no breaker)](https://github.com/lsfera/circuit-breaker-unboxing/blob/article/01-base-scenario/README.md)
+>
+> Or read the whole series as one article: [Circuit Breaker: Unboxing](https://lsfera.github.io/circuit-breaker-unboxing/)
