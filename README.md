@@ -22,7 +22,11 @@ articles 1–4 cannot give:
   service;
 - **tens to thousands of APIs**, each with its own breaker.
 
-If none applies, stop at article 3 or 4.
+If none applies, stop at article 3 or 4. And before building any of them, see
+[what is available off the shelf](docs/off-the-shelf.md): meshes, gateways,
+egress proxies and AI gateways, commercial and open source, judged on the same
+three constraints. This repo is Envoy's answer plus what it lacks; the same page
+[lays the two side by side](docs/off-the-shelf.md#envoy-alone-and-what-this-repo-adds).
 
 ## The problem
 
@@ -188,7 +192,7 @@ packages/
   tracing/       OpenTelemetry when OTEL_EXPORTER_OTLP_ENDPOINT is set
   demo/          drives the demo incident over HTTP
 infra/           envoy.yaml, flaky-upstream, chaos harnesses, monitoring
-docs/            architecture, high availability, measurements, decisions/
+docs/            architecture, high availability, measurements, off the shelf, decisions/
 ```
 
 **Effect 4 (4.0.0-rc.117)**; see `AGENTS.md`. No build step: Node runs the
