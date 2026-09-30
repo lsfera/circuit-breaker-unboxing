@@ -7,7 +7,7 @@
  * `repos/effect` exists so that an agent — or a person — reading how an Effect
  * API behaves reads the implementation and tests of the version actually
  * installed. The failure it invites is quiet: someone bumps `effect` in the
- * catalog, the subtree stays where it was, and from then on the reference
+ * catalog, the copy stays where it was, and from then on the reference
  * material describes a library the code no longer compiles against. Worse than
  * no reference at all, because it is trusted. The day this was added, Effect's
  * `main` was already two release candidates ahead of the lockfile.
@@ -60,8 +60,8 @@ for (const [name, where] of checked) console.log(`  ${name.padEnd(24)} ${where}`
 if (problems.length > 0) {
   console.error(`\n${problems.join("\n")}\n`);
   console.error(
-    "Move the subtree to the tag for the installed version:\n" +
-      "  git subtree pull --prefix=repos/effect https://github.com/Effect-TS/effect.git effect@<version> --squash",
+    "Every Effect package moves with the catalog's effect; pin them to the same version, then:\n" +
+      "  pnpm run fetch:effect",
   );
   process.exit(1);
 }

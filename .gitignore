@@ -20,3 +20,6 @@ docs/assets/vendor/
 # yours to delete.
 history/runs/*.json
 !history/runs/baseline-*.json
+
+# Reference source, fetched at the installed version by scripts/fetch-effect.mjs.
+repos/
