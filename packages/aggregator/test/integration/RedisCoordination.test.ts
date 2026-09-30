@@ -18,7 +18,8 @@ import {
 import type { LeaseToken } from "../../src/Coordination.ts";
 
 /**
- * Everything in Coordination.test.ts runs against the in-memory layer and is
+ * Everything in Coordination.test.ts runs against the in-memory double
+ * (test/support/InMemory.ts) and is
  * fast, deterministic, and requires nothing external — that is what
  * `pnpm test` runs by default. This file is the other half:
  * `RedisCoordinationLayer`'s Lua scripts started out reasoned from Redis's

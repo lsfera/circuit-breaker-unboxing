@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Ref, Option as O, Predicate, Result, Schema } from "effect";
+import { Context, Effect, Layer, Option as O, Predicate, Result, Schema } from "effect";
 import { CoordinationUnavailable, evalGuarded } from "./Coordination.ts";
 import type { RedisLike } from "./Coordination.ts";
 import { decodeCircuitEvent, readerFor } from "@egress/domain/Model.ts";
@@ -46,54 +46,6 @@ export class Outbox extends Context.Service<
     readonly depth: (apiId: string) => Effect.Effect<number, CoordinationUnavailable>;
   }
 >()("@egress/aggregator/Outbox") {}
-
-// ---------------------------------------------------------------------------
-// In memory: what solo mode uses, and what the unit tests drive.
-// ---------------------------------------------------------------------------
-
-export const makeInMemoryOutbox = Effect.gen(function* () {
-  /** Per API: the pending events, and the absolute position of the first. */
-  type Queue = { readonly head: number; readonly events: ReadonlyArray<CircuitEvent> };
-  const queues = yield* Ref.make(new Map<string, Queue>());
-  const queueOf = (map: Map<string, Queue>, apiId: string): Queue =>
-    map.get(apiId) ?? { head: 0, events: [] };
-
-  const append = (event: CircuitEvent) =>
-    Ref.modify(queues, (map) => {
-      const apiId = event.data.apiId;
-      const q = queueOf(map, apiId);
-      const next = [...q.events, event];
-      const dropped = Math.max(0, next.length - OUTBOX_MAX_PER_API);
-      return [dropped, new Map(map).set(apiId, { head: q.head + dropped, events: next.slice(dropped) })];
-    });
-
-  const peek = (apiId: string, limit: number) =>
-    Ref.get(queues).pipe(
-      Effect.map((map): Peeked => {
-        const q = queueOf(map, apiId);
-        return { from: q.head, entries: q.events.slice(0, limit).map(O.some) };
-      }),
-    );
-
-  // The head is kept when the queue empties, so a commit from an older peek
-  // can never trim entries appended after it.
-  const commit = (apiId: string, through: number) =>
-    Ref.update(queues, (map) => {
-      const q = queueOf(map, apiId);
-      const trim = Math.max(0, through - q.head);
-      return new Map(map).set(apiId, { head: q.head + trim, events: q.events.slice(trim) });
-    });
-
-  const apis = Ref.get(queues).pipe(
-    Effect.map((map) => [...map].filter(([, q]) => q.events.length > 0).map(([apiId]) => apiId)),
-  );
-  const depth = (apiId: string) =>
-    Ref.get(queues).pipe(Effect.map((map) => queueOf(map, apiId).events.length));
-
-  return { append, peek, commit, apis, depth } as const;
-});
-
-export const InMemoryOutboxLayer = Layer.effect(Outbox, makeInMemoryOutbox);
 
 // ---------------------------------------------------------------------------
 // Redis: the same port CheckpointStore uses, deliberately.

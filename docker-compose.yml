@@ -241,8 +241,8 @@ services:
     # Runs main.ts against the three real Envoy replicas, which push their
     # stats here over gRPC (not the sim fleet — --source=envoy-push is what
     # makes this stack's outlier detection real instead of simulated), with
-    # Redis-backed HA instead of the in-memory default, since two instances
-    # are genuinely competing here. --source=envoy is the polling alternative;
+    # the lease in Redis, which both instances compete for. --source=envoy is
+    # the polling alternative;
     # see "Ingestion" in README.md for the measurement that chose between them.
     #
     # Keep node's args after "src/main.ts" on this one line. With YAML `>`
@@ -258,7 +258,7 @@ services:
     # every event on circuit.control. Only the leader publishes, so the two
     # instances never double-deliver.
     command: >
-      node packages/aggregator/src/main.ts --source=envoy-push --push-port=9900 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-1
+      node packages/aggregator/src/main.ts --source=envoy-push --push-port=9900 --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-1
     # Restarting matters more here than it looks: a killed leader whose
     # container never comes back leaves the survivor with nowhere to fail
     # over to next time, so the second failover in a demo has no candidate.
@@ -276,7 +276,7 @@ services:
   aggregator-2:
     <<: *aggregator
     command: >
-      node packages/aggregator/src/main.ts --source=envoy-push --push-port=9900 --ha=redis --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-2
+      node packages/aggregator/src/main.ts --source=envoy-push --push-port=9900 --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-2
     ports: ["8089:8088"]
 
   # The scenario from docs/architecture.md, running for real: a producer

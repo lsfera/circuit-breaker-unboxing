@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { Duration, Effect, Layer, Ref, Option as O} from "effect";
 import { TestClock } from "effect/testing";
 import { Aggregator } from "../src/Aggregator.ts";
-import { InMemoryCoordinationLayer } from "../src/Coordination.ts";
+import { InMemoryCoordinationLayer } from "./support/InMemory.ts";
 import { EventBus, EventSink } from "../src/Events.ts";
 import { FleetSource, SimFleetLayer, parseStats } from "../src/FleetSource.ts";
 import { emptyIntegrity, record } from "../src/Http.ts";
@@ -50,9 +50,8 @@ const harness = (delivered: Ref.Ref<ReadonlyArray<CircuitEvent>>) =>
         SimFleetLayer(SPECS, 5),
         EventBus.layer,
         RecordingSink(delivered),
-        // Solo HA: this instance always wins its own lease, same as a single
-        // real process would. Dedicated failover/fencing tests below build
-        // their own two-instance harness instead of this one.
+        // One instance, alone on the lease, so it always wins it. The
+        // failover/fencing tests build their own two-instance harness.
         InMemoryCoordinationLayer,
       ),
     ),
@@ -171,7 +170,7 @@ test("every published event is a valid CloudEvent carrying full state", async ()
     assert.ok(Number.isFinite(Date.parse(e.data.observedSince)));
     assert.notEqual(e.data.observedSince, "1970-01-01T00:00:00.000Z");
     // The publishing leader's lease, so a reader can rank it against a paused
-    // predecessor. Solo mode is one instance holding the first handoff.
+    // predecessor. A lone instance holds the first handoff.
     assert.equal(e.data.lease?.counter, 1);
     assert.ok(e.data.lease?.epoch);
   }

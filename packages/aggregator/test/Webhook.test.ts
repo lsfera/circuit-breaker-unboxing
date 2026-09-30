@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Effect, Layer } from "effect";
-import { InMemoryOutboxLayer } from "../src/Outbox.ts";
+import { InMemoryOutboxLayer } from "./support/InMemory.ts";
 import { makeWebhookSink, SOURCE } from "../src/Events.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 

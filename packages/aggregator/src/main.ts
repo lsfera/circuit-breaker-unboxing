@@ -10,8 +10,8 @@ import { Rmq } from "@egress/rmq/Client.ts";
 import { PositiveInt, rmqFlag, VERSION } from "@egress/config/Settings.ts";
 import { Aggregator } from "./Aggregator.ts";
 import { makeAmqpControlPlaneSink } from "./AmqpControlPlaneSink.ts";
-import { HaSettings, InMemoryCoordinationLayer, RedisCoordinationLayer } from "./Coordination.ts";
-import { InMemoryOutboxLayer, RedisOutboxLayer } from "./Outbox.ts";
+import { HaSettings, RedisCoordinationLayer } from "./Coordination.ts";
+import { RedisOutboxLayer } from "./Outbox.ts";
 import { combineSinks, EventBus, EventSink, makeWebhookSink, NoopSinkLayer } from "./Events.ts";
 import { EnvoyFleetLayer, SimFleetLayer } from "./FleetSource.ts";
 import { EnvoyPushFleetLayer } from "./EnvoyPushSource.ts";
@@ -57,13 +57,9 @@ const flags = {
     Flag.withDefault(false),
     Flag.withDescription("Drop the webhook sink, leaving only --rmq"),
   ),
-  ha: Flag.Literals("ha", ["memory", "redis"] as const).pipe(
-    Flag.withDefault("memory" as const),
-    Flag.withDescription("Coordination backend for the publishing lease"),
-  ),
   redis: Flag.String("redis").pipe(
     Flag.withDefault("redis://127.0.0.1:6379"),
-    Flag.withDescription("Redis URL (--ha=redis)"),
+    Flag.withDescription("Redis URL for the publishing lease, checkpoints and outbox"),
   ),
   instanceId: Flag.String("instance-id").pipe(
     Flag.withDefault(randomUUID()),
@@ -157,35 +153,38 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
       ).pipe(Layer.provide(Rmq.layer(broker))),
   });
 
-  /** Solo by default (in-memory, always wins its lease); `--ha=redis` for the compose pair. */
+  /**
+   * Redis even for one instance: an in-process lease excludes nothing, so a
+   * second instance would lead beside it. Unreachable, and this instance stands
+   * down rather than leading unfenced.
+   */
   const asRedisLike = (redis: Redis): RedisLike => ({
     eval: (script, { keys, args: evalArgs }) =>
       redis.eval(script, keys.length, ...keys, ...evalArgs) as Promise<string | number | null>,
   });
 
-  const CoordinationLayer =
-    settings.ha === "redis"
-      ? Layer.unwrap(
-          Effect.acquireRelease(
-            Effect.sync(
-              () =>
-                new Redis(settings.redis, {
-                  // Fail fast: ioredis's default retries turn an outage into a hung tick.
-                  maxRetriesPerRequest: 1,
-                  enableOfflineQueue: false,
-                  connectTimeout: 1000,
-                }),
-            ),
-            (redis) => Effect.promise(() => redis.quit().then(() => {}, () => {})),
-          ).pipe(
-            Effect.map((redis) => {
-              // One connection for the lease and the outbox.
-              const like = asRedisLike(redis);
-              return Layer.mergeAll(RedisCoordinationLayer(like), RedisOutboxLayer(like));
-            }),
-          ),
-        )
-      : Layer.mergeAll(InMemoryCoordinationLayer, InMemoryOutboxLayer);
+  const CoordinationLayer = Layer.unwrap(
+    Effect.acquireRelease(
+      Effect.sync(() =>
+        new Redis(settings.redis, {
+          // Fail fast: ioredis's default retries turn an outage into a hung tick.
+          maxRetriesPerRequest: 1,
+          enableOfflineQueue: false,
+          connectTimeout: 1000,
+        })
+          // Otherwise ioredis prints a stack per reconnect attempt. The outage is
+          // already reported, once, by the tick that stands down over it.
+          .on("error", () => {}),
+      ),
+      (redis) => Effect.promise(() => redis.quit().then(() => {}, () => {})),
+    ).pipe(
+      Effect.map((redis) => {
+        // One connection for the lease and the outbox.
+        const like = asRedisLike(redis);
+        return Layer.mergeAll(RedisCoordinationLayer(like), RedisOutboxLayer(like));
+      }),
+    ),
+  );
 
   const HaLayer = Layer.mergeAll(
     CoordinationLayer,
@@ -222,7 +221,7 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
       yield* Effect.log(
         `egress circuit breaker console  source=${settings.source}` +
           (settings.source === "sim" ? ` replicas=${settings.replicas}` : "") +
-          `  instance=${settings.instanceId}  ha=${settings.ha}` +
+          `  instance=${settings.instanceId}` +
           O.match(settings.rmq, {
             onNone: () => "",
             onSome: ({ host, port }) => `  rmq=${host}:${port}`,

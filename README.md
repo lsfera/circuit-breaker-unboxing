@@ -120,7 +120,8 @@ fencing, checkpoints and the outbox.
 
 ```bash
 pnpm install
-pnpm start                                        # one aggregator over a simulated fleet, console on :8088
+docker compose up -d redis                        # the aggregator always takes its lease in Redis
+pnpm start --redis=redis://redis:6379             # one aggregator over a simulated fleet, console on :8088
 docker compose up --build -d                      # HOST_WORKSPACE_FOLDER: this repo's path on the Docker host
 pnpm run demo:envoy                               # an incident, driven through the aggregators' own routes
 node infra/chaos-load.mjs --profiles=low --faults=flaky-full-cycle,kill-leader

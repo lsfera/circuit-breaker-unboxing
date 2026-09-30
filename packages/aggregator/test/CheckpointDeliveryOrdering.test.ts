@@ -7,8 +7,8 @@ import {
   HaSettings,
   LeaderElection,
   CheckpointStore,
-  makeInMemoryCoordination,
 } from "../src/Coordination.ts";
+import { makeInMemoryCoordination } from "./support/InMemory.ts";
 import { EventBus, EventSink } from "../src/Events.ts";
 import { FleetSource, SimFleetLayer } from "../src/FleetSource.ts";
 import { Config, defaultConfig, DeliveryFailed, SEQUENCED_EVENT } from "@egress/domain/Model.ts";

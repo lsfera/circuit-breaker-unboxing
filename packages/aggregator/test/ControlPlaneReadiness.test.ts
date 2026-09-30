@@ -5,14 +5,16 @@ import { TestClock } from "effect/testing";
 import { Aggregator } from "../src/Aggregator.ts";
 import {
   HaSettings,
-  InMemoryCoordinationLayer,
   LeaderElection,
   CheckpointStore,
-  makeInMemoryCoordination,
 } from "../src/Coordination.ts";
 import { EventBus, EventSink, makeWebhookSink } from "../src/Events.ts";
 import { FleetSource, SimFleetLayer } from "../src/FleetSource.ts";
-import { InMemoryOutboxLayer } from "../src/Outbox.ts";
+import {
+  InMemoryCoordinationLayer,
+  InMemoryOutboxLayer,
+  makeInMemoryCoordination,
+} from "./support/InMemory.ts";
 import { Config, defaultConfig } from "@egress/domain/Model.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 

@@ -9,8 +9,8 @@ import {
   CoordinationUnavailable,
   HaSettings,
   LeaderElection,
-  makeInMemoryCoordination,
 } from "../src/Coordination.ts";
+import { makeInMemoryCoordination } from "./support/InMemory.ts";
 import { isFenced, parseToken, sameToken } from "../src/Coordination.ts";
 import type { LeaseToken } from "../src/Coordination.ts";
 import { EventBus, EventSink } from "../src/Events.ts";
@@ -113,6 +113,43 @@ test("a stale token is rejected even for an API no one has checkpointed yet", as
           })
           .pipe(Effect.as("ok" as const), Effect.catchTag("CheckpointFenced", () => Effect.succeed("fenced" as const)));
         assert.equal(freshWrite, "ok", "B's current token must be accepted");
+      }),
+      TestClock.layer(),
+    ),
+  );
+});
+
+test("a release does not restart the counter, so the released holder stays fenced", async () => {
+  await Effect.runPromise(
+    Effect.provide(
+      Effect.gen(function* () {
+        const { leaderElection, checkpointStore } = yield* makeInMemoryCoordination;
+
+        // A takes the lease three times over, so its token is well above 1.
+        let aToken = O.none<LeaseToken>();
+        for (let i = 0; i < 3; i++) {
+          aToken = yield* leaderElection.tryAcquireOrRenew("A", 1000);
+          yield* TestClock.adjust(Duration.millis(2000));
+        }
+        aToken = yield* leaderElection.tryAcquireOrRenew("A", 1000);
+        yield* leaderElection.release("A");
+        const bToken = yield* leaderElection.tryAcquireOrRenew("B", 1000);
+        assert.ok(O.isSome(aToken) && O.isSome(bToken));
+        assert.ok(
+          bToken.value.counter > aToken.value.counter,
+          "the holder after a release must outrank the one that released, as in Redis",
+        );
+
+        const staleWrite = yield* checkpointStore
+          .save("payments", aToken.value, {
+            state: "OPEN",
+            reason: "ALL_ENDPOINTS_EJECTED",
+            sequence: 1,
+            changedAt: 0,
+            openBackoffMs: 4000,
+          })
+          .pipe(Effect.as("ok" as const), Effect.catchTag("CheckpointFenced", () => Effect.succeed("fenced" as const)));
+        assert.equal(staleWrite, "fenced", "A released; its token must no longer write");
       }),
       TestClock.layer(),
     ),

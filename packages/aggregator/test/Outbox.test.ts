@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Effect, Exit, Option as O } from "effect";
-import { makeInMemoryOutbox, Outbox, OUTBOX_MAX_PER_API, RedisOutboxLayer } from "../src/Outbox.ts";
+import { Outbox, OUTBOX_MAX_PER_API, RedisOutboxLayer } from "../src/Outbox.ts";
+import { makeInMemoryOutbox } from "./support/InMemory.ts";
 import type { RedisLike } from "../src/Coordination.ts";
 import { SOURCE } from "../src/Events.ts";
 import type { Entry } from "../src/Outbox.ts";

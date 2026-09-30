@@ -1,11 +1,12 @@
-import { Clock, Context, Data, Duration, Effect, Layer, Option as O, Predicate, Ref, Result, Schema } from "effect";
+import { Context, Data, Duration, Effect, Layer, Option as O, Predicate, Result, Schema } from "effect";
 import { readerFor, ReasonSchema, StateSchema } from "@egress/domain/Model.ts";
 import { randomUUID } from "node:crypto";
 
 /**
  * Exactly one instance publishes (LeaderElection), and a successor continues the
- * sequence (CheckpointStore). Solo mode is the in-memory layer: one instance
- * always winning its own lease.
+ * sequence (CheckpointStore). The only backend is Redis: exclusion needs state
+ * outside the process, so there is no in-process one (the unit tests' double
+ * lives in test/support/).
  */
 
 /**
@@ -123,95 +124,6 @@ export class CheckpointStore extends Context.Service<
     ) => Effect.Effect<O.Option<Checkpoint>, CoordinationUnavailable>;
   }
 >()("@egress/aggregator/Coordination/CheckpointStore") {}
-
-// The default runtime path, the two-instance test harness, and the reference the
-// Redis layer must match.
-
-type Lock = {
-  readonly holderId: string;
-  readonly counter: number;
-  readonly expiresAt: number;
-};
-
-export const makeInMemoryCoordination = Effect.gen(function* () {
-  // Never rotates: this store cannot lose its state without the process.
-  const epoch = newEpoch();
-  const lock = yield* Ref.make<O.Option<Lock>>(O.none());
-  const checkpoints = yield* Ref.make(new Map<string, Checkpoint>());
-
-  const tryAcquireOrRenew = (holderId: string, ttlMs: number) =>
-    Clock.currentTimeMillis.pipe(
-      Effect.flatMap((now) =>
-        Ref.modify(lock, (current) => {
-          type Outcome = readonly [O.Option<LeaseToken>, O.Option<Lock>];
-          /** Someone else holds a live lease: no token, and the lock is left alone. */
-          const deny: Outcome = [O.none(), current];
-          /** Same holder, same token, extended TTL. */
-          const renew = (held: Lock): Outcome => [
-            O.some({ epoch, counter: held.counter }),
-            O.some({ ...held, expiresAt: now + ttlMs }),
-          ];
-          /** Expired or never held: a genuine handoff, counter strictly increases. */
-          const handOver = (previous: number): Outcome => [
-            O.some({ epoch, counter: previous + 1 }),
-            O.some({ holderId, counter: previous + 1, expiresAt: now + ttlMs }),
-          ];
-          return O.match(current, {
-            onNone: () => handOver(0),
-            onSome: (held) =>
-              held.expiresAt <= now
-                ? handOver(held.counter)
-                : held.holderId === holderId
-                  ? renew(held)
-                  : deny,
-          });
-        }),
-      ),
-    );
-
-  const release = (holderId: string) =>
-    Ref.update(lock, O.filter((held) => held.holderId !== holderId));
-
-  const currentToken = Ref.get(lock).pipe(
-    Effect.map((l): LeaseToken => ({
-      epoch,
-      counter: O.getOrElse(
-        O.map(l, (held) => held.counter),
-        () => 0,
-      ),
-    })),
-  );
-
-  const save = (apiId: string, token: LeaseToken, checkpoint: Checkpoint) =>
-    currentToken.pipe(
-      Effect.flatMap((current) =>
-        isFenced(token, current)
-          ? Effect.fail(
-              new CheckpointFenced({ apiId, attempted: token, current: O.some(current) }),
-            )
-          : Ref.update(checkpoints, (map) => new Map(map).set(apiId, checkpoint)),
-      ),
-    );
-
-  const load = (apiId: string) =>
-    Ref.get(checkpoints).pipe(Effect.map((map) => O.fromUndefinedOr(map.get(apiId))));
-
-  return {
-    leaderElection: { tryAcquireOrRenew, release },
-    checkpointStore: { save, load },
-  };
-});
-
-/** Both services, sharing the one token counter that makes fencing correct. */
-export const InMemoryCoordinationLayer: Layer.Layer<LeaderElection | CheckpointStore> =
-  Layer.unwrap(
-    Effect.map(makeInMemoryCoordination, ({ leaderElection, checkpointStore }) =>
-      Layer.mergeAll(
-        Layer.succeed(LeaderElection, leaderElection),
-        Layer.succeed(CheckpointStore, checkpointStore),
-      ),
-    ),
-  );
 
 /** Untrusted input: anything that does not decode reads as a cold start. */
 const readCheckpoint = readerFor(CheckpointFromJson);

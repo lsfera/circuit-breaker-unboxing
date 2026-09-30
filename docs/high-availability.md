@@ -129,5 +129,8 @@ delivery that fails its retries is appended to a per-API outbox in Redis
 - **bounded at 500 per API, dropping the oldest**, so a subscriber that stays
   down sees a gap it can detect rather than a state it wrongly trusts.
 
-Solo mode runs the same interfaces in memory; `pnpm run test:redis` runs them
-against a real Redis.
+Redis is the only backend, even for one instance: a lease held in one
+process's memory excludes nothing, so a second instance would lead beside it.
+The unit tests drive an in-memory double of the same interfaces
+(`test/support/InMemory.ts`); `pnpm run test:redis` runs the real ones against
+a real Redis.
