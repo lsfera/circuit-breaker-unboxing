@@ -8,3 +8,4 @@ node_modules/
 # yours to delete.
 docs/runs/*.json
 !docs/runs/baseline-*.json
+*.tsbuildinfo
