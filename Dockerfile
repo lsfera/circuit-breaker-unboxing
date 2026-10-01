@@ -31,6 +31,9 @@ RUN npm install --global "$(node -p 'require("./package.json").packageManager')"
 # @egress/tracing is exactly how that was learned.
 COPY packages/aggregator/package.json packages/aggregator/
 COPY packages/config/package.json packages/config/
+COPY packages/coordination/package.json packages/coordination/
+COPY packages/coordination-postgres/package.json packages/coordination-postgres/
+COPY packages/coordination-redis/package.json packages/coordination-redis/
 COPY packages/demo/package.json packages/demo/
 COPY packages/domain/package.json packages/domain/
 COPY packages/rmq/package.json packages/rmq/

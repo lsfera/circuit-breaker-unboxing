@@ -1,0 +1,14 @@
+{
+  "name": "@egress/coordination",
+  "private": true,
+  "type": "module",
+  "description": "The aggregator's coordination ports (LeaderElection, CheckpointStore, Outbox) and the fencing-token rules every backend obeys. No backend here.",
+  "exports": {
+    "./Coordination.ts": "./src/Coordination.ts",
+    "./Outbox.ts": "./src/Outbox.ts"
+  },
+  "dependencies": {
+    "@egress/domain": "workspace:*",
+    "effect": "catalog:"
+  }
+}

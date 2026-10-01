@@ -1,0 +1,15 @@
+{
+  "name": "@egress/coordination-postgres",
+  "private": true,
+  "type": "module",
+  "description": "@egress/coordination's ports over PostgreSQL: the lease, checkpoints and outbox as single statements.",
+  "exports": {
+    "./PostgresBackend.ts": "./src/PostgresBackend.ts"
+  },
+  "dependencies": {
+    "@egress/coordination": "workspace:*",
+    "@egress/domain": "workspace:*",
+    "effect": "catalog:",
+    "postgres": "^3.4.9"
+  }
+}

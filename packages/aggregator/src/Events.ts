@@ -15,8 +15,8 @@ import {
 } from "effect";
 import { randomUUID } from "node:crypto";
 import { DeliveryFailed, SEQUENCED_EVENT, SNAPSHOT_EVENT } from "@egress/domain/Model.ts";
-import { Outbox, OUTBOX_DRAIN_LIMIT } from "./Outbox.ts";
-import type { CoordinationUnavailable } from "./Coordination.ts";
+import { Outbox, OUTBOX_DRAIN_LIMIT } from "@egress/coordination/Outbox.ts";
+import type { CoordinationUnavailable } from "@egress/coordination/Coordination.ts";
 import * as Telemetry from "./Telemetry.ts";
 import type { ApiSnapshot, CircuitEvent, EventType, State } from "@egress/domain/Model.ts";
 

@@ -5,20 +5,30 @@ import { HttpRouter } from "effect/unstable/http";
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { Redis } from "ioredis";
 import { Rmq } from "@egress/rmq/Client.ts";
 import { PositiveInt, rmqFlag, VERSION } from "@egress/config/Settings.ts";
 import { Aggregator } from "./Aggregator.ts";
 import { makeAmqpControlPlaneSink } from "./AmqpControlPlaneSink.ts";
-import { HaSettings, RedisCoordinationLayer } from "./Coordination.ts";
-import { RedisOutboxLayer } from "./Outbox.ts";
+import { HaSettings } from "@egress/coordination/Coordination.ts";
+import { PostgresBackendLayer } from "@egress/coordination-postgres/PostgresBackend.ts";
+import { RedisBackendLayer } from "@egress/coordination-redis/RedisBackend.ts";
 import { combineSinks, EventBus, EventSink, makeWebhookSink, NoopSinkLayer } from "./Events.ts";
 import { EnvoyFleetLayer, SimFleetLayer } from "./FleetSource.ts";
 import { EnvoyPushFleetLayer } from "./EnvoyPushSource.ts";
 import { HttpLive } from "./Http.ts";
 import { Config, defaultConfig } from "@egress/domain/Model.ts";
 import type { ApiSpec } from "./FleetSource.ts";
-import type { RedisLike } from "./Coordination.ts";
+
+/** Where coordination lives, decoded at boot (ADR 008): the URL's scheme names the backend. */
+type CoordinationStore = { readonly backend: "redis" | "postgres"; readonly url: string };
+
+/** An unrecognised scheme stops the process rather than falling back to either backend. */
+const decodeCoordinationStore = (url: string): O.Option<CoordinationStore> =>
+  /^rediss?:\/\//.test(url)
+    ? O.some({ backend: "redis", url })
+    : /^postgres(ql)?:\/\//.test(url)
+      ? O.some({ backend: "postgres", url })
+      : O.none();
 
 /** An unknown flag stops the process rather than being ignored (ADR 008). */
 const flags = {
@@ -57,9 +67,15 @@ const flags = {
     Flag.withDefault(false),
     Flag.withDescription("Drop the webhook sink, leaving only --rmq"),
   ),
-  redis: Flag.String("redis").pipe(
-    Flag.withDefault("redis://127.0.0.1:6379"),
-    Flag.withDescription("Redis URL for the publishing lease, checkpoints and outbox"),
+  coordination: Flag.String("coordination").pipe(
+    Flag.filterMap(
+      decodeCoordinationStore,
+      (raw) => `expected redis://, rediss://, postgres:// or postgresql://, got ${raw}`,
+    ),
+    Flag.withDefault<CoordinationStore>({ backend: "redis", url: "redis://127.0.0.1:6379" }),
+    Flag.withDescription(
+      "Where the publishing lease, checkpoints and outbox live: redis://… or postgres://…",
+    ),
   ),
   instanceId: Flag.String("instance-id").pipe(
     Flag.withDefault(randomUUID()),
@@ -154,37 +170,14 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
   });
 
   /**
-   * Redis even for one instance: an in-process lease excludes nothing, so a
-   * second instance would lead beside it. Unreachable, and this instance stands
-   * down rather than leading unfenced.
+   * A shared store even for one instance: an in-process lease excludes nothing,
+   * so a second instance would lead beside it. Unreachable, and this instance
+   * stands down rather than leading unfenced.
    */
-  const asRedisLike = (redis: Redis): RedisLike => ({
-    eval: (script, { keys, args: evalArgs }) =>
-      redis.eval(script, keys.length, ...keys, ...evalArgs) as Promise<string | number | null>,
-  });
-
-  const CoordinationLayer = Layer.unwrap(
-    Effect.acquireRelease(
-      Effect.sync(() =>
-        new Redis(settings.redis, {
-          // Fail fast: ioredis's default retries turn an outage into a hung tick.
-          maxRetriesPerRequest: 1,
-          enableOfflineQueue: false,
-          connectTimeout: 1000,
-        })
-          // Otherwise ioredis prints a stack per reconnect attempt. The outage is
-          // already reported, once, by the tick that stands down over it.
-          .on("error", () => {}),
-      ),
-      (redis) => Effect.promise(() => redis.quit().then(() => {}, () => {})),
-    ).pipe(
-      Effect.map((redis) => {
-        // One connection for the lease and the outbox.
-        const like = asRedisLike(redis);
-        return Layer.mergeAll(RedisCoordinationLayer(like), RedisOutboxLayer(like));
-      }),
-    ),
-  );
+  const CoordinationLayer =
+    settings.coordination.backend === "postgres"
+      ? PostgresBackendLayer(settings.coordination.url)
+      : RedisBackendLayer(settings.coordination.url);
 
   const HaLayer = Layer.mergeAll(
     CoordinationLayer,

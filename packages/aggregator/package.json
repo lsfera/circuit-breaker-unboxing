@@ -6,20 +6,25 @@
   "scripts": {
     "start": "node src/main.ts",
     "test": "node --test 'test/*.test.ts'",
-    "test:redis": "node --test 'test/integration/*.test.ts'"
+    "test:redis": "node --test test/integration/Redis.test.ts",
+    "test:postgres": "node --test test/integration/Postgres.test.ts"
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",
     "@egress/config": "workspace:*",
+    "@egress/coordination": "workspace:*",
+    "@egress/coordination-postgres": "workspace:*",
+    "@egress/coordination-redis": "workspace:*",
     "@egress/domain": "workspace:*",
     "@egress/rmq": "workspace:*",
     "@egress/tracing": "workspace:*",
     "@grpc/grpc-js": "^1.14.5",
     "@grpc/proto-loader": "^0.8.1",
-    "effect": "catalog:",
-    "ioredis": "^6.0.0"
+    "effect": "catalog:"
   },
   "devDependencies": {
-    "testcontainers": "^12.1.0"
+    "testcontainers": "^12.1.0",
+    "ioredis": "^6.0.0",
+    "postgres": "^3.4.9"
   }
 }

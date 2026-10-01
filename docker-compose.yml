@@ -164,19 +164,38 @@ services:
     command: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "egress", "--service-node", "envoy-02"]
     ports: ["19003:9901"]
 
-  # Backs LeaderElection/CheckpointStore (Coordination.ts) for the two
-  # aggregator instances below — no bind mount, so this one needed nothing
-  # special to run even before HOST_WORKSPACE_FOLDER was set correctly.
+  # Backs LeaderElection, CheckpointStore and the Outbox (@egress/coordination)
+  # for the two aggregator instances below, unless COORDINATION points them at
+  # the postgres service instead.
   redis:
     image: redis:8-alpine@sha256:becdda6c7f4b3fb42e42fd7f120bbf5c54c4caaaf16f26da24e4563d2c1f0576
     # AOF, because this is the checkpoint store. Without persistence a restart
     # loses every checkpoint, and a newly promoted leader resumes from nothing
     # rather than from where the last one stopped — a sequence reset, which is
     # the one thing the published contract promises never happens. Fencing is
-    # safe across a wipe (tokens carry an epoch, see Coordination.ts), but safe
+    # safe across a wipe (tokens carry an epoch, see @egress/coordination), but safe
     # is not the same as intact.
     command: ["redis-server", "--appendonly", "yes"]
     volumes: ["redis-data:/data"]
+    restart: unless-stopped
+    networks: [default, devcontainer]
+    deploy: *limits-small
+
+  # The other coordination backend (@egress/coordination-postgres), off unless
+  # asked for:
+  #   COORDINATION=postgres://egress:egress@postgres:5432/egress \
+  #     docker compose --profile postgres up -d
+  # The aggregators create their tables on the first call that reaches it.
+  postgres:
+    image: postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    profiles: [postgres]
+    environment:
+      POSTGRES_USER: egress
+      POSTGRES_PASSWORD: egress
+      POSTGRES_DB: egress
+    # Its own volume name: another postgres-data may already exist in this
+    # compose project, initialised for something else.
+    volumes: ["coordination-postgres-data:/var/lib/postgresql"]
     restart: unless-stopped
     networks: [default, devcontainer]
     deploy: *limits-small
@@ -221,14 +240,14 @@ services:
     networks: [default, devcontainer]
     deploy: *limits-broker
 
-  # Two real instances against the shared Redis lease, not one — this is
+  # Two real instances against the shared lease, not one — this is
   # what makes HA a demonstrated property of the stack instead of a design
   # only exercised in tests. `egress_aggregator_is_leader` on whichever one
   # is currently active reads 1; the other reads 0 and is doing nothing but
   # trying to acquire. Kill the leader's container and the other takes over
   # within lease_ttl_ms, resuming `sequence` from its last checkpoint rather
   # than restarting at zero — the same property Coordination.test.ts and
-  # RedisCoordination.test.ts prove, now visible from outside the process.
+  # test/integration/suite.ts prove, now visible from outside the process.
   aggregator: &aggregator
     # One image for every process this repo runs — see Dockerfile. Built here
     # rather than bind-mounted: what runs is an artifact with its dependencies
@@ -241,7 +260,8 @@ services:
     # Runs main.ts against the three real Envoy replicas, which push their
     # stats here over gRPC (not the sim fleet — --source=envoy-push is what
     # makes this stack's outlier detection real instead of simulated), with
-    # the lease in Redis, which both instances compete for. --source=envoy is
+    # the lease in Redis (or PostgreSQL, through COORDINATION), which both
+    # instances compete for. --source=envoy is
     # the polling alternative;
     # see "Ingestion" in README.md for the measurement that chose between them.
     #
@@ -258,7 +278,7 @@ services:
     # every event on circuit.control. Only the leader publishes, so the two
     # instances never double-deliver.
     command: >
-      node packages/aggregator/src/main.ts --source=envoy-push --push-port=9900 --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-1
+      node packages/aggregator/src/main.ts --source=envoy-push --push-port=9900 --coordination=${COORDINATION:-redis://redis:6379} --rmq=rabbitmq:5672 --instance-id=aggregator-1
     # Restarting matters more here than it looks: a killed leader whose
     # container never comes back leaves the survivor with nowhere to fail
     # over to next time, so the second failover in a demo has no candidate.
@@ -268,6 +288,7 @@ services:
       envoy-01: {condition: service_started}
       envoy-02: {condition: service_started}
       redis: {condition: service_started}
+      postgres: {condition: service_started, required: false}
       rabbitmq: {condition: service_healthy}
     ports: ["8088:8088"]
     networks: [default, devcontainer]
@@ -276,7 +297,7 @@ services:
   aggregator-2:
     <<: *aggregator
     command: >
-      node packages/aggregator/src/main.ts --source=envoy-push --push-port=9900 --redis=redis://redis:6379 --rmq=rabbitmq:5672 --instance-id=aggregator-2
+      node packages/aggregator/src/main.ts --source=envoy-push --push-port=9900 --coordination=${COORDINATION:-redis://redis:6379} --rmq=rabbitmq:5672 --instance-id=aggregator-2
     ports: ["8089:8088"]
 
   # The scenario from docs/architecture.md, running for real: a producer
@@ -482,6 +503,7 @@ services:
 # entire data directory lived in a container's writable layer.
 volumes:
   redis-data:
+  coordination-postgres-data:
   rabbitmq-data:
   prometheus-data:
   grafana-data:

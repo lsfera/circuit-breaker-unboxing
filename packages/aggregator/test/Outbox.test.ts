@@ -1,17 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Effect, Exit, Option as O } from "effect";
-import { Outbox, OUTBOX_MAX_PER_API, RedisOutboxLayer } from "../src/Outbox.ts";
+import { Outbox, OUTBOX_MAX_PER_API } from "@egress/coordination/Outbox.ts";
+import { RedisOutboxLayer } from "@egress/coordination-redis/RedisOutbox.ts";
 import { makeInMemoryOutbox } from "./support/InMemory.ts";
-import type { RedisLike } from "../src/Coordination.ts";
+import type { RedisLike } from "@egress/coordination-redis/RedisCoordination.ts";
 import { SOURCE } from "../src/Events.ts";
-import type { Entry } from "../src/Outbox.ts";
+import type { Entry } from "@egress/coordination/Outbox.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 
 /**
- * The outbox with no Redis and no HTTP: ordering, the bound, and what `commit`
- * may remove. This file is about the rules; test/integration/Outbox.test.ts is
- * about whether Lua and a socket obey them.
+ * The outbox with no store and no HTTP: ordering, the bound, and what `commit`
+ * may remove. This file is about the rules; test/integration/suite.ts is about
+ * whether Redis and PostgreSQL obey them.
  */
 
 const event = (apiId: string, sequence: number): CircuitEvent => ({
@@ -37,7 +38,7 @@ const event = (apiId: string, sequence: number): CircuitEvent => ({
 
 /**
  * `peek` returns positions, not just events. `None` is an entry that no longer
- * decodes, which only the Redis outbox can produce — in memory it would be a
+ * decodes, which only a real store can produce — in memory it would be a
  * bug, so it reads as -1 rather than being quietly skipped.
  */
 const sequenceOf = (entry: Entry): number =>

@@ -9,14 +9,14 @@ import {
   CoordinationUnavailable,
   HaSettings,
   LeaderElection,
-} from "../src/Coordination.ts";
+} from "@egress/coordination/Coordination.ts";
 import { makeInMemoryCoordination } from "./support/InMemory.ts";
-import { isFenced, parseToken, sameToken } from "../src/Coordination.ts";
-import type { LeaseToken } from "../src/Coordination.ts";
+import { isFenced, parseToken, sameToken } from "@egress/coordination/Coordination.ts";
+import type { LeaseToken } from "@egress/coordination/Coordination.ts";
 import { EventBus, EventSink } from "../src/Events.ts";
 import { FleetSource, SimFleetLayer } from "../src/FleetSource.ts";
 import { Config, defaultConfig } from "@egress/domain/Model.ts";
-import type { Checkpoint } from "../src/Coordination.ts";
+import type { Checkpoint } from "@egress/coordination/Coordination.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 
 /**

@@ -5,17 +5,17 @@ import {
   CheckpointStore,
   isFenced,
   LeaderElection,
-} from "../../src/Coordination.ts";
-import type { Checkpoint, LeaseToken } from "../../src/Coordination.ts";
-import { Outbox, OUTBOX_MAX_PER_API } from "../../src/Outbox.ts";
-import type { Peeked } from "../../src/Outbox.ts";
+} from "@egress/coordination/Coordination.ts";
+import type { Checkpoint, LeaseToken } from "@egress/coordination/Coordination.ts";
+import { Outbox, OUTBOX_MAX_PER_API } from "@egress/coordination/Outbox.ts";
+import type { Peeked } from "@egress/coordination/Outbox.ts";
 import type { CircuitEvent } from "@egress/domain/Model.ts";
 
 /**
  * Test doubles for the coordination ports, never a runtime backend: one
  * process's memory cannot exclude another process, so two instances would both
- * lead. They are the unit tests' reference for the rules the Redis scripts must
- * obey; test/integration/ checks the scripts against a real Redis.
+ * lead. They are the unit tests' reference for the rules every backend must
+ * obey; test/integration/suite.ts checks the backends against real stores.
  */
 
 type Lock = {
@@ -32,7 +32,7 @@ export const makeInMemoryCoordination = Effect.gen(function* () {
   // Never rotates: this store cannot lose its state without the process.
   const epoch = randomUUID();
   // The counter lives beside the lock, not in it, as Redis keeps the token key
-  // apart from the holder key: a release must not restart the count inside a
+  // apart from the holder key and PostgreSQL keeps the row on release: a release must not restart the count inside a
   // live epoch, or a stale leader's higher counter outranks the next one.
   const lease = yield* Ref.make<Lease>({ counter: 0, lock: O.none() });
   const checkpoints = yield* Ref.make(new Map<string, Checkpoint>());

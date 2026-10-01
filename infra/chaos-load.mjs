@@ -419,7 +419,18 @@ const firewall = async (from, to, ports, action) => {
 const ENVOYS = ["envoy-00", "envoy-01", "envoy-02"].map((s) => `${PROJECT}-${s}-1`);
 const UPSTREAM = [`${PROJECT}-flaky-upstream-1`];
 const BROKER = [`${PROJECT}-rabbitmq-1`];
-const REDIS = [`${PROJECT}-redis-1`];
+/**
+ * The coordination store the aggregators were started against, read from their
+ * own argv rather than assumed, so a fault never targets the idle one.
+ */
+let storeLookup = null;
+const store = () =>
+  (storeLookup ??= exec("docker", ["inspect", AGGREGATORS[0].container, "--format", "{{json .Args}}"]).then(({ stdout }) => {
+    const url = JSON.parse(stdout).join(" ").match(/--coordination=(\S+)/)?.[1] ?? "redis://redis:6379";
+    return /^postgres(ql)?:/.test(url)
+      ? { name: "PostgreSQL", container: `${PROJECT}-postgres-1`, port: 5432 }
+      : { name: "Redis", container: `${PROJECT}-redis-1`, port: 6379 };
+  }));
 const daemonContainers = async () => (await daemons()).filter((d) => d.running).map((d) => d.name);
 const leaderContainer = async () => {
   const leader = (await aggregators()).find((a) => a.leader);
@@ -531,9 +542,10 @@ const FAULTS = {
     await exec("docker", ["kill", leader]);
     return killAndStart(leader, leader);
   }),
-  "kill-redis": fault("closed", async () => {
-    await exec("docker", ["kill", REDIS[0]]);
-    return killAndStart(REDIS[0]);
+  "kill-store": fault("closed", async () => {
+    const { container } = await store();
+    await exec("docker", ["kill", container]);
+    return killAndStart(container);
   }),
   "pause-envoy": fault("closed", async () => {
     const name = pick(ENVOYS);
@@ -596,11 +608,13 @@ const FAULTS = {
   }),
   "net-lease-partition": fault("closed", async () => {
     const leader = await leaderContainer();
-    return { detail: `${leader} cut from Redis`, heal: (await firewall([leader], REDIS, [6379], "drop")).heal };
+    const { name, container, port } = await store();
+    return { detail: `${leader} cut from ${name}`, heal: (await firewall([leader], [container], [port], "drop")).heal };
   }),
-  "net-lease-partition+outage": withOutage("cut from Redis while the upstream fails", async () => {
+  "net-lease-partition+outage": withOutage("cut from the coordination store while the upstream fails", async () => {
     const leader = await leaderContainer();
-    return { what: leader, heal: (await firewall([leader], REDIS, [6379], "drop")).heal };
+    const { container, port } = await store();
+    return { what: leader, heal: (await firewall([leader], [container], [port], "drop")).heal };
   }),
   "net-broker-latency": fault("closed", async () => ({ detail: "+200ms ±50ms daemons → broker", heal: await netem(await daemonContainers(), BROKER, [5672], "delay 200ms 50ms") })),
 
@@ -983,7 +997,7 @@ const FAULT_LIST = flag("faults", Object.keys(FAULTS).join(",")).split(",");
 for (const p of PROFILE_LIST) if (!PROFILES[p]) throw new Error(`unknown profile ${p}`);
 for (const f of FAULT_LIST) if (!FAULTS[f]) throw new Error(`unknown fault ${f}`);
 
-const record = { scenario: "chaos-load", startedAt: new Date().toISOString(), settle: SETTLE, faultSeconds: FAULT_SECONDS, spikeOn: SPIKE_ON, spikeOff: SPIKE_OFF, runs: [] };
+const record = { scenario: "chaos-load", store: (await store()).name, startedAt: new Date().toISOString(), settle: SETTLE, faultSeconds: FAULT_SECONDS, spikeOn: SPIKE_ON, spikeOff: SPIKE_OFF, runs: [] };
 const save = () => {
   mkdirSync(dirname(OUT), { recursive: true });
   writeFileSync(OUT, `${JSON.stringify(record, null, 2)}\n`);

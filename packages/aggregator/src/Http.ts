@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import * as Zlib from "node:zlib";
 import { Aggregator } from "./Aggregator.ts";
 import * as ConsoleFrames from "./ConsoleFrames.ts";
-import { HaSettings } from "./Coordination.ts";
+import { HaSettings } from "@egress/coordination/Coordination.ts";
 import { EventBus, EventSink } from "./Events.ts";
 import { FleetSource } from "./FleetSource.ts";
 import * as Telemetry from "./Telemetry.ts";
