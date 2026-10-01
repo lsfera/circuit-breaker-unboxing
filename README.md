@@ -59,18 +59,40 @@ opens that branch's README, which holds its diagram.
 | [04 · Held by the broker](https://github.com/lsfera/circuit-breaker-unboxing/blob/article/04-rabbitmq-only-breaker/README.md) | RabbitMQ: a consumer on or off, a token in a delay chain | stops consuming; the work waits in the queue | 0 dead-lettered where cockatiel lost 2,745 |
 | [05 · A platform control plane](https://github.com/lsfera/circuit-breaker-unboxing/blob/article/05-platform-control-plane/README.md) | Envoy per replica, and one verdict per API in an aggregator | Envoy ejects hosts; the fleet stops consuming | 0 lost, 0 dead-lettered across ten chaos faults |
 
-Two things carry through the steps:
+## The broker is the control plane
 
-- **The breaker gets simpler, not bigger.** By article 4 the breaker keeps no
-  state of its own. The broker already holds messages durably, delays them and
-  elects one consumer among many, and the breaker is built from those.
-- **Most of the loss came from what open did, not from the outage.** In article
-  2, 52–59 real failures cost 1,577–2,246 dead letters, because every call an
-  open breaker turned away still spent one of the message's delivery attempts.
+A breaker with no control plane floods. In article 2 every replica finds the
+outage on its own and acts on it alone: one outage becomes about 27 openings,
+each half-open probe runs on its own clock, and every call an open breaker turns
+away still spends one of the message's delivery attempts. 52–59 real failures
+cost 1,577–2,246 dead letters. Most of the loss came from what open did, not
+from the outage.
 
-Article 5 moves the breaker to platform level: Envoy enforces, and an aggregator
-publishes one verdict per API as events. It costs about three times the code of
-article 3, and pays only when other systems act on the verdict.
+The fix is something the fleet shares that says whether to call and who probes.
+RabbitMQ already is one, so articles 3 and 4 add no new infrastructure:
+
+- **one probe for the whole fleet**: a one-token queue (`x-max-length: 1`,
+  `reject-publish`) is the probe permit. With every replica open, peak probes
+  in flight went from 6 to 1;
+- **one replica for work only one should do**: `x-single-active-consumer`
+  elects the redriver, and hands over when it disconnects;
+- **a refusal that costs nothing**: from RabbitMQ 4.3 a requeuing `nack` does
+  not count toward `x-delivery-limit`, so a message handed back untried keeps
+  its attempts;
+- **open as state the broker holds** (article 4): a consumer switched off, and
+  a token waiting in a delay chain of per-queue TTLs.
+
+Plus what a separate control plane would not give: **the work itself**. While
+the breaker is open, messages wait durably in the queue that already holds
+them instead of being tried, refused and dead-lettered by every replica. That
+is the difference between 1,577–2,246 dead letters in article 2 and 0 in
+articles 3 and 4. It also keeps the breaker simple: by article 4 it has no state
+of its own.
+
+Article 5 is for when the verdict has to leave the fleet: Envoy enforces, and an
+aggregator publishes one verdict per API as events for other systems. RabbitMQ
+stays the fleet's control plane underneath. It costs about three times the code
+of article 3, and pays only when other systems act on the verdict.
 
 ## About the code
 
