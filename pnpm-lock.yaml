@@ -196,6 +196,15 @@ importers:
       '@egress/config':
         specifier: workspace:*
         version: link:../config
+      '@egress/coordination':
+        specifier: workspace:*
+        version: link:../coordination
+      '@egress/coordination-postgres':
+        specifier: workspace:*
+        version: link:../coordination-postgres
+      '@egress/coordination-redis':
+        specifier: workspace:*
+        version: link:../coordination-redis
       '@egress/domain':
         specifier: workspace:*
         version: link:../domain
@@ -214,10 +223,13 @@ importers:
       effect:
         specifier: 'catalog:'
         version: 4.0.0-rc.117
+    devDependencies:
       ioredis:
         specifier: ^6.0.0
         version: 6.0.0
-    devDependencies:
+      postgres:
+        specifier: ^3.4.9
+        version: 3.4.9
       testcontainers:
         specifier: ^12.1.0
         version: 12.1.0
@@ -227,6 +239,45 @@ importers:
       effect:
         specifier: 'catalog:'
         version: 4.0.0-rc.117
+
+  packages/coordination:
+    dependencies:
+      '@egress/domain':
+        specifier: workspace:*
+        version: link:../domain
+      effect:
+        specifier: 'catalog:'
+        version: 4.0.0-rc.117
+
+  packages/coordination-postgres:
+    dependencies:
+      '@egress/coordination':
+        specifier: workspace:*
+        version: link:../coordination
+      '@egress/domain':
+        specifier: workspace:*
+        version: link:../domain
+      effect:
+        specifier: 'catalog:'
+        version: 4.0.0-rc.117
+      postgres:
+        specifier: ^3.4.9
+        version: 3.4.9
+
+  packages/coordination-redis:
+    dependencies:
+      '@egress/coordination':
+        specifier: workspace:*
+        version: link:../coordination
+      '@egress/domain':
+        specifier: workspace:*
+        version: link:../domain
+      effect:
+        specifier: 'catalog:'
+        version: 4.0.0-rc.117
+      ioredis:
+        specifier: ^6.0.0
+        version: 6.0.0
 
   packages/demo:
     dependencies:
@@ -1533,6 +1584,10 @@ packages:
 
   points-on-path@0.2.1:
     resolution: {integrity: sha512-25ClnWWuw7JbWZcgqY/gJ4FQWadKxGWk+3kR/7kD0tCaDtPPMj7oHu2ToLaVhfpnHrZzYby2w6tUA0eOIuUg8g==}
+
+  postgres@3.4.9:
+    resolution: {integrity: sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw==}
+    engines: {node: '>=12'}
 
   process-nextick-args@2.0.1:
     resolution: {integrity: sha512-3ouUOpQhtgrbOa17J7+uxOTpITYWaGP7/AhoR3+A+/1e9skrzelGi/dXzEYyvbxubEF6Wn2ypscTKiKJFFn1ag==}
@@ -3002,6 +3057,8 @@ snapshots:
     dependencies:
       path-data-parser: 0.1.0
       points-on-curve: 0.2.0
+
+  postgres@3.4.9: {}
 
   process-nextick-args@2.0.1: {}
 

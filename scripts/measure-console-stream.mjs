@@ -6,7 +6,7 @@
  *
  *   node packages/aggregator/src/main.ts \
  *     --source=sim --apis=1000 --replicas=10 --port=8098 --no-webhook \
- *     --redis=redis://redis:6379 &
+ *     --coordination=redis://redis:6379 &
  *   node scripts/measure-console-stream.mjs http://127.0.0.1:8098 --pid=<aggregator pid>
  *
  * Three parts:

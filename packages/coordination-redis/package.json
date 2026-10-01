@@ -1,0 +1,17 @@
+{
+  "name": "@egress/coordination-redis",
+  "private": true,
+  "type": "module",
+  "description": "@egress/coordination's ports over Redis: the lease, checkpoints and outbox as Lua scripts.",
+  "exports": {
+    "./RedisBackend.ts": "./src/RedisBackend.ts",
+    "./RedisCoordination.ts": "./src/RedisCoordination.ts",
+    "./RedisOutbox.ts": "./src/RedisOutbox.ts"
+  },
+  "dependencies": {
+    "@egress/coordination": "workspace:*",
+    "@egress/domain": "workspace:*",
+    "effect": "catalog:",
+    "ioredis": "^6.0.0"
+  }
+}

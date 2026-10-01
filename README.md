@@ -9,7 +9,7 @@ RabbitMQ and Prometheus (`article/03-rabbitmq-coordination`,
 `article/04-rabbitmq-only-breaker`): no lost work, one probe at a time, a redrive,
 one fleet verdict and backoff on a `429`, in 2,200–2,900 lines. This costs about
 three times the code and 19 containers (Envoy for egress, two aggregators with a
-lease in Redis, a published event stream). Build it only when you need something
+lease in Redis or PostgreSQL, a published event stream). Build it only when you need something
 articles 1–4 cannot give:
 
 - **other systems act on the verdict** — a producer that stops accepting work,
@@ -78,7 +78,7 @@ flowchart LR
   subgraph DECIDE["decision — one breaker per API"]
     lead["aggregator (leader)"]:::leader
     stby["aggregator-2 (standby)"]:::standby
-    redis[("redis<br/>lease · checkpoints · outbox")]:::box
+    redis[("redis or postgres<br/>lease · checkpoints · outbox")]:::box
   end
   subgraph FLEET["daemon fleet"]
     ctl{{"circuit.control"}}:::box
@@ -120,8 +120,10 @@ fencing, checkpoints and the outbox.
 
 ```bash
 pnpm install
-docker compose up -d redis                        # the aggregator always takes its lease in Redis
-pnpm start --redis=redis://redis:6379             # one aggregator over a simulated fleet, console on :8088
+docker compose up -d redis                        # the aggregator always takes its lease in a shared store
+pnpm start --coordination=redis://redis:6379      # one aggregator over a simulated fleet, console on :8088
+# or PostgreSQL: docker compose --profile postgres up -d postgres, then
+# pnpm start --coordination=postgres://egress:egress@postgres:5432/egress
 docker compose up --build -d                      # HOST_WORKSPACE_FOLDER: this repo's path on the Docker host
 pnpm run demo:envoy                               # an incident, driven through the aggregators' own routes
 node infra/chaos-load.mjs --profiles=low --faults=flaky-full-cycle,kill-leader
@@ -129,7 +131,10 @@ node infra/chaos-load.mjs --profiles=low --faults=flaky-full-cycle,kill-leader
 
 The stack is three Envoy replicas, two aggregators, Redis, RabbitMQ, the
 producer, five daemons, the fake third party and a traffic generator, and
-Prometheus, Alertmanager, an alert sink and Grafana. From the
+Prometheus, Alertmanager, an alert sink and Grafana. To coordinate through
+PostgreSQL instead, start it with
+`COORDINATION=postgres://egress:egress@postgres:5432/egress docker compose
+--profile postgres up -d`; Redis still starts, unused. From the
 devcontainer, by service name (from the host, `localhost` with the published
 port):
 - Console <http://aggregator:8088> and <http://aggregator-2:8088> (`:8088`, `:8089` on the host)
@@ -171,8 +176,9 @@ the failover timings are in [docs/measurements.md](docs/measurements.md).
   them.
 - **HTTPS egress needs TLS interception** for any L7 signal. Through `CONNECT`
   the breaker only sees connection failures.
-- **One Redis, one broker.** Losing Redis loses the checkpoints: sequences start
-  over and the half-open backoff resets. The fencing token's epoch still stops a
+- **One coordination store, one broker.** Losing the store's data (Redis or
+  PostgreSQL) loses the checkpoints: sequences start over and the half-open
+  backoff resets. The fencing token's epoch still stops a
   stale leader. Quorum queues on one node survive a restart, not a node loss.
 - **The console re-sends the whole fleet** every 400 ms: 2.75 MB/s per browser
   at a thousand APIs ([ADR 015](docs/decisions/015-the-console-at-a-thousand-apis.md)).
@@ -183,8 +189,12 @@ the failover timings are in [docs/measurements.md](docs/measurements.md).
 ```
 packages/
   domain/        pure: the event schema, the breaker state machine, supersedes()
-  aggregator/    tick loop, coordination (lease, fencing, checkpoints), outbox,
-                 webhook and AMQP sinks, Envoy push/poll sources, console, /metrics
+  aggregator/    tick loop, webhook and AMQP sinks, Envoy push/poll sources,
+                 console, /metrics
+  coordination/  the ports the aggregator coordinates through: lease and fencing
+                 token, checkpoints, outbox
+  coordination-redis/     those ports as Lua scripts over Redis
+  coordination-postgres/  those ports as SQL over PostgreSQL
   rmq/           amqplib in Effect; queue names, arguments and codecs
   rmq-consumer/  the daemon: pure policy and reducer, Attempts, Limiter, Redrive
   rmq-producer/  the load onto the work queue, message_id as idempotency key
@@ -202,7 +212,8 @@ docs/            architecture, high availability, measurements, off the shelf, d
 ```bash
 pnpm run check       # vendored version, typecheck, unit tests
 pnpm run test:rmq    # needs Docker: against a real broker
-pnpm run test:redis  # needs Docker: coordination and the outbox against a real Redis
+pnpm run test:redis     # needs Docker: coordination and the outbox against a real Redis
+pnpm run test:postgres  # needs Docker: the same suite against a real PostgreSQL
 ```
 
 > [Main overview](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/main/README.md)

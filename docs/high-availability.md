@@ -1,12 +1,13 @@
 # High availability
 
-Two aggregators run against one Redis. Exactly one publishes; the other only
+Two aggregators run against one coordination store, Redis or PostgreSQL
+([ADR 021](decisions/021-two-coordination-backends.md)). Exactly one publishes; the other only
 tries to take the lease. Two instances publishing would hand out conflicting
 sequence numbers for the same API, which is the one thing the contract forbids.
 
 ## Lease, fencing token, checkpoint
 
-`Coordination.ts` provides two services built on one shared counter:
+`@egress/coordination` declares two services built on one shared counter:
 
 - **`LeaderElection`**: every tick calls `tryAcquireOrRenew(instanceId, ttl)`
   (5 s). A non-leader does not poll, step or publish. Every genuine handoff,
@@ -24,7 +25,7 @@ stateDiagram-v2
   [*] --> standby
   standby --> leader: acquires the lease
   leader --> leader: renews it, publishes, checkpoints
-  leader --> standby: lease lost, checkpoint fenced, or Redis unreachable
+  leader --> standby: lease lost, checkpoint fenced, or the store unreachable
   leader --> holding_off: sink not ready, or a transition not confirmed
   holding_off --> standby: one lease TTL later
 ```
@@ -41,7 +42,7 @@ Two ways fencing went wrong before it was right:
 - **Per-key fencing** only stops a stale writer after someone else has written
   that key, so a paused leader could still win every API the new leader had not
   published for yet. The check is against the one lease counter.
-- **A bare counter** restarts at 1 when Redis loses its state, and a surviving
+- **A bare counter** restarts at 1 when the store loses its state, and a surviving
   stale leader's 5 then outranks the live one's 1. The epoch is minted by
   whichever coordinator finds nothing to inherit; tokens from different epochs
   are incomparable, so the stale one is fenced.
@@ -70,6 +71,10 @@ The daemons apply this and count what they ignore in
 
 ## Failover, measured
 
+On Redis. Under the same chaos faults PostgreSQL's leaderless times are within
+a second of Redis's for every handover, and both last the outage when the store
+itself is killed ([measurements.md](measurements.md#redis-against-postgresql-2026-10-01)).
+
 | How the leader went away | Standby leads after |
 |---|---|
 | `docker kill` (a crash) | 4,952 ms — the full lease TTL |
@@ -86,7 +91,7 @@ has failed. A shared dependency failing across many APIs costs the tick two
 confirms' latency, not one per API, inside the loop that renews the lease, and
 a leader deposed mid-tick still publishes only one stale transition.
 
-**One-sided partition**: one aggregator cannot reach Redis, the other can. Every
+**One-sided partition**: one aggregator cannot reach the store, the other can. Every
 coordination call has a 1 s timeout under the 5 s lease, so the cut-off instance
 stands down each tick (`is_leader` 0) instead of hanging, and the healthy one
 holds the lease throughout.
@@ -101,7 +106,7 @@ deploy.
 | What is lost | What stops | What carries on | Says so |
 |---|---|---|---|
 | The leader | nothing, after the lease TTL (≤ 5 s) | the standby publishes from the checkpoint | `NoLeaderElected` if both |
-| Both aggregators, or Redis | every event; the leader stands down without Redis | Envoy's local ejection; after 60 s each daemon falls back to a quarter of its fleet ([ADR 019](decisions/019-a-daemon-that-does-not-know.md)) | `NoLeaderElected`, `ControlLoopStalled`, `DaemonsOnFallback` |
+| Both aggregators, or the store | every event; the leader stands down without it | Envoy's local ejection; after 60 s each daemon falls back to a quarter of its fleet ([ADR 019](decisions/019-a-daemon-that-does-not-know.md)) | `NoLeaderElected`, `ControlLoopStalled`, `DaemonsOnFallback` |
 | RabbitMQ | work and control both; the leader steps down (its sink is not ready) | Envoy; daemons retry the connection for up to about 8 minutes, then restart | `NoLeaderElected` (the leader steps down), `egress_aggregator_control_plane_ready` at 0 |
 | One Envoy replica | its share of traffic and its vote | the quorum over the replicas still reporting ([ADR 009](decisions/009-what-the-quorum-is-a-quorum-of.md)) | `FleetShrunk` |
 | A daemon | its share of the work; its unacked deliveries return to the queue | the rest, by position; SAC promotes another floor or elected daemon | `FloorUnheld` only if no floor is re-elected within 2 minutes |
@@ -114,8 +119,8 @@ checks the two.
 ## The outbox
 
 Inside the aggregator the sequence is gapless; the webhook's last hop was not. A
-delivery that fails its retries is appended to a per-API outbox in Redis
-(`Outbox.ts`), and the leader drains it:
+delivery that fails its retries is appended to a per-API outbox in the store
+(`@egress/coordination/Outbox.ts`), and the leader drains it:
 
 - **only the leader drains**, or every event would be delivered twice;
 - **nothing overtakes it**: deliveries for one API run one after another, and
@@ -129,8 +134,24 @@ delivery that fails its retries is appended to a per-API outbox in Redis
 - **bounded at 500 per API, dropping the oldest**, so a subscriber that stays
   down sees a gap it can detect rather than a state it wrongly trusts.
 
-Redis is the only backend, even for one instance: a lease held in one
-process's memory excludes nothing, so a second instance would lead beside it.
-The unit tests drive an in-memory double of the same interfaces
-(`test/support/InMemory.ts`); `pnpm run test:redis` runs the real ones against
-a real Redis.
+## Backends
+
+`--coordination` picks the store by its URL's scheme: `redis://` (or
+`rediss://`) for `@egress/coordination-redis`, `postgres://` (or
+`postgresql://`) for `@egress/coordination-postgres`. A shared store is
+required even for one instance: a lease held in one process's memory excludes
+nothing, so a second instance would lead beside it.
+
+| | Redis | PostgreSQL |
+|---|---|---|
+| One atomic step | a Lua script | one statement; the outbox's append is one short transaction |
+| Lease expiry | `PX`, Redis's clock | `expires_at` against `now()`, the database's clock |
+| Fencing the checkpoint | the script reads the lease keys | the statement reads the lease row `FOR SHARE`, so a takeover cannot commit in between |
+| Outbox positions | a list plus a head counter | absolute, ever-growing `pos` per API |
+| A hung call | client-side 1 s timeout | the same, plus `statement_timeout`, `lock_timeout` and `idle_in_transaction_session_timeout` at 1 s on the server. A call given up on is abandoned, never cancelled: cancelling one that waits on a reconnect wedges postgres.js's pool |
+| Losing its data | a restart without AOF, an empty replica | a restore from an older backup, a lagging replica promoted |
+
+Both keep the epoch for the last row. The unit tests drive an in-memory double
+of the same interfaces (`test/support/InMemory.ts`); `test/integration/suite.ts`
+is one conformance suite that `pnpm run test:redis` and
+`pnpm run test:postgres` each run against the real store.

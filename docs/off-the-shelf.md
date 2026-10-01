@@ -126,7 +126,7 @@ flowchart LR
 | Callers during an outage | keep calling; each call fails fast | stop at the source: the fleet drains nothing while `OPEN` |
 | Recovery | active health checks put a host back | one elected probe, a ramp from one daemon to all, a redrive of the dead letters |
 | Proxy overload | a `503` like any other failure | a `429`, released uncounted, and the daemon's own limit backs off |
-| Cost | configuration | an aggregator pair, Redis, the event stream and a daemon fleet |
+| Cost | configuration | an aggregator pair, Redis or PostgreSQL, the event stream and a daemon fleet |
 
 The Envoy side is unchanged: take the aggregator away and every call is still
 protected, which is why its `OPEN` is observational and never pushed back into

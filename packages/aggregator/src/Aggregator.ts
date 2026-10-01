@@ -14,12 +14,12 @@ import {
 import * as Breaker from "@egress/domain/Breaker.ts";
 import { Config, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
 import type { DeliveryFailed } from "@egress/domain/Model.ts";
-import { CheckpointStore, HaSettings, LeaderElection } from "./Coordination.ts";
+import { CheckpointStore, HaSettings, LeaderElection } from "@egress/coordination/Coordination.ts";
 import { EventBus, EventSink, snapshotEvent, stateChanged } from "./Events.ts";
 import { FleetSource } from "./FleetSource.ts";
 import * as Telemetry from "./Telemetry.ts";
-import { formatToken } from "./Coordination.ts";
-import type { Checkpoint, CoordinationUnavailable, LeaseToken } from "./Coordination.ts";
+import { formatToken } from "@egress/coordination/Coordination.ts";
+import type { Checkpoint, CoordinationUnavailable, LeaseToken } from "@egress/coordination/Coordination.ts";
 import type { ApiSnapshot, CircuitEvent, State } from "@egress/domain/Model.ts";
 
 type Registry = {
@@ -522,7 +522,7 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         yield* demoteAndFence;
         yield* Metric.update(Telemetry.coordinationErrors, 1);
-        // Set explicitly: an instance that never reached Redis had no series, and
+        // Set explicitly: an instance that never reached the store had no series, and
         // `max(is_leader) == 0` cannot fire on an absent metric.
         yield* Metric.update(Telemetry.isLeader, 0);
         yield* Ref.getAndSet(coordinationOk, false).pipe(

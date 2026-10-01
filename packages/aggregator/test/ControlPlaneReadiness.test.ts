@@ -7,7 +7,7 @@ import {
   HaSettings,
   LeaderElection,
   CheckpointStore,
-} from "../src/Coordination.ts";
+} from "@egress/coordination/Coordination.ts";
 import { EventBus, EventSink, makeWebhookSink } from "../src/Events.ts";
 import { FleetSource, SimFleetLayer } from "../src/FleetSource.ts";
 import {
