@@ -1,0 +1,973 @@
+{
+  "scenario": "chaos-load",
+  "store": "PostgreSQL",
+  "startedAt": "2026-10-01T07:41:48.194Z",
+  "settle": 10,
+  "faultSeconds": 30,
+  "spikeOn": 15,
+  "spikeOff": 15,
+  "runs": [
+    {
+      "profile": "low",
+      "faults": [
+        {
+          "fault": "kill-leader",
+          "expect": "closed",
+          "detail": "workspace-aggregator-1",
+          "forbid": [],
+          "injectedAt": 1790840518621,
+          "healedAt": 1790840548914,
+          "recoveredAt": 1790840549003,
+          "recoveredSeconds": 0.1,
+          "stuckOn": [],
+          "journey": null
+        }
+      ],
+      "checks": [
+        {
+          "kind": "recovery",
+          "ok": true,
+          "what": "the stack recovered after kill-leader",
+          "detail": "0.1s after heal"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "no message lost",
+          "detail": "confirmed 80986 of 80986, processed 80986 (+0 duplicate calls), dead-lettered 0, lost 0"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "dead-letter queue empty at the end",
+          "detail": "0 left (peak 0)"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "nothing parked as poison",
+          "detail": "0 parked"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "the work queue drained once arrivals stopped",
+          "detail": "8.0s"
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "every transition is an edge of the reducer's table",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "the transitions form one unbroken chain",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "no state was left before its timer allowed",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "a failed probe doubled the next OPEN",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "every daemon followed each settled state within 5s",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "[kill-leader] no trip on a fault the third party never saw",
+          "detail": "no transition"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "never two leaders at once",
+          "detail": "0s"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "the published sequence never went backwards",
+          "detail": "0 -> 0"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "no control event delivered twice",
+          "detail": "0 -> 0"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "no daemon saw a gap or duplicate on circuit.control",
+          "detail": "0 gaps, 0 duplicates"
+        },
+        {
+          "kind": "recovery",
+          "ok": true,
+          "what": "the stack ended whole",
+          "detail": ""
+        },
+        {
+          "kind": "recovery",
+          "ok": true,
+          "what": "nothing crashed that was not a victim",
+          "detail": ""
+        }
+      ],
+      "startedAt": "2026-10-01T07:41:48.503Z",
+      "runId": "mup8783vslj2",
+      "traffic": {
+        "spikes": 2,
+        "publisherDisconnectedSeconds": 0
+      },
+      "messages": {
+        "sent": 80986,
+        "confirmed": 80986,
+        "unconfirmed": 0,
+        "processed": 80986,
+        "duplicateCalls": 0,
+        "processedUnconfirmed": 0,
+        "lost": 0,
+        "lostSample": [],
+        "deadLetterDepthAtEnd": 0,
+        "parkedFromThisRun": 0,
+        "maxDeadLetterDepth": 0,
+        "workDepthAtEnd": 0,
+        "drainedSeconds": 8
+      },
+      "transitions": [],
+      "observed": {
+        "maxDepth": 45,
+        "maxDeadDepth": 0,
+        "leaderlessSeconds": 5,
+        "splitBrainSeconds": 0,
+        "floorlessSeconds": 0,
+        "stalledSeconds": 5
+      },
+      "endedAt": "2026-10-01T07:42:47.823Z",
+      "suspendedSeconds": 0,
+      "correct": true,
+      "passed": true
+    },
+    {
+      "profile": "low",
+      "faults": [
+        {
+          "fault": "kill-store",
+          "expect": "closed",
+          "detail": null,
+          "forbid": [],
+          "injectedAt": 1790840577936,
+          "healedAt": 1790840608160,
+          "recoveredAt": 1790840609305,
+          "recoveredSeconds": 1.1,
+          "stuckOn": [],
+          "journey": null
+        }
+      ],
+      "checks": [
+        {
+          "kind": "recovery",
+          "ok": true,
+          "what": "the stack recovered after kill-store",
+          "detail": "1.1s after heal"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "no message lost",
+          "detail": "confirmed 83962 of 83962, processed 83962 (+0 duplicate calls), dead-lettered 0, lost 0"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "dead-letter queue empty at the end",
+          "detail": "0 left (peak 0)"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "nothing parked as poison",
+          "detail": "0 parked"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "the work queue drained once arrivals stopped",
+          "detail": "8.0s"
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "every transition is an edge of the reducer's table",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "the transitions form one unbroken chain",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "no state was left before its timer allowed",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "a failed probe doubled the next OPEN",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "every daemon followed each settled state within 5s",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "[kill-store] no trip on a fault the third party never saw",
+          "detail": "no transition"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "never two leaders at once",
+          "detail": "0s"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "the published sequence never went backwards",
+          "detail": "0 -> 0"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "no control event delivered twice",
+          "detail": "0 -> 0"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "no daemon saw a gap or duplicate on circuit.control",
+          "detail": "0 gaps, 0 duplicates"
+        },
+        {
+          "kind": "recovery",
+          "ok": true,
+          "what": "the stack ended whole",
+          "detail": ""
+        },
+        {
+          "kind": "recovery",
+          "ok": true,
+          "what": "nothing crashed that was not a victim",
+          "detail": ""
+        }
+      ],
+      "startedAt": "2026-10-01T07:42:47.823Z",
+      "runId": "mup88hvhp06u",
+      "traffic": {
+        "spikes": 2,
+        "publisherDisconnectedSeconds": 0
+      },
+      "messages": {
+        "sent": 83962,
+        "confirmed": 83962,
+        "unconfirmed": 0,
+        "processed": 83962,
+        "duplicateCalls": 0,
+        "processedUnconfirmed": 0,
+        "lost": 0,
+        "lostSample": [],
+        "deadLetterDepthAtEnd": 0,
+        "parkedFromThisRun": 0,
+        "maxDeadLetterDepth": 0,
+        "workDepthAtEnd": 0,
+        "drainedSeconds": 8
+      },
+      "transitions": [],
+      "observed": {
+        "maxDepth": 61,
+        "maxDeadDepth": 0,
+        "leaderlessSeconds": 30,
+        "splitBrainSeconds": 0,
+        "floorlessSeconds": 0,
+        "stalledSeconds": 5
+      },
+      "endedAt": "2026-10-01T07:43:48.128Z",
+      "suspendedSeconds": 0,
+      "correct": true,
+      "passed": true
+    },
+    {
+      "profile": "low",
+      "faults": [
+        {
+          "fault": "net-lease-partition",
+          "expect": "closed",
+          "detail": "workspace-aggregator-1 cut from PostgreSQL",
+          "forbid": [],
+          "injectedAt": 1790840638244,
+          "healedAt": 1790840668614,
+          "recoveredAt": 1790840668713,
+          "recoveredSeconds": 0.1,
+          "stuckOn": [],
+          "journey": null
+        }
+      ],
+      "checks": [
+        {
+          "kind": "recovery",
+          "ok": true,
+          "what": "the stack recovered after net-lease-partition",
+          "detail": "0.1s after heal"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "no message lost",
+          "detail": "confirmed 81242 of 81242, processed 81242 (+0 duplicate calls), dead-lettered 0, lost 0"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "dead-letter queue empty at the end",
+          "detail": "0 left (peak 0)"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "nothing parked as poison",
+          "detail": "0 parked"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "the work queue drained once arrivals stopped",
+          "detail": "8.0s"
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "every transition is an edge of the reducer's table",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "the transitions form one unbroken chain",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "no state was left before its timer allowed",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "a failed probe doubled the next OPEN",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "every daemon followed each settled state within 5s",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "[net-lease-partition] no trip on a fault the third party never saw",
+          "detail": "no transition"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "never two leaders at once",
+          "detail": "0s"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "the published sequence never went backwards",
+          "detail": "0 -> 0"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "no control event delivered twice",
+          "detail": "0 -> 0"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "no daemon saw a gap or duplicate on circuit.control",
+          "detail": "0 gaps, 0 duplicates"
+        },
+        {
+          "kind": "recovery",
+          "ok": true,
+          "what": "the stack ended whole",
+          "detail": ""
+        },
+        {
+          "kind": "recovery",
+          "ok": true,
+          "what": "nothing crashed that was not a victim",
+          "detail": ""
+        }
+      ],
+      "startedAt": "2026-10-01T07:43:48.129Z",
+      "runId": "mup89seqfvm0",
+      "traffic": {
+        "spikes": 2,
+        "publisherDisconnectedSeconds": 0
+      },
+      "messages": {
+        "sent": 81242,
+        "confirmed": 81242,
+        "unconfirmed": 0,
+        "processed": 81242,
+        "duplicateCalls": 0,
+        "processedUnconfirmed": 0,
+        "lost": 0,
+        "lostSample": [],
+        "deadLetterDepthAtEnd": 0,
+        "parkedFromThisRun": 0,
+        "maxDeadLetterDepth": 0,
+        "workDepthAtEnd": 0,
+        "drainedSeconds": 8
+      },
+      "transitions": [],
+      "observed": {
+        "maxDepth": 61,
+        "maxDeadDepth": 0,
+        "leaderlessSeconds": 4,
+        "splitBrainSeconds": 0,
+        "floorlessSeconds": 0,
+        "stalledSeconds": 5
+      },
+      "endedAt": "2026-10-01T07:44:47.444Z",
+      "suspendedSeconds": 0,
+      "correct": true,
+      "passed": true
+    },
+    {
+      "profile": "low",
+      "faults": [
+        {
+          "fault": "net-lease-partition+outage",
+          "expect": "fleet-open",
+          "detail": "workspace-aggregator-2-1 cut from the coordination store while the upstream fails",
+          "forbid": [],
+          "injectedAt": 1790840697555,
+          "healedAt": 1790840727937,
+          "recoveredAt": 1790840751638,
+          "recoveredSeconds": 23.7,
+          "stuckOn": [],
+          "journey": null
+        }
+      ],
+      "checks": [
+        {
+          "kind": "recovery",
+          "ok": true,
+          "what": "the stack recovered after net-lease-partition+outage",
+          "detail": "23.7s after heal"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "no message lost",
+          "detail": "confirmed 109890 of 109890, processed 109890 (+24 duplicate calls), dead-lettered 0, lost 0"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "dead-letter queue empty at the end",
+          "detail": "0 left (peak 23357)"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "nothing parked as poison",
+          "detail": "0 parked"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "the work queue drained once arrivals stopped",
+          "detail": "10.0s"
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "every transition is an edge of the reducer's table",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "the transitions form one unbroken chain",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "no state was left before its timer allowed",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "a failed probe doubled the next OPEN",
+          "detail": "4045ms → 8089ms → 16180ms"
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "every daemon followed each settled state within 5s",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "the fleet stopped calling the third party while OPEN",
+          "detail": "0.0 calls/s over 20s"
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "[net-lease-partition+outage] the fleet heard OPEN through the partition",
+          "detail": "CLOSED→OPEN, OPEN→HALF_OPEN, HALF_OPEN→OPEN, OPEN→HALF_OPEN, HALF_OPEN→OPEN, OPEN→HALF_OPEN, HALF_OPEN→CLOSED"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "never two leaders at once",
+          "detail": "0s"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "the published sequence never went backwards",
+          "detail": "0 -> 7"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "no control event delivered twice",
+          "detail": "0 -> 0"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "no daemon saw a gap or duplicate on circuit.control",
+          "detail": "0 gaps, 0 duplicates"
+        },
+        {
+          "kind": "recovery",
+          "ok": true,
+          "what": "the stack ended whole",
+          "detail": ""
+        },
+        {
+          "kind": "recovery",
+          "ok": true,
+          "what": "nothing crashed that was not a victim",
+          "detail": ""
+        }
+      ],
+      "startedAt": "2026-10-01T07:44:47.445Z",
+      "runId": "mup8b26ab75e",
+      "traffic": {
+        "spikes": 3,
+        "publisherDisconnectedSeconds": 0
+      },
+      "messages": {
+        "sent": 109890,
+        "confirmed": 109890,
+        "unconfirmed": 0,
+        "processed": 109890,
+        "duplicateCalls": 24,
+        "processedUnconfirmed": 0,
+        "lost": 0,
+        "lostSample": [],
+        "deadLetterDepthAtEnd": 0,
+        "parkedFromThisRun": 0,
+        "maxDeadLetterDepth": 23357,
+        "workDepthAtEnd": 0,
+        "drainedSeconds": 10
+      },
+      "transitions": [
+        {
+          "sequence": 1,
+          "edge": "CLOSED→OPEN",
+          "reason": "ALL_ENDPOINTS_EJECTED",
+          "at": "2026-10-01T07:45:05.544Z",
+          "dwellMs": null
+        },
+        {
+          "sequence": 2,
+          "edge": "OPEN→HALF_OPEN",
+          "reason": "OPEN_TIMEOUT_ELAPSED",
+          "at": "2026-10-01T07:45:09.589Z",
+          "dwellMs": 4045
+        },
+        {
+          "sequence": 3,
+          "edge": "HALF_OPEN→OPEN",
+          "reason": "PROBE_FAILED",
+          "at": "2026-10-01T07:45:09.848Z",
+          "dwellMs": 259
+        },
+        {
+          "sequence": 4,
+          "edge": "OPEN→HALF_OPEN",
+          "reason": "OPEN_TIMEOUT_ELAPSED",
+          "at": "2026-10-01T07:45:17.937Z",
+          "dwellMs": 8089
+        },
+        {
+          "sequence": 5,
+          "edge": "HALF_OPEN→OPEN",
+          "reason": "PROBE_FAILED",
+          "at": "2026-10-01T07:45:18.193Z",
+          "dwellMs": 256
+        },
+        {
+          "sequence": 6,
+          "edge": "OPEN→HALF_OPEN",
+          "reason": "OPEN_TIMEOUT_ELAPSED",
+          "at": "2026-10-01T07:45:34.373Z",
+          "dwellMs": 16180
+        },
+        {
+          "sequence": 7,
+          "edge": "HALF_OPEN→CLOSED",
+          "reason": "PROBE_SUCCEEDED",
+          "at": "2026-10-01T07:45:35.137Z",
+          "dwellMs": 764
+        }
+      ],
+      "observed": {
+        "maxDepth": 57513,
+        "maxDeadDepth": 23357,
+        "leaderlessSeconds": 3,
+        "splitBrainSeconds": 0,
+        "floorlessSeconds": 0,
+        "stalledSeconds": 37
+      },
+      "endedAt": "2026-10-01T07:46:12.771Z",
+      "suspendedSeconds": 0,
+      "correct": true,
+      "passed": true
+    },
+    {
+      "profile": "low",
+      "faults": [
+        {
+          "fault": "flaky-full-cycle",
+          "expect": "journey",
+          "detail": "2 steps",
+          "forbid": [],
+          "injectedAt": 1790840782883,
+          "healedAt": 1790840814979,
+          "recoveredAt": 1790840831083,
+          "recoveredSeconds": 16.1,
+          "stuckOn": [],
+          "journey": [
+            {
+              "step": "every endpoint fails",
+              "startedAt": 1790840782883,
+              "edges": [
+                {
+                  "want": "*→OPEN",
+                  "afterSeconds": 2.5,
+                  "got": "CLOSED→OPEN (ALL_ENDPOINTS_EJECTED)"
+                },
+                {
+                  "want": "OPEN→HALF_OPEN (OPEN_TIMEOUT_ELAPSED)",
+                  "afterSeconds": 6.5,
+                  "got": "OPEN→HALF_OPEN (OPEN_TIMEOUT_ELAPSED)"
+                },
+                {
+                  "want": "HALF_OPEN→OPEN (PROBE_FAILED)",
+                  "afterSeconds": 6.8,
+                  "got": "HALF_OPEN→OPEN (PROBE_FAILED)"
+                },
+                {
+                  "want": "OPEN→HALF_OPEN (OPEN_TIMEOUT_ELAPSED)",
+                  "afterSeconds": 14.8,
+                  "got": "OPEN→HALF_OPEN (OPEN_TIMEOUT_ELAPSED)"
+                }
+              ],
+              "quiet": null
+            },
+            {
+              "step": "healed",
+              "startedAt": 1790840797927,
+              "edges": [
+                {
+                  "want": "HALF_OPEN→CLOSED (PROBE_SUCCEEDED)",
+                  "afterSeconds": 17,
+                  "got": "HALF_OPEN→CLOSED (PROBE_SUCCEEDED)"
+                }
+              ],
+              "quiet": null
+            }
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "kind": "recovery",
+          "ok": true,
+          "what": "the stack recovered after flaky-full-cycle",
+          "detail": "16.1s after heal"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "no message lost",
+          "detail": "confirmed 134487 of 134487, processed 134487 (+46 duplicate calls), dead-lettered 0, lost 0"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "dead-letter queue empty at the end",
+          "detail": "0 left (peak 7306)"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "nothing parked as poison",
+          "detail": "0 parked"
+        },
+        {
+          "kind": "correctness",
+          "ok": true,
+          "what": "the work queue drained once arrivals stopped",
+          "detail": "10.0s"
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "every transition is an edge of the reducer's table",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "the transitions form one unbroken chain",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "no state was left before its timer allowed",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "a failed probe doubled the next OPEN",
+          "detail": "4040ms → 8069ms → 16180ms"
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "every daemon followed each settled state within 5s",
+          "detail": ""
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "the fleet stopped calling the third party while OPEN",
+          "detail": "0.0 calls/s over 19s"
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "[flaky-full-cycle] every endpoint fails: *→OPEN",
+          "detail": "CLOSED→OPEN (ALL_ENDPOINTS_EJECTED) after 2.5s"
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "[flaky-full-cycle] every endpoint fails: OPEN→HALF_OPEN (OPEN_TIMEOUT_ELAPSED)",
+          "detail": "OPEN→HALF_OPEN (OPEN_TIMEOUT_ELAPSED) after 6.5s"
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "[flaky-full-cycle] every endpoint fails: HALF_OPEN→OPEN (PROBE_FAILED)",
+          "detail": "HALF_OPEN→OPEN (PROBE_FAILED) after 6.8s"
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "[flaky-full-cycle] every endpoint fails: OPEN→HALF_OPEN (OPEN_TIMEOUT_ELAPSED)",
+          "detail": "OPEN→HALF_OPEN (OPEN_TIMEOUT_ELAPSED) after 14.8s"
+        },
+        {
+          "kind": "breaker",
+          "ok": true,
+          "what": "[flaky-full-cycle] healed: HALF_OPEN→CLOSED (PROBE_SUCCEEDED)",
+          "detail": "HALF_OPEN→CLOSED (PROBE_SUCCEEDED) after 17s"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "never two leaders at once",
+          "detail": "0s"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "the published sequence never went backwards",
+          "detail": "7 -> 14"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "no control event delivered twice",
+          "detail": "0 -> 0"
+        },
+        {
+          "kind": "coordination",
+          "ok": true,
+          "what": "no daemon saw a gap or duplicate on circuit.control",
+          "detail": "0 gaps, 0 duplicates"
+        },
+        {
+          "kind": "recovery",
+          "ok": true,
+          "what": "the stack ended whole",
+          "detail": ""
+        },
+        {
+          "kind": "recovery",
+          "ok": true,
+          "what": "nothing crashed that was not a victim",
+          "detail": ""
+        }
+      ],
+      "startedAt": "2026-10-01T07:46:12.772Z",
+      "runId": "mup8cw0fy3ly",
+      "traffic": {
+        "spikes": 4,
+        "publisherDisconnectedSeconds": 0
+      },
+      "messages": {
+        "sent": 134487,
+        "confirmed": 134487,
+        "unconfirmed": 0,
+        "processed": 134487,
+        "duplicateCalls": 46,
+        "processedUnconfirmed": 0,
+        "lost": 0,
+        "lostSample": [],
+        "deadLetterDepthAtEnd": 0,
+        "parkedFromThisRun": 0,
+        "maxDeadLetterDepth": 7306,
+        "workDepthAtEnd": 0,
+        "drainedSeconds": 10
+      },
+      "transitions": [
+        {
+          "sequence": 8,
+          "edge": "CLOSED→OPEN",
+          "reason": "ALL_ENDPOINTS_EJECTED",
+          "at": "2026-10-01T07:46:25.332Z",
+          "dwellMs": 50195
+        },
+        {
+          "sequence": 9,
+          "edge": "OPEN→HALF_OPEN",
+          "reason": "OPEN_TIMEOUT_ELAPSED",
+          "at": "2026-10-01T07:46:29.372Z",
+          "dwellMs": 4040
+        },
+        {
+          "sequence": 10,
+          "edge": "HALF_OPEN→OPEN",
+          "reason": "PROBE_FAILED",
+          "at": "2026-10-01T07:46:29.630Z",
+          "dwellMs": 258
+        },
+        {
+          "sequence": 11,
+          "edge": "OPEN→HALF_OPEN",
+          "reason": "OPEN_TIMEOUT_ELAPSED",
+          "at": "2026-10-01T07:46:37.699Z",
+          "dwellMs": 8069
+        },
+        {
+          "sequence": 12,
+          "edge": "HALF_OPEN→OPEN",
+          "reason": "PROBE_FAILED",
+          "at": "2026-10-01T07:46:37.955Z",
+          "dwellMs": 256
+        },
+        {
+          "sequence": 13,
+          "edge": "OPEN→HALF_OPEN",
+          "reason": "OPEN_TIMEOUT_ELAPSED",
+          "at": "2026-10-01T07:46:54.135Z",
+          "dwellMs": 16180
+        },
+        {
+          "sequence": 14,
+          "edge": "HALF_OPEN→CLOSED",
+          "reason": "PROBE_SUCCEEDED",
+          "at": "2026-10-01T07:46:54.894Z",
+          "dwellMs": 759
+        }
+      ],
+      "observed": {
+        "maxDepth": 79014,
+        "maxDeadDepth": 7306,
+        "leaderlessSeconds": 0,
+        "splitBrainSeconds": 0,
+        "floorlessSeconds": 0,
+        "stalledSeconds": 37
+      },
+      "endedAt": "2026-10-01T07:47:32.081Z",
+      "suspendedSeconds": 0,
+      "correct": true,
+      "passed": true
+    }
+  ],
+  "endedAt": "2026-10-01T07:47:32.377Z",
+  "edgeCoverage": {
+    "CLOSED→DEGRADED": false,
+    "CLOSED→OPEN": true,
+    "DEGRADED→CLOSED": false,
+    "DEGRADED→OPEN": false,
+    "OPEN→HALF_OPEN": true,
+    "HALF_OPEN→CLOSED": true,
+    "HALF_OPEN→OPEN": true,
+    "HALF_OPEN→DEGRADED": false
+  }
+}

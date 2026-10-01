@@ -59,6 +59,34 @@ node infra/chaos-load.mjs --profiles=low --faults=flaky-full-cycle,kill-leader
 Results for 2026-09-24/25 are in the README. Runs are voided when the host
 suspends mid-run, since timings are meaningless across a sleep.
 
+### Redis against PostgreSQL, 2026-10-01
+
+The five faults that touch coordination, at `low` (200/s, spikes to 3,000/s),
+once per store on the same stack
+(`docs/runs/chaos-load-{redis,postgres}-2026-10-01.json`). `kill-store` kills
+whichever store the aggregators were started with.
+
+| Fault | Redis: leaderless · recovery | PostgreSQL: leaderless · recovery |
+|---|---|---|
+| `kill-leader` | 4 s · 0.1 s | 5 s · 0.1 s |
+| `kill-store` | 32 s · 3.3 s | 30 s · 1.1 s |
+| `net-lease-partition` | 3 s · 0.1 s | 4 s · 0.1 s |
+| `net-lease-partition+outage` | 4 s · 23.6 s | 3 s · 23.7 s |
+| `flaky-full-cycle` | 0 s · 17.3 s | 0 s · 16.1 s |
+
+Both stores pass every check: nothing lost, nothing dead-lettered, never two
+leaders, no gap or duplicate on `circuit.control`. Leaderless time is about the
+5 s lease TTL where the leader changes hands, the 30 s outage itself for `kill-store`,
+and none for `flaky-full-cycle`, where it never does. The duplicate upstream calls
+in the two outage runs (Redis 37 and 28, PostgreSQL 24 and 46) come with the
+outage, not the store.
+
+PostgreSQL's first `kill-store` run failed: after the restart no instance led
+again for the rest of the run (228 s). Calls made during the outage timed out
+while postgres.js reopened a connection for them, and cancelling them wedged
+every connection in the pool ([ADR 021](decisions/021-two-coordination-backends.md)).
+The numbers above are from after the fix.
+
 A soak of 27 minutes, deliberately disrupted (two chaos runs, a one-sided Redis
 partition, a Redis outage, rebuilds): aggregator RSS 98.7 → 103.4 MiB, a daemon
 95.7 → 97.1 MiB, 6,619 ticks, zero gaps, zero duplicates. That rules out a fast
