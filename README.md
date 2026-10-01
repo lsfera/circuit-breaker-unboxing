@@ -111,7 +111,11 @@ It mounts this repository at `/workspace` and installs dependencies on creation.
 Clone both repositories into the expected layout with:
 
 ```sh
-git clone https://github.com/lsfera/devcontainer-typescript.git && cd devcontainer-typescript && mkdir -p ws && git clone https://github.com/lsfera/circuit-breaker-unboxing.git ws/circuit-breaker && ./up.sh circuit-breaker
+git clone https://github.com/lsfera/devcontainer-typescript.git \
+  && cd devcontainer-typescript \
+  && mkdir -p ws \
+  && git clone https://github.com/lsfera/circuit-breaker-unboxing.git ws/circuit-breaker \
+  && ./up.sh circuit-breaker
 ```
 
 **RabbitMQ 4.3 or later.** Every branch runs `rabbitmq:4.3` (tested on 4.3.5),
