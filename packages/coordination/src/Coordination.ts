@@ -137,12 +137,12 @@ export const COORDINATION_TIMEOUT_MS = 1000;
 
 /**
  * Every call a backend makes goes through this: a rejected or hung promise is a
- * failure, never a defect. The signal aborts when the call is given up on, for
- * a driver that can cancel what it sent.
+ * failure, never a defect. A call given up on is abandoned, not cancelled; each
+ * backend says why that is safe for it.
  */
-export const guarded = <A>(operation: string, run: (signal: AbortSignal) => Promise<A>) =>
+export const guarded = <A>(operation: string, run: () => Promise<A>) =>
   Effect.tryPromise({
-    try: run,
+    try: () => run(),
     catch: (cause) => new CoordinationUnavailable({ operation, cause: String(cause) }),
   }).pipe(
     Effect.timeout(Duration.millis(COORDINATION_TIMEOUT_MS)),

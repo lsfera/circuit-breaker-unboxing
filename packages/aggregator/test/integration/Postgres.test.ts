@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createConnection, createServer } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
-import { Effect, Exit } from "effect";
+import { Effect, Exit, Option as O } from "effect";
 import { GenericContainer, Wait } from "testcontainers";
 import type { AddressInfo } from "node:net";
 import type { StartedTestContainer } from "testcontainers";
@@ -112,6 +112,64 @@ test("postgres: a call given up on while its connection opens does not wedge the
     assert.ok(Exit.isSuccess(await acquire()), "and once the connection is open, the next call goes through");
   } finally {
     await slow.end({ timeout: 1 }).catch(() => {});
+    proxy.close();
+  }
+});
+
+/**
+ * Found in review: a call the client gave up on still runs, and with more than
+ * one connection it can run after a later call. Two checkpoints under one token
+ * then land out of order, and the older sequence wins, which a successor would
+ * resume from and reuse. Redis cannot reorder them over its one connection.
+ *
+ * Here the save of 5 goes out first on a connection that opens slowly; the
+ * save of 6 follows. Whatever the pool does, 6 must be what is stored.
+ */
+test("postgres: checkpoints land in the order they were issued", async (t) => {
+  if (!container || !pool) return void t.skip("Docker is not available in this environment");
+
+  const delays: Array<number> = [];
+  const sockets = new Set<import("node:net").Socket>();
+  const proxy = createServer((client) => {
+    sockets.add(client);
+    setTimeout(() => {
+      const upstream = createConnection(container!.getMappedPort(5432), container!.getHost());
+      client.pipe(upstream).pipe(client);
+      upstream.on("error", () => client.destroy());
+      client.on("error", () => upstream.destroy());
+    }, delays.shift() ?? 0);
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+  // The production pool, so its size is what is under test.
+  const sql = connect(`postgres://postgres:test@127.0.0.1:${(proxy.address() as AddressInfo).port}/postgres`);
+  const { leaderElection, checkpointStore } = makePostgresBackend(sql, `test_order_${Date.now()}`);
+  const checkpoint = (sequence: number) => ({
+    state: "OPEN" as const,
+    reason: "ALL_ENDPOINTS_EJECTED" as const,
+    sequence,
+    changedAt: 0,
+    openBackoffMs: 4000,
+  });
+
+  try {
+    const token = await Effect.runPromise(leaderElection.tryAcquireOrRenew("A", 10_000));
+    assert.ok(O.isSome(token));
+
+    // Every connection gone; the next opens slowly, any after it quickly.
+    for (const socket of sockets) socket.destroy();
+    await sleep(200);
+    delays.push(600, 0);
+
+    await Promise.all([
+      Effect.runPromiseExit(checkpointStore.save("payments", token.value, checkpoint(5))),
+      sleep(20).then(() => Effect.runPromiseExit(checkpointStore.save("payments", token.value, checkpoint(6)))),
+    ]);
+    await sleep(1500);
+
+    const stored = await Effect.runPromise(checkpointStore.load("payments"));
+    assert.equal(O.getOrUndefined(stored)?.sequence, 6, "the later checkpoint must be the one that stays");
+  } finally {
+    await sql.end({ timeout: 1 }).catch(() => {});
     proxy.close();
   }
 });

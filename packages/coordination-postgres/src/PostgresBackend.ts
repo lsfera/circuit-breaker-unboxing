@@ -109,8 +109,9 @@ type Rows = ReadonlyArray<Record<string, unknown>>;
  * connection for is cancelled: after a store outage every call waited on a
  * reconnect, timed out, and wedged the whole pool, so no instance led again
  * (chaos-load `kill-store`). What actually runs is bounded on the server by
- * `statement_timeout` and `lock_timeout`, and one that lands late is harmless:
- * a renewal keeps the token, a stale checkpoint is fenced.
+ * `statement_timeout` and `lock_timeout`. One that lands late still lands
+ * before anything issued after it, because the pool has one connection (see
+ * `connect`).
  */
 const run = (
   sql: postgres.Sql | postgres.TransactionSql,
@@ -207,7 +208,8 @@ export const makePostgresBackend = (sql: postgres.Sql, schema = "egress_aggregat
         ready().then(() =>
           sql.begin(async (tx) => {
             const apiId = event.data.apiId;
-            const next = Number(O.getOrThrow(stringField(await run(tx, q.nextPosition, [apiId]), "next")));
+            const next = Number(O.getOrUndefined(stringField(await run(tx, q.nextPosition, [apiId]), "next")));
+            if (!Number.isSafeInteger(next)) throw new Error(`no outbox position came back for ${apiId}`);
             await run(tx, q.append, [apiId, next - 1, JSON.stringify(event)]);
             const trimmed = await tx.unsafe(q.trim, [apiId, next - OUTBOX_MAX_PER_API]);
             return trimmed.count;
@@ -252,11 +254,25 @@ export const PostgresCoordinationLayer = (
   );
 };
 
-/** The pool every process opens: small, quick to give up, and bounded on the server too. */
+/**
+ * The pool every process opens: quick to give up, and bounded on the server too.
+ *
+ * One connection, as Redis has one: calls reach the store in the order they
+ * were issued, whether or not the caller is still waiting. With more, a save
+ * the client gave up on could run after the next save under the same token
+ * (an instance that stands down keeps its lease, and renews it), leaving the
+ * older sequence stored; an outbox append could likewise land behind an event
+ * delivered after it.
+ */
 export const connect = (url: string): postgres.Sql =>
   postgres(url, {
-    max: 4,
+    max: 1,
     connect_timeout: Math.ceil(COORDINATION_TIMEOUT_MS / 1000),
+    // Seconds before reconnecting after a failed connect. The default grows to
+    // 20 s, so after an outage the one connection could wait that long with the
+    // store already back: chaos-load `kill-store` measured 8.6 s to recover. The
+    // tick already paces the attempts.
+    backoff: () => COORDINATION_TIMEOUT_MS / 2000,
     idle_timeout: 30,
     onnotice: () => {},
     connection: {

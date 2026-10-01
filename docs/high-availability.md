@@ -148,6 +148,7 @@ nothing, so a second instance would lead beside it.
 | Lease expiry | `PX`, Redis's clock | `expires_at` against `now()`, the database's clock |
 | Fencing the checkpoint | the script reads the lease keys | the statement reads the lease row `FOR SHARE`, so a takeover cannot commit in between |
 | Outbox positions | a list plus a head counter | absolute, ever-growing `pos` per API |
+| Order of calls | one connection: in the order issued | one connection too. With more, a save the client gave up on could land after the next save under the same lease, and the older sequence would stay |
 | A hung call | client-side 1 s timeout | the same, plus `statement_timeout`, `lock_timeout` and `idle_in_transaction_session_timeout` at 1 s on the server. A call given up on is abandoned, never cancelled: cancelling one that waits on a reconnect wedges postgres.js's pool |
 | Losing its data | a restart without AOF, an empty replica | a restore from an older backup, a lagging replica promoted |
 

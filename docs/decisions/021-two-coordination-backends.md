@@ -53,6 +53,16 @@ abandoned, not cancelled, and a test drops a connection, makes its replacement
 slower to open than a call is given, and checks the next call still goes
 through.
 
+Review found a third. With a pool of four, a call the client had given up on
+could still run after a later one: a checkpoint save under the same lease
+(an instance that stands down keeps its lease, and renews it) or an outbox
+append behind an event delivered after it. The older sequence then stayed.
+The pool has one connection, as Redis has, so calls land in the order they
+were issued; a test opens the first connection slowly and checks the later
+save is the one stored. One connection made postgres.js's reconnect backoff matter,
+since it grows to 20 s: `kill-store` took 8.6 s to recover until it was
+fixed at half a second.
+
 PostgreSQL creates its tables on the first call that reaches it, under an
 advisory lock, rather than at startup: an unreachable store is a failed call
 the aggregator stands down over, never a crash.

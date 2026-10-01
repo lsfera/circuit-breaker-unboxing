@@ -76,7 +76,11 @@ redis.call("SET", KEYS[3], ARGV[2])
 return ARGV[1]
 `;
 
-/** Every call to Redis goes through this, the outbox's too. */
+/**
+ * Every call to Redis goes through this, the outbox's too. A call given up on
+ * may still run, but over one connection it runs before anything issued after
+ * it, so a late save or append cannot overtake a newer one.
+ */
 export const evalGuarded = (
   redis: RedisLike,
   operation: string,

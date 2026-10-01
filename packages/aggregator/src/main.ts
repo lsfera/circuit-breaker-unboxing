@@ -19,14 +19,16 @@ import { HttpLive } from "./Http.ts";
 import { Config, defaultConfig } from "@egress/domain/Model.ts";
 import type { ApiSpec } from "./FleetSource.ts";
 
-/** The scheme picks the backend, so a typo in it stops the process rather than picking one (ADR 008). */
-const CoordinationUrl = Schema.String.pipe(
-  Schema.check(
-    Schema.makeFilter((url: string) =>
-      /^(rediss?|postgres(ql)?):\/\//.test(url) || "expected redis://, rediss://, postgres:// or postgresql://",
-    ),
-  ),
-);
+/** Where coordination lives, decoded at boot (ADR 008): the URL's scheme names the backend. */
+type CoordinationStore = { readonly backend: "redis" | "postgres"; readonly url: string };
+
+/** An unrecognised scheme stops the process rather than falling back to either backend. */
+const decodeCoordinationStore = (url: string): O.Option<CoordinationStore> =>
+  /^rediss?:\/\//.test(url)
+    ? O.some({ backend: "redis", url })
+    : /^postgres(ql)?:\/\//.test(url)
+      ? O.some({ backend: "postgres", url })
+      : O.none();
 
 /** An unknown flag stops the process rather than being ignored (ADR 008). */
 const flags = {
@@ -66,8 +68,11 @@ const flags = {
     Flag.withDescription("Drop the webhook sink, leaving only --rmq"),
   ),
   coordination: Flag.String("coordination").pipe(
-    Flag.withSchema(CoordinationUrl),
-    Flag.withDefault("redis://127.0.0.1:6379"),
+    Flag.filterMap(
+      decodeCoordinationStore,
+      (raw) => `expected redis://, rediss://, postgres:// or postgresql://, got ${raw}`,
+    ),
+    Flag.withDefault<CoordinationStore>({ backend: "redis", url: "redis://127.0.0.1:6379" }),
     Flag.withDescription(
       "Where the publishing lease, checkpoints and outbox live: redis://… or postgres://…",
     ),
@@ -169,9 +174,10 @@ const aggregator = Command.make("aggregator", flags, (settings) => {
    * so a second instance would lead beside it. Unreachable, and this instance
    * stands down rather than leading unfenced.
    */
-  const CoordinationLayer = /^postgres(ql)?:/.test(settings.coordination)
-    ? PostgresBackendLayer(settings.coordination)
-    : RedisBackendLayer(settings.coordination);
+  const CoordinationLayer =
+    settings.coordination.backend === "postgres"
+      ? PostgresBackendLayer(settings.coordination.url)
+      : RedisBackendLayer(settings.coordination.url);
 
   const HaLayer = Layer.mergeAll(
     CoordinationLayer,

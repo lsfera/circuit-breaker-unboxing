@@ -44,7 +44,7 @@ export class Outbox extends Context.Service<
     readonly apis: Effect.Effect<ReadonlyArray<string>, CoordinationUnavailable>;
     readonly depth: (apiId: string) => Effect.Effect<number, CoordinationUnavailable>;
   }
->()("@egress/coordination/Outbox") {}
+>()("@egress/coordination/Outbox/Outbox") {}
 
 /** One stored entry, read back: anything that does not decode keeps its place as `None`. */
 export const decodeEntry = (raw: string): Entry => Result.getSuccess(decodeCircuitEvent(raw));
