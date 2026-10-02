@@ -1,5 +1,9 @@
 # Agent instructions
 
+## Commits
+
+Do not add `Co-authored-by` trailers to commits in this repository.
+
 ## Effect
 
 This repository uses **Effect 4** — `effect@4.0.0-rc.117`, pinned in

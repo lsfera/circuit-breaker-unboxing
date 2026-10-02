@@ -16,3 +16,4 @@ history/runs/*.json
 
 # Reference source, fetched at the installed version by scripts/fetch-effect.mjs.
 repos/
+.full-review/
