@@ -3,7 +3,6 @@ import type { Context } from "effect";
 import {
   ATTEMPTS_HEADER,
   decodeWorkMessage,
-  IDEMPOTENCY_KEY_HTTP_HEADER,
   ORIGIN_QUEUE_HEADER,
   ORIGIN_REASON_HEADER,
   readsWorkFormat,
@@ -14,6 +13,13 @@ import * as Attempts from "./Attempts.ts";
 import * as Limiter from "./Limiter.ts";
 import * as Telemetry from "./Telemetry.ts";
 import type { Counts } from "./Tally.ts";
+
+/**
+ * The idempotency key as the third party receives it. On the broker it is the
+ * `message_id`, assigned once by the producer; every republish must pass
+ * `messageId` forward or `send` stamps a new one.
+ */
+export const IDEMPOTENCY_KEY_HTTP_HEADER = "x-idempotency-key";
 
 /**
  * The work path: one delivery, one call through Envoy, one settlement (the table
