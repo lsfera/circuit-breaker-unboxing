@@ -1,6 +1,6 @@
-import { Effect, Option as O, Schema } from "effect";
+import { Effect, Match, Option as O, Schema } from "effect";
 import { carry, Rmq } from "@egress/rmq/Client.ts";
-import type { GotMessage, RmqError } from "@egress/rmq/Client.ts";
+import type { GotMessage } from "@egress/rmq/Client.ts";
 import { deadLetterQueueFor, workQueueFor } from "@egress/rmq/WorkQueue.ts";
 
 /**
@@ -84,29 +84,30 @@ export const runPass = Effect.fnUntraced(function* (opts: RedriveOptions) {
   const parkedPub = yield* rmq.publisherToQueue(parkedQueueFor(opts.apiId));
 
   const move = (got: GotMessage) => {
-    const decision = nextRedrive(got.properties[REDRIVE_COUNT_HEADER]);
-    const [publish, outcome] =
-      decision.destination === "work"
-        ? [rmq.send(workPub, got.body, carry(got, { [REDRIVE_COUNT_HEADER]: String(decision.count) })), "moved" as const]
-        : [rmq.send(parkedPub, got.body, carry(got, { [PARKED_REASON_HEADER]: "redriven-too-often" })), "parked" as const];
+    const [publish, outcome] = Match.value(nextRedrive(got.properties[REDRIVE_COUNT_HEADER])).pipe(
+      Match.discriminatorsExhaustive("destination")({
+        work: ({ count }) =>
+          [rmq.send(workPub, got.body, carry(got, { [REDRIVE_COUNT_HEADER]: String(count) })), "moved" as const] as const,
+        parked: () =>
+          [rmq.send(parkedPub, got.body, carry(got, { [PARKED_REASON_HEADER]: "redriven-too-often" })), "parked" as const] as const,
+      }),
+    );
     return publish.pipe(
       Effect.andThen(got.ack),
       Effect.andThen(opts.onOutcome(outcome)),
     );
   };
 
-  const next = (left: number): Effect.Effect<void, RmqError> =>
-    left === 0
-      ? Effect.void
-      : opts.isClosed.pipe(
-          Effect.flatMap((closed) => (closed ? rmq.get(deadQueue) : Effect.succeed(O.none<GotMessage>()))),
-          Effect.flatMap(
-            O.match({
-              onNone: () => Effect.void,
-              onSome: (got) => move(got).pipe(Effect.andThen(next(left - 1))),
-            }),
-          ),
-        );
+  /** One message, if the breaker is still closed and the queue still has one; `false` ends the pass. */
+  const step = opts.isClosed.pipe(
+    Effect.flatMap((closed) => (closed ? rmq.get(deadQueue) : Effect.succeedNone)),
+    Effect.flatMap(
+      O.match({
+        onNone: () => Effect.succeed(false),
+        onSome: (got) => move(got).pipe(Effect.as(true)),
+      }),
+    ),
+  );
 
-  yield* next(MAX_PER_PASS);
+  yield* step.pipe(Effect.repeat({ while: (more) => more, times: MAX_PER_PASS - 1 }));
 });
