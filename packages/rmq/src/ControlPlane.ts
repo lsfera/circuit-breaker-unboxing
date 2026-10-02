@@ -1,24 +1,10 @@
 /**
  * Naming conventions for the work-queue shape shared by the producer and the competing-consumer fleet that
  * drains it: a durable work queue with a dead-letter destination, the broker's own delivery-limit budget, and
- * the idempotency-key convention a caller and a third party agree on.
+ * the work message's format.
  */
 
 import { Option as O, Schema } from "effect";
-
-/**
- * The payments idempotency key as the third party receives it: an HTTP header. A retry that reuses the key
- * keeps the third party from charging twice. On the broker it is the AMQP `message_id`: assigned once
- * (`workMessageId`), and a republish must carry it explicitly or the replay is a new message with a new key.
- */
-export const IDEMPOTENCY_KEY_HTTP_HEADER = "x-idempotency-key";
-
-/**
- * A work message's identity: unique to the producer run, stable for the life of the message. `n` alone restarts
- * at zero with each process, so a restarted producer would reuse the key of different work and a third party
- * would drop it as a duplicate. The last `:` splits run from sequence (the fake third party's audit reads it).
- */
-export const workMessageId = (run: string, n: number): string => `${run}:${n}`;
 
 /**
  * What a work message says, declared once so the producer's encoder and the daemons' decoder cannot drift.
@@ -26,8 +12,7 @@ export const workMessageId = (run: string, n: number): string => `${run}:${n}`;
  * not thrown: a body that is not a work message is an answer ("discard it"). Unknown fields are ignored, so a
  * newer producer can add one without breaking an older daemon.
  */
-export const WorkMessage = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
-export type WorkMessage = typeof WorkMessage.Type;
+const WorkMessage = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
 
 /**
  * The AMQP `content_type` a work publisher declares and a daemon negotiates on before decoding. RabbitMQ

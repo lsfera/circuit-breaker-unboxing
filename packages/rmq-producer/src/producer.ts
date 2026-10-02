@@ -7,7 +7,6 @@ import {
   encodeWorkMessage,
   WORK_CONTENT_TYPE,
   WORK_MESSAGE_TYPE,
-  workMessageId,
   workQueueFor,
   workQueueOptions,
 } from "@egress/rmq/ControlPlane.ts";
@@ -17,6 +16,13 @@ import {
  * third party: arrivals do not stop when it degrades, and a producer that backed off would hide the backlog
  * the fleet has to survive.
  */
+
+/**
+ * A work message's identity: unique to the producer run, stable for the life of the message. `n` alone restarts
+ * at zero with each process, so a restarted producer would reuse the key of different work and a third party
+ * would drop it as a duplicate. The last `:` splits run from sequence (the fake third party's audit reads it).
+ */
+const workMessageId = (run: string, n: number): string => `${run}:${n}`;
 
 type ProducerConfig = {
   readonly apiId: string;
