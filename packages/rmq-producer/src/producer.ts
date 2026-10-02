@@ -7,7 +7,6 @@ import {
   encodeWorkMessage,
   WORK_CONTENT_TYPE,
   WORK_MESSAGE_TYPE,
-  workMessageId,
   workQueueFor,
   workQueueOptions,
 } from "@egress/rmq/ControlPlane.ts";
@@ -17,6 +16,9 @@ import {
  * third party: arrivals do not stop when it degrades, and a producer that backed off would hide the backlog
  * the fleet has to survive.
  */
+
+/** A work message's identity, stable for its life. `n` alone would collide across producer restarts. */
+const workMessageId = (run: string, n: number): string => `${run}:${n}`;
 
 type ProducerConfig = {
   readonly apiId: string;

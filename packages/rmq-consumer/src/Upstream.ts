@@ -1,6 +1,5 @@
 import { Cause, Duration, Effect, Predicate } from "effect";
 import { HttpClient, HttpClientRequest } from "effect/unstable/http";
-import { IDEMPOTENCY_KEY_HTTP_HEADER } from "@egress/rmq/ControlPlane.ts";
 
 /**
  * The one third-party call this daemon makes, reduced to what came back: the HTTP status, or `timeout` /
@@ -8,6 +7,9 @@ import { IDEMPOTENCY_KEY_HTTP_HEADER } from "@egress/rmq/ControlPlane.ts";
  * (Breaker.ts). The idempotency key rides along as the third party's own HTTP header, so a redelivered message
  * repeats the same request rather than a new one.
  */
+
+/** The payments idempotency key, as the third party receives it. On the broker it's the AMQP `message_id`. */
+export const IDEMPOTENCY_KEY_HTTP_HEADER = "x-idempotency-key";
 
 export type CallStatus = number | "timeout" | "network";
 

@@ -1,21 +1,14 @@
 /**
  * Naming conventions for the work-queue shape shared by the producer and the competing-consumer fleet that
  * drains it: a durable work queue with a dead-letter destination, the broker's own delivery-limit budget,
- * the idempotency-key convention a caller and a third party agree on, and, as of article 3, the redrive-trigger
+ * the work message's format, and, as of article 3, the redrive-trigger
  * and parked-queue naming `Redrive.ts` and `consumer.ts` use to recover `<api>.work.dead`.
  */
 
 import { Option as O, Schema } from "effect";
 
-/** The payments idempotency key, as the third party receives it. On the broker it's the AMQP `message_id`. */
-export const IDEMPOTENCY_KEY_HTTP_HEADER = "x-idempotency-key";
-
-/** A work message's identity, stable for its life. `n` alone would collide across producer restarts. */
-export const workMessageId = (run: string, n: number): string => `${run}:${n}`;
-
 /** What a work message says, declared once so encoder and decoder can't drift. Unknown fields are ignored. */
-export const WorkMessage = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
-export type WorkMessage = typeof WorkMessage.Type;
+const WorkMessage = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
 
 /** The AMQP `content_type` a work publisher declares. AMQP has no `Accept`, so negotiation is the reader's. */
 export const WORK_CONTENT_TYPE = "application/json";

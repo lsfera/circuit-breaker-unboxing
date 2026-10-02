@@ -4,7 +4,6 @@ import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { Effect } from "effect";
 import { FetchHttpClient } from "effect/unstable/http";
-import { IDEMPOTENCY_KEY_HTTP_HEADER } from "@egress/rmq/ControlPlane.ts";
 import * as Upstream from "../src/Upstream.ts";
 
 const run = (url: string, key = "run:1") =>
@@ -20,7 +19,7 @@ const serving = async (handler: Parameters<typeof createServer>[1]) => {
 test("a 2xx comes back as its status, and the idempotency key travels as the third party's header", async () => {
   const seen: Array<string | string[] | undefined> = [];
   const upstream = await serving((req, res) => {
-    seen.push(req.headers[IDEMPOTENCY_KEY_HTTP_HEADER]);
+    seen.push(req.headers[Upstream.IDEMPOTENCY_KEY_HTTP_HEADER]);
     res.end("fine");
   });
   assert.equal(await run(upstream.url, "abc:7"), 200);
