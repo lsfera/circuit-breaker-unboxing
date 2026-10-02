@@ -9,7 +9,7 @@
   "packageManager": "pnpm@12.8.1",
   "scripts": {
     "test": "node --test 'packages/*/test/*.test.ts'",
-    "test:rmq": "pnpm --filter @egress/rmq test:rmq",
+    "test:rmq": "pnpm --filter @egress/rmq test:rmq && pnpm --filter @egress/rmq-consumer test:rmq",
     "typecheck": "tsc --noEmit",
     "fetch:effect": "node scripts/fetch-effect.mjs",
     "check:vendored": "node scripts/fetch-effect.mjs && node scripts/check-vendored.mjs",

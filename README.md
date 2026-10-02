@@ -408,7 +408,7 @@ docs/            the write-up, its media, saved runs
 
 ```bash
 pnpm run check       # vendored version, typecheck, unit tests
-pnpm run test:rmq    # needs Docker: against a real broker
+pnpm run test:rmq    # needs Docker: RMQ client and consumer integration tests against a real broker
 ```
 
 > [Main overview](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/main/README.md) | [Next: 05 · A platform control plane](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/05-platform-control-plane/README.md)

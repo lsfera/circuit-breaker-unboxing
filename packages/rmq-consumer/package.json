@@ -3,6 +3,9 @@
   "private": true,
   "type": "module",
   "description": "The consumer SDK: an application declares its contracts, what it does with each message and the dependencies that work calls; this runs the rest — one breaker per dependency whose open state is a token in RabbitMQ's delay chain, the fleet's probe permits, the redrive of dead letters, a concurrency limit learned from throttled answers, parking and metrics. packages/consumer is the application written against it.",
+  "scripts": {
+    "test:rmq": "node --test 'test/integration/*.test.ts'"
+  },
   "exports": {
     ".": "./src/index.ts"
   },
