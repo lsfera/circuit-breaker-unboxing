@@ -1,6 +1,6 @@
 {
     "recommendations": [
-        "anthropic.claude-code",
-        "firsttris.vscode-jest-runner"
+        "oxc.oxc-vscode",
+        "dprint.dprint"
     ]
 }

@@ -1,18 +1,17 @@
 {
 	"editor.inlineSuggest.enabled": true,
+	"editor.formatOnSave": true,
+	"editor.formatOnSaveMode": "file",
 	"claudeCode.environmentVariables": [
 		{
 			"name": "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
 			"value": "1"
 		}
 	],
-	"json.schemaDownload.trustedDomains": {
-		"https://biomejs.dev/schema": true
-	},
 	"editor.codeActionsOnSave": {
-		"source.organizeImports.biome": "explicit",
-		"source.fixAll.biome": "explicit"
+		"source.fixAll.oxc": "explicit"
 	},
+	"files.insertFinalNewline": true,
 	"todo-tree.ripgrep.ripgrep": "/usr/bin/rg",
 	"js/ts.preferences.autoImportFileExcludePatterns": [
 		"repos/**"
@@ -25,5 +24,14 @@
 	},
 	"files.exclude": {
 		"repos/**": true
+	},
+	"[typescript]": {
+		"editor.defaultFormatter": "dprint.dprint"
+	},
+	"[typescriptreact]": {
+		"editor.defaultFormatter": "dprint.dprint"
+	},
+	"[javascript]": {
+		"editor.defaultFormatter": "dprint.dprint"
 	}
 }

@@ -8,6 +8,7 @@ catalog:
 
 allowBuilds:
   cpu-features: true
+  dprint: true
   msgpackr-extract: true
   protobufjs: true
   ssh2: true

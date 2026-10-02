@@ -14,10 +14,13 @@
     "fetch:effect": "node scripts/fetch-effect.mjs",
     "check:vendored": "node scripts/fetch-effect.mjs && node scripts/check-vendored.mjs",
     "check": "pnpm run check:vendored && pnpm run typecheck && pnpm run test",
-    "incident": "node infra/incident.mjs"
+    "incident": "node infra/incident.mjs",
+    "format": "dprint fmt"
   },
   "devDependencies": {
     "@types/node": "^26.6.3",
+    "dprint": "^0.57.4",
+    "oxlint": "^1.86.0",
     "typescript": "^7.0.2"
   }
 }
