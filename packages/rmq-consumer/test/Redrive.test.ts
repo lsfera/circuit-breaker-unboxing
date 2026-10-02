@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Effect, Option as O } from "effect";
-import { Rmq } from "@egress/rmq/Client.ts";
+import { Rmq, RmqError } from "@egress/rmq/Client.ts";
 import type { GotMessage, RmqService } from "@egress/rmq/Client.ts";
 import { REDRIVE_COUNT_HEADER } from "@egress/rmq/ControlPlane.ts";
 import * as Redrive from "../src/Redrive.ts";
@@ -44,9 +44,19 @@ test("a header that doesn't parse is treated as zero, not trusted", () => {
  * broker, matching Breaker.test.ts's own style for `withPermit`. `get`
  * simply shifts the next fake delivery; `send` records which destination a
  * body landed on, keyed by the queue name `publisherToQueue` was given.
+ * `events` logs every send and settlement in the order they happened, so a
+ * test can see that a message is acked only after its publish landed.
+ * `failSendOf` makes `send` fail for that body, as a broker refusal would.
  */
-const fakeRedriveRmq = (dead: ReadonlyArray<GotMessage>) => {
-  const queue = [...dead];
+type Dead = Omit<GotMessage, "ack" | "nack">;
+
+const fakeRedriveRmq = (dead: ReadonlyArray<Dead>, failSendOf?: string) => {
+  const events: Array<string> = [];
+  const queue: Array<GotMessage> = dead.map((m) => ({
+    ...m,
+    ack: Effect.sync(() => void events.push(`ack ${m.body}`)),
+    nack: Effect.sync(() => void events.push(`nack ${m.body}`)),
+  }));
   const sent: Record<string, Array<{ body: string; headers: Record<string, string>; messageId: string | undefined }>> = {};
   const unimplemented =
     (op: string) =>
@@ -69,9 +79,12 @@ const fakeRedriveRmq = (dead: ReadonlyArray<GotMessage>) => {
         mandatory: true,
       }),
     send: (pub, body, options) =>
-      Effect.sync(() => {
-        (sent[pub.routingKey] ??= []).push({ body, headers: options?.headers ?? {}, messageId: options?.messageId });
-      }),
+      body === failSendOf
+        ? Effect.fail(new RmqError({ operation: "send", cause: "message nacked" }))
+        : Effect.sync(() => {
+            events.push(`send ${pub.routingKey} ${body}`);
+            (sent[pub.routingKey] ??= []).push({ body, headers: options?.headers ?? {}, messageId: options?.messageId });
+          }),
     sendBatch: unimplemented("sendBatch"),
     cancelConsumer: unimplemented("cancelConsumer"),
     closeConsumer: unimplemented("closeConsumer"),
@@ -79,22 +92,20 @@ const fakeRedriveRmq = (dead: ReadonlyArray<GotMessage>) => {
     isConnected: Effect.succeed(true),
     resetConnection: Effect.sync(() => {}),
   });
-  return { rmq, sent };
+  return { rmq, sent, events };
 };
 
-const message = (body: string, redriveCount?: number, messageId?: string): GotMessage => ({
+const message = (body: string, redriveCount?: number, messageId?: string): Dead => ({
   body,
   properties: redriveCount === undefined ? {} : { [REDRIVE_COUNT_HEADER]: String(redriveCount) },
   messageId: O.fromNullishOr(messageId),
-  ack: Effect.sync(() => {}),
-  nack: Effect.sync(() => {}),
 });
 
 const run = <A>(effect: Effect.Effect<A, unknown, Rmq>, rmq: RmqService) =>
   Effect.runPromise(Effect.provideService(effect, Rmq, rmq));
 
 test("a pass drains the dead queue onto work, incrementing the redrive count", async () => {
-  const { rmq, sent } = fakeRedriveRmq([message("a"), message("b", 2)]);
+  const { rmq, sent, events } = fakeRedriveRmq([message("a"), message("b", 2)]);
   const outcomes: Array<Redrive.RedriveOutcome> = [];
   await run(
     Redrive.runPass({
@@ -111,6 +122,12 @@ test("a pass drains the dead queue onto work, incrementing the redrive count", a
     { body: "b", headers: { [REDRIVE_COUNT_HEADER]: "3" }, messageId: undefined },
   ]);
   assert.equal(sent["payments-provider.work.parked"], undefined);
+  assert.deepEqual(events, [
+    "send payments-provider.work a",
+    "ack a",
+    "send payments-provider.work b",
+    "ack b",
+  ]);
 });
 
 test("a redriven message carries its original message_id forward, so the third party sees the same idempotency key", async () => {
@@ -124,7 +141,7 @@ test("a redriven message carries its original message_id forward, so the third p
 });
 
 test("a message already at MAX_REDRIVES is parked instead of moved", async () => {
-  const { rmq, sent } = fakeRedriveRmq([message("poison", 5)]);
+  const { rmq, sent, events } = fakeRedriveRmq([message("poison", 5)]);
   const outcomes: Array<Redrive.RedriveOutcome> = [];
   await run(
     Redrive.runPass({
@@ -138,10 +155,11 @@ test("a message already at MAX_REDRIVES is parked instead of moved", async () =>
   assert.deepEqual(outcomes, ["parked"]);
   assert.equal(sent["payments-provider.work"], undefined);
   assert.deepEqual(sent["payments-provider.work.parked"], [{ body: "poison", headers: { "x-egress-parked-reason": "redriven-too-often" }, messageId: undefined }]);
+  assert.deepEqual(events, ["send payments-provider.work.parked poison", "ack poison"]);
 });
 
 test("a pass stops the instant the gate closes, leaving the rest of the queue untouched", async () => {
-  const { rmq, sent } = fakeRedriveRmq([message("a"), message("b"), message("c")]);
+  const { rmq, sent, events } = fakeRedriveRmq([message("a"), message("b"), message("c")]);
   let closedAfter = 1;
   const outcomes: Array<Redrive.RedriveOutcome> = [];
   await run(
@@ -159,4 +177,19 @@ test("a pass stops the instant the gate closes, leaving the rest of the queue un
   assert.deepEqual(sent["payments-provider.work"], [
     { body: "a", headers: { [REDRIVE_COUNT_HEADER]: "1" }, messageId: undefined },
   ]);
+  assert.deepEqual(events, ["send payments-provider.work a", "ack a"], "b and c must never be fetched, let alone settled");
+});
+
+test("a publish that fails leaves its message unacked, so it is never lost", async () => {
+  const { rmq, events } = fakeRedriveRmq([message("a"), message("b")], "b");
+  const exit = await Effect.runPromiseExit(
+    Effect.provideService(
+      Redrive.runPass({ apiId: "payments-provider", isClosed: Effect.succeed(true), onOutcome: () => {} }),
+      Rmq,
+      rmq,
+    ),
+  );
+
+  assert.equal(exit._tag, "Failure");
+  assert.equal(events.includes("ack b"), false, "acking b without its publish landing would drop it");
 });

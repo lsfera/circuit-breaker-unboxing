@@ -1,4 +1,4 @@
-import { Effect, Option as O } from "effect";
+import { Effect, Match, Option as O } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
   deadLetterQueueFor,
@@ -85,20 +85,22 @@ export const runPass = Effect.fn(function* (opts: RedriveOptions) {
     // party no way to recognize a redriven message as the same request it may already have answered.
     const messageId = O.getOrUndefined(got.value.messageId);
     const decision = nextRedrive(got.value.properties[REDRIVE_COUNT_HEADER]);
-    if (decision.destination === "work") {
-      yield* rmq.send(workPub, got.value.body, {
-        messageId,
-        headers: { [REDRIVE_COUNT_HEADER]: String(decision.count) },
-      });
-      yield* got.value.ack;
-      opts.onOutcome("moved");
-    } else {
-      yield* rmq.send(parkedPub, got.value.body, {
-        messageId,
-        headers: { [PARKED_REASON_HEADER]: "redriven-too-often" },
-      });
-      yield* got.value.ack;
-      opts.onOutcome("parked");
-    }
+    const { pub, headers, outcome } = Match.value(decision).pipe(
+      Match.discriminatorsExhaustive("destination")({
+        work: ({ count }) => ({
+          pub: workPub,
+          headers: { [REDRIVE_COUNT_HEADER]: String(count) },
+          outcome: "moved" as const,
+        }),
+        parked: () => ({
+          pub: parkedPub,
+          headers: { [PARKED_REASON_HEADER]: "redriven-too-often" },
+          outcome: "parked" as const,
+        }),
+      }),
+    );
+    yield* rmq.send(pub, got.value.body, { messageId, headers });
+    yield* got.value.ack;
+    opts.onOutcome(outcome);
   }
 });
