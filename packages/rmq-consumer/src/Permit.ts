@@ -1,6 +1,6 @@
-import { Effect, Option as O } from "effect";
 import { Rmq } from "@egress/rmq/Client.ts";
 import type { RmqError } from "@egress/rmq/Client.ts";
+import { Effect, Option as O } from "effect";
 
 /**
  * The fleet's probe permit: one token in a queue of at most one ready message, so one probe reaches the dependency
@@ -15,21 +15,21 @@ export const permitQueueFor = (scope: string): string => `${scope}.probe-permit`
 const PERMIT_QUEUE_OPTIONS = { args: { "x-max-length": 1, "x-overflow": "reject-publish" } } as const;
 
 /** Publish a token, and treat the broker refusing it (one is already there) as success. */
-const offer = Effect.fnUntraced(function* (scope: string) {
+const offer = Effect.fnUntraced(function*(scope: string) {
   const rmq = yield* Rmq;
   yield* rmq.send(yield* rmq.publisherToQueue(permitQueueFor(scope)), "permit");
 }, (effect) => Effect.ignore(effect));
 
 /** Every replica seeds at startup; all but the first are refused. */
-export const seed = Effect.fnUntraced(function* (scope: string) {
+export const seed = Effect.fnUntraced(function*(scope: string) {
   const rmq = yield* Rmq;
   yield* rmq.declareQueue(permitQueueFor(scope), PERMIT_QUEUE_OPTIONS);
   yield* offer(scope);
 });
 
 /** The permit if it is free, as the effect that hands it back; `None` if another replica holds it. */
-export const take = Effect.fnUntraced(function* (
-  scope: string,
+export const take = Effect.fnUntraced(function*(
+  scope: string
 ): Effect.fn.Return<O.Option<Effect.Effect<void>>, RmqError, Rmq> {
   const rmq = yield* Rmq;
   const got = yield* rmq.get(permitQueueFor(scope));

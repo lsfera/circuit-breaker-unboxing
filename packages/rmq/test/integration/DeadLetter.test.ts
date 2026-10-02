@@ -1,23 +1,16 @@
-import { test, before, after } from "node:test";
-import assert from "node:assert/strict";
 import { Effect, Option as O } from "effect";
-import {
-  broker,
-  restartBroker,
-  skipIfNoDocker,
-  startBroker,
-  stopBroker,
-  waitFor,
-} from "./harness.ts";
+import assert from "node:assert/strict";
+import { after, before, test } from "node:test";
 import { Rmq } from "../../src/Client.ts";
+import { TRACEPARENT } from "../../src/Trace.ts";
 import {
   deadLetterQueueFor,
   deadLetterQueueOptions,
   WORK_DELIVERY_LIMIT,
   workQueueFor,
-  workQueueOptions,
+  workQueueOptions
 } from "../../src/WorkQueue.ts";
-import { TRACEPARENT } from "../../src/Trace.ts";
+import { broker, restartBroker, skipIfNoDocker, startBroker, stopBroker, waitFor } from "./harness.ts";
 
 /**
  * Dead-lettering: what a rejection does, what it carries, and what survives a republish. A separate file from
@@ -31,7 +24,7 @@ after(stopBroker);
 
 const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(
-    Effect.scoped(Effect.provide(program, Rmq.layer({ host: broker.host, port: broker.port }))) as Effect.Effect<A>,
+    Effect.scoped(Effect.provide(program, Rmq.layer({ host: broker.host, port: broker.port }))) as Effect.Effect<A>
   );
 
 /**
@@ -47,11 +40,11 @@ test("a rejected delivery dead-letters, and a classic queue counts no attempts",
   const dead = "dl.work.dead";
 
   const { deadLettered, counts } = await run(
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const rmq = yield* Rmq;
       yield* rmq.declareQueue(dead);
       yield* rmq.declareQueue(work, {
-        args: { "x-dead-letter-exchange": "", "x-dead-letter-routing-key": dead },
+        args: { "x-dead-letter-exchange": "", "x-dead-letter-routing-key": dead }
       });
 
       const deadLettered: string[] = [];
@@ -71,13 +64,13 @@ test("a rejected delivery dead-letters, and a classic queue counts no attempts",
       yield* rmq.send(pub, "needs-retrying");
       yield* waitFor(() => deadLettered.length > 0 && counts.length >= 3);
       return { deadLettered, counts };
-    }),
+    })
   );
 
   assert.deepEqual(
     deadLettered,
     ["needs-retrying"],
-    "a discarded message must arrive on the dead-letter queue, not vanish",
+    "a discarded message must arrive on the dead-letter queue, not vanish"
   );
   assert.ok(counts.length >= 3, `the message should have been redelivered, saw ${counts.length}`);
   assert.deepEqual(
@@ -85,7 +78,7 @@ test("a rejected delivery dead-letters, and a classic queue counts no attempts",
     [0, 0, 0],
     "a classic queue exposes no x-delivery-count, so every redelivery looks " +
       "like a first one — which is exactly why WORK_DELIVERY_LIMIT needs a " +
-      "quorum queue to mean anything",
+      "quorum queue to mean anything"
   );
 });
 
@@ -102,22 +95,22 @@ test("a dead-lettered message says which queue it came from", async (t) => {
   const control = "origin.control";
 
   const seen = await run(
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const rmq = yield* Rmq;
       yield* rmq.declareQueue(dead);
       const options = {
-        args: { "x-dead-letter-exchange": "", "x-dead-letter-routing-key": dead },
+        args: { "x-dead-letter-exchange": "", "x-dead-letter-routing-key": dead }
       };
       yield* rmq.declareQueue(work, options);
       yield* rmq.declareQueue(control, options);
 
-      const seen: Array<{ body: string; queue: string | null; reason: string | null }> = [];
+      const seen: Array<{ body: string; queue: string | null; reason: string | null; }> = [];
       yield* rmq.consume(dead, (bytes, delivery) => {
         const body = bytes.toString();
         seen.push({
           body,
           queue: O.getOrUndefined(delivery.deadLetter)?.queue ?? null,
-          reason: O.getOrUndefined(delivery.deadLetter)?.reason ?? null,
+          reason: O.getOrUndefined(delivery.deadLetter)?.reason ?? null
         });
       });
 
@@ -132,7 +125,7 @@ test("a dead-lettered message says which queue it came from", async (t) => {
       yield* rmq.send(controlPub, "an-undecodable-control-message");
       yield* waitFor(() => seen.length >= 2);
       return seen;
-    }),
+    })
   );
 
   assert.equal(seen.length, 2, `both messages should reach the dead-letter queue, got ${seen.length}`);
@@ -142,7 +135,7 @@ test("a dead-lettered message says which queue it came from", async (t) => {
   assert.equal(
     byBody.get("a-work-message")?.reason,
     "rejected",
-    "the reason distinguishes a rejection from an expiry or an overflow",
+    "the reason distinguishes a rejection from an expiry or an overflow"
   );
 });
 
@@ -155,7 +148,7 @@ test("application properties survive a republish, so provenance can outlive the 
 
   const queue = "props.queue";
   const seen = await run(
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const rmq = yield* Rmq;
       yield* rmq.declareQueue(queue);
       const got: Array<Record<string, string>> = [];
@@ -164,13 +157,13 @@ test("application properties survive a republish, so provenance can outlive the 
       yield* rmq.send(pub, "stamped", {
         headers: {
           "x-egress-origin-queue": "some.control.queue",
-          "x-egress-origin-reason": "rejected",
-        },
+          "x-egress-origin-reason": "rejected"
+        }
       });
       yield* rmq.send(pub, "unstamped");
       yield* waitFor(() => got.length >= 2);
       return got;
-    }),
+    })
   );
 
   assert.equal(seen.length, 2);
@@ -180,7 +173,7 @@ test("application properties survive a republish, so provenance can outlive the 
   assert.equal(stamped!["x-egress-origin-reason"], "rejected");
   assert.ok(
     seen.some((p) => Object.keys(p).length === 0),
-    "a message published without properties must arrive with none, not with the previous message's",
+    "a message published without properties must arrive with none, not with the previous message's"
   );
 });
 
@@ -195,7 +188,7 @@ test("a durable queue keeps its messages across a broker restart", async (t) => 
   const durable = "survive.durable";
 
   await run(
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const rmq = yield* Rmq;
       yield* rmq.declareQueue(durable, { durable: true });
       const a = yield* rmq.publisherToQueue(durable);
@@ -205,13 +198,13 @@ test("a durable queue keeps its messages across a broker restart", async (t) => 
       // Settle before the restart, so this measures durability rather than a
       // race between publishing and the broker going down.
       yield* Effect.promise(() => new Promise((r) => setTimeout(r, 1000)));
-    }),
+    })
   );
 
   await restartBroker();
 
   const kept = await run(
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const rmq = yield* Rmq;
       // Redeclared with the same arguments, as a reconnecting daemon does: an empty durable queue would look
       // identical to a healthy one from the outside.
@@ -221,7 +214,7 @@ test("a durable queue keeps its messages across a broker restart", async (t) => 
       yield* rmq.consume(durable, (body) => void kept.push(body.toString()));
       yield* waitFor(() => kept.length >= 5);
       return kept;
-    }),
+    })
   );
 
   assert.equal(kept.length, 5, `durable queue must keep its messages, kept ${kept.length}`);
@@ -247,14 +240,14 @@ test("a traceparent survives dead-lettering, and only a republish that carries i
   const carried = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
   const { onDead, replayed } = await run(
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const rmq = yield* Rmq;
       yield* rmq.declareQueue(dead, deadLetterQueueOptions());
       yield* rmq.declareQueue(work, workQueueOptions(apiId));
       const into = yield* rmq.publisherToQueue(work);
 
       const onDead: boolean[] = [];
-      const replayed: Array<{ how: string; parent: boolean }> = [];
+      const replayed: Array<{ how: string; parent: boolean; }> = [];
 
       // Two independent messages, each dead-lettered once and replayed once: one alone, one carrying the header.
       const deadSeen = new Map<string, number>();
@@ -264,8 +257,7 @@ test("a traceparent survives dead-lettering, and only a republish that carries i
         deadSeen.set(body, n);
         if (n > 1) return "accept" as const;
         onDead.push(O.isSome(delivery.parent));
-        const options =
-          body === "alone" ? {} : { headers: { [TRACEPARENT]: delivery.properties[TRACEPARENT]! } };
+        const options = body === "alone" ? {} : { headers: { [TRACEPARENT]: delivery.properties[TRACEPARENT]! } };
         return Effect.runPromise(rmq.send(into, body, options)).then(() => "accept" as const);
       });
 
@@ -282,20 +274,20 @@ test("a traceparent survives dead-lettering, and only a republish that carries i
       yield* rmq.send(into, "carrying", { headers: { [TRACEPARENT]: carried } });
       yield* waitFor(() => replayed.length >= 2);
       return { onDead, replayed };
-    }),
+    })
   );
 
   assert.deepEqual(
     onDead,
     [true, true],
-    "the traceparent must still be readable once the message is dead-lettered",
+    "the traceparent must still be readable once the message is dead-lettered"
   );
   assert.deepEqual(
     [...replayed].sort((a, b) => a.how.localeCompare(b.how)),
     [
       { how: "alone", parent: false },
-      { how: "carrying", parent: true },
-    ],
+      { how: "carrying", parent: true }
+    ]
   );
 });
 
@@ -313,14 +305,14 @@ test("a message id survives dead-lettering, and only a redrive republish that ca
   const id = "run1:41";
 
   const { onDead, replayed } = await run(
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const rmq = yield* Rmq;
       yield* rmq.declareQueue(dead, deadLetterQueueOptions());
       yield* rmq.declareQueue(work, workQueueOptions(apiId));
       const into = yield* rmq.publisherToQueue(work);
 
       const onDead: Array<O.Option<string>> = [];
-      const replayed: Array<{ how: string; id: O.Option<string> }> = [];
+      const replayed: Array<{ how: string; id: O.Option<string>; }> = [];
 
       // Two messages, each dead-lettered once and replayed once: one carrying the id, one dropping it (a careless republish).
       const deadSeen = new Map<string, number>();
@@ -347,13 +339,17 @@ test("a message id survives dead-lettering, and only a redrive republish that ca
       yield* rmq.send(into, "dropping", { messageId: id });
       yield* waitFor(() => replayed.length >= 2);
       return { onDead, replayed };
-    }),
+    })
   );
 
   assert.deepEqual(onDead, [O.some(id), O.some(id)], "the id must still be readable once the message is dead-lettered");
   const byHow = Object.fromEntries(replayed.map((r) => [r.how, r.id]));
   assert.deepEqual(byHow["carrying"], O.some(id), "a republish that carries the id keeps the key");
-  assert.equal(O.isSome(byHow["dropping"]!) && byHow["dropping"]!.value !== id, true, "a republish that drops it is a different message");
+  assert.equal(
+    O.isSome(byHow["dropping"]!) && byHow["dropping"]!.value !== id,
+    true,
+    "a republish that drops it is a different message"
+  );
 });
 
 test("the work queue parks a message at the delivery limit, and a redrive republish grants a fresh budget", async (t) => {
@@ -364,7 +360,7 @@ test("the work queue parks a message at the delivery limit, and a redrive republ
   const dead = deadLetterQueueFor(apiId);
 
   const { attempts, parked } = await run(
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const rmq = yield* Rmq;
       yield* rmq.declareQueue(dead, deadLetterQueueOptions());
       yield* rmq.declareQueue(work, workQueueOptions(apiId));
@@ -390,25 +386,25 @@ test("the work queue parks a message at the delivery limit, and a redrive republ
 
       yield* waitFor(() => parked.length >= 2);
       return { attempts, parked };
-    }),
+    })
   );
 
   assert.deepEqual(
     parked,
     ["delivery_limit", "delivery_limit"],
-    "both parkings must be the broker enforcing the limit, not something else rejecting",
+    "both parkings must be the broker enforcing the limit, not something else rejecting"
   );
   assert.equal(
     attempts.length,
     (WORK_DELIVERY_LIMIT + 1) * 2,
-    `one delivery plus ${WORK_DELIVERY_LIMIT} redeliveries, twice — the redrive resets the budget`,
+    `one delivery plus ${WORK_DELIVERY_LIMIT} redeliveries, twice — the redrive resets the budget`
   );
   // The count is the broker's, which is what makes it survive a message moving between daemons; the header is
   // readable, so a reset is visible rather than inferred from the parkings.
   assert.deepEqual(
     attempts,
     [0, 1, 2, 3, 0, 1, 2, 3],
-    "x-delivery-count climbs to the limit, then starts again from 0 for the republished message",
+    "x-delivery-count climbs to the limit, then starts again from 0 for the republished message"
   );
 });
 
@@ -424,7 +420,7 @@ test("the dead-letter queue keeps a message through more returns than a default 
   const dead = deadLetterQueueFor(apiId);
 
   const left = await run(
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const rmq = yield* Rmq;
       yield* rmq.declareQueue(dead, deadLetterQueueOptions());
       yield* rmq.send(yield* rmq.publisherToQueue(dead), "kept");
@@ -443,7 +439,7 @@ test("the dead-letter queue keeps a message through more returns than a default 
       yield* rmq.consume(dead, (body) => void received.push(body.toString()));
       yield* waitFor(() => received.length > 0);
       return received;
-    }),
+    })
   );
 
   assert.deepEqual(left, ["kept"]);

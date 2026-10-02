@@ -1,6 +1,6 @@
-import { test } from "node:test";
-import assert from "node:assert/strict";
 import { Effect, Option as O } from "effect";
+import assert from "node:assert/strict";
+import { test } from "node:test";
 import type { Registration } from "../src/Dependency.ts";
 import * as Gate from "../src/Gate.ts";
 
@@ -24,7 +24,7 @@ test("any dependency open stops the consumer; else any half-open probes; else it
 });
 
 const world = (registrations: Array<O.Option<Registration>>) =>
-  Effect.gen(function* () {
+  Effect.gen(function*() {
     const log: Array<string> = [];
     let next = 0;
     const gate = yield* Gate.make(Effect.sync(() => registrations), {
@@ -34,7 +34,7 @@ const world = (registrations: Array<O.Option<Registration>>) =>
           log.push(`subscribe ${mode} #${id}`);
           return id;
         }),
-      retire: (id) => Effect.sync(() => void log.push(`retire #${id}`)),
+      retire: (id) => Effect.sync(() => void log.push(`retire #${id}`))
     });
     return { gate, log, registrations };
   });
@@ -43,9 +43,10 @@ const run = (body: Effect.Effect<void, unknown>) => Effect.runPromise(body);
 
 test("one dependency reproduces the single breaker: full, stop, one probe, stop, full", () =>
   run(
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const w = yield* world([open]);
-      const step = (r: O.Option<Registration>) => Effect.andThen(Effect.sync(() => void (w.registrations[0] = r)), w.gate.reconcile);
+      const step = (r: O.Option<Registration>) =>
+        Effect.andThen(Effect.sync(() => void (w.registrations[0] = r)), w.gate.reconcile);
       yield* w.gate.reconcile;
       assert.deepEqual(w.log, [], "nothing subscribes until the breaker registers");
       yield* step(closed);
@@ -53,13 +54,19 @@ test("one dependency reproduces the single breaker: full, stop, one probe, stop,
       yield* step(halfOpen);
       yield* step(open);
       yield* step(closed);
-      assert.deepEqual(w.log, ["subscribe full #0", "retire #0", "subscribe probe #1", "retire #1", "subscribe full #2"]);
-    }),
+      assert.deepEqual(w.log, [
+        "subscribe full #0",
+        "retire #0",
+        "subscribe probe #1",
+        "retire #1",
+        "subscribe full #2"
+      ]);
+    })
   ));
 
 test("with two dependencies, the consumer waits for both, and either one opening stops it", () =>
   run(
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const w = yield* world([open, open]);
       w.registrations[0] = closed;
       yield* w.gate.reconcile;
@@ -70,35 +77,35 @@ test("with two dependencies, the consumer waits for both, and either one opening
       yield* w.gate.reconcile;
       assert.deepEqual(w.log, ["subscribe full #0", "retire #0"]);
       assert.equal(yield* w.gate.mode, "none");
-    }),
+    })
   ));
 
 test("one dependency half-open while the other is closed: the consumer probes, one message at a time", () =>
   run(
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const w = yield* world([closed, halfOpen]);
       yield* w.gate.reconcile;
       assert.deepEqual(w.log, ["subscribe probe #0"]);
       w.registrations[1] = closed;
       yield* w.gate.reconcile;
       assert.deepEqual(w.log, ["subscribe probe #0", "retire #0", "subscribe full #1"]);
-    }),
+    })
   ));
 
 test("reconciling without a change touches nothing", () =>
   run(
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const w = yield* world([closed]);
       yield* w.gate.reconcile;
       yield* w.gate.reconcile;
       yield* w.gate.reconcile;
       assert.deepEqual(w.log, ["subscribe full #0"]);
-    }),
+    })
   ));
 
 test("a Gate sees only its own dependencies: another's breaker opening leaves it consuming", () =>
   run(
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const payments = yield* world([closed, closed]);
       const refunds = yield* world([closed]);
       yield* payments.gate.reconcile;
@@ -110,5 +117,5 @@ test("a Gate sees only its own dependencies: another's breaker opening leaves it
       assert.equal(yield* payments.gate.mode, "none");
       assert.equal(yield* refunds.gate.mode, "full");
       assert.deepEqual(refunds.log, ["subscribe full #0"]);
-    }),
+    })
   ));

@@ -1,8 +1,8 @@
-import { test } from "node:test";
-import assert from "node:assert/strict";
+import { NodeServices } from "@effect/platform-node";
 import { ConfigProvider, Effect, Result } from "effect";
 import { Flag } from "effect/unstable/cli";
-import { NodeServices } from "@effect/platform-node";
+import assert from "node:assert/strict";
+import { test } from "node:test";
 import { brokerFlag, metricsPortFlag, PositiveInt, setting } from "../src/Settings.ts";
 
 /**
@@ -15,8 +15,8 @@ const read = <A>(flag: Flag.Flag<A>, env: Record<string, string>, flags: Record<
   Effect.runPromise(
     Effect.result(flag.parse({ flags, arguments: [] })).pipe(
       Effect.provideService(ConfigProvider.ConfigProvider, ConfigProvider.fromEnv({ env })),
-      Effect.provide(NodeServices.layer),
-    ),
+      Effect.provide(NodeServices.layer)
+    )
   ).then(Result.match({ onSuccess: ([, value]) => value as A | string, onFailure: (error) => error.message }));
 
 const broker = brokerFlag("test");
@@ -28,7 +28,10 @@ test("an unset broker address takes its default", async () => {
 
 test("a broker address decodes into a host and a port, from the environment or the flag", async () => {
   assert.deepEqual(await read(broker, { RMQ: "rabbitmq:5672" }), { host: "rabbitmq", port: 5672 });
-  assert.deepEqual(await read(broker, { RMQ: "rabbitmq:5672" }, { rmq: ["other:5673"] }), { host: "other", port: 5673 });
+  assert.deepEqual(await read(broker, { RMQ: "rabbitmq:5672" }, { rmq: ["other:5673"] }), {
+    host: "other",
+    port: 5673
+  });
 });
 
 /**

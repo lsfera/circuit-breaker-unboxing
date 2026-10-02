@@ -1,9 +1,9 @@
-import { test, before, after } from "node:test";
-import assert from "node:assert/strict";
 import { Effect } from "effect";
-import { broker, skipIfNoDocker, startBroker, stopBroker, waitFor } from "./harness.ts";
+import assert from "node:assert/strict";
+import { after, before, test } from "node:test";
 import { Rmq } from "../../src/Client.ts";
 import * as Delay from "../../src/DelayedDelivery.ts";
+import { broker, skipIfNoDocker, startBroker, stopBroker, waitFor } from "./harness.ts";
 
 /**
  * The delay chain against a real broker: what arrives, where, and how late. Real time, because a broker's TTL
@@ -15,7 +15,7 @@ after(stopBroker);
 
 const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(
-    Effect.scoped(Effect.provide(program, Rmq.layer({ host: broker.host, port: broker.port }))) as Effect.Effect<A>,
+    Effect.scoped(Effect.provide(program, Rmq.layer({ host: broker.host, port: broker.port }))) as Effect.Effect<A>
   );
 
 test("a delayed message arrives once, at its own destination, no earlier than asked", async (t) => {
@@ -24,24 +24,24 @@ test("a delayed message arrives once, at its own destination, no earlier than as
   // 1s enters and leaves level 0; 5s (101) waits in level 2, is passed
   // through level 1, then waits in level 0 — every kind of hop.
   const delays = [1, 2, 5];
-  const arrivals: Array<{ body: string; queue: string; at: number }> = [];
+  const arrivals: Array<{ body: string; queue: string; at: number; }> = [];
   const sentAt = Date.now();
 
   await run(
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const rmq = yield* Rmq;
       yield* Delay.declare();
       yield* Effect.forEach(["delay.a", "delay.b"], (queue) =>
-        Effect.gen(function* () {
+        Effect.gen(function*() {
           yield* rmq.declareQueue(queue);
           yield* Delay.receive(queue);
-          yield* rmq.consume(queue, (body) => void arrivals.push({ body: body.toString(), queue, at: Date.now() - sentAt }));
-        }),
-      );
+          yield* rmq.consume(queue, (body) =>
+            void arrivals.push({ body: body.toString(), queue, at: Date.now() - sentAt }));
+        }));
       yield* Effect.forEach(delays, (s) => Delay.sendDelayed("delay.a", s, `a:${s}`));
       yield* Delay.sendDelayed("delay.b", 2, "b:2");
       yield* waitFor(() => arrivals.length >= 4, 15_000);
-    }),
+    })
   );
 
   assert.equal(arrivals.length, 4, JSON.stringify(arrivals));
@@ -58,7 +58,7 @@ test("a delay near a day is accepted into the top of the chain and holds there",
   if (skipIfNoDocker(t)) return;
 
   const depth = await run(
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const rmq = yield* Rmq;
       yield* Delay.declare();
       yield* rmq.declareQueue("delay.day");
@@ -73,7 +73,7 @@ test("a delay near a day is accepted into the top of the chain and holds there",
         await conn.close();
         return { top: top.messageCount, dest: dest.messageCount };
       });
-    }),
+    })
   );
 
   assert.deepEqual(depth, { top: 1, dest: 0 });

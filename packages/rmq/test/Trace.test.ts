@@ -1,6 +1,6 @@
-import { test } from "node:test";
-import assert from "node:assert/strict";
 import { Effect, Option as O } from "effect";
+import assert from "node:assert/strict";
+import { test } from "node:test";
 import { parentFrom, traceparent } from "../src/Trace.ts";
 
 const TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
@@ -12,7 +12,15 @@ test("a W3C traceparent becomes the parent span", () => {
 });
 
 test("anything unparseable is no parent, never an error", () => {
-  for (const header of ["", "garbage", `01-${TRACE}-${SPAN}-01`, `00-${TRACE.toUpperCase()}-${SPAN}-01`, `00-${TRACE}-${SPAN}`]) {
+  for (
+    const header of [
+      "",
+      "garbage",
+      `01-${TRACE}-${SPAN}-01`,
+      `00-${TRACE.toUpperCase()}-${SPAN}-01`,
+      `00-${TRACE}-${SPAN}`
+    ]
+  ) {
     assert.equal(O.isNone(parentFrom(header)), true, header);
   }
 });

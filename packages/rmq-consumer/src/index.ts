@@ -1,15 +1,15 @@
-import { Config, Effect, Layer, Option as O, Predicate, Schema } from "effect";
-import { Command, Flag } from "effect/unstable/cli";
-import { HttpRouter } from "effect/unstable/http";
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
-import { randomUUID } from "node:crypto";
-import { createServer } from "node:http";
+import { brokerFlag, metricsPortFlag, PositiveInt, setting, VERSION } from "@egress/config/Settings.ts";
 import { launchWithRmq, Rmq } from "@egress/rmq/Client.ts";
 import type { DeliveryInfo } from "@egress/rmq/Client.ts";
 import { MAX_DELAY_SECONDS } from "@egress/rmq/DelayedDelivery.ts";
-import { brokerFlag, metricsPortFlag, PositiveInt, setting, VERSION } from "@egress/config/Settings.ts";
 import { MetricsRoute } from "@egress/tracing/Metrics.ts";
 import { TracingLive } from "@egress/tracing/Tracing.ts";
+import { Config, Effect, Layer, Option as O, Predicate, Schema } from "effect";
+import { Command, Flag } from "effect/unstable/cli";
+import { HttpRouter } from "effect/unstable/http";
+import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 import { runApplication } from "./consumer.ts";
 import type { ConsumerSpec } from "./consumer.ts";
 import * as Dep from "./Dependency.ts";
@@ -25,10 +25,10 @@ import type { Negotiate } from "./Negotiation.ts";
  */
 
 export type { Outcome } from "./Breaker.ts";
-export type { Declared, Negotiate, Parser } from "./Negotiation.ts";
-export { accept, bytes, text } from "./Negotiation.ts";
 export type { Verdict } from "./Dependency.ts";
 export { Halted, Rejected } from "./Dependency.ts";
+export type { Declared, Negotiate, Parser } from "./Negotiation.ts";
+export { accept, bytes, text } from "./Negotiation.ts";
 
 /** RabbitMQ's side of a delivery: `message_id`, `type`, content type and encoding, headers, delivery count, dead-letter origin, publish time. */
 export type Metadata = DeliveryInfo;
@@ -51,8 +51,9 @@ export interface Registration<R> {
   readonly spec: (key: string) => ConsumerSpec;
 }
 
-type BreakerOf<D extends ReadonlyArray<AnyDependency>> =
-  D[number] extends infer X ? (X extends Dep.Dependency<infer Name, any, any> ? Gated<Name> : never) : never;
+type BreakerOf<D extends ReadonlyArray<AnyDependency>> = D[number] extends infer X
+  ? (X extends Dep.Dependency<infer Name, any, any> ? Gated<Name> : never)
+  : never;
 
 type ServicesOf<C> = C extends Registration<infer R> ? R : never;
 
@@ -69,7 +70,7 @@ export const For = <T>(message: Schema.Codec<T, any, never, unknown>, negotiate:
      */
     bind: <Out, E, R, const D extends ReadonlyArray<AnyDependency>>(
       action: (payload: T, metadata: Metadata) => Effect.Effect<Out, E, R>,
-      dependencies: D,
+      dependencies: D
     ): Registration<Exclude<R, BreakerOf<D>>> =>
       ({
         spec: (key: string): ConsumerSpec => ({
@@ -77,15 +78,15 @@ export const For = <T>(message: Schema.Codec<T, any, never, unknown>, negotiate:
           negotiate,
           decode,
           action: action as ConsumerSpec["action"],
-          dependencies,
-        }),
-      }) as Registration<Exclude<R, BreakerOf<D>>>,
+          dependencies
+        })
+      }) as Registration<Exclude<R, BreakerOf<D>>>
   };
 };
 
 // Strictly between: a decrease of 0 or 1 is a limit that collapses or never moves.
 const OpenFraction = Schema.Finite.check(
-  Schema.isBetween({ minimum: 0, maximum: 1, exclusiveMinimum: true, exclusiveMaximum: true }),
+  Schema.isBetween({ minimum: 0, maximum: 1, exclusiveMinimum: true, exclusiveMaximum: true })
 );
 
 /**
@@ -96,41 +97,61 @@ export const flags = {
   broker: brokerFlag("Broker to consume work from"),
   maxInFlight: setting(Flag.Int("max-in-flight"), PositiveInt, "MAX_IN_FLIGHT").pipe(
     Flag.withDefault(20),
-    Flag.withDescription("Concurrent actions each consumer allows itself"),
+    Flag.withDescription("Concurrent actions each consumer allows itself")
   ),
   breakerThreshold: setting(Flag.Int("breaker-threshold"), PositiveInt, "BREAKER_THRESHOLD").pipe(
     Flag.withDefault(5),
-    Flag.withDescription("Consecutive failures at a dependency before its breaker opens, for a dependency that sets none of its own"),
+    Flag.withDescription(
+      "Consecutive failures at a dependency before its breaker opens, for a dependency that sets none of its own"
+    )
   ),
-  breakerInitialDelaySeconds: setting(Flag.Int("breaker-initial-delay-seconds"), PositiveInt, "BREAKER_INITIAL_DELAY_SECONDS").pipe(
+  breakerInitialDelaySeconds: setting(
+    Flag.Int("breaker-initial-delay-seconds"),
+    PositiveInt,
+    "BREAKER_INITIAL_DELAY_SECONDS"
+  ).pipe(
     Flag.withDefault(1),
-    Flag.withDescription("First hold after a breaker opens, before its half-open probe, for a dependency that sets none of its own"),
+    Flag.withDescription(
+      "First hold after a breaker opens, before its half-open probe, for a dependency that sets none of its own"
+    )
   ),
-  breakerMaxDelaySeconds: setting(Flag.Int("breaker-max-delay-seconds"), Dep.MaxDelaySeconds, "BREAKER_MAX_DELAY_SECONDS").pipe(
+  breakerMaxDelaySeconds: setting(
+    Flag.Int("breaker-max-delay-seconds"),
+    Dep.MaxDelaySeconds,
+    "BREAKER_MAX_DELAY_SECONDS"
+  ).pipe(
     Flag.withDefault(86_400),
-    Flag.withDescription(`Ceiling a hold grows to, for a dependency that sets none of its own; the delay chain counts to ${MAX_DELAY_SECONDS}`),
+    Flag.withDescription(
+      `Ceiling a hold grows to, for a dependency that sets none of its own; the delay chain counts to ${MAX_DELAY_SECONDS}`
+    )
   ),
   replicaId: Flag.String("replica-id").pipe(
     Flag.withFallbackConfig(Config.NonEmptyString("REPLICA_ID")),
     Flag.withDefault(randomUUID()),
-    Flag.withDescription("Names this replica's wake queues; unique per process start by default, so a token sent by a process that has since died reaches a queue nobody reads instead of waking its successor"),
+    Flag.withDescription(
+      "Names this replica's wake queues; unique per process start by default, so a token sent by a process that has since died reaches a queue nobody reads instead of waking its successor"
+    )
   ),
   adaptiveLimit: Flag.Boolean("adaptive-limit").pipe(
     Flag.withFallbackConfig(Config.Boolean("ADAPTIVE_LIMIT")),
     Flag.withDefault(true),
     Flag.withDescription(
-      "Shrink a consumer's concurrent-action limit when a dependency answers throttled and grow it back while it answers ok; off, throttled is a plain failure and the limit stays at MAX_IN_FLIGHT",
-    ),
+      "Shrink a consumer's concurrent-action limit when a dependency answers throttled and grow it back while it answers ok; off, throttled is a plain failure and the limit stays at MAX_IN_FLIGHT"
+    )
   ),
   limitMin: setting(Flag.Int("limit-min"), PositiveInt, "LIMIT_MIN").pipe(
     Flag.withDefault(1),
-    Flag.withDescription("Floor the adaptive limit never goes below; setting it to MAX_IN_FLIGHT keeps throttled handling but stops the limit adapting"),
+    Flag.withDescription(
+      "Floor the adaptive limit never goes below; setting it to MAX_IN_FLIGHT keeps throttled handling but stops the limit adapting"
+    )
   ),
   limitDecrease: setting(Flag.Finite("limit-decrease"), OpenFraction, "LIMIT_DECREASE").pipe(
     Flag.withDefault(0.7),
-    Flag.withDescription("What the limit is multiplied by on a throttled answer (once per round trip, not once per answer)"),
+    Flag.withDescription(
+      "What the limit is multiplied by on a throttled answer (once per round trip, not once per answer)"
+    )
   ),
-  metricsPort: metricsPortFlag,
+  metricsPort: metricsPortFlag
 };
 
 /** What the SDK's flags decode to. */
@@ -157,7 +178,7 @@ export type Application<C extends Record<string, Registration<any>>, F extends C
  */
 export const command = <const C extends Record<string, Registration<any>>, const F extends Command.Command.Config = {}>(
   app: Application<C, F>,
-  options: { readonly name?: string } = {},
+  options: { readonly name?: string; } = {}
 ) => {
   const name = options.name ?? "consumer";
   const consumers = Object.entries(app.consumers).map(([key, registration]) => registration.spec(key));
@@ -166,8 +187,10 @@ export const command = <const C extends Record<string, Registration<any>>, const
     const services = Predicate.isFunction(app.layer) ? app.layer(own as Command.Command.Config.Infer<F>) : app.layer;
     return launchWithRmq(
       Layer.mergeAll(
-        HttpRouter.serve(MetricsRoute).pipe(Layer.provide(NodeHttpServer.layer(createServer, { port: settings.metricsPort }))),
-        services,
+        HttpRouter.serve(MetricsRoute).pipe(
+          Layer.provide(NodeHttpServer.layer(createServer, { port: settings.metricsPort }))
+        ),
+        services
       ).pipe(Layer.provideMerge(TracingLive(name)), Layer.provideMerge(Rmq.layer(settings.broker))),
       runApplication({
         name,
@@ -176,17 +199,17 @@ export const command = <const C extends Record<string, Registration<any>>, const
         breaker: {
           consecutiveFailures: settings.breakerThreshold,
           initialDelaySeconds: settings.breakerInitialDelaySeconds,
-          maxDelaySeconds: settings.breakerMaxDelaySeconds,
+          maxDelaySeconds: settings.breakerMaxDelaySeconds
         },
         limit: settings.adaptiveLimit
           ? O.some({
-              min: Math.min(settings.limitMin, settings.maxInFlight),
-              max: settings.maxInFlight,
-              decrease: settings.limitDecrease,
-            })
+            min: Math.min(settings.limitMin, settings.maxInFlight),
+            max: settings.maxInFlight,
+            decrease: settings.limitDecrease
+          })
           : O.none(),
-        consumers,
-      }),
+        consumers
+      })
     );
   });
 };
@@ -198,5 +221,5 @@ export const launch = (cmd: Command.Command<string, any, any, unknown, NodeServi
 /** Run every consumer of one application in this process, until the broker is lost or a breaker cannot operate. */
 export const run = <const C extends Record<string, Registration<any>>, const F extends Command.Command.Config = {}>(
   app: Application<C, F>,
-  options: { readonly name?: string } = {},
+  options: { readonly name?: string; } = {}
 ): void => launch(command(app, options));

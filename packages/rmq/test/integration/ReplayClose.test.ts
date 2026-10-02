@@ -1,8 +1,8 @@
-import { test, before, after } from "node:test";
-import assert from "node:assert/strict";
 import { Effect } from "effect";
-import { broker, brokerExec, skipIfNoDocker, startBroker, stopBroker, waitFor } from "./harness.ts";
+import assert from "node:assert/strict";
+import { after, before, test } from "node:test";
 import { Rmq } from "../../src/Client.ts";
+import { broker, brokerExec, skipIfNoDocker, startBroker, stopBroker, waitFor } from "./harness.ts";
 
 /**
  * The gap this guards: amqplib's recovery opens a new connection and runs the
@@ -38,12 +38,12 @@ test("a connection the broker closes during topology replay is reconnected, not 
     await Effect.runPromise(
       Effect.scoped(
         Effect.provide(
-          Effect.gen(function* () {
+          Effect.gen(function*() {
             const rmq = yield* Rmq;
             yield* Effect.forEach(
               Array.from({ length: QUEUES }, (_, i) => `${prefix}.${i}`),
               (q) => rmq.declareQueue(q, { durable: true }),
-              { discard: true },
+              { discard: true }
             );
             const last = `${prefix}.${QUEUES - 1}`;
             yield* rmq.consume(last, (body) => void seen.push(body.toString()));
@@ -54,21 +54,21 @@ test("a connection the broker closes during topology replay is reconnected, not 
                 "rabbitmqctl",
                 "eval",
                 "Old = rabbit_networking:connections(), " +
-                  'rabbit_networking:close_all_connections("replay test"), ' +
-                  "Wait = fun W(N) when N > 0 -> case rabbit_networking:connections() -- Old of " +
-                  "[] -> timer:sleep(2), W(N - 1); New -> timer:sleep(15), [sys:suspend(P) || P <- New], " +
-                  "timer:sleep(4000), [sys:resume(P) || P <- New], length(New) end; W(_) -> 0 end, " +
-                  "Wait(2500).",
-              ]),
+                "rabbit_networking:close_all_connections(\"replay test\"), " +
+                "Wait = fun W(N) when N > 0 -> case rabbit_networking:connections() -- Old of " +
+                "[] -> timer:sleep(2), W(N - 1); New -> timer:sleep(15), [sys:suspend(P) || P <- New], " +
+                "timer:sleep(4000), [sys:resume(P) || P <- New], length(New) end; W(_) -> 0 end, " +
+                "Wait(2500)."
+              ])
             );
 
             yield* waitFor(() => false, 3000);
             yield* rmq.send(pub, "after");
             yield* waitFor(() => seen.length >= 1, 30_000);
           }),
-          Rmq.layer({ host: broker.host, port: broker.port, heartbeat: 1 }),
-        ),
-      ) as Effect.Effect<void>,
+          Rmq.layer({ host: broker.host, port: broker.port, heartbeat: 1 })
+        )
+      ) as Effect.Effect<void>
     );
   } finally {
     process.off("uncaughtException", onUncaught);

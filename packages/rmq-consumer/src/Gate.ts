@@ -1,5 +1,5 @@
-import { Array as Arr, Effect, Option as O, Ref, Semaphore } from "effect";
 import type { RmqError } from "@egress/rmq/Client.ts";
+import { Array as Arr, Effect, Option as O, Ref, Semaphore } from "effect";
 import type { Registration } from "./Dependency.ts";
 
 /**
@@ -14,8 +14,8 @@ export const modeOf = (registrations: ReadonlyArray<O.Option<Registration>>): Mo
   Arr.some(registrations, O.isNone)
     ? "none"
     : Arr.some(registrations, O.exists((r) => r.phase === "half-open"))
-      ? "probe"
-      : "full";
+    ? "probe"
+    : "full";
 
 type GateIo<Subscription> = {
   readonly subscribe: (mode: "probe" | "full") => Effect.Effect<Subscription, RmqError>;
@@ -29,17 +29,17 @@ export type Gate = {
   readonly mode: Effect.Effect<Mode>;
 };
 
-export const make = Effect.fnUntraced(function* <Subscription>(
+export const make = Effect.fnUntraced(function*<Subscription>(
   registrations: Effect.Effect<ReadonlyArray<O.Option<Registration>>>,
-  io: GateIo<Subscription>,
+  io: GateIo<Subscription>
 ) {
   const lock = yield* Semaphore.make(1);
-  const current = yield* Ref.make<{ readonly mode: Mode; readonly subscription: O.Option<Subscription> }>({
+  const current = yield* Ref.make<{ readonly mode: Mode; readonly subscription: O.Option<Subscription>; }>({
     mode: "none",
-    subscription: O.none(),
+    subscription: O.none()
   });
 
-  const change = Effect.fnUntraced(function* (next: Mode) {
+  const change = Effect.fnUntraced(function*(next: Mode) {
     const { subscription } = yield* Ref.get(current);
     yield* O.match(subscription, { onNone: () => Effect.void, onSome: io.retire });
     yield* Ref.set(current, { mode: "none", subscription: O.none() });
@@ -49,11 +49,11 @@ export const make = Effect.fnUntraced(function* <Subscription>(
 
   const reconcile = Semaphore.withPermit(
     lock,
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const next = modeOf(yield* registrations);
       const { mode } = yield* Ref.get(current);
       yield* next === mode ? Effect.void : change(next);
-    }),
+    })
   );
 
   return { reconcile, mode: Effect.map(Ref.get(current), (c) => c.mode) } satisfies Gate;

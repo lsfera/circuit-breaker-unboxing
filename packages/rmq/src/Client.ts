@@ -1,14 +1,26 @@
-import { randomUUID } from "node:crypto";
-import { Context, Data, Deferred, Effect, Layer, Match, Option as O, Predicate, Record as Rec, Scope, Tracer } from "effect";
 import * as amqp from "amqplib";
+import type { Channel, ChannelModel, ConfirmChannel, ConsumeMessage } from "amqplib";
+import {
+  Context,
+  Data,
+  Deferred,
+  Effect,
+  Layer,
+  Match,
+  Option as O,
+  Predicate,
+  Record as Rec,
+  Scope,
+  Tracer
+} from "effect";
+import { randomUUID } from "node:crypto";
 import { parentFrom, TRACEPARENT, traceparent } from "./Trace.ts";
-import type { ChannelModel, ConfirmChannel, ConsumeMessage, Channel } from "amqplib";
 
 /**
  * A channel plus the tag the broker gave it. Mutable on purpose: recovery repoints this same
  * object at a rebuilt channel, so a caller's handle stays valid.
  */
-export type Consumer = { channel: Channel; consumerTag: string };
+export type Consumer = { channel: Channel; consumerTag: string; };
 
 /**
  * What a publisher declares about its bodies, sent on every message; one that declares nothing says nothing.
@@ -49,7 +61,7 @@ export type SendOptions = {
 export type Body = string | Uint8Array;
 
 /** One message of a `sendBatch`. */
-type BatchMessage = SendOptions & { readonly body: Body };
+type BatchMessage = SendOptions & { readonly body: Body; };
 
 /**
  * One message fetched by `get`, held unsettled until `ack`/`nack` runs — `ack` drops it, `nack` requeues it.
@@ -70,9 +82,9 @@ export const carry = (from: DeliveryInfo, headers: Record<string, string>): Send
   format: {
     contentType: O.getOrUndefined(from.contentType),
     contentEncoding: O.getOrUndefined(from.contentEncoding),
-    type: O.getOrUndefined(from.type),
+    type: O.getOrUndefined(from.type)
   },
-  headers: { ...Rec.filter(from.properties, (_, key) => key === TRACEPARENT), ...headers },
+  headers: { ...Rec.filter(from.properties, (_, key) => key === TRACEPARENT), ...headers }
 });
 
 /** The broker returned a mandatory message it could not route to any queue. */
@@ -118,7 +130,7 @@ export type DeliveryInfo = {
    * Where this message was dead-lettered from (`x-first-death-*`), `None` if it arrived normally.
    * Lazy: the high-rate handlers never read it.
    */
-  readonly deadLetter: O.Option<{ readonly queue: string; readonly reason: string }>;
+  readonly deadLetter: O.Option<{ readonly queue: string; readonly reason: string; }>;
   /**
    * Headers carried on the message, as strings. Broker death annotations are lost when anything
    * republishes, so a consumer that moves messages inside the dead-letter queue carries provenance here.
@@ -152,22 +164,22 @@ export interface RmqService {
    */
   readonly declareQueue: (
     name: string,
-    options?: { readonly args?: QueueArgs; readonly durable?: boolean },
+    options?: { readonly args?: QueueArgs; readonly durable?: boolean; }
   ) => Effect.Effect<string, RmqError>;
   readonly declareTopicExchange: (
     name: string,
-    options?: { readonly durable?: boolean },
+    options?: { readonly durable?: boolean; }
   ) => Effect.Effect<string, RmqError>;
   readonly bind: (
     routingKey: string,
     source: string,
-    destination: string,
+    destination: string
   ) => Effect.Effect<void, RmqError>;
   /** An exchange-to-exchange binding: what a delay chain is made of. */
   readonly bindExchange: (
     routingKey: string,
     source: string,
-    destination: string,
+    destination: string
   ) => Effect.Effect<void, RmqError>;
   /**
    * Settled only once `onMessage` settles, which is the flow-control lever: a handler that awaits its
@@ -179,9 +191,9 @@ export interface RmqService {
     queue: string,
     onMessage: (
       body: Buffer,
-      delivery: DeliveryInfo,
+      delivery: DeliveryInfo
     ) => void | Settlement | Promise<void | Settlement>,
-    options?: { readonly prefetch?: number },
+    options?: { readonly prefetch?: number; }
   ) => Effect.Effect<Consumer, RmqError>;
   /**
    * A single non-blocking fetch — `basic.get`, not a subscription. `None` when the queue was empty. Its own
@@ -192,7 +204,7 @@ export interface RmqService {
   readonly publisherToExchange: (
     exchange: string,
     routingKey: string,
-    format?: Format,
+    format?: Format
   ) => Effect.Effect<Publisher, RmqError>;
   readonly publisherToQueue: (queue: string, format?: Format) => Effect.Effect<Publisher, RmqError>;
   /**
@@ -265,7 +277,7 @@ const settle = (channel: Channel, message: ConsumeMessage, outcome: Settlement) 
       Match.when("requeue", () => channel.reject(message, true)),
       Match.when("release", () => channel.nack(message, false, true)),
       Match.when("accept", () => channel.ack(message)),
-      Match.exhaustive,
+      Match.exhaustive
     );
   } catch {
     // channel already gone; the broker has the delivery back
@@ -282,7 +294,7 @@ type RmqConnectOptions = {
 };
 
 /** Computed on first read and kept. The memo is an `Option` because a computed value is not the same as an absent one. */
-const lazily = <A>(compute: () => A): (() => A) => {
+const lazily = <A>(compute: () => A): () => A => {
   let memo = O.none<A>();
   return () =>
     O.getOrElse(memo, () => {
@@ -318,8 +330,8 @@ const describe = (delivery: Pick<ConsumeMessage, "properties">): DeliveryInfo =>
   const deadLetter = lazily(() =>
     O.map(header("x-first-death-queue"), (queue) => ({
       queue,
-      reason: O.getOrElse(header("x-first-death-reason"), () => "unknown"),
-    })),
+      reason: O.getOrElse(header("x-first-death-reason"), () => "unknown")
+    }))
   );
   const properties = lazily(() => stringifyHeaders(headers));
   const contentType = O.liftPredicate(delivery.properties.contentType, Predicate.isString);
@@ -328,7 +340,7 @@ const describe = (delivery: Pick<ConsumeMessage, "properties">): DeliveryInfo =>
   const messageId = O.liftPredicate(delivery.properties.messageId, Predicate.isString);
   const publishedAt = O.map(
     O.liftPredicate(delivery.properties.timestamp, Predicate.isNumber),
-    (seconds) => seconds * 1000,
+    (seconds) => seconds * 1000
   );
   const parent = lazily(() => O.flatMap(header(TRACEPARENT), parentFrom));
   return {
@@ -346,7 +358,7 @@ const describe = (delivery: Pick<ConsumeMessage, "properties">): DeliveryInfo =>
     },
     get parent() {
       return parent();
-    },
+    }
   };
 };
 
@@ -355,8 +367,8 @@ const describe = (delivery: Pick<ConsumeMessage, "properties">): DeliveryInfo =>
  * records every queue, exchange, binding and consumer and rebuilds them in `setup`: topology first, then consumers.
  * Past `maxRetries`, `lost` fails.
  */
-export const makeRmq = Effect.fnUntraced(function* (
-  opts: RmqConnectOptions,
+export const makeRmq = Effect.fnUntraced(function*(
+  opts: RmqConnectOptions
 ): Effect.fn.Return<RmqService, RmqError, Scope.Scope> {
   type OnMessage = Parameters<RmqService["consume"]>[1];
 
@@ -370,8 +382,8 @@ export const makeRmq = Effect.fnUntraced(function* (
 
   /** Everything this connection was told to create, so it can be created again. */
   type Topology =
-    | { readonly kind: "queue"; readonly name: string; readonly durable: boolean; readonly args: QueueArgs }
-    | { readonly kind: "exchange"; readonly name: string; readonly durable: boolean }
+    | { readonly kind: "queue"; readonly name: string; readonly durable: boolean; readonly args: QueueArgs; }
+    | { readonly kind: "exchange"; readonly name: string; readonly durable: boolean; }
     | {
       readonly kind: "bind";
       readonly routingKey: string;
@@ -448,15 +460,13 @@ export const makeRmq = Effect.fnUntraced(function* (
   };
 
   /** The delivery callback, shared by the first registration and every rebuild. */
-  const deliver =
-    (ch: Channel, entry: Live) =>
-      (message: ConsumeMessage | null): void =>
-        O.match(O.fromNullOr(message), {
-          // The broker cancelled this consumer (its queue was deleted): nothing to settle or rebuild, and the
-          // channel stays open and looks healthy, so say so.
-          onNone: () => void warn(`broker cancelled the consumer on ${entry.queue} — it receives nothing now`),
-          onSome: (delivery) => handle(ch, entry, delivery),
-        });
+  const deliver = (ch: Channel, entry: Live) => (message: ConsumeMessage | null): void =>
+    O.match(O.fromNullOr(message), {
+      // The broker cancelled this consumer (its queue was deleted): nothing to settle or rebuild, and the
+      // channel stays open and looks healthy, so say so.
+      onNone: () => void warn(`broker cancelled the consumer on ${entry.queue} — it receives nothing now`),
+      onSome: (delivery) => handle(ch, entry, delivery)
+    });
 
   /**
    * A handler that threw or rejected did not finish, so acking would say it had. It is `discard`ed:
@@ -477,12 +487,10 @@ export const makeRmq = Effect.fnUntraced(function* (
   const handle = (ch: Channel, entry: Live, message: ConsumeMessage): void => {
     entry.outstanding += 1;
     // The executor turns a synchronous throw into a rejection, so it never escapes into amqplib's callback.
-    void new Promise<void | Settlement>((resolve) =>
-      resolve(entry.onMessage(message.content, describe(message))),
-    )
+    void new Promise<void | Settlement>((resolve) => resolve(entry.onMessage(message.content, describe(message))))
       .then(
         (outcome) => settle(ch, message, outcome ?? "accept"),
-        (error) => failed(ch, entry, message, error),
+        (error) => failed(ch, entry, message, error)
       )
       .finally(() => released(entry));
   };
@@ -499,9 +507,11 @@ export const makeRmq = Effect.fnUntraced(function* (
         (error) =>
           // `connected` is false if the connection is what went, and `setup` re-attaches everything on return;
           // reporting here would flag a failure already being handled.
-          when(connected, () => void warn(`consumer on ${entry.queue} closed and could not be rebuilt: ${String(error)}`)),
-      ),
-    );
+          when(
+            connected,
+            () => void warn(`consumer on ${entry.queue} closed and could not be rebuilt: ${String(error)}`)
+          )
+      ));
 
   /** Register one consumer on its own channel, and point its handle at it. */
   const attach = async (open: () => Promise<Channel>, entry: Live) => {
@@ -512,7 +522,7 @@ export const makeRmq = Effect.fnUntraced(function* (
     ch.on("close", () => rebuild(entry));
     await ch.prefetch(entry.prefetch);
     const { consumerTag } = await ch.consume(entry.queue, deliver(ch, entry), {
-      noAck: false,
+      noAck: false
     });
     const previous = entry.handle.channel;
     entry.handle.channel = ch;
@@ -532,20 +542,17 @@ export const makeRmq = Effect.fnUntraced(function* (
       await inSequence(topology.values(), (t) =>
         Match.value(t).pipe(
           Match.discriminatorsExhaustive("kind")({
-            queue: (q) =>
-              ch.assertQueue(q.name, { durable: q.durable, exclusive: false, arguments: q.args }),
+            queue: (q) => ch.assertQueue(q.name, { durable: q.durable, exclusive: false, arguments: q.args }),
             exchange: (x) => ch.assertExchange(x.name, "topic", { durable: x.durable }),
             bind: (b) => ch.bindQueue(b.destination, b.source, b.routingKey),
-            exchangeBind: (b) => ch.bindExchange(b.destination, b.source, b.routingKey),
-          }),
-        ),
-      );
+            exchangeBind: (b) => ch.bindExchange(b.destination, b.source, b.routingKey)
+          })
+        ));
     } finally {
       await quietly(ch.close());
     }
   };
-  const applyTopology = (open: () => Promise<Channel>) =>
-    topology.size === 0 ? Promise.resolve() : replay(open);
+  const applyTopology = (open: () => Promise<Channel>) => topology.size === 0 ? Promise.resolve() : replay(open);
 
   /**
    * Runs on every connect, before the connection is handed out; uses `model`, since the recovering wrapper would
@@ -582,7 +589,7 @@ export const makeRmq = Effect.fnUntraced(function* (
             // short interval amqplib itself closes the connection after ~2-3 missed beats and emits the usual 'disconnect'.
             // Not 1: RabbitMQ warns a second or less is very likely to declare a live connection dead (a GC pause is
             // enough) and recommends 5-20, so 5 is the shortest it endorses and a partition shows within ~10-15s.
-            heartbeat: opts.heartbeat ?? 5,
+            heartbeat: opts.heartbeat ?? 5
           },
           {
             // Bounds every socket connect, initial and reconnect, to a fixed wall-clock time instead of the OS's SYN-retry
@@ -600,11 +607,10 @@ export const makeRmq = Effect.fnUntraced(function* (
               setup: (model: ChannelModel) => {
                 model.on("error", (error: Error) => void warn(`connection error during setup: ${error.message}`));
                 return setup(model);
-              },
-            },
-          },
-        ),
-      ),
+              }
+            }
+          }
+        )),
       // Swallowed deliberately: this runs on every scope close, and `close` rejects if the broker has already gone.
       // Closing also stops recovery. Forgetting every consumer first stops the resulting channel closes from being
       // read as consumers to repair.
@@ -612,7 +618,7 @@ export const makeRmq = Effect.fnUntraced(function* (
         Effect.promise(() => {
           onClose();
           return quietly(conn.close());
-        }),
+        })
     );
 
   const connection = yield* open(setup, () => live.clear());
@@ -624,7 +630,7 @@ export const makeRmq = Effect.fnUntraced(function* (
    * (`ECONNREFUSED`) or none. That split is "the broker says no" versus "the broker is not there".
    */
   const amqpReplyCode = (error: Error): O.Option<number> =>
-    O.liftPredicate((error as { readonly code?: unknown }).code, Predicate.isNumber);
+    O.liftPredicate((error as { readonly code?: unknown; }).code, Predicate.isNumber);
 
   /** Wires one connection's events to the shared bookkeeping; either connection failing for good fails `lost`. */
   const watch = (conn: typeof connection, role: string, up: (state: boolean) => void, restored: () => string) => {
@@ -644,7 +650,9 @@ export const makeRmq = Effect.fnUntraced(function* (
     conn.on("connect-failed", (error) => {
       const code = amqpReplyCode(error);
       warn(
-        `${role} connect attempt failed${O.match(code, { onNone: () => "", onSome: (c) => ` (AMQP ${c})` })}: ${error.message}`,
+        `${role} connect attempt failed${
+          O.match(code, { onNone: () => "", onSome: (c) => ` (AMQP ${c})` })
+        }: ${error.message}`
       );
       O.map(code, () =>
         Deferred.doneUnsafe(
@@ -652,11 +660,11 @@ export const makeRmq = Effect.fnUntraced(function* (
           Effect.fail(
             new RmqError({
               operation: "connection",
-              cause: `${role} connection: broker rejected setup deterministically, abandoning retry budget: ${error.message}`,
-            }),
-          ),
-        ),
-      );
+              cause:
+                `${role} connection: broker rejected setup deterministically, abandoning retry budget: ${error.message}`
+            })
+          )
+        ));
     });
     conn.on("reconnect-scheduled", ({ attempt, delay, error }) => {
       warn(`${role} reconnect attempt ${attempt} in ${delay}ms (${error.message})`);
@@ -669,13 +677,16 @@ export const makeRmq = Effect.fnUntraced(function* (
       Deferred.doneUnsafe(
         lost,
         Effect.fail(
-          new RmqError({ operation: "connection", cause: `${role} connection recovery gave up: ${error.message}` }),
-        ),
+          new RmqError({ operation: "connection", cause: `${role} connection recovery gave up: ${error.message}` })
+        )
       );
     });
   };
-  watch(connection, "consuming", (state) => void (connected = state), () =>
-    `${topology.size} topology entries and ${live.size} consumer(s) restored`,
+  watch(
+    connection,
+    "consuming",
+    (state) => void (connected = state),
+    () => `${topology.size} topology entries and ${live.size} consumer(s) restored`
   );
   watch(publisher, "publishing", (state) => void (publishing = state), () => "publish channel reopened");
 
@@ -684,8 +695,7 @@ export const makeRmq = Effect.fnUntraced(function* (
     O.match(O.fromNullOr(out), {
       onSome: (open) => Promise.resolve(open),
       // One reopen at a time: racing sends must not each open a channel and orphan all but one.
-      onNone: () =>
-      (opening ??= publisher.createConfirmChannel().then(
+      onNone: () => (opening ??= publisher.createConfirmChannel().then(
         (ch) => {
           out = watchPublishChannel(ch);
           opening = null;
@@ -694,8 +704,8 @@ export const makeRmq = Effect.fnUntraced(function* (
         (error) => {
           opening = null;
           throw error;
-        },
-      )),
+        }
+      ))
     });
 
   /**
@@ -709,12 +719,11 @@ export const makeRmq = Effect.fnUntraced(function* (
           // A failed declare closes its channel; without a listener that 'error' would reach the process.
           ch.on("error", () => {});
           return ch;
-        }),
-      ),
+        })),
       (ch) => wrap(operation, () => use(ch)),
       // Closing is best effort by definition: the channel this runs on may be
       // the one the broker just closed under us.
-      (ch) => Effect.promise(() => quietly(ch.close())),
+      (ch) => Effect.promise(() => quietly(ch.close()))
     );
 
   /**
@@ -739,11 +748,10 @@ export const makeRmq = Effect.fnUntraced(function* (
               return returned
                 ? reject(new Unroutable(`no queue for ${pub.exchange || "(default)"}/${pub.routingKey}`))
                 : error
-                  ? reject(error instanceof Error ? error : new Error(String(error)))
-                  : resolve();
-            }),
-          );
-        }),
+                ? reject(error instanceof Error ? error : new Error(String(error)))
+                : resolve();
+            }));
+        })
     );
 
   /**
@@ -758,8 +766,8 @@ export const makeRmq = Effect.fnUntraced(function* (
     timestamp: Math.floor(Date.now() / 1000),
     headers: O.match(tp, {
       onNone: () => options.headers,
-      onSome: (value) => ({ ...options.headers, [TRACEPARENT]: value }),
-    }),
+      onSome: (value) => ({ ...options.headers, [TRACEPARENT]: value })
+    })
   });
 
   return Rmq.of({
@@ -767,8 +775,9 @@ export const makeRmq = Effect.fnUntraced(function* (
       const durable = options.durable ?? true;
       const args = options.args ?? {};
       record(`q:${name}`, { kind: "queue", name, durable, args });
-      return onFreshChannel("declareQueue", (ch) =>
-        ch.assertQueue(name, { durable, exclusive: false, arguments: args }).then(() => name),
+      return onFreshChannel(
+        "declareQueue",
+        (ch) => ch.assertQueue(name, { durable, exclusive: false, arguments: args }).then(() => name)
       );
     },
     declareTopicExchange: (name, options = {}) => {
@@ -791,7 +800,7 @@ export const makeRmq = Effect.fnUntraced(function* (
           onMessage,
           prefetch: options.prefetch ?? DEFAULT_PREFETCH,
           outstanding: 0,
-          idle: [],
+          idle: []
         };
         // In `live` before `attach`: `attach` registers the channel's 'close' handler before it finishes, and a
         // channel that dies in that window would be dropped by `rebuild`, leaving the consumer deaf. Roll back on
@@ -836,23 +845,26 @@ export const makeRmq = Effect.fnUntraced(function* (
           ...describe(msg),
           body: msg.content,
           ack: settleOnce(() => ch.ack(msg)),
-          nack: settleOnce(() => ch.nack(msg, false, true)),
+          nack: settleOnce(() => ch.nack(msg, false, true))
         });
       }),
     publisherToExchange: (exchange, routingKey, format = {}) =>
       Effect.succeed({ exchange, routingKey, format, mandatory: false }),
     // The default exchange routes by queue name, which is the same path `deadLetterArgs` uses for dead-lettering.
-    publisherToQueue: (queue, format = {}) => Effect.succeed({ exchange: "", routingKey: queue, format, mandatory: true }),
+    publisherToQueue: (queue, format = {}) =>
+      Effect.succeed({ exchange: "", routingKey: queue, format, mandatory: true }),
     send: (pub, body, options) =>
-      Effect.flatMap(traceparent, (tp) =>
-        wrap("send", () => publish(pub, bytes(body), propertiesFor(pub, tp, options ?? {}))),
+      Effect.flatMap(
+        traceparent,
+        (tp) => wrap("send", () => publish(pub, bytes(body), propertiesFor(pub, tp, options ?? {})))
       ),
     // Every `publish` is issued before any is awaited: they reach the channel in order and their confirms pipeline.
     sendBatch: (pub, messages) =>
-      Effect.flatMap(traceparent, (tp) =>
-        wrap("sendBatch", () =>
-          Promise.all(messages.map((m) => publish(pub, bytes(m.body), propertiesFor(pub, tp, m)))),
-        ),
+      Effect.flatMap(
+        traceparent,
+        (tp) =>
+          wrap("sendBatch", () =>
+            Promise.all(messages.map((m) => publish(pub, bytes(m.body), propertiesFor(pub, tp, m)))))
       ).pipe(Effect.asVoid),
     // Each teardown forgets its consumer first, so a recovery does not bring back one we retired.
     cancelConsumer: (c) =>
@@ -882,14 +894,13 @@ export const makeRmq = Effect.fnUntraced(function* (
     resetConnection: Effect.sync(() =>
       // Both sockets: the publishes buffered on one are what this fences, and a reset process should come back whole.
       [currentModel, currentPublishModel].forEach((model) =>
-        (model?.connection as { readonly stream?: { destroy: (err?: Error) => void } } | undefined)?.stream?.destroy(
-          new Error("connection reset: fencing a demoted leader's buffered publishes"),
-        ),
-      ),
-    ),
+        (model?.connection as { readonly stream?: { destroy: (err?: Error) => void; }; } | undefined)?.stream?.destroy(
+          new Error("connection reset: fencing a demoted leader's buffered publishes")
+        )
+      )
+    )
   });
 });
-
 
 /**
  * Build `layer`, then run `program` with its services until `program` ends or fails, or the broker connection is
@@ -898,10 +909,9 @@ export const makeRmq = Effect.fnUntraced(function* (
  */
 export const launchWithRmq = <ROut, E, RIn, A, E2>(
   layer: Layer.Layer<ROut | Rmq, E, RIn>,
-  program: Effect.Effect<A, E2, ROut | Rmq>,
+  program: Effect.Effect<A, E2, ROut | Rmq>
 ): Effect.Effect<A, E | E2 | RmqError, RIn> =>
   Effect.scoped(
     Effect.flatMap(Layer.build(layer), (context) =>
-      Effect.raceFirst(Context.get(context, Rmq).lost, Effect.provideContext(program, context)),
-    ),
+      Effect.raceFirst(Context.get(context, Rmq).lost, Effect.provideContext(program, context)))
   );

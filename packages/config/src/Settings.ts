@@ -35,11 +35,11 @@ export const brokerFlag = (description: string) =>
   setting(Flag.String("rmq"), BrokerAddress, "RMQ").pipe(
     Flag.map(toAddress),
     Flag.withDefault({ host: "127.0.0.1", port: 5672 }),
-    Flag.withDescription(description),
+    Flag.withDescription(description)
   );
 
 export const metricsPortFlag = Flag.Int("metrics-port").pipe(
   Flag.withFallbackConfig(Config.Port("METRICS_PORT")),
   Flag.withDefault(9464),
-  Flag.withDescription("Port /metrics is served on"),
+  Flag.withDescription("Port /metrics is served on")
 );

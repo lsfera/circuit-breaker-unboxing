@@ -1,13 +1,21 @@
-import { Array as Arr, Clock, Context, Effect, Metric, Option as O, Queue, Random, Ref, Result, Schedule, Semaphore } from "effect";
 import { carry, Rmq } from "@egress/rmq/Client.ts";
 import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
-import {
-  deadLetterQueueFor,
-  deadLetterQueueOptions,
-  workQueueFor,
-  workQueueOptions,
-} from "@egress/rmq/WorkQueue.ts";
 import * as Delay from "@egress/rmq/DelayedDelivery.ts";
+import { deadLetterQueueFor, deadLetterQueueOptions, workQueueFor, workQueueOptions } from "@egress/rmq/WorkQueue.ts";
+import {
+  Array as Arr,
+  Clock,
+  Context,
+  Effect,
+  Metric,
+  Option as O,
+  Queue,
+  Random,
+  Ref,
+  Result,
+  Schedule,
+  Semaphore
+} from "effect";
 import * as Breaker from "./Breaker.ts";
 import { breakerFor, CurrentCaller, localPermit } from "./Dependency.ts";
 import type { AnyDependency, Caller, Registration, Verdict } from "./Dependency.ts";
@@ -70,7 +78,7 @@ const throttleHold = Effect.flatMap(Random.nextBetween(100, 400), (ms) => Effect
 const REDRIVE_SWEEP = "30 seconds";
 
 /** A breaker's state, as the Gates, the wrapped calls and the redrive read it. */
-type Cell = { readonly registration: O.Option<Registration>; readonly phase: Breaker.Phase };
+type Cell = { readonly registration: O.Option<Registration>; readonly phase: Breaker.Phase; };
 type Cells = Record<string, Ref.Ref<Cell>>;
 
 type Running = {
@@ -81,42 +89,49 @@ type Running = {
 
 const cellOf = (cells: Cells, d: AnyDependency) => cells[d.dependencyName]!;
 
-export const runApplication = Effect.fnUntraced(function* (cfg: ApplicationConfig) {
+export const runApplication = Effect.fnUntraced(function*(cfg: ApplicationConfig) {
   const rmq = yield* Rmq;
   yield* Delay.declare();
 
   const dependencies = Arr.dedupeWith(
     Arr.flatMap(cfg.consumers, (c) => c.dependencies),
-    (a: AnyDependency, b: AnyDependency) => a.dependencyName === b.dependencyName,
+    (a: AnyDependency, b: AnyDependency) => a.dependencyName === b.dependencyName
   );
   const cells: Cells = Object.fromEntries(
-    yield* Effect.forEach(dependencies, (d) =>
-      Effect.map(Ref.make<Cell>({ registration: O.none(), phase: "closed" }), (cell) => [d.dependencyName, cell] as const),
-    ),
+    yield* Effect.forEach(
+      dependencies,
+      (d) =>
+        Effect.map(
+          Ref.make<Cell>({ registration: O.none(), phase: "closed" }),
+          (cell) => [d.dependencyName, cell] as const
+        )
+    )
   );
   const scopeOf = (d: AnyDependency) => `${cfg.name}.${d.dependencyName}`;
   const permits = yield* Effect.forEach(dependencies, (d) =>
     localPermit(
       Permit.take(scopeOf(d)).pipe(
         Effect.provideService(Rmq, rmq),
-        Effect.orElseSucceed(() => O.none<Effect.Effect<void>>()),
-      ),
-    ),
-  );
+        Effect.orElseSucceed(() => O.none<Effect.Effect<void>>())
+      )
+    ));
 
   // Captured so the plain-async handlers (amqplib's callbacks, not Effect fibers) reach the application's
   // services, the broker, and each dependency's breaker.
   const captured = yield* Effect.context<Rmq>();
-  const services = Arr.reduce(Arr.zip(dependencies, permits), captured as Context.Context<any>, (ctx, [d, takePermit]) =>
-    Context.add(ctx, d.guard, {
-      registration: Effect.map(Ref.get(cellOf(cells, d)), (c) => c.registration),
-      takePermit,
-    }),
+  const services = Arr.reduce(
+    Arr.zip(dependencies, permits),
+    captured as Context.Context<any>,
+    (ctx, [d, takePermit]) =>
+      Context.add(ctx, d.guard, {
+        registration: Effect.map(Ref.get(cellOf(cells, d)), (c) => c.registration),
+        takePermit
+      })
   );
 
   const running = yield* Effect.forEach(cfg.consumers, (spec) => runConsumer(cfg, spec, cells, services));
 
-  const superviseDependency = Effect.fnUntraced(function* (d: AnyDependency) {
+  const superviseDependency = Effect.fnUntraced(function*(d: AnyDependency) {
     const name = d.dependencyName;
     const cell = cellOf(cells, d);
     const gates = Arr.filter(running, (r) => r.spec.dependencies.some((x) => x.dependencyName === name));
@@ -135,12 +150,11 @@ export const runApplication = Effect.fnUntraced(function* (cfg: ApplicationConfi
         Queue.offerUnsafe(wakes, Number(delivery.properties.attempt));
         return "accept";
       },
-      { prefetch: 1 },
+      { prefetch: 1 }
     );
     yield* Permit.seed(scopeOf(d));
 
-    const setRegistration = (registration: O.Option<Registration>) =>
-      Ref.update(cell, (c) => ({ ...c, registration }));
+    const setRegistration = (registration: O.Option<Registration>) => Ref.update(cell, (c) => ({ ...c, registration }));
     const register = (registration: Registration) =>
       setRegistration(O.some(registration)).pipe(Effect.andThen(reconcile), Effect.as(registration));
 
@@ -156,7 +170,7 @@ export const runApplication = Effect.fnUntraced(function* (cfg: ApplicationConfi
         Delay.sendDelayed(wakeQueue, seconds, "wake", { headers: { attempt: String(attempt) } }).pipe(
           Effect.provideService(Rmq, rmq),
           Effect.andThen(Effect.log(`${cfg.name}: breaker ${name} open for ${seconds}s (attempt ${attempt})`)),
-          Effect.andThen(Queue.take(wakes)),
+          Effect.andThen(Queue.take(wakes))
         ),
       onPhase: (next) =>
         Ref.update(cell, (c) => ({ ...c, phase: next })).pipe(
@@ -165,9 +179,9 @@ export const runApplication = Effect.fnUntraced(function* (cfg: ApplicationConfi
           Effect.andThen(Effect.log(`${cfg.name}: breaker ${name} ${next}`)),
           // Closing (startup included) is when "the outage may be over" first becomes true here.
           Effect.andThen(
-            next === "closed" ? Effect.forEach(gates, (r) => r.triggerRedrive, { discard: true }) : Effect.void,
-          ),
-        ),
+            next === "closed" ? Effect.forEach(gates, (r) => r.triggerRedrive, { discard: true }) : Effect.void
+          )
+        )
     });
   });
 
@@ -176,10 +190,12 @@ export const runApplication = Effect.fnUntraced(function* (cfg: ApplicationConfi
     return `${d.dependencyName}:${b.consecutiveFailures}consecutive/${b.initialDelaySeconds}-${b.maxDelaySeconds}s`;
   };
   yield* Effect.log(
-    `${cfg.name}: up — consumers=${running.map((r) => `${r.spec.key}[${r.spec.dependencies.map((d) => d.dependencyName).join(",")}]`).join(",")} ` +
+    `${cfg.name}: up — consumers=${
+      running.map((r) => `${r.spec.key}[${r.spec.dependencies.map((d) => d.dependencyName).join(",")}]`).join(",")
+    } ` +
       `maxInFlight=${cfg.maxInFlight} wake=${cfg.name}.<dependency>.breaker.wake.${cfg.replicaId} ` +
       `breakers=${dependencies.map(describeBreaker).join(",")} ` +
-      `limit=${O.match(cfg.limit, { onNone: () => "off", onSome: (l) => `${l.min}-${l.max} x${l.decrease}` })}`,
+      `limit=${O.match(cfg.limit, { onNone: () => "off", onSome: (l) => `${l.min}-${l.max} x${l.decrease}` })}`
   );
 
   // Runs for the process's life: the phases repeat, and it ends only if the broker fails an operation a
@@ -187,11 +203,11 @@ export const runApplication = Effect.fnUntraced(function* (cfg: ApplicationConfi
   return yield* Effect.forEach(dependencies, superviseDependency, { concurrency: "unbounded", discard: true });
 });
 
-const runConsumer = Effect.fnUntraced(function* (
+const runConsumer = Effect.fnUntraced(function*(
   cfg: ApplicationConfig,
   spec: ConsumerSpec,
   cells: Cells,
-  services: Context.Context<any>,
+  services: Context.Context<any>
 ) {
   const rmq = yield* Rmq;
   const log = `${cfg.name}/${spec.key}`;
@@ -208,14 +224,14 @@ const runConsumer = Effect.fnUntraced(function* (
 
   const isClosed = Effect.map(
     Effect.forEach(spec.dependencies, (d) => Ref.get(cellOf(cells, d))),
-    Arr.every((c) => c.phase === "closed"),
+    Arr.every((c) => c.phase === "closed")
   );
 
   const redriveQueue = Redrive.redriveTriggerQueueFor(spec.key);
   yield* rmq.declareQueue(redriveQueue, Redrive.redriveTriggerQueueOptions());
   const redriveTriggerPub = yield* rmq.publisherToQueue(redriveQueue);
   const triggerRedrive = rmq.send(redriveTriggerPub, "redrive").pipe(
-    Effect.catch((err) => Effect.logWarning(`${log}: redrive trigger publish failed`, err)),
+    Effect.catch((err) => Effect.logWarning(`${log}: redrive trigger publish failed`, err))
   );
   // Two triggers close together must not start overlapping passes; one that arrives mid-pass is dropped.
   const redriving = yield* Ref.make(false);
@@ -224,13 +240,14 @@ const runConsumer = Effect.fnUntraced(function* (
       running
         ? Effect.void
         : Redrive.runPass({
-            apiId: spec.key,
-            // This replica's own view, not the fleet's: see README.md's "Limits it accepts".
-            isClosed,
-            onOutcome: (outcome) => Metric.update(Metric.withAttributes(Telemetry.redrives, { ...attributes, outcome }), 1),
-          }).pipe(Effect.ensuring(Ref.set(redriving, false))),
+          apiId: spec.key,
+          // This replica's own view, not the fleet's: see README.md's "Limits it accepts".
+          isClosed,
+          onOutcome: (outcome) =>
+            Metric.update(Metric.withAttributes(Telemetry.redrives, { ...attributes, outcome }), 1)
+        }).pipe(Effect.ensuring(Ref.set(redriving, false)))
     ),
-    Effect.catch((err) => Effect.logWarning(`${log}: redrive pass failed`, err)),
+    Effect.catch((err) => Effect.logWarning(`${log}: redrive pass failed`, err))
   );
   // Only the consumer RabbitMQ has made active (`x-single-active-consumer`) receives anything here.
   yield* rmq.consume(redriveQueue, () => {
@@ -256,8 +273,8 @@ const runConsumer = Effect.fnUntraced(function* (
           return l.slots === before
             ? Effect.void
             : Semaphore.resize(slots, l.slots).pipe(Effect.andThen(Metric.update(concurrencyLimit, l.slots)));
-        },
-      }),
+        }
+      })
     );
 
   // A `throttled` answer keeps its slot through the hold. Released first, the slot is free again the moment
@@ -270,8 +287,8 @@ const runConsumer = Effect.fnUntraced(function* (
       verdict.outcome === "ok"
         ? adapt((l) => l.succeeded())
         : verdict.outcome === "throttled"
-          ? adapt((l) => l.throttled(startedIn)).pipe(Effect.andThen(throttleHold))
-          : Effect.void,
+        ? adapt((l) => l.throttled(startedIn)).pipe(Effect.andThen(throttleHold))
+        : Effect.void
   };
 
   const inFlight = yield* Ref.make(0);
@@ -286,7 +303,7 @@ const runConsumer = Effect.fnUntraced(function* (
   const warnAtMostOncePerSecond = (message: () => string) =>
     Clock.currentTimeMillis.pipe(
       Effect.flatMap((now) => Ref.modify(lastLoggedAt, (last) => (now - last >= 1000 ? [true, now] : [false, last]))),
-      Effect.flatMap((due) => (due ? Effect.logWarning(message()) : Effect.void)),
+      Effect.flatMap((due) => (due ? Effect.logWarning(message()) : Effect.void))
     );
 
   const declared = (o: O.Option<string>) => O.getOrElse(o, () => "none");
@@ -301,7 +318,7 @@ const runConsumer = Effect.fnUntraced(function* (
       .send(parkedPub, body, carry(delivery, { [Redrive.PARKED_REASON_HEADER]: reason }))
       .pipe(
         Effect.as<Settlement>("accept"),
-        Effect.orElseSucceed((): Settlement => "discard"),
+        Effect.orElseSucceed((): Settlement => "discard")
       );
 
   // A body this consumer cannot read, or that is not a message of its contract, was never published for it:
@@ -313,22 +330,23 @@ const runConsumer = Effect.fnUntraced(function* (
           () =>
             `${log}: parking a ${reason} delivery — message_id ${declared(delivery.messageId)}, ` +
             `type ${declared(delivery.type)}, content-type ${declared(delivery.contentType)}, ` +
-            `content-encoding ${declared(delivery.contentEncoding)}`,
-        ),
+            `content-encoding ${declared(delivery.contentEncoding)}`
+        )
       ),
-      Effect.andThen(park(body, delivery, `unreadable-${reason}`)),
+      Effect.andThen(park(body, delivery, `unreadable-${reason}`))
     );
 
   const dispose = (body: Uint8Array, delivery: DeliveryInfo, settled: Settled): Effect.Effect<Settlement> =>
     settled.disposition === "park"
-      ? warnAtMostOncePerSecond(() => `${log}: parking message_id ${declared(delivery.messageId)}: ${settled.reason}`).pipe(
-          Effect.andThen(park(body, delivery, settled.reason)),
+      ? warnAtMostOncePerSecond(() => `${log}: parking message_id ${declared(delivery.messageId)}: ${settled.reason}`)
+        .pipe(
+          Effect.andThen(park(body, delivery, settled.reason))
         )
       : settled.reason === "defect" || settled.reason === "unwrapped-error"
-        ? warnAtMostOncePerSecond(
-            () => `${log}: the action failed outside any dependency (${settled.reason}); requeueing`,
-          ).pipe(Effect.as(settled.disposition))
-        : Effect.succeed(settled.disposition);
+      ? warnAtMostOncePerSecond(
+        () => `${log}: the action failed outside any dependency (${settled.reason}); requeueing`
+      ).pipe(Effect.as(settled.disposition))
+      : Effect.succeed(settled.disposition);
 
   // A span only for a delivery that carries a trace: the producer's sampler decides, never this process.
   const traced = (delivery: DeliveryInfo) => <A, E, R>(effect: Effect.Effect<A, E, R>) =>
@@ -341,9 +359,9 @@ const runConsumer = Effect.fnUntraced(function* (
             "messaging.system": "rabbitmq",
             "messaging.operation.name": "process",
             "messaging.destination.name": workQueue,
-            "messaging.message.id": O.getOrUndefined(delivery.messageId),
-          },
-        }),
+            "messaging.message.id": O.getOrUndefined(delivery.messageId)
+          }
+        })
     });
 
   const act = (payload: unknown, body: Uint8Array, delivery: DeliveryInfo) =>
@@ -351,8 +369,8 @@ const runConsumer = Effect.fnUntraced(function* (
       slots,
       setInFlight(1).pipe(
         Effect.andThen(Effect.exit(Effect.suspend(() => spec.action(payload, delivery)).pipe(traced(delivery)))),
-        Effect.ensuring(setInFlight(-1)),
-      ),
+        Effect.ensuring(setInFlight(-1))
+      )
     ).pipe(
       Effect.provideService(CurrentCaller, caller),
       Effect.flatMap((exit) => {
@@ -361,14 +379,14 @@ const runConsumer = Effect.fnUntraced(function* (
         return settled.reason === "defect"
           ? Effect.logError(`${log}: the action died`, exit).pipe(Effect.andThen(dispose(body, delivery, settled)))
           : dispose(body, delivery, settled);
-      }),
+      })
     );
 
   const readBody = read(spec.negotiate, spec.decode);
   const handle = (body: Uint8Array, delivery: DeliveryInfo): Effect.Effect<Settlement, never, any> =>
     Result.match(readBody(body, delivery), {
       onFailure: (reason) => unreadable(reason, body, delivery),
-      onSuccess: (payload) => act(payload, body, delivery),
+      onSuccess: (payload) => act(payload, body, delivery)
     });
 
   const gate = yield* Gate.make(
@@ -377,10 +395,10 @@ const runConsumer = Effect.fnUntraced(function* (
       // A probe is one message: prefetch 1 is the whole mechanism.
       subscribe: (mode) =>
         rmq.consume(workQueue, (body, delivery) => runInContext(handle(body, delivery)), {
-          prefetch: mode === "probe" ? 1 : cfg.maxInFlight,
+          prefetch: mode === "probe" ? 1 : cfg.maxInFlight
         }),
-      retire: rmq.drainConsumer,
-    },
+      retire: rmq.drainConsumer
+    }
   );
 
   return { spec, gate, triggerRedrive } satisfies Running;

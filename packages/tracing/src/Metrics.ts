@@ -9,13 +9,11 @@ import { PrometheusMetrics } from "effect/unstable/observability";
 const metricsResponse = PrometheusMetrics.format().pipe(
   Effect.map((body) =>
     HttpServerResponse.text(body, {
-      contentType: "text/plain; version=0.0.4; charset=utf-8",
-    }),
+      contentType: "text/plain; version=0.0.4; charset=utf-8"
+    })
   ),
-  HttpMiddleware.withLoggerDisabled,
+  HttpMiddleware.withLoggerDisabled
 );
 
 /** The same thing as a route, for a process whose HTTP surface is only this. */
-export const MetricsRoute = HttpRouter.use((router) =>
-  router.add("GET", "/metrics", metricsResponse),
-);
+export const MetricsRoute = HttpRouter.use((router) => router.add("GET", "/metrics", metricsResponse));

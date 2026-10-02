@@ -1,13 +1,8 @@
-import { randomUUID } from "node:crypto";
-import { Duration, Effect, Schedule, Schema } from "effect";
-import protobuf from "protobufjs";
 import { Rmq } from "@egress/rmq/Client.ts";
-import {
-  deadLetterQueueFor,
-  deadLetterQueueOptions,
-  workQueueFor,
-  workQueueOptions,
-} from "@egress/rmq/WorkQueue.ts";
+import { deadLetterQueueFor, deadLetterQueueOptions, workQueueFor, workQueueOptions } from "@egress/rmq/WorkQueue.ts";
+import { Duration, Effect, Schedule, Schema } from "effect";
+import { randomUUID } from "node:crypto";
+import protobuf from "protobufjs";
 
 /**
  * The load half of the scenario: a steady stream onto `<apiId>.work`. Fixed rate, and it never reacts to the
@@ -33,7 +28,7 @@ type WorkMessage = typeof WorkMessage.Type;
 
 /** `message Work { string api_id = 1; int64 n = 2; }`, what a consumer reading `application/x-protobuf` expects. */
 const WorkProto = protobuf.Type.fromJSON("Work", {
-  fields: { apiId: { type: "string", id: 1 }, n: { type: "int64", id: 2 } },
+  fields: { apiId: { type: "string", id: 1 }, n: { type: "int64", id: 2 } }
 });
 
 /**
@@ -42,7 +37,7 @@ const WorkProto = protobuf.Type.fromJSON("Work", {
  */
 const FORMATS = {
   json: { contentType: "application/json", encode: Schema.encodeSync(Schema.fromJsonString(WorkMessage)) },
-  protobuf: { contentType: "application/x-protobuf", encode: (m: WorkMessage) => WorkProto.encode(m).finish() },
+  protobuf: { contentType: "application/x-protobuf", encode: (m: WorkMessage) => WorkProto.encode(m).finish() }
 } as const;
 
 type ProducerConfig = {
@@ -51,7 +46,7 @@ type ProducerConfig = {
   readonly format: keyof typeof FORMATS;
 };
 
-export const runProducer = Effect.fnUntraced(function* (cfg: ProducerConfig) {
+export const runProducer = Effect.fnUntraced(function*(cfg: ProducerConfig) {
   const rmq = yield* Rmq;
   const queue = workQueueFor(cfg.apiId);
   // Same arguments the daemons declare: whichever container starts first creates the queue, and a mismatched
@@ -75,7 +70,7 @@ export const runProducer = Effect.fnUntraced(function* (cfg: ProducerConfig) {
 
   yield* Effect.log(`${cfg.apiId}/producer: up — ${cfg.ratePerSecond}/s of ${cfg.format} onto ${queue}`);
 
-  yield* Effect.gen(function* () {
+  yield* Effect.gen(function*() {
     // One batch per tick: published back to back on the confirm channel and confirmed together, one round trip
     // for the tick rather than one per message. `messageId` is stamped once here and is the idempotency key the
     // consumer sends: a redelivery is the same message with the same id.
@@ -92,22 +87,25 @@ export const runProducer = Effect.fnUntraced(function* (cfg: ProducerConfig) {
           "messaging.operation.name": "publish",
           "messaging.destination.name": queue,
           "messaging.batch.message_count": batch.length,
-          "egress.api_id": cfg.apiId,
-        },
+          "egress.api_id": cfg.apiId
+        }
       }),
       Effect.as(true),
       Effect.catch((error) =>
         failing
           ? Effect.succeed(false)
-          : Effect.as(Effect.logWarning(`${cfg.apiId}/producer: publishing failed, still trying — ${error.message}`), false),
-      ),
+          : Effect.as(
+            Effect.logWarning(`${cfg.apiId}/producer: publishing failed, still trying — ${error.message}`),
+            false
+          )
+      )
     );
     yield* published && failing ? Effect.log(`${cfg.apiId}/producer: publishing again`) : Effect.void;
     failing = !published;
     // Publish rate is read from RabbitMQ's own metrics, not republished here.
     yield* Effect.when(
       Effect.log(`${cfg.apiId}/producer: ${sent} messages published`),
-      Effect.sync(() => sent % (cfg.ratePerSecond * 10) < perTick),
+      Effect.sync(() => sent % (cfg.ratePerSecond * 10) < perTick)
     );
     // `fixed`, not `spaced`: spaced waits after each batch, so the period becomes 100ms plus the broker's confirm
     // time and the producer would quietly back off exactly when the queue is deepest. `fixed` keeps the cadence and

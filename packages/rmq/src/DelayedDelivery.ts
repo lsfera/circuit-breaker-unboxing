@@ -41,33 +41,33 @@ export const bindingKey = (destination: string): string => `#.${destination}`;
  * promise that outlives a broker restart, with `at-least-once` dead-lettering so a hop between levels is never
  * where one is lost.
  */
-export const declare = Effect.fnUntraced(function* () {
+export const declare = Effect.fnUntraced(function*() {
   const rmq = yield* Rmq;
   const levels = Arr.makeBy(LEVELS, (n) => n);
   const nextOf = (level: number): string => (level === 0 ? DELIVERY_EXCHANGE : levelName(level - 1));
 
-  yield* Effect.forEach([DELIVERY_EXCHANGE, ...Arr.map(levels, levelName)], (name) =>
-    rmq.declareTopicExchange(name, { durable: true }),
+  yield* Effect.forEach(
+    [DELIVERY_EXCHANGE, ...Arr.map(levels, levelName)],
+    (name) => rmq.declareTopicExchange(name, { durable: true })
   );
   yield* Effect.forEach(levels, (n) =>
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const queue = yield* rmq.declareQueue(levelName(n), {
         args: {
           "x-queue-type": "quorum",
           "x-message-ttl": 1000 * 2 ** n,
           "x-dead-letter-exchange": nextOf(n),
           "x-dead-letter-strategy": "at-least-once",
-          "x-overflow": "reject-publish",
-        },
+          "x-overflow": "reject-publish"
+        }
       });
       yield* rmq.bind(`${wildcards(wordOf(n))}1.#`, levelName(n), queue);
       yield* rmq.bindExchange(`${wildcards(wordOf(n))}0.#`, levelName(n), nextOf(n));
-    }),
-  );
+    }));
 });
 
 /** Give an already-declared `queue` its own delayed messages. Run after `declare`. */
-export const receive = Effect.fnUntraced(function* (queue: string) {
+export const receive = Effect.fnUntraced(function*(queue: string) {
   const rmq = yield* Rmq;
   yield* rmq.bind(bindingKey(queue), DELIVERY_EXCHANGE, queue);
 });
@@ -76,16 +76,16 @@ export const receive = Effect.fnUntraced(function* (queue: string) {
  * Deliver `body` to `destination` in `seconds`, give or take the chain's own latency (one TTL check per level
  * the message waits in). Confirmed once it is in the first queue, which is when the delay is a promise.
  */
-export const sendDelayed = Effect.fnUntraced(function* (
+export const sendDelayed = Effect.fnUntraced(function*(
   destination: string,
   seconds: number,
   body: string,
-  options?: SendOptions,
+  options?: SendOptions
 ): Effect.fn.Return<void, RmqError, Rmq> {
   const rmq = yield* Rmq;
   const publisher: Publisher = yield* rmq.publisherToExchange(
     levelName(entryLevel(seconds)),
-    routingKey(seconds, destination),
+    routingKey(seconds, destination)
   );
   yield* rmq.send(publisher, body, options);
 });

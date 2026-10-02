@@ -1,5 +1,5 @@
-import { Deferred, Effect, Match, Random, Ref } from "effect";
 import type { Consumer, RmqError } from "@egress/rmq/Client.ts";
+import { Deferred, Effect, Match, Random, Ref } from "effect";
 
 /**
  * A circuit breaker whose open state is a message. Tripping withdraws its registration, so its consumers get no
@@ -67,20 +67,22 @@ export type Io<Handle = Consumer> = {
 };
 
 export const supervise = <Handle>(cfg: BreakerConfig, io: Io<Handle>): Effect.Effect<never, RmqError> => {
-  const closed = Effect.gen(function* () {
+  const closed = Effect.gen(function*() {
     yield* io.onPhase("closed");
     const tripped = yield* Deferred.make<void>();
     const failures = yield* Ref.make(0);
     const consumer = yield* io.subscribe((ok) =>
       Ref.updateAndGet(failures, (n) => (ok ? 0 : n + 1)).pipe(
-        Effect.tap((n) => Effect.when(Deferred.succeed(tripped, undefined), Effect.succeed(n >= cfg.consecutiveFailures))),
-      ),
+        Effect.tap((n) =>
+          Effect.when(Deferred.succeed(tripped, undefined), Effect.succeed(n >= cfg.consecutiveFailures))
+        )
+      )
     );
     yield* Deferred.await(tripped);
     yield* io.retire(consumer);
   });
 
-  const probe = Effect.gen(function* () {
+  const probe = Effect.gen(function*() {
     yield* io.onPhase("half-open");
     const verdict = yield* Deferred.make<ProbeVerdict>();
     const consumer = yield* io.probe((v) => Effect.asVoid(Deferred.succeed(verdict, v)));
@@ -89,14 +91,14 @@ export const supervise = <Handle>(cfg: BreakerConfig, io: Io<Handle>): Effect.Ef
     return v;
   });
 
-  const open = Effect.fnUntraced(function* (attempt: number): Effect.fn.Return<void, RmqError> {
+  const open = Effect.fnUntraced(function*(attempt: number): Effect.fn.Return<void, RmqError> {
     yield* io.onPhase("open");
     const woken = yield* io.hold(holdSeconds(cfg, attempt, yield* Random.next), attempt);
     yield* Match.value(yield* probe).pipe(
       Match.when("ok", () => Effect.void),
       Match.when("failed", () => open(woken + 1)),
       Match.when("no-permit", () => open(woken)),
-      Match.exhaustive,
+      Match.exhaustive
     );
   });
 

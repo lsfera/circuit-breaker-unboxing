@@ -1,5 +1,5 @@
-import { test } from "node:test";
 import assert from "node:assert/strict";
+import { test } from "node:test";
 import * as Delay from "../src/DelayedDelivery.ts";
 
 /** The routing key is the whole contract between a sender and the chain, so it is pinned as data. */
@@ -16,7 +16,11 @@ test("the destination follows the bits and may itself contain dots", () => {
   const key = Delay.routingKey(5, "payments.breaker.wake.host-1");
   assert.equal(key.split(".").length, Delay.LEVELS + 4);
   assert.ok(key.endsWith(".payments.breaker.wake.host-1"));
-  assert.equal(key.split(".").slice(-6, -4).join(""), "01", "the low bits of 5 are 101, the last two before the destination are 0 and 1");
+  assert.equal(
+    key.split(".").slice(-6, -4).join(""),
+    "01",
+    "the low bits of 5 are 101, the last two before the destination are 0 and 1"
+  );
 });
 
 test("a message enters the chain at its highest set bit", () => {

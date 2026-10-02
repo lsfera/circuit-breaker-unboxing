@@ -1,5 +1,5 @@
-import { Cause, Exit, Match, Option as O } from "effect";
 import type { Settlement } from "@egress/rmq/Client.ts";
+import { Cause, Exit, Match, Option as O } from "effect";
 import type { Outcome } from "./Breaker.ts";
 import { Halted, Rejected } from "./Dependency.ts";
 import type { Role } from "./Dependency.ts";
@@ -25,18 +25,21 @@ export const decide = (outcome: Outcome, role: Role = "work", streak = 1): Dispo
     Match.when("client_error", () => "park"),
     Match.when("throttled", () => "release"),
     Match.when("failed", () => (role === "probe" || streak > 1 ? "release" : "requeue")),
-    Match.exhaustive,
+    Match.exhaustive
   );
 
 /** `reason` is the parked message's `x-egress-parked-reason`, and names the outcome in a log line. */
-export type Settled = { readonly disposition: Disposition; readonly reason: string };
+export type Settled = { readonly disposition: Disposition; readonly reason: string; };
 
 const halted = (h: Halted): Settled =>
   Match.value(h.stop).pipe(
     Match.withReturnType<Settled>(),
     // `open` and `no-permit` made no call: nothing was learned about the message.
     Match.when(Match.is("open", "no-permit"), () => ({ disposition: "release", reason: h.stop })),
-    Match.orElse((outcome) => ({ disposition: decide(outcome, h.role, h.streak), reason: `refused-${h.dependency}-${h.reason}` })),
+    Match.orElse((outcome) => ({
+      disposition: decide(outcome, h.role, h.streak),
+      reason: `refused-${h.dependency}-${h.reason}`
+    }))
   );
 
 /**
@@ -54,7 +57,7 @@ export const settle = (exit: Exit.Exit<unknown, unknown>): Settled =>
             Match.withReturnType<Settled>(),
             Match.when(Match.instanceOf(Halted), halted),
             Match.when(Match.instanceOf(Rejected), (r) => ({ disposition: "park", reason: `rejected-${r.reason}` })),
-            Match.orElse(() => ({ disposition: "requeue", reason: "unwrapped-error" })),
-          ),
-      }),
+            Match.orElse(() => ({ disposition: "requeue", reason: "unwrapped-error" }))
+          )
+      })
   });

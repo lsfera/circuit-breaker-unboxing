@@ -24,10 +24,10 @@ const fromBytes = <A>(to: Schema.Codec<A>, expected: string, decode: (body: Uint
   Schema.Uint8Array.pipe(
     Schema.decodeTo(to, {
       decode: SchemaGetter.transformEffect((body, options) =>
-        Effect.try({ try: () => decode(body), catch: () => new SchemaIssue.InvalidValue({ expected }, body, options) }),
+        Effect.try({ try: () => decode(body), catch: () => new SchemaIssue.InvalidValue({ expected }, body, options) })
       ),
-      encode: SchemaGetter.forbidden(() => "a parser only reads"),
-    }),
+      encode: SchemaGetter.forbidden(() => "a parser only reads")
+    })
   );
 
 const utf8 = new TextDecoder("utf-8", { fatal: true });
@@ -36,15 +36,18 @@ const utf8 = new TextDecoder("utf-8", { fatal: true });
 const Utf8 = fromBytes(Schema.String, "UTF-8 text", (body) => utf8.decode(body));
 
 /** A parser for a text format, such as `Schema.fromJsonString(…)`, reading the body as UTF-8. */
-export const text = (parser: Schema.Codec<unknown, string, never, unknown>): Parser => Utf8.pipe(Schema.decodeTo(parser));
+export const text = (parser: Schema.Codec<unknown, string, never, unknown>): Parser =>
+  Utf8.pipe(Schema.decodeTo(parser));
 
 /**
  * A parser for a binary format from its decoder, such as protobuf's `fromBinary`. The decoder gets a plain
  * `Uint8Array` view, never a `Buffer`: protobufjs 7's `Buffer` path read a truncated string as a shorter one.
  */
 export const bytes = (decode: (body: Uint8Array) => unknown): Parser =>
-  fromBytes(Schema.Unknown, "a body its decoder reads", (body) =>
-    decode(new Uint8Array(body.buffer, body.byteOffset, body.byteLength)),
+  fromBytes(
+    Schema.Unknown,
+    "a body its decoder reads",
+    (body) => decode(new Uint8Array(body.buffer, body.byteOffset, body.byteLength))
   );
 
 /**
@@ -67,17 +70,17 @@ const unencoded = (contentEncoding: string): boolean =>
  */
 export const accept = (
   parsers: Record<string, Parser>,
-  options: { readonly undeclared?: string; readonly type?: string } = {},
+  options: { readonly undeclared?: string; readonly type?: string; } = {}
 ): Negotiate => {
   const byMediaType = Rec.mapKeys(parsers, mediaType);
   const parserFor = (contentType: string) => Rec.get(byMediaType, mediaType(contentType));
   return (declared) =>
     O.match(declared.contentEncoding, { onNone: () => true, onSome: unencoded }) &&
-    O.match(declared.type, { onNone: () => true, onSome: (t) => options.type === undefined || t === options.type })
+      O.match(declared.type, { onNone: () => true, onSome: (t) => options.type === undefined || t === options.type })
       ? O.match(declared.contentType, {
-          onNone: () => O.flatMap(O.fromUndefinedOr(options.undeclared), parserFor),
-          onSome: parserFor,
-        })
+        onNone: () => O.flatMap(O.fromUndefinedOr(options.undeclared), parserFor),
+        onSome: parserFor
+      })
       : O.none();
 };
 
@@ -91,5 +94,5 @@ export const read =
     O.match(negotiate(declared), {
       onNone: () => Result.fail("format" as const),
       onSome: (parse) =>
-        Result.fromOption(O.flatMap(Schema.decodeUnknownOption(parse)(body), decode), () => "malformed" as const),
+        Result.fromOption(O.flatMap(Schema.decodeUnknownOption(parse)(body), decode), () => "malformed" as const)
     });

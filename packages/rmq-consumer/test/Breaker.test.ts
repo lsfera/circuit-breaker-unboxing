@@ -1,8 +1,8 @@
-import { test } from "node:test";
-import assert from "node:assert/strict";
-import { Deferred, Effect, Fiber } from "effect";
-import * as Breaker from "../src/Breaker.ts";
 import type { Consumer } from "@egress/rmq/Client.ts";
+import { Deferred, Effect, Fiber } from "effect";
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import * as Breaker from "../src/Breaker.ts";
 
 /**
  * The state machine against a fake world: no broker, no dependency, no timers. What the fake records is what
@@ -36,7 +36,7 @@ const world = () => {
     verdict: (v: Breaker.ProbeVerdict) => Effect.Effect<void>;
     live: boolean;
   }> = [];
-  const holds: Array<{ seconds: number; attempt: number; wake: Deferred.Deferred<void> }> = [];
+  const holds: Array<{ seconds: number; attempt: number; wake: Deferred.Deferred<void>; }> = [];
   const add = (role: string, report: Breaker.Report, verdict: (v: Breaker.ProbeVerdict) => Effect.Effect<void>) =>
     Effect.sync(() => {
       const entry = { role, report, verdict, live: true };
@@ -45,25 +45,26 @@ const world = () => {
       return entry as unknown as Consumer;
     });
   const io: Breaker.Io = {
-    subscribe: (report) => add("work", report, () => Effect.sync(() => assert.fail("a work consumer gives no verdict"))),
+    subscribe: (report) =>
+      add("work", report, () => Effect.sync(() => assert.fail("a work consumer gives no verdict"))),
     probe: (verdict) => add("probe", (ok) => Effect.as(verdict(ok ? "ok" : "failed"), ok ? 0 : 1), verdict),
     retire: (c) =>
       Effect.sync(() => {
-        (c as unknown as { live: boolean }).live = false;
+        (c as unknown as { live: boolean; }).live = false;
         log.push("retire");
       }),
     hold: (seconds, attempt) =>
-      Effect.gen(function* () {
+      Effect.gen(function*() {
         const wake = yield* Deferred.make<void>();
         holds.push({ seconds, attempt, wake });
         log.push(`hold ${attempt}`);
         yield* Deferred.await(wake);
         return attempt;
       }),
-    onPhase: (phase) => Effect.sync(() => void log.push(phase)),
+    onPhase: (phase) => Effect.sync(() => void log.push(phase))
   };
   const until = (done: () => boolean) =>
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       for (let i = 0; i < 200 && !done(); i++) yield* Effect.sleep(1);
       assert.ok(done(), `never got there: ${log.join(" > ")}`);
     });
@@ -72,17 +73,17 @@ const world = () => {
 
 const drive = (body: (w: ReturnType<typeof world>) => Effect.Effect<void>) =>
   Effect.runPromise(
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       const w = world();
       const fiber = yield* Effect.forkChild(Breaker.supervise(cfg, w.io));
       yield* body(w);
       yield* Fiber.interrupt(fiber);
-    }),
+    })
   );
 
 test("it stays closed while successes interrupt the failures, and trips on the Nth in a row", () =>
   drive((w) =>
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       yield* w.until(() => w.consumers.length === 1);
       const work = w.consumers[0]!;
       yield* Effect.forEach([false, false, true, false, false], work.report);
@@ -91,24 +92,24 @@ test("it stays closed while successes interrupt the failures, and trips on the N
       yield* work.report(false);
       yield* w.until(() => w.holds.length === 1);
       assert.deepEqual(w.log, ["closed", "subscribe work", "retire", "open", "hold 0"]);
-    }),
+    })
   ));
 
 test("open means no consumer: nothing is subscribed until the token comes back", () =>
   drive((w) =>
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       yield* w.until(() => w.consumers.length === 1);
       yield* Effect.forEach([false, false, false], w.consumers[0]!.report);
       yield* w.until(() => w.holds.length === 1);
       yield* Effect.sleep(10);
       assert.equal(w.consumers.filter((c) => c.live).length, 0);
       assert.equal(w.consumers.length, 1);
-    }),
+    })
   ));
 
 test("the token's return half-opens with a single probe; a good one closes the breaker", () =>
   drive((w) =>
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       yield* w.until(() => w.consumers.length === 1);
       yield* Effect.forEach([false, false, false], w.consumers[0]!.report);
       yield* w.until(() => w.holds.length === 1);
@@ -119,12 +120,12 @@ test("the token's return half-opens with a single probe; a good one closes the b
       yield* w.until(() => w.consumers.length === 3);
       assert.equal(w.consumers[2]!.role, "work");
       assert.deepEqual(w.log.slice(-5), ["half-open", "subscribe probe", "retire", "closed", "subscribe work"]);
-    }),
+    })
   ));
 
 test("a failed probe reopens with a longer hold, carried by the token's attempt", () =>
   drive((w) =>
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       yield* w.until(() => w.consumers.length === 1);
       yield* Effect.forEach([false, false, false], w.consumers[0]!.report);
       yield* w.until(() => w.holds.length === 1);
@@ -136,12 +137,12 @@ test("a failed probe reopens with a longer hold, carried by the token's attempt"
       assert.ok(w.holds[1]!.seconds > w.holds[0]!.seconds || w.holds[1]!.seconds >= 2, "the hold grows");
       assert.equal(w.consumers.length, 2, "and nothing consumes while it does");
       assert.equal(w.consumers.filter((c) => c.live).length, 0);
-    }),
+    })
   ));
 
 test("a breaker that has closed forgets: the next outage starts from the first hold again", () =>
   drive((w) =>
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       yield* w.until(() => w.consumers.length === 1);
       yield* Effect.forEach([false, false, false], w.consumers[0]!.report);
       yield* w.until(() => w.holds.length === 1);
@@ -152,21 +153,21 @@ test("a breaker that has closed forgets: the next outage starts from the first h
       yield* Effect.forEach([false, false, false], w.consumers[2]!.report);
       yield* w.until(() => w.holds.length === 2);
       assert.equal(w.holds[1]!.attempt, 0);
-    }),
+    })
   ));
 
 test("a work consumer is told how long the run of failures is, and a success ends it", () =>
   drive((w) =>
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       yield* w.until(() => w.consumers.length === 1);
       const work = w.consumers[0]!;
       assert.deepEqual(yield* Effect.forEach([false, false, true, false], work.report), [1, 2, 0, 1]);
-    }),
+    })
   ));
 
 test("a probe that loses the permit race holds again at the same attempt: nothing was learned", () =>
   drive((w) =>
-    Effect.gen(function* () {
+    Effect.gen(function*() {
       yield* w.until(() => w.consumers.length === 1);
       yield* Effect.forEach([false, false, false], w.consumers[0]!.report);
       yield* w.until(() => w.holds.length === 1);
@@ -182,5 +183,5 @@ test("a probe that loses the permit race holds again at the same attempt: nothin
       assert.equal(w.holds[2]!.attempt, 1, "a lost race does not grow the hold");
       assert.equal(w.consumers.filter((c) => c.live).length, 0, "and it is open again, not consuming");
       assert.deepEqual(w.log.slice(-4), ["subscribe probe", "retire", "open", "hold 1"]);
-    }),
+    })
   ));

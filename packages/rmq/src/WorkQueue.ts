@@ -16,7 +16,7 @@ export const deadLetterQueueFor = (apiId: string): string => `${apiId}.work.dead
  */
 const deadLetterArgs = (apiId: string): Record<string, unknown> => ({
   "x-dead-letter-exchange": "",
-  "x-dead-letter-routing-key": deadLetterQueueFor(apiId),
+  "x-dead-letter-routing-key": deadLetterQueueFor(apiId)
 });
 
 /** Identical to `deadLetterArgs` today; named separately because here it is designed behaviour, not a backstop. */
@@ -43,9 +43,9 @@ export const workQueueOptions = (apiId: string) => ({
     // At-least-once: the default (at-most-once) drops a dead letter the target queue does not take. Quorum
     // queues require reject-publish for it.
     "x-dead-letter-strategy": "at-least-once",
-    "x-overflow": "reject-publish",
+    "x-overflow": "reject-publish"
   },
-  durable: true,
+  durable: true
 });
 
 /**
@@ -54,6 +54,5 @@ export const workQueueOptions = (apiId: string) => ({
  */
 export const deadLetterQueueOptions = () => ({
   args: { "x-queue-type": "quorum", "x-delivery-limit": -1 },
-  durable: true,
+  durable: true
 });
-

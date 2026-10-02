@@ -1,10 +1,10 @@
+import { PgClient } from "@effect/sql-pg";
+import * as Consumer from "@egress/rmq-consumer";
 import { Config, Context, Effect, Layer, Match, Option, Redacted, Result, Schema } from "effect";
 import { Flag } from "effect/unstable/cli";
 import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest } from "effect/unstable/http";
 import { SqlClient, SqlError } from "effect/unstable/sql";
-import { PgClient } from "@effect/sql-pg";
 import protobuf from "protobufjs";
-import * as Consumer from "@egress/rmq-consumer";
 
 /**
  * The consumer application (`node src/main.ts`). Payments are charged at the third party, then recorded in the
@@ -18,7 +18,7 @@ const Refund = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
 /** The third party, reached at one address. The idempotency key rides as its own header, so a redelivery repeats the same request. */
 class PaymentsApi extends Context.Service<
   PaymentsApi,
-  { readonly charge: (key: string) => Effect.Effect<number, HttpClientError.HttpClientError> }
+  { readonly charge: (key: string) => Effect.Effect<number, HttpClientError.HttpClientError>; }
 >()("@egress/consumer/main/PaymentsApi") {
   static readonly layer = (url: string) =>
     Layer.effect(
@@ -29,10 +29,9 @@ class PaymentsApi extends Context.Service<
             client.execute(HttpClientRequest.get(url).pipe(HttpClientRequest.setHeader("x-idempotency-key", key))).pipe(
               // Drain the body even though nothing wants it: an unconsumed response holds its connection out of the pool.
               Effect.tap((response) => Effect.ignore(response.text)),
-              Effect.map((response) => response.status),
-            ),
-        }),
-      ),
+              Effect.map((response) => response.status)
+            )
+        }))
     ).pipe(Layer.provide(FetchHttpClient.layer));
 }
 
@@ -51,14 +50,17 @@ class Ledger extends Context.Service<
         Ledger.of({
           record: (key, p) =>
             Effect.asVoid(
-              sql`INSERT INTO payments ${sql.insert({ message_id: key, api_id: p.apiId, n: p.n })} ON CONFLICT (message_id) DO NOTHING`,
+              sql`INSERT INTO payments ${
+                sql.insert({ message_id: key, api_id: p.apiId, n: p.n })
+              } ON CONFLICT (message_id) DO NOTHING`
             ),
           refund: (key, r) =>
             Effect.asVoid(
-              sql`INSERT INTO refunds ${sql.insert({ message_id: key, api_id: r.apiId, n: r.n })} ON CONFLICT (message_id) DO NOTHING`,
-            ),
-        }),
-      ),
+              sql`INSERT INTO refunds ${
+                sql.insert({ message_id: key, api_id: r.apiId, n: r.n })
+              } ON CONFLICT (message_id) DO NOTHING`
+            )
+        }))
     ).pipe(Layer.provide(PgClient.layer({ url })));
 }
 
@@ -71,11 +73,11 @@ const byHttpStatus = (result: Result.Result<number, HttpClientError.HttpClientEr
         Match.when((s) => s >= 200 && s < 300, () => "ok" as const),
         Match.when(429, () => "throttled" as const),
         Match.when((s) => s >= 400 && s < 500 && s !== 408, () => "client_error" as const),
-        Match.orElse(() => "failed" as const),
-      ),
+        Match.orElse(() => "failed" as const)
+      )
     }),
     // A transport failure, or one of ours such as an invalid URL: the tag says which.
-    onFailure: ({ reason }) => ({ outcome: "failed", reason: reason._tag }),
+    onFailure: ({ reason }) => ({ outcome: "failed", reason: reason._tag })
   });
 
 /** Contention means "fewer at once"; a row the schema refuses is this message's fault; anything else is the database failing. */
@@ -87,13 +89,13 @@ const bySqlError = (result: Result.Result<void, SqlError.SqlError>): Consumer.Ve
       outcome: Match.value(reason._tag).pipe(
         Match.when(
           Match.is("DeadlockError", "SerializationError", "LockTimeoutError", "StatementTimeoutError"),
-          () => "throttled" as const,
+          () => "throttled" as const
         ),
         Match.when("ConstraintError", () => "client_error" as const),
         // A connection or authentication failure, a missing table (SqlSyntaxError), anything unknown.
-        Match.orElse(() => "failed" as const),
-      ),
-    }),
+        Match.orElse(() => "failed" as const)
+      )
+    })
   });
 
 const ThirdParty = Consumer.Dependency("payments-api", { classify: byHttpStatus });
@@ -106,7 +108,7 @@ const Database = Consumer.Dependency("ledger", { classify: bySqlError, breaker: 
  * wire, and `n` starts at 0. `longs: Number`: the contract's `n` is a number, not a `Long`.
  */
 const WorkProto = protobuf.Type.fromJSON("Work", {
-  fields: { apiId: { type: "string", id: 1 }, n: { type: "int64", id: 2 } },
+  fields: { apiId: { type: "string", id: 1 }, n: { type: "int64", id: 2 } }
 });
 
 /** Each message is read by the format it declares; either way, the contract decides whether it is a payment. */
@@ -114,35 +116,35 @@ const formats = Consumer.accept(
   {
     "application/json": Consumer.text(Schema.fromJsonString(Schema.Unknown)),
     "application/x-protobuf": Consumer.bytes((body) =>
-      WorkProto.toObject(WorkProto.decode(body), { longs: Number, defaults: true }),
-    ),
+      WorkProto.toObject(WorkProto.decode(body), { longs: Number, defaults: true })
+    )
   },
-  { undeclared: "application/json", type: "egress.work" },
+  { undeclared: "application/json", type: "egress.work" }
 );
 
 /** The third party dedupes on it: no `message_id`, no safe retry. */
 const keyOf = (metadata: Consumer.Metadata) =>
   Option.match(metadata.messageId, {
     onNone: () => Effect.fail(new Consumer.Rejected({ reason: "keyless" })),
-    onSome: Effect.succeed,
+    onSome: Effect.succeed
   });
 
 const payments = Consumer.For(Payment, formats).bind(
-  Effect.fnUntraced(function* (payment, metadata) {
+  Effect.fnUntraced(function*(payment, metadata) {
     const key = yield* keyOf(metadata);
     // Halts here unless the charge was ok, so only an accepted charge is recorded.
     yield* ThirdParty((yield* PaymentsApi).charge(key));
     yield* Database((yield* Ledger).record(key, payment));
   }),
-  [ThirdParty, Database],
+  [ThirdParty, Database]
 );
 
 const refunds = Consumer.For(Refund, formats).bind(
-  Effect.fnUntraced(function* (refund, metadata) {
+  Effect.fnUntraced(function*(refund, metadata) {
     const key = yield* keyOf(metadata);
     yield* Database((yield* Ledger).refund(key, refund));
   }),
-  [Database],
+  [Database]
 );
 
 Consumer.run({
@@ -150,18 +152,18 @@ Consumer.run({
   flags: {
     egressAddr: Flag.String("egress-addr").pipe(
       Flag.withFallbackConfig(Config.NonEmptyString("EGRESS_ADDR")),
-      Flag.withDescription("The one address the third party is reached at"),
+      Flag.withDescription("The one address the third party is reached at")
     ),
     apiPath: Flag.String("api-path").pipe(
       Flag.withFallbackConfig(Config.NonEmptyString("API_PATH")),
       Flag.withDefault("/payments"),
-      Flag.withDescription("The route on egress-addr that charges a payment"),
+      Flag.withDescription("The route on egress-addr that charges a payment")
     ),
     databaseUrl: Flag.Redacted("database-url").pipe(
       Flag.withFallbackConfig(Config.Redacted("DATABASE_URL")),
-      Flag.withDescription("The ledger: postgres://user:password@host:port/database"),
-    ),
+      Flag.withDescription("The ledger: postgres://user:password@host:port/database")
+    )
   },
   layer: ({ egressAddr, apiPath, databaseUrl }) =>
-    Layer.mergeAll(PaymentsApi.layer(`${egressAddr}${apiPath}`), Ledger.layer(databaseUrl)),
+    Layer.mergeAll(PaymentsApi.layer(`${egressAddr}${apiPath}`), Ledger.layer(databaseUrl))
 });

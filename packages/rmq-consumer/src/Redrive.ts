@@ -1,7 +1,7 @@
-import { Effect, Match, Option as O, Schema } from "effect";
 import { carry, Rmq } from "@egress/rmq/Client.ts";
 import type { GotMessage } from "@egress/rmq/Client.ts";
 import { deadLetterQueueFor, workQueueFor } from "@egress/rmq/WorkQueue.ts";
+import { Effect, Match, Option as O, Schema } from "effect";
 
 /**
  * Replays `<api>.work.dead` onto the work queue once the third party is back, and parks what has been redriven
@@ -17,7 +17,7 @@ export const redriveTriggerQueueFor = (apiId: string): string => `${apiId}.redri
 
 export const redriveTriggerQueueOptions = () => ({
   args: { "x-queue-type": "quorum", "x-single-active-consumer": true },
-  durable: true,
+  durable: true
 });
 
 /**
@@ -31,7 +31,7 @@ export const PARKED_REASON_HEADER = "x-egress-parked-reason";
 
 export const parkedQueueOptions = () => ({
   args: { "x-queue-type": "quorum", "x-delivery-limit": -1 },
-  durable: true,
+  durable: true
 });
 
 /** Stamped on a redriven message; absent means it has never been redriven. */
@@ -44,11 +44,11 @@ export const REDRIVE_COUNT_HEADER = "x-egress-redrive-count";
 const MAX_REDRIVES = 5;
 
 type RedriveDecision =
-  | { readonly destination: "work"; readonly count: number }
-  | { readonly destination: "parked" };
+  | { readonly destination: "work"; readonly count: number; }
+  | { readonly destination: "parked"; };
 
 const decodeCount = Schema.decodeUnknownOption(
-  Schema.FiniteFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  Schema.FiniteFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))
 );
 
 /**
@@ -77,7 +77,7 @@ type RedriveOptions = {
  * in between duplicates (the idempotency key rides along as `message_id`), where the reverse order would lose
  * the message. Whatever a pass does not reach stays where it was.
  */
-export const runPass = Effect.fnUntraced(function* (opts: RedriveOptions) {
+export const runPass = Effect.fnUntraced(function*(opts: RedriveOptions) {
   const rmq = yield* Rmq;
   const deadQueue = deadLetterQueueFor(opts.apiId);
   const workPub = yield* rmq.publisherToQueue(workQueueFor(opts.apiId));
@@ -87,14 +87,20 @@ export const runPass = Effect.fnUntraced(function* (opts: RedriveOptions) {
     const [publish, outcome] = Match.value(nextRedrive(got.properties[REDRIVE_COUNT_HEADER])).pipe(
       Match.discriminatorsExhaustive("destination")({
         work: ({ count }) =>
-          [rmq.send(workPub, got.body, carry(got, { [REDRIVE_COUNT_HEADER]: String(count) })), "moved" as const] as const,
+          [
+            rmq.send(workPub, got.body, carry(got, { [REDRIVE_COUNT_HEADER]: String(count) })),
+            "moved" as const
+          ] as const,
         parked: () =>
-          [rmq.send(parkedPub, got.body, carry(got, { [PARKED_REASON_HEADER]: "redriven-too-often" })), "parked" as const] as const,
-      }),
+          [
+            rmq.send(parkedPub, got.body, carry(got, { [PARKED_REASON_HEADER]: "redriven-too-often" })),
+            "parked" as const
+          ] as const
+      })
     );
     return publish.pipe(
       Effect.andThen(got.ack),
-      Effect.andThen(opts.onOutcome(outcome)),
+      Effect.andThen(opts.onOutcome(outcome))
     );
   };
 
@@ -104,9 +110,9 @@ export const runPass = Effect.fnUntraced(function* (opts: RedriveOptions) {
     Effect.flatMap(
       O.match({
         onNone: () => Effect.succeed(false),
-        onSome: (got) => move(got).pipe(Effect.as(true)),
-      }),
-    ),
+        onSome: (got) => move(got).pipe(Effect.as(true))
+      })
+    )
   );
 
   yield* step.pipe(Effect.repeat({ while: (more) => more, times: MAX_PER_PASS - 1 }));

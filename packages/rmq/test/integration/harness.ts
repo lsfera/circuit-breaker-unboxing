@@ -1,5 +1,5 @@
-import { GenericContainer, Wait } from "testcontainers";
 import { Effect } from "effect";
+import { GenericContainer, Wait } from "testcontainers";
 import type { StartedTestContainer } from "testcontainers";
 
 /**
@@ -34,8 +34,7 @@ export const stopBroker = async (): Promise<void> => {
 let container: StartedTestContainer | null = null;
 
 /** Run a command inside the broker container — `rabbitmqctl`, in practice. */
-export const brokerExec = (command: ReadonlyArray<string>): Promise<unknown> =>
-  container!.exec([...command]);
+export const brokerExec = (command: ReadonlyArray<string>): Promise<unknown> => container!.exec([...command]);
 
 /**
  * Restart the broker and re-read where it landed: the mapped port changes, and a test that does not re-read it
@@ -48,7 +47,7 @@ export const restartBroker = async (settleMs = 3000): Promise<void> => {
   broker.port = container!.getMappedPort(5672);
 };
 
-export const skipIfNoDocker = (t: { skip: (reason: string) => void }): boolean => {
+export const skipIfNoDocker = (t: { skip: (reason: string) => void; }): boolean => {
   if (broker.available) return false;
   t.skip("Docker is not available in this environment");
   return true;

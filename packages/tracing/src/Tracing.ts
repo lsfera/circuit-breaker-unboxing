@@ -1,13 +1,9 @@
 // The submodule, not the package root: the root re-exports WebSdk, which imports a browser-only package and
 // crashes a Node image at import time.
-import { Config, Effect, Layer, Option as O, Schema } from "effect";
 import * as NodeSdk from "@effect/opentelemetry/NodeSdk";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
-import {
-  BatchSpanProcessor,
-  ParentBasedSampler,
-  TraceIdRatioBasedSampler,
-} from "@opentelemetry/sdk-trace-base";
+import { BatchSpanProcessor, ParentBasedSampler, TraceIdRatioBasedSampler } from "@opentelemetry/sdk-trace-base";
+import { Config, Effect, Layer, Option as O, Schema } from "effect";
 
 /**
  * Tracing for every process here. Opt-in on `OTEL_EXPORTER_OTLP_ENDPOINT`: without it no tracer is installed,
@@ -19,7 +15,7 @@ import {
 const endpoint = Config.String("OTEL_EXPORTER_OTLP_ENDPOINT").pipe(
   Config.map((raw) => raw.trim()),
   Config.option,
-  Config.map(O.filter((raw) => raw !== "")),
+  Config.map(O.filter((raw) => raw !== ""))
 );
 
 /**
@@ -28,7 +24,7 @@ const endpoint = Config.String("OTEL_EXPORTER_OTLP_ENDPOINT").pipe(
  */
 const ratio = Config.schema(
   Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
-  "OTEL_TRACES_SAMPLER_ARG",
+  "OTEL_TRACES_SAMPLER_ARG"
 ).pipe(Config.withDefault(1));
 
 /**
@@ -48,14 +44,13 @@ export const TracingLive = (serviceName: string) =>
             // Batched rather than simple: a span per message at this rate would
             // put an HTTP round trip on the path this is supposed to be measuring.
             spanProcessor: new BatchSpanProcessor(
-              new OTLPTraceExporter({ url: `${url}/v1/traces` }),
+              new OTLPTraceExporter({ url: `${url}/v1/traces` })
             ),
             tracerConfig: {
               sampler: new ParentBasedSampler({
-                root: new TraceIdRatioBasedSampler(sampleRatio),
-              }),
-            },
-          })),
-      }),
-    ),
+                root: new TraceIdRatioBasedSampler(sampleRatio)
+              })
+            }
+          }))
+      }))
   );

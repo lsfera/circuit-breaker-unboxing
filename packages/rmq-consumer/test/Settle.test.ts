@@ -1,6 +1,6 @@
-import { test } from "node:test";
-import assert from "node:assert/strict";
 import { Cause, Exit } from "effect";
+import assert from "node:assert/strict";
+import { test } from "node:test";
 import { Halted, Rejected } from "../src/Dependency.ts";
 import type { Stop } from "../src/Dependency.ts";
 import { decide, settle } from "../src/Settle.ts";
@@ -51,7 +51,11 @@ test("an action halted at a dependency settles by that dependency's answer, and 
   assert.equal(settle(haltedAt("failed", "work", 2)).disposition, "release");
   assert.equal(settle(haltedAt("failed", "probe", 1)).disposition, "release");
   assert.equal(settle(haltedAt("throttled")).disposition, "release");
-  assert.equal(settle(haltedAt("ok")).disposition, "accept", "a failure the application classified as fine ends the message");
+  assert.equal(
+    settle(haltedAt("ok")).disposition,
+    "accept",
+    "a failure the application classified as fine ends the message"
+  );
 });
 
 test("a halt that made no call — the breaker was open, or another replica held the probe permit — releases uncharged", () => {
@@ -60,7 +64,10 @@ test("a halt that made no call — the breaker was open, or another replica held
 });
 
 test("a message the action rejects is parked with the action's reason, whatever else", () => {
-  assert.deepEqual(settle(Exit.fail(new Rejected({ reason: "keyless" }))), { disposition: "park", reason: "rejected-keyless" });
+  assert.deepEqual(settle(Exit.fail(new Rejected({ reason: "keyless" }))), {
+    disposition: "park",
+    reason: "rejected-keyless"
+  });
 });
 
 test("a failure outside any dependency is the application's bug: charged to the message, not parked", () => {
