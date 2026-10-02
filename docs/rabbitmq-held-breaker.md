@@ -151,15 +151,17 @@ healthy messages while the breaker is still opening.
 
 | | sent | processed | duplicates | lost | dead-lettered | openings | peak tokens | longest hold | all closed after restore |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `outage` | 45,345 | 45,345 | 0 | 0 | **0** | 30 | 5 | 29 s | 17 s |
-| `outage-hang` | 47,363 | 47,363 | 0 | 0 | **0** | 28 | 5 | 26 s | 27 s |
-| `kill-open-replica` | 46,585 | 46,585 | 0 | 0 | **0** | 31 | 5 | 32 s | 23 s |
-| `kill-broker-while-open` | 41,742 | 41,742 | 0 | 0 | **0** | 30 | 5 | 24 s | 16 s |
+| `outage` | 46,861 | 46,861 | 0 | 0 | **0** | 38 | 5 | 32 s | 26 s |
+| `outage-hang` | 45,704 | 45,704 | 0 | 0 | **0** | 71 | 5 | 16 s | 19 s |
+| `kill-open-replica` | 48,914 | 48,914 | 0 | 0 | **0** | 35 | 5 | 36 s | 36 s |
+| `kill-broker-while-open` | 46,194 | 46,194 | 0 | 0 | **0** | 34 | 5 | 27 s | 38 s |
 | `delay-survives-broker-restart` | 1 | 1 | 0 | 0 | 0 | — | — | 100 s | — |
-| `partial` (informational) | 44,505 | 44,494 | 0 | 0 | 11 | 83 | 5 | 15 s | 13 s |
+| `partial` (informational) | 46,207 | 46,207 | 0 | 0 | 12, all redriven | 93 | 5 | 19 s | 18 s |
 
-A rerun after the Effect rc.116 upgrade passed the same way
-([the run](runs/chaos-breaker-rc116.json)).
+This is the run with the 5 s heartbeat ([the run](runs/chaos-breaker-heartbeat5.json)); the
+other graded scenarios (`restart-during-probe`, `kill-permit-holder`, `redrive-failover`, `overload`) passed
+in it too. Earlier runs, with a 1 s heartbeat, passed the same way
+([after the release rule](runs/chaos-breaker-after-fix.json), [Effect rc.116](runs/chaos-breaker-rc116.json)).
 
 A killed replica comes back closed, and the token addressed to its
 predecessor goes to a queue nobody reads: wake queues are named by a fresh
@@ -167,14 +169,14 @@ random id per process, not the hostname a restarted container keeps, which
 would let a stale token wake it early (reasoned, not tested).
 
 The broker's consumer count on the work queue matched the number of replicas
-not open in 47 of 56 one-second samples in `outage` (37 of 61 when calls hang),
+not open in 56 of 61 one-second samples in `outage` (43 of 58 when calls hang),
 the misses being scrape lag: a sanity check that an open breaker has no
 consumer, not a proof.
 
 ## The incident on screen
 
 A 24-second total outage against the running stack, recorded from the Grafana
-dashboard on 2026-09-24, at the compose producer's ordinary 200/s. The
+dashboard on 2026-10-02, at the compose producer's ordinary 200/s. The
 dead-letter and parked queues were emptied first, so both lines start at zero.
 
 The panels that matter here: the broker's consumer count on the work queue,
@@ -191,21 +193,22 @@ The [recording](media/incident.webm) runs the whole incident, start to finish.
 **2 · The outage begins.** All five open within a millisecond of each other
 (the replicas' own logs). The fleet view turns open, the consumer count on the
 work queue falls to zero, and five tokens appear in the delay chain. While the
-holds are still one or two seconds, replicas wake together and most lose the
-race for the probe permit: that is the bump in the bottom-right panel. A lost
-race holds again at the same length, so it does not add to the backoff.
+holds are still one or two seconds, replicas wake together and race for the
+probe permit; the losers show in the bottom-right panel (here mostly later, when
+several holds ended together after the restore). A lost race holds again at
+the same length, so it does not add to the backoff.
 
 ![the outage begins](media/2-mid-outage.png)
 
-**3 · The third party is restored.** The backlog is about 3,900 messages, held in
+**3 · The third party is restored.** The backlog is about 4,500 messages, held in
 the queue, not spinning through it. No consumers. Tokens are still in flight,
-because the holds have grown to 8–15 s; the replicas do not yet know.
+because the holds have grown to 8–16 s; the replicas do not yet know.
 
 ![restored, replicas still holding](media/3-restored.png)
 
-**4 · Recovered.** The breakers came back at different moments: 0.2, 1.3, 2.2,
-3.4 and 3.5 s after the restore, as each hold ended; in other runs the last
-closed 10 s or more after it. The backlog drained as they did, and no dead
+**4 · Recovered.** The breakers came back at different moments: 1.4, 4.4, 6.5,
+17.6 and 21.3 s after the restore, as each hold ended; in an earlier recording
+all five closed within 4 s. The backlog drained as they did, and no dead
 letters appeared.
 
 ![recovered](media/4-recovered.png)
@@ -213,7 +216,7 @@ letters appeared.
 ## What it costs, and what it doesn't fix
 
 - **A long hold is a late recovery.** A hold of *h* seconds means a replica
-  notices the recovery up to *h* seconds late (16–27 s after the restore in
+  notices the recovery up to *h* seconds late (19–38 s after the restore in
   the chaos runs). With a 24-hour ceiling, a day-long outage can leave a
   replica dark for most of another day. The ceiling is how late you are
   willing to find out, and it is now set per dependency: the ledger caps its
@@ -243,5 +246,5 @@ node infra/chaos-breaker.mjs --list          # or pick some with --scenarios=a,b
 The scripts use the compose service names; from the host, point `BROKER`,
 `FLAKY_UPSTREAM`, `PROMETHEUS` and `RABBITMQ_MANAGEMENT` at `localhost`. The
 recording is `infra/capture-incident.mjs` (needs `playwright-core`). The run
-above is [`runs/chaos-breaker-after-fix.json`](runs/chaos-breaker-after-fix.json);
+above is [`runs/chaos-breaker-heartbeat5.json`](runs/chaos-breaker-heartbeat5.json);
 `chaos-breaker-before-fix.json` predates the release rule.

@@ -136,14 +136,15 @@ spike (outage, hang, killed replicas, broker restarts, a killed permit holder
 and redriver, overload) and grades per message: nothing lost, dead-letter queue
 back where it started, one probe permit left. Every graded scenario passes,
 about 45,000 messages each (`docs/runs/chaos-breaker-sdk.json`; a subset again
-on Effect rc.117).
+on Effect rc.117; all of them again with the 5 s heartbeat,
+`docs/runs/chaos-breaker-heartbeat5.json`).
 
 ![Grafana through a 24 s outage: the fleet view and all five breakers open, the work queue fills while the dead-letter queue stays flat at zero, calls to the third party stop, then every breaker closes and the backlog drains](docs/media/incident.gif)
 
-A 24 s outage, recorded with `infra/capture-incident.mjs` (3.04× real time,
+A 24 s outage, recorded with `infra/capture-incident.mjs` (4.10× real time,
 [full recording](docs/media/incident.webm)): the work queue holds the backlog,
 the dead-letter line stays flat, and after the restore every breaker closed
-within 4 s.
+within 22 s, each as its hold ended.
 
 ## Shared through the broker
 
