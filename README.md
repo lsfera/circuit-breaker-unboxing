@@ -71,7 +71,7 @@ The system leans on each of these:
 | --- | --- | --- |
 | quorum queues, persistent messages | work, and a breaker's hold, survive a broker restart | 01 |
 | publisher confirms, `mandatory` | a message counts as sent only once the broker holds it; an unroutable one fails the publish instead of vanishing | 01 |
-| manual acks, `prefetch` | nothing leaves the queue until settled; a dead replica's deliveries go back; prefetch is the concurrency limit | 01 |
+| manual acks, `prefetch` | nothing leaves the queue until settled; a dead replica's deliveries go back, each counted as an attempt; prefetch is the concurrency limit | 01 |
 | `x-delivery-limit` (3) | the attempt budget lives on the queue, so it survives a message moving between replicas | 01 |
 | dead-lettering, `at-least-once` with `x-overflow: reject-publish` | exhausted work lands in `work.dead` and is never dropped in transit; `x-delivery-limit: -1` there, since the default 20 would drop at its cap | 01 |
 | requeuing `nack` isn't counted, `reject` is | `release` when the dependency is to blame (a failed probe, a failure in a streak, a lost permit race), `requeue` for a failure that stands alone | 03 |
@@ -80,7 +80,7 @@ The system leans on each of these:
 | subscribing, cancelling, `prefetch: 1` | the breaker's state: closed is a consumer, open is none, half-open is one message at a time | **04** |
 | per-queue `x-message-ttl` dead-lettering into topic exchanges | the delay chain: 17 levels, a durable hold of 1 s to 36 h with no plugin and no timer in the process | **04** |
 | `x-expires` | a restarted replica's old wake queue is collected after 10 minutes | **04** |
-| 1 s heartbeat | a one-sided partition is noticed in seconds, not the 60 s default | 01 |
+| 5 s heartbeat | a one-sided partition is noticed in 10–15 s, not minutes under the 60 s default; 5 s is the shortest RabbitMQ recommends | **04** |
 | a fixed memory watermark (1 GiB of 2), `connection.blocked` | flow control refuses publishes before the OOM killer takes the broker; publishing and consuming use separate connections, so an alarm doesn't stall acks; on this branch, alerted on from RabbitMQ's own metrics | 01 |
 
 ## The breaker

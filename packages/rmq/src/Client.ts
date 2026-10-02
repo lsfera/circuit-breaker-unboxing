@@ -211,7 +211,10 @@ export interface RmqService {
    * that back to the queue.
    */
   readonly cancelConsumer: (c: Consumer) => Effect.Effect<void>;
-  /** Retire the consumer and its channel; anything held unacked returns to the queue. */
+  /**
+   * Retire the consumer and its channel; anything held unacked returns to the queue, and on a quorum queue each of
+   * those counts as a failed delivery toward `x-delivery-limit`, as a lost connection does.
+   */
   readonly closeConsumer: (c: Consumer) => Effect.Effect<void>;
   /**
    * Stop delivery, let what the consumer holds settle, then retire it and its
@@ -274,6 +277,8 @@ type RmqConnectOptions = {
   readonly port: number;
   readonly username?: string;
   readonly password?: string;
+  /** Seconds, 5 unless given. A test that needs a missed heartbeat inside a few seconds passes 1. */
+  readonly heartbeat?: number;
 };
 
 /** Computed on first read and kept. The memo is an `Option` because a computed value is not the same as an absent one. */
@@ -575,7 +580,9 @@ export const makeRmq = Effect.fnUntraced(function* (
             password: opts.password ?? "guest",
             // Unset this negotiates RabbitMQ's 60s default, far too slow to notice a silent one-sided partition. With a
             // short interval amqplib itself closes the connection after ~2-3 missed beats and emits the usual 'disconnect'.
-            heartbeat: 1,
+            // Not 1: RabbitMQ warns a second or less is very likely to declare a live connection dead (a GC pause is
+            // enough) and recommends 5-20, so 5 is the shortest it endorses and a partition shows within ~10-15s.
+            heartbeat: opts.heartbeat ?? 5,
           },
           {
             // Bounds every socket connect, initial and reconnect, to a fixed wall-clock time instead of the OS's SYN-retry

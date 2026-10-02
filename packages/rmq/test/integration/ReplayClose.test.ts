@@ -14,7 +14,8 @@ import { Rmq } from "../../src/Client.ts";
  * A broker's own close (CONNECTION_FORCED) is not an `error` in amqplib, so
  * this uses one that is: a missed heartbeat. The broker closes every
  * connection, then suspends whichever connections open next, a few
- * milliseconds in, so the client's replay stalls and its 1s heartbeat fails
+ * milliseconds in, so the client's replay stalls and its 1s heartbeat (set
+ * here, shorter than the default, to fit the window) fails
  * inside `setup`. Four seconds later they are resumed. Surviving it means
  * reconnecting afterwards: a publish goes through.
  */
@@ -65,7 +66,7 @@ test("a connection the broker closes during topology replay is reconnected, not 
             yield* rmq.send(pub, "after");
             yield* waitFor(() => seen.length >= 1, 30_000);
           }),
-          Rmq.layer({ host: broker.host, port: broker.port }),
+          Rmq.layer({ host: broker.host, port: broker.port, heartbeat: 1 }),
         ),
       ) as Effect.Effect<void>,
     );

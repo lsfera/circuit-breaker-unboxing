@@ -32,7 +32,7 @@ export const WORK_DELIVERY_LIMIT = 3;
 
 /**
  * Durability is decided here so producer and daemons cannot disagree: a mismatch is a redeclare conflict
- * (`409 inequivalent arg 'durable'`), so changing a flag means deleting the queue first. Always durable:
+ * (406 `PRECONDITION_FAILED`, `inequivalent arg 'durable'`), so changing a flag means deleting the queue first. Always durable:
  * RabbitMQ 4.3 refuses a transient queue that is not exclusive by closing the whole connection (541).
  */
 export const workQueueOptions = (apiId: string) => ({
