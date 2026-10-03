@@ -1,6 +1,6 @@
 import { Effect } from "effect";
-import { HttpMiddleware, HttpRouter, HttpServerResponse } from "effect/unstable/http";
-import { PrometheusMetrics } from "effect/unstable/observability";
+import { HttpMiddleware, HttpRouter, HttpServerResponse } from "effect/http";
+import { PrometheusMetrics } from "effect/observability";
 
 /**
  * The `/metrics` every process here serves, from the same in-process `effect`

@@ -17,9 +17,9 @@
     "incident": "node --env-file-if-exists=.env.local infra/incident.mjs"
   },
   "devDependencies": {
-    "@types/node": "^26.6.3",
+    "@types/node": "^26.6.4",
     "jsdom": "^30.1.1",
-    "mermaid": "12.0.0",
+    "mermaid": "12.1.0",
     "typescript": "^7.0.2"
   }
 }

@@ -2,8 +2,8 @@ packages:
   - "packages/*"
 
 catalog:
-  effect: 4.0.0-rc.117
-  "@effect/platform-node": 4.0.0-rc.117
+  effect: 4.0.0
+  "@effect/platform-node": 4.0.0
 
 allowBuilds:
   cpu-features: true

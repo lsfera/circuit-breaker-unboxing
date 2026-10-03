@@ -2,7 +2,7 @@
 
 ## Effect
 
-This repository uses **Effect 4** — `effect@4.0.0-rc.117`, pinned in
+This repository uses **Effect 4** — `effect@4.0.0`, pinned in
 `pnpm-workspace.yaml`'s catalog. Most Effect material in circulation, and
 most of what a model remembers, is Effect 3, which Effect 4 renamed and
 reshaped substantially. Before writing Effect code:
@@ -32,7 +32,7 @@ runs it too).
 - Do not import from @repos/ — application code keeps importing from normal
   package dependencies.
 
-`repos/effect` is `Effect-TS/effect` at the tag `effect@4.0.0-rc.117`,
+`repos/effect` is `Effect-TS/effect` at the tag `effect@4.0.0`,
 fetched by `scripts/fetch-effect.mjs` as a shallow clone of that tag. It is
 **the installed version, not `main`**: `main` runs ahead of the releases (it
 was two release candidates ahead when this was first vendored), and reference
