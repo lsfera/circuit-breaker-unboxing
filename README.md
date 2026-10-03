@@ -206,7 +206,7 @@ infra/           envoy.yaml, flaky-upstream, chaos harnesses, monitoring
 docs/            architecture, high availability, measurements, off the shelf, decisions/
 ```
 
-**Effect 4 (4.0.0-rc.117)**; see `AGENTS.md`. No build step: Node runs the
+**Effect 4 (4.0.0)**; see `AGENTS.md`. No build step: Node runs the
 `src/*.ts` directly, which makes `tsc --noEmit` load-bearing.
 
 ```bash

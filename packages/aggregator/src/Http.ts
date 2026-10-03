@@ -1,5 +1,5 @@
 import { Clock, Effect, Match, Metric, Option as O, Ref, Schema, Stream } from "effect";
-import { HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import { HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { NodeStream } from "@effect/platform-node";
 import { CircuitEvent, classifyEvent, SEQUENCED_EVENT } from "@egress/domain/Model.ts";
 import type { Applied, Lease } from "@egress/domain/Model.ts";

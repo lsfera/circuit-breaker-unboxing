@@ -1,6 +1,6 @@
 # Effect 3 idioms, and what they are in Effect 4
 
-This repository runs `effect@4.0.0-rc.117`. Most Effect material in
+This repository runs `effect@4.0.0`. Most Effect material in
 circulation — blog posts, model memory, and some of this repository's own
 agent skills — is Effect 3, and Effect 4 renamed or removed a good deal of it.
 The code usually fails to compile, which is the good outcome. The bad one is
@@ -30,6 +30,10 @@ subset that has come up here.
 | `DateTime.unsafeNow` | `DateTime.nowUnsafe` — `unsafe` moved to the end of every name | v3-to-v4.md:9587 |
 
 ## Changed contracts, not just names
+
+**`Array.separate` returns successes first, failures second.** Destructure its
+result as `[successes, failures]`; the stable release's types make a reversed
+order fail to typecheck (`Array.ts:3949`).
 
 **`filterMap` keeps a `Result`, not an `Option`.** `Array.filterMap` and
 `Stream.filterMapEffect` take a function returning `Result.succeed(value)` to

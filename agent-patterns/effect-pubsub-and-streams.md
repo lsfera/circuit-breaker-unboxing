@@ -11,10 +11,10 @@ guessing got one of these wrong.
 
 | Constructor | When a subscriber falls behind | Source |
 | --- | --- | --- |
-| `PubSub.bounded(n)` | the **publisher** waits | `PubSub.ts:335` |
-| `PubSub.dropping(n)` | the **newest** message is dropped | `PubSub.ts:382` |
-| `PubSub.sliding(n)` | the **oldest** message is dropped | `PubSub.ts:428` |
-| `PubSub.unbounded()` | nothing is dropped, and memory grows | `PubSub.ts:468` |
+| `PubSub.bounded(n)` | the **publisher** waits | `PubSub.ts:365` |
+| `PubSub.dropping(n)` | the **newest** message is dropped | `PubSub.ts:412` |
+| `PubSub.sliding(n)` | the **oldest** message is dropped | `PubSub.ts:458` |
+| `PubSub.unbounded()` | nothing is dropped, and memory grows | `PubSub.ts:498` |
 
 All four take `{ capacity, replay }` (unbounded takes `{ replay }`): `replay`
 hands a new subscriber the last *n* messages.
@@ -53,19 +53,19 @@ process. Use `PubSub.sliding(1)` and publish to it.
 - `Stream.fromPubSub(pubsub)` (`Stream.ts:1173`) subscribes when the stream
   runs, so one stream value served to many HTTP requests is many
   subscriptions.
-- `Stream.onStart(effect)` (`:9777`) and `Stream.ensuring(effect)` (`:9886`)
+- `Stream.onStart(effect)` (`:10053`) and `Stream.ensuring(effect)` (`:10162`)
   bracket a run. `ensuring` runs on interruption, which is how a closed
   browser tab arrives: the response stream is interrupted with the request's
   scope. `ConsoleFrames.ts` counts watchers this way, so it builds nothing
   once the last one leaves.
-- `Stream.merge(a, b)` (`:2909`) runs until **both** end. Merge a
+- `Stream.merge(a, b)` (`:2960`) runs until **both** end. Merge a
   never-ending stream, such as `Stream.tick` (`:513`), only into one that is
   meant to run until the client disconnects.
 
 ## HTTP responses already apply back-pressure
 
 `HttpServerResponse.stream` on Node waits for the socket's `drain` event
-before pulling the next chunk (`NodeHttpServer.ts:633`). The stream feeding a
+before pulling the next chunk (`NodeHttpServer.ts:639-647`). The stream feeding a
 response is therefore pulled no faster than the client reads. Whatever
 buffers *upstream* of it — the PubSub — decides what a slow client costs.
 

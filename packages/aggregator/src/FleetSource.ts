@@ -278,7 +278,7 @@ export const parseStats = (
   // One rule, two outputs: a cluster missing either half of the membership pair
   // is `incomplete`, everything else is a report. `Result` is what keeps the
   // two from being decided by two separately-maintained conditions.
-  const [incomplete, reports] = Arr.separate(
+  const [reports, incomplete] = Arr.separate(
     Arr.map([...byCluster], ([apiId, s]): Result.Result<ReplicaReport, string> => {
       const healthy = s["membership_healthy"];
       const total = s["membership_total"];

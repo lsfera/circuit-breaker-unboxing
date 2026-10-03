@@ -1,6 +1,6 @@
 import { Config, Data, Deferred, Effect, Layer, Option as O, Schema } from "effect";
-import { Command, Flag } from "effect/unstable/cli";
-import { HttpRouter } from "effect/unstable/http";
+import { Command, Flag } from "effect/cli";
+import { HttpRouter } from "effect/http";
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";

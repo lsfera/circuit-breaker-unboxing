@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Effect, Fiber, Option as O, Ref, type Scope, Stream } from "effect";
 import { TestClock } from "effect/testing";
-import { Sse } from "effect/unstable/encoding";
+import { Sse } from "effect/encoding";
 import { Reason, State, type ApiSnapshot } from "@egress/domain/Model.ts";
 import * as ConsoleFrames from "../src/ConsoleFrames.ts";
 

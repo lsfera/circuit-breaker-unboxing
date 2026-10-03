@@ -1,5 +1,5 @@
 import { type Duration, Effect, Metric, Option as O, PubSub, Ref, Schedule, type Scope, Stream } from "effect";
-import { Sse } from "effect/unstable/encoding";
+import { Sse } from "effect/encoding";
 import { STATE_CODE, State, type ApiSnapshot } from "@egress/domain/Model.ts";
 import * as Telemetry from "./Telemetry.ts";
 

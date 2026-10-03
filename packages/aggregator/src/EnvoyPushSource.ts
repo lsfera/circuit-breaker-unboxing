@@ -161,7 +161,7 @@ export const EnvoyPushFleetLayer = (
           Effect.succeed(unidentified > 0),
         );
 
-        const [quiet, live] = Arr.separate(
+        const [live, quiet] = Arr.separate(
           Arr.map([...latest], ([replicaId, snapshot]) =>
             now - snapshot.receivedAt > staleMs
               ? Result.fail(replicaId)

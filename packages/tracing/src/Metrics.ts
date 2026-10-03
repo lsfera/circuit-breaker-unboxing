@@ -1,6 +1,6 @@
 import { Effect } from "effect";
-import { HttpMiddleware, HttpRouter, HttpServerResponse } from "effect/unstable/http";
-import { PrometheusMetrics } from "effect/unstable/observability";
+import { HttpMiddleware, HttpRouter, HttpServerResponse } from "effect/http";
+import { PrometheusMetrics } from "effect/observability";
 
 /** Not access-logged: a line per 2s scrape buries the heartbeat that shows a deaf daemon. */
 export const metricsResponse = PrometheusMetrics.format().pipe(

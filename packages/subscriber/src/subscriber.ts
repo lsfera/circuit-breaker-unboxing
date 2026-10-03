@@ -1,6 +1,6 @@
 import { Config, Console, Data, Duration, Effect, Match, Option as O, Ref, Result, Schedule, Stream } from "effect";
-import { Command, Flag } from "effect/unstable/cli";
-import { Sse } from "effect/unstable/encoding";
+import { Command, Flag } from "effect/cli";
+import { Sse } from "effect/encoding";
 import { NodeRuntime, NodeServices } from "@effect/platform-node";
 import { VERSION } from "@egress/config/Settings.ts";
 import { classifyEvent, decodeCircuitEvent, SEQUENCED_EVENT, State } from "@egress/domain/Model.ts";

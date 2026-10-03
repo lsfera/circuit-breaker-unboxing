@@ -1,5 +1,5 @@
 import { Config, Console, Duration, Effect, Option as O, Schedule, Schema } from "effect";
-import { Argument, Command, Flag } from "effect/unstable/cli";
+import { Argument, Command, Flag } from "effect/cli";
 import { NodeRuntime, NodeServices } from "@effect/platform-node";
 import { VERSION } from "@egress/config/Settings.ts";
 import { CircuitEvent, SEQUENCED_EVENT, State } from "@egress/domain/Model.ts";
