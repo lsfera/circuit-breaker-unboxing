@@ -13,10 +13,10 @@
     "test:rmq": "node --test 'test/integration/*.test.ts'"
   },
   "dependencies": {
-    "amqplib": "^2.0.1",
+    "amqplib": "^2.2.0",
     "effect": "catalog:"
   },
   "devDependencies": {
-    "testcontainers": "^12.1.0"
+    "testcontainers": "^12.2.0"
   }
 }

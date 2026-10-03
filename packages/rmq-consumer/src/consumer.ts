@@ -1,5 +1,5 @@
 import { Effect, Metric, Option as O } from "effect";
-import type { HttpClient } from "effect/unstable/http";
+import type { HttpClient } from "effect/http";
 import { Rmq } from "@egress/rmq/Client.ts";
 import {
   deadLetterQueueFor,

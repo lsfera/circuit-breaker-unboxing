@@ -1,5 +1,5 @@
 import { Duration, Effect } from "effect";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 /**
  * The one third-party call this daemon makes, reduced to whether it worked: a timeout, a refused connection

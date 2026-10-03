@@ -11,12 +11,11 @@ reader starts from the correction.
 
 | | For |
 | --- | --- |
-| [effect-3-to-4.md](effect-3-to-4.md) | The Effect 3 idioms that surrounding material still teaches — including one of this repository's own skills — and what each is in the version installed |
 | [effect-guide-in-this-repo.md](effect-guide-in-this-repo.md) | Effect's own agent guide (`repos/effect/LLMS.md`) applied to this code: what it follows, and where an ADR overrides the guide |
 | [effect-pubsub-and-streams.md](effect-pubsub-and-streams.md) | Fan-out, back-pressure and buffering: which PubSub to use, the unbounded buffer inside `SubscriptionRef`, and testing streams under `TestClock` |
 
 **They go stale with the pin.** The line numbers are for
-`effect@4.0.0-rc.117`, the tag `repos/effect` was fetched from. When the
+`effect@4.0.0`, the tag `repos/effect` was fetched from. When the
 pin moves — `pnpm run check:vendored` fails until it does — regenerate a
 note from the new source rather than trusting it:
 
