@@ -7,13 +7,13 @@ repository — an ADR, or a reason written next to the code — **the repository
 wins**. This note lists both halves so that nobody "fixes" the code back toward
 the guide.
 
-Checked against `effect@4.0.0-rc.115` on 2026-09-13; its line citations
-re-checked against `effect@4.0.0-rc.117` on 2026-09-26.
+Checked against `effect@4.0.0` on 2026-10-03.
 
 ## Guidance this repository follows
 
 | The guide says | Here | Where |
 | --- | --- | --- |
+| Import CLI, HTTP, SQL, and observability modules from their package entrypoints | `effect/cli`, `effect/http`, `effect/sql`, and `effect/observability`; the stable release removed the corresponding `effect/unstable/*` entrypoints | `packages/config/src/Settings.ts`, `packages/consumer/src/main.ts`, `packages/tracing/src/Metrics.ts` |
 | A reusable function returning an Effect is `Effect.fn` / `Effect.fnUntraced`, not a function that wraps `Effect.gen` | `Effect.fnUntraced` — see below for why not the traced form | `makeRmq`, `makeWebhookSink`, `runDaemon`, `runProducer`, `ConsoleFrames.make`, `pollOne` |
 | A pipe on such a function goes in as extra arguments, not `.pipe` | Each pipeable receives the effect and then the function's arguments | `pollOne` in `FleetSource.ts`: `(effect, replica) => Effect.catch(effect, …)` |
 | A service with one implementation carries it as `static readonly layer`, and builds it with `Service.of` | `Aggregator.layer`, `EventBus.layer`, `Rmq.layer(opts)` | `Aggregator.ts`, `Events.ts`, `rmq/Client.ts` |
@@ -34,7 +34,7 @@ Two traps met while applying these:
   directly throws at module load. `Rmq.layer` has no such problem, because it is
   a function that runs only when called.
 - **`Schema.UnknownFromJsonString` is `@internal`** in this version
-  (`Schema.ts:9208`). Use the public `Schema.fromJsonString(Schema.Unknown)`.
+  (`Schema.ts:9496`). Use the public `Schema.fromJsonString(Schema.Unknown)`.
   Decoding in two steps (`read` in `packages/rmq-consumer/src/Negotiation.ts`)
   keeps a body that does not parse an answer, not an exception.
 

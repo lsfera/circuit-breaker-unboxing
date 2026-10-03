@@ -1,6 +1,6 @@
 import { NodeServices } from "@effect/platform-node";
 import { ConfigProvider, Effect, Result } from "effect";
-import { Flag } from "effect/unstable/cli";
+import { Flag } from "effect/cli";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { brokerFlag, metricsPortFlag, PositiveInt, setting } from "../src/Settings.ts";

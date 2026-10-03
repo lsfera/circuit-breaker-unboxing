@@ -4,8 +4,8 @@ import { launchWithRmq, Rmq } from "@egress/rmq/Client.ts";
 import { MetricsRoute } from "@egress/tracing/Metrics.ts";
 import { TracingLive } from "@egress/tracing/Tracing.ts";
 import { Config, Effect, Layer } from "effect";
-import { Command, Flag } from "effect/unstable/cli";
-import { HttpRouter } from "effect/unstable/http";
+import { Command, Flag } from "effect/cli";
+import { HttpRouter } from "effect/http";
 import { createServer } from "node:http";
 import { runProducer } from "./producer.ts";
 

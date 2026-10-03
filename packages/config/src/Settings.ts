@@ -1,5 +1,5 @@
 import { Config, Schema } from "effect";
-import { Flag } from "effect/unstable/cli";
+import { Flag } from "effect/cli";
 import manifest from "../../../package.json" with { type: "json" };
 
 /**

@@ -1,9 +1,9 @@
 import { PgClient } from "@effect/sql-pg";
 import * as Consumer from "@egress/rmq-consumer";
 import { Config, Context, Effect, Layer, Match, Option, Redacted, Result, Schema } from "effect";
-import { Flag } from "effect/unstable/cli";
-import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest } from "effect/unstable/http";
-import { SqlClient, SqlError } from "effect/unstable/sql";
+import { Flag } from "effect/cli";
+import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest } from "effect/http";
+import { SqlClient, SqlError } from "effect/sql";
 import protobuf from "protobufjs";
 
 /**
