@@ -1,5 +1,5 @@
 import { Cause, Duration, Effect, Predicate } from "effect";
-import { HttpClient, HttpClientRequest } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest } from "effect/http";
 
 /**
  * The one third-party call this daemon makes, reduced to what came back: the HTTP status, or `timeout` /
