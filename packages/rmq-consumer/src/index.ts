@@ -1,5 +1,5 @@
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
-import { brokerFlag, metricsPortFlag, PositiveInt, setting, VERSION } from "@egress/config/Settings.ts";
+import { brokerFlag, metricsFlag, metricsPortFlag, PositiveInt, setting, telemetryFlag, VERSION } from "@egress/config/Settings.ts";
 import { launchWithRmq, Rmq } from "@egress/rmq/Client.ts";
 import type { DeliveryInfo } from "@egress/rmq/Client.ts";
 import { MAX_DELAY_SECONDS } from "@egress/rmq/DelayedDelivery.ts";
@@ -151,7 +151,9 @@ export const flags = {
       "What the limit is multiplied by on a throttled answer (once per round trip, not once per answer)"
     )
   ),
-  metricsPort: metricsPortFlag
+  metricsPort: metricsPortFlag,
+  metrics: metricsFlag,
+  telemetry: telemetryFlag
 };
 
 /** What the SDK's flags decode to. */
@@ -185,13 +187,20 @@ export const command = <const C extends Record<string, Registration<any>>, const
 
   return Command.make(name, { sdk: flags, app: (app.flags ?? {}) as F }, ({ sdk: settings, app: own }) => {
     const services = Predicate.isFunction(app.layer) ? app.layer(own as Command.Command.Config.Infer<F>) : app.layer;
+    const exposeMetrics = settings.metrics;
+    const exposeTelemetry = settings.telemetry;
     return launchWithRmq(
       Layer.mergeAll(
-        HttpRouter.serve(MetricsRoute).pipe(
-          Layer.provide(NodeHttpServer.layer(createServer, { port: settings.metricsPort }))
-        ),
+        exposeMetrics
+          ? HttpRouter.serve(MetricsRoute).pipe(
+              Layer.provide(NodeHttpServer.layer(createServer, { port: settings.metricsPort }))
+            )
+          : Layer.empty,
         services
-      ).pipe(Layer.provideMerge(TracingLive(name)), Layer.provideMerge(Rmq.layer(settings.broker))),
+      ).pipe(
+        Layer.provideMerge(exposeTelemetry ? TracingLive(name) : Layer.empty),
+        Layer.provideMerge(Rmq.layer(settings.broker))
+      ),
       runApplication({
         name,
         maxInFlight: settings.maxInFlight,

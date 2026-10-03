@@ -79,15 +79,14 @@ export const runProducer = Effect.fnUntraced(function*(cfg: ProducerConfig) {
       return { body: encode({ apiId: cfg.apiId, n }), messageId: workMessageId(run, n) };
     });
     const published = yield* rmq.sendBatch(publisher, batch).pipe(
-      // The root of every trace: the sampler decides here alone (`@egress/rmq` stamps a traceparent only when a span
-      // is active and downstream spans are ParentBased), so a tick's messages are followed the whole way or not at all.
+      // One tick is one trace root: `sendBatch` stamps the same traceparent on each message, and each consumer
+      // processing span inherits it from its delivery.
       Effect.withSpan("work.publish", {
         attributes: {
           "messaging.system": "rabbitmq",
           "messaging.operation.name": "publish",
           "messaging.destination.name": queue,
-          "messaging.batch.message_count": batch.length,
-          "egress.api_id": cfg.apiId
+          "messaging.batch.message_count": batch.length
         }
       }),
       Effect.as(true),

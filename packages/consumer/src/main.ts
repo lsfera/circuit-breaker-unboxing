@@ -1,6 +1,7 @@
 import { PgClient } from "@effect/sql-pg";
 import * as Consumer from "@egress/rmq-consumer";
-import { Config, Context, Effect, Layer, Match, Option, Redacted, Result, Schema } from "effect";
+import { traceparent } from "@egress/rmq/Trace.ts";
+import { Config, Context, Effect, Layer, Match, Option as O, Redacted, Result, Schema } from "effect";
 import { Flag } from "effect/cli";
 import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest } from "effect/http";
 import { SqlClient, SqlError } from "effect/sql";
@@ -16,6 +17,14 @@ const Payment = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
 const Refund = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
 
 /** The third party, reached at one address. The idempotency key rides as its own header, so a redelivery repeats the same request. */
+const withTraceParent = (request: HttpClientRequest.HttpClientRequest): Effect.Effect<HttpClientRequest.HttpClientRequest> =>
+  Effect.flatMap(traceparent, (header) =>
+    O.match(header, {
+      onNone: () => Effect.succeed(request),
+      onSome: (value) => Effect.succeed(request.pipe(HttpClientRequest.setHeader("traceparent", value)))
+    })
+  );
+
 class PaymentsApi extends Context.Service<
   PaymentsApi,
   { readonly charge: (key: string) => Effect.Effect<number, HttpClientError.HttpClientError>; }
@@ -26,11 +35,25 @@ class PaymentsApi extends Context.Service<
       Effect.map(HttpClient.HttpClient, (client) =>
         PaymentsApi.of({
           charge: (key) =>
-            client.execute(HttpClientRequest.get(url).pipe(HttpClientRequest.setHeader("x-idempotency-key", key))).pipe(
+            Effect.flatMap(
+              withTraceParent(HttpClientRequest.get(url).pipe(HttpClientRequest.setHeader("x-idempotency-key", key))),
+              (request) =>
+                Effect.withSpan(
+                  client.execute(request),
+                  "payments-api.charge",
+                  {
+                    attributes: {
+                      "http.request.method": "GET",
+                      "server.address": url,
+                      "url.full": url
+                    }
+                  }
+                )
+            ).pipe(
               // Drain the body even though nothing wants it: an unconsumed response holds its connection out of the pool.
               Effect.tap((response) => Effect.ignore(response.text)),
               Effect.map((response) => response.status)
-            )
+            ) as Effect.Effect<number, HttpClientError.HttpClientError>
         }))
     ).pipe(Layer.provide(FetchHttpClient.layer));
 }
@@ -124,7 +147,7 @@ const formats = Consumer.accept(
 
 /** The third party dedupes on it: no `message_id`, no safe retry. */
 const keyOf = (metadata: Consumer.Metadata) =>
-  Option.match(metadata.messageId, {
+  O.match(metadata.messageId, {
     onNone: () => Effect.fail(new Consumer.Rejected({ reason: "keyless" })),
     onSome: Effect.succeed
   });

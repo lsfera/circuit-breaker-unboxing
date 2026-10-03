@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@effect/sql-pg": "catalog:",
+    "@egress/rmq": "workspace:*",
     "@egress/rmq-consumer": "workspace:*",
     "effect": "catalog:",
     "protobufjs": "8.8.0"

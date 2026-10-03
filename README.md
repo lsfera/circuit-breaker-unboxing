@@ -278,8 +278,9 @@ const json = Consumer.accept(
 
 const payments = Consumer.For(Payment, json).bind(
   Effect.fnUntraced(function* (payment, metadata) {
+    // The SDK runs this action in work.process, parented from this delivery's traceparent when present.
     const key = yield* keyOf(metadata);                     // Rejected (parked) without a message_id
-    yield* ThirdParty((yield* PaymentsApi).charge(key));    // halts here unless the charge was ok
+    yield* ThirdParty((yield* PaymentsApi).charge(key));    // the HTTP child span forwards the current traceparent
     yield* Database((yield* Ledger).record(key, payment));
   }),
   [ThirdParty, Database],
@@ -308,6 +309,38 @@ Consumer.run({
   300 s: while our own database is down every consumer waits.
 - **The types hold the lists.** A call to a dependency the consumer doesn't
   list, or a service no layer provides, fails to compile.
+
+### Telemetry and metrics
+
+The SDK also instruments its work and carries sampled traces across the broker:
+
+- **Batch parent trace propagation.** Each producer tick has one root
+  `work.publish` span; `sendBatch` stamps its W3C `traceparent` on each
+  message. Consequently, messages in the same tick share a trace ID, with a
+  separate `work.process` branch per delivery. The application forwards the
+  parent context to the third party, where `payments-api.charge` remains in
+  that trace. Without a traceparent, there is no parented `work.process` span;
+  the application's outbound `payments-api.charge` span can still be exported
+  as a root. Republish, redrive and parking preserve the trace header.
+- **Database spans.** Effect SQL emits a `sql.execute` span for each ledger
+  statement, with PostgreSQL and query attributes. It is nested under
+  `work.process`, so a trace that reaches the consumer should show the database
+  operation beneath the publisher's span.
+- **Metrics are independent of tracing.** `--metrics` or
+  `EXPOSE_METRICS=true` exposes `GET /metrics` on port 9464 by default
+  (`--metrics-port` / `METRICS_PORT` changes the port). Both metrics and
+  telemetry are off by default; the local Compose demo opts in explicitly.
+- **OTLP tracing is opt-in.** `--telemetry` or `EXPOSE_TELEMETRY=true` enables
+  the tracing layer, and an OTLP endpoint must also be set:
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` takes precedence over
+  `OTEL_EXPORTER_OTLP_ENDPOINT`. The default sampling ratio is 1; configure
+  `OTEL_TRACES_SAMPLER_ARG` between 0 and 1 when sampling at the application
+  rather than at a collector.
+- **The SDK's Prometheus series** include dependency call outcomes and reasons,
+  discarded/unreadable deliveries, in-flight actions, each replica's breaker
+  state and trips, lost probe permits, redrive outcomes, and the adaptive
+  concurrency limit. Consumer and dependency labels distinguish the work;
+  Prometheus's `instance` label distinguishes replicas.
 
 **Chaos**: `node infra/chaos-app.mjs`, both consumers under a spike, a fault in
 either dependency for about 40 s. Graded per message plus the ledger: every
@@ -384,6 +417,19 @@ curl -X POST flaky-upstream:8080/__fail -d '{}'                            # hea
 duplicates, openings and how far the replicas agreed (`MODE=hang`,
 `CAPACITY=5 DELAY_MS=100`, `RATE`, `WINDOW_MS` shape it).
 
+`node infra/telemetry-demo.mjs` generates a short 503 outage followed by
+recovery traffic, then restores the fake upstream to healthy behavior. With
+telemetry enabled, open the **LGTM Grafana** at
+<http://localhost:3001/explore> and use Explore to inspect traces. This is the
+Grafana included in the OTEL/LGTM backend, separate from the monitoring
+Grafana on port 3000. Search recent `rmq-producer` traces for `work.publish`,
+then follow the `consumer` `work.process`, `payments-api.charge` and
+`sql.execute` spans. Set `WINDOW_MS`, `RECOVERY_MS`, `FLAKY_UPSTREAM` or
+`TRACE_UI` to change the durations or endpoints. Do not run it during another
+injected-failure scenario. Unless overridden, the script detects the fake
+upstream on either the Compose network (`flaky-upstream:8080`) or the host
+(`localhost:8080`).
+
 ## Layout
 
 ```
@@ -394,10 +440,11 @@ packages/
   rmq-consumer/  the SDK: Breaker, Dependency, Gate, Negotiation, Settle,
                  Permit, Redrive, Limiter, run by consumer.ts
   consumer/      the application (main.ts)
-  tracing/       /metrics, and OpenTelemetry when OTEL_EXPORTER_OTLP_ENDPOINT is set
+  tracing/       opt-in /metrics endpoint and OTLP tracing (`--telemetry` or `EXPOSE_TELEMETRY=true` plus an OTLP endpoint)
 infra/
   flaky-upstream.mjs, alert-sink.mjs     the fake third party and alert receiver
   incident.mjs, chaos-*.mjs              one incident; the graded chaos suites
+  telemetry-demo.mjs                     generates failure and recovery traces
   capture-incident.mjs                   records the dashboard (needs playwright-core)
   monitoring/, postgres/, rabbitmq.conf  rules, alerting, dashboard; the ledger schema; the broker's watermark
 docs/            the write-up, its media, saved runs

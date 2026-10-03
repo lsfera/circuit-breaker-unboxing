@@ -8,6 +8,7 @@
 			"value": "1"
 		}
 	],
+	"git.addAICoAuthor": "off",
 	"editor.codeActionsOnSave": {
 		"source.fixAll.oxc": "explicit"
 	},

@@ -1,5 +1,5 @@
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
-import { brokerFlag, metricsPortFlag, PositiveInt, setting, VERSION } from "@egress/config/Settings.ts";
+import { brokerFlag, metricsFlag, metricsPortFlag, PositiveInt, setting, telemetryFlag, VERSION } from "@egress/config/Settings.ts";
 import { launchWithRmq, Rmq } from "@egress/rmq/Client.ts";
 import { MetricsRoute } from "@egress/tracing/Metrics.ts";
 import { TracingLive } from "@egress/tracing/Tracing.ts";
@@ -31,18 +31,22 @@ const flags = {
       "How each body is written: JSON, or protobuf (`message Work { string api_id = 1; int64 n = 2; }`)"
     )
   ),
-  metricsPort: metricsPortFlag
+  metricsPort: metricsPortFlag,
+  metrics: metricsFlag,
+  telemetry: telemetryFlag
 };
 
 /** Failing setup (a broker that never comes up, a queue redeclared with different arguments) ends the process, for the container's restart policy. */
 const producer = Command.make("rmq-producer", flags, (settings) =>
   launchWithRmq(
-    HttpRouter.serve(MetricsRoute).pipe(
-      Layer.provide(NodeHttpServer.layer(createServer, { port: settings.metricsPort })),
-      // Every trace starts in this process; without an OTLP endpoint no tracer is installed.
-      Layer.provideMerge(TracingLive("rmq-producer")),
-      Layer.provideMerge(Rmq.layer(settings.broker))
-    ),
+    Layer.mergeAll(
+      settings.metrics
+        ? HttpRouter.serve(MetricsRoute).pipe(
+            Layer.provide(NodeHttpServer.layer(createServer, { port: settings.metricsPort }))
+          )
+        : Layer.empty,
+      settings.telemetry ? TracingLive("rmq-producer") : Layer.empty
+    ).pipe(Layer.provideMerge(Rmq.layer(settings.broker))),
     runProducer(settings)
   ));
 

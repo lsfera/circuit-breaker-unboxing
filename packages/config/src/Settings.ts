@@ -41,5 +41,19 @@ export const brokerFlag = (description: string) =>
 export const metricsPortFlag = Flag.Int("metrics-port").pipe(
   Flag.withFallbackConfig(Config.Port("METRICS_PORT")),
   Flag.withDefault(9464),
-  Flag.withDescription("Port /metrics is served on")
+  Flag.withDescription("Port /metrics is served on when metrics are enabled")
+);
+
+export const metricsFlag = Flag.Boolean("metrics").pipe(
+  Flag.withFallbackConfig(Config.Boolean("EXPOSE_METRICS")),
+  Flag.withFallbackConfig(Config.Boolean("METRICS")),
+  Flag.withDefault(false),
+  Flag.withDescription("Expose the /metrics endpoint")
+);
+
+export const telemetryFlag = Flag.Boolean("telemetry").pipe(
+  Flag.withFallbackConfig(Config.Boolean("EXPOSE_TELEMETRY")),
+  Flag.withFallbackConfig(Config.Boolean("TELEMETRY")),
+  Flag.withDefault(false),
+  Flag.withDescription("Enable OTLP tracing export")
 );

@@ -206,6 +206,9 @@ importers:
       '@effect/sql-pg':
         specifier: 'catalog:'
         version: 4.0.0(effect@4.0.0)
+      '@egress/rmq':
+        specifier: workspace:*
+        version: link:../rmq
       '@egress/rmq-consumer':
         specifier: workspace:*
         version: link:../rmq-consumer

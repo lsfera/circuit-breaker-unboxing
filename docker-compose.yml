@@ -91,6 +91,9 @@ services:
       RMQ: rabbitmq:5672
       API_ID: payments-provider
       RATE_PER_SECOND: ${RATE_PER_SECOND:-200}
+      EXPOSE_METRICS: "true"
+      EXPOSE_TELEMETRY: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-lgtm:4318
       METRICS_PORT: "9464"
     restart: unless-stopped
     depends_on: &rmq-depends
@@ -117,6 +120,9 @@ services:
     command: node packages/consumer/src/main.ts
     environment:
       RMQ: rabbitmq:5672
+      EXPOSE_METRICS: "true"
+      EXPOSE_TELEMETRY: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-lgtm:4318
       METRICS_PORT: "9464"
       DATABASE_URL: postgres://consumer:consumer@postgres:5432/ledger
       # One address, the fake third party directly: the address a real client of a real third party would be given.
@@ -163,6 +169,15 @@ services:
     ports: ["9093:9093"]
     networks: [default, devcontainer]
     deploy: *limits-small
+
+  # OpenTelemetry backend used by the app's tracing layer; the `OTEL_EXPORTER_OTLP_ENDPOINT` above sends spans
+  # there over OTLP/HTTP. This image includes its own Grafana on 3001; the separate monitoring Grafana stays on 3000.
+  otel-lgtm:
+    image: grafana/otel-lgtm:latest
+    ports: ["4317:4317", "4318:4318", "3001:3000"]
+    restart: unless-stopped
+    networks: [default, devcontainer]
+    deploy: *limits-node
 
   # Stands in for Slack or PagerDuty: it logs what it is sent, so routing is something you can watch rather than
   # infer. Not the product, so it stays a bind-mounted file on the stock Node image like flaky-upstream.

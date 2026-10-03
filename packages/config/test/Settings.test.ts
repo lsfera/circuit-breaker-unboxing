@@ -3,7 +3,7 @@ import { ConfigProvider, Effect, Result } from "effect";
 import { Flag } from "effect/cli";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { brokerFlag, metricsPortFlag, PositiveInt, setting } from "../src/Settings.ts";
+import { brokerFlag, metricsFlag, metricsPortFlag, PositiveInt, setting, telemetryFlag } from "../src/Settings.ts";
 
 /**
  * The settings every process takes, read the way `Command.run` reads them: the command line first, the environment
@@ -64,4 +64,18 @@ test("the metrics port defaults, reads the environment, and refuses what is not 
   for (const raw of ["0", "70000", "abc"]) {
     assert.match(String(await read(metricsPortFlag, { METRICS_PORT: raw })), /METRICS_PORT/, raw);
   }
+});
+
+test("metrics are disabled by default and can be enabled by flag or env", async () => {
+  assert.equal(await read(metricsFlag, {}), false);
+  assert.equal(await read(metricsFlag, { EXPOSE_METRICS: "true" }), true);
+  assert.equal(await read(metricsFlag, { METRICS: "true" }), true);
+  assert.equal(await read(metricsFlag, {}, { metrics: ["true"] }), true);
+});
+
+test("telemetry is disabled by default and can be enabled by flag or env", async () => {
+  assert.equal(await read(telemetryFlag, {}), false);
+  assert.equal(await read(telemetryFlag, { EXPOSE_TELEMETRY: "true" }), true);
+  assert.equal(await read(telemetryFlag, { TELEMETRY: "true" }), true);
+  assert.equal(await read(telemetryFlag, {}, { telemetry: ["true"] }), true);
 });
