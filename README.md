@@ -97,8 +97,8 @@ of article 3, and pays only when other systems act on the verdict.
 ## About the code
 
 Branches 02–05 use [Effect 4](https://effect.website) 4.0.0 and talk to
-RabbitMQ through `amqplib`. Branch 01 is the baseline without a package
-manifest. There is no build step on the Effect branches: Node 26 runs the
+RabbitMQ through `amqplib`. Branch 01 is the no-breaker baseline. There is no
+build step on the Effect branches: Node 26 runs the
 `.ts` sources directly, so `pnpm run check` (typecheck and unit tests) is the
 only compile the code gets.
 Effect 4 renamed and reshaped much of Effect 3, which most examples online
