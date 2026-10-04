@@ -521,7 +521,7 @@ infra/
 docs/            the write-up, its media, saved runs
 ```
 
-**Effect 4 (4.0.0-rc.117)**; see `AGENTS.md`. No build step: Node runs the
+**Effect 4 (4.0.0)**; see `AGENTS.md`. No build step: Node runs the
 `src/*.ts` directly.
 
 ```bash
