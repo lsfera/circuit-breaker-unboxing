@@ -6,7 +6,7 @@
   "engines": {
     "node": ">=26"
   },
-  "packageManager": "pnpm@12.8.1",
+  "packageManager": "pnpm@12.8.2",
   "scripts": {
     "test": "node --test 'packages/*/test/*.test.ts'",
     "test:rmq": "pnpm --filter @egress/rmq test:rmq && pnpm --filter @egress/rmq-consumer test:rmq",

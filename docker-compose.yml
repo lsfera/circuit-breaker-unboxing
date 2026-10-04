@@ -24,7 +24,7 @@ services:
   # per-message audit trail via /__audit. Not part of the product, so it stays a bind-mounted file on the stock
   # Node image with no dependencies to install.
   flaky-upstream:
-    image: &node-image node:26-alpine@sha256:ef24c5053d50fdc3e4e56eb4e7ddb7861874ab0fdc797046ba897581deb8e868
+    image: &node-image node:26-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80
     working_dir: /app
     volumes: ["$HOST_WORKSPACE_FOLDER/infra/flaky-upstream.mjs:/app/flaky-upstream.mjs:ro"]
     command: node flaky-upstream.mjs
@@ -144,7 +144,7 @@ services:
   # Scrapes RabbitMQ's own Prometheus plugin and both fleets' /metrics. See
   # infra/monitoring/prometheus.yml.
   prometheus:
-    image: prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
+    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/rules.yml:/etc/prometheus/rules.yml:ro
@@ -157,7 +157,7 @@ services:
   # Where rules.yml's alert goes (infra/monitoring/alertmanager.yml): grouped per dependency and forwarded to
   # the sink below.
   alertmanager:
-    image: prom/alertmanager:v0.34.0@sha256:690c7b525f4367aa91f73e2f91c632206d32e97c6384bdbf2fb7a861b420340d
+    image: prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
     restart: unless-stopped
@@ -187,7 +187,7 @@ services:
     deploy: *limits-small
 
   grafana:
-    image: grafana/grafana:13.2.1@sha256:f772d434e8fab0049deb2b1b30abd43342bcfca1537614aa8d36080232cf4283
+    image: grafana/grafana:13.2.3@sha256:b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572
     environment:
       # Grafana refuses a refresh under 5s unless told otherwise; the
       # dashboard asks for 1s so an incident is drawn as it happens.
