@@ -1,10 +1,15 @@
-# A circuit breaker with no memory: keeping the open state in RabbitMQ
+# Keeping an open circuit breaker in RabbitMQ
 
 *Part 4 of the circuit-breaker series. Part 2 put a breaker inside each
-consumer. This one moves everything that breaker remembered into the broker.*
+consumer. Part 3 added fleet-wide probe coordination, dead-letter redrive and
+a fleet view. This part keeps those mechanisms and changes how an open breaker
+handles work: its consumer stops, and RabbitMQ holds the recovery token. Each
+replica still keeps its policy state and settlement streak, and applies its
+policy independently.*
 
-*Since written, the consumer has become an SDK with one breaker per
-dependency; the README covers what was built on this.*
+The step is specifically about avoiding retry churn while a dependency is
+known to be failing. It does not create one fleet-wide breaker or make all
+replicas trip together.
 
 The breaker in part 2 was a library object. Its state — closed, open,
 half-open, how long until the next probe — lived in the memory of five
@@ -18,12 +23,13 @@ dead-letter queue grew by **2,745**.
 Nothing was wrong with those 2,745 messages. An open breaker rejects locally
 and requeues, a requeue spends one of the message's four delivery attempts,
 and a message rejected four times is dead-lettered. Fifty real failures
-cannot account for 2,745 dead letters; that is the mechanism the numbers point
-to (I did not instrument the old build to watch it).
+cannot account for 2,745 dead letters; the retry mechanism accounts for the
+difference.
 
-The fix is not a better hold. It is to stop rejecting. An open breaker should
-receive nothing, and the thing that ends the silence should be a message the
-broker keeps, so that it can be as long as it needs to be — a minute, or a day.
+The fix is not a better rejection delay. It is to stop rejecting. An open
+breaker should receive nothing, and the thing that ends the silence should be
+a message the broker keeps. This removes per-delivery retry churn, at the cost
+of probing only when the broker-held timer expires.
 
 ## Open is a consumer that isn't there
 
@@ -34,7 +40,7 @@ facts about the broker:
 
 | phase | what the broker sees | leaves when |
 | --- | --- | --- |
-| **closed** | a work consumer at full prefetch | 5 calls in a row fail |
+| **closed** | a work consumer at full prefetch | the dependency's configured policy trips |
 | **open** | *no* consumer; a wake token is in flight, addressed to this replica | the token comes back |
 | **half-open** | a consumer with prefetch 1 — the first message it gets is the probe | probe succeeds → closed; fails → open again, longer |
 
@@ -44,28 +50,31 @@ sequenceDiagram
   participant R as replica
   participant D as delay chain
   participant K as replica's wake queue
-  W->>R: deliveries (prefetch 20)
-  R->>R: 5th failure in a row
-  R--xW: cancel, let in-flight calls settle (open)
-  R->>D: token, attempt 0, hold 1s
-  D-->>K: 1s later
-  K->>R: attempt 0
-  R->>W: consume, prefetch 1 (half-open)
-  W->>R: one message, the probe
-  alt probe fails
-    R--xW: release it, cancel
-    R->>D: token, attempt 1, hold about 2s
-  else probe succeeds
-    R->>W: consume, prefetch 20 (closed)
+  rect rgb(253, 230, 138)
+    W->>R: deliveries (prefetch 20)
+    R->>R: dependency policy reports failure
+    R--xW: SDK cancels; in-flight calls settle (open)
+    R->>D: token, attempt 0, hold 1s
+    D-->>K: 1s later
+    K->>R: attempt 0
+    R->>W: consume, prefetch 1 (half-open)
+    W->>R: one message, the probe
+    alt probe fails
+      R--xW: release it, cancel
+      R->>D: token, attempt 1, hold about 2s
+    else probe succeeds
+      R->>W: consume, prefetch 20 (closed)
+    end
   end
 ```
 
-The only thing a process still keeps while closed is the counter that decides
-to trip: how many of its own calls have failed in a row. Everything after that
-is in RabbitMQ. The token carries the attempt number, so the growing hold —
-`initial · 2^attempt`, capped, jittered into its upper half so replicas that
-tripped together do not return together — is read off the message, not off a
-variable.
+Amber marks the breaker lifecycle and broker-backed wake timer added since
+article/03. The application supplies a policy through the SDK adapter; the
+replica-local policy decides when closed-state failures trip, while RabbitMQ
+holds and routes the wake token. The token carries the attempt number, so the
+growing hold — `initial · 2^attempt`, capped, jittered into its upper half so
+replicas that tripped together do not return together — is read off the
+message, not off a variable.
 
 ## The timer is the part I borrowed
 
@@ -97,7 +106,12 @@ flowchart TB
   end
   q0 -->|expires| dx{{"delivery exchange"}}
   dx --> dest[("the replica's wake queue")]
+  classDef new fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#1c1917
+  class send,x2,q2,x1,x0,q0,dx,dest new
+  linkStyle 0,1,2,3,4,5,6 stroke:#d97706,stroke-width:3px
 ```
+
+<sub>Amber: new since article/03.</sub>
 
 Seventeen levels count to 131,071 seconds, just over 36 hours, so **a
 24-hour hold is one ordinary durable message** — no consumer, no unacked slot,
@@ -111,9 +125,9 @@ and 100.5 s in two runs, once each.
 
 ## Chaos
 
-A breaker that behaves in a demo is the easy half. I ran it the way the earlier
-reliability work was run: real faults, injected under a traffic spike, judged
-first on correctness and only then on what the breaker did.
+A breaker that behaves in a demo is the easy half. The scenarios inject real
+faults under a traffic spike and are judged first on correctness, then on
+breaker behavior.
 
 **The bar** is per message, not from broker counters (the management API's
 totals drift whenever a channel closes). Every message carries `message_id:
@@ -132,10 +146,12 @@ breaker to close and the queue to empty — about 45,000 messages each.
 | `outage-hang` | it accepts the call and never answers (2 s client timeout) |
 | `kill-open-replica` | `docker kill` a replica while its breaker is open, restart it 3 s later |
 | `kill-broker-while-open` | restart RabbitMQ with all five tokens in the chain |
+| `restart-during-probe` | restart replicas while a probe holds the permit |
+| `kill-permit-holder` | kill the replica holding the probe permit |
+| `redrive-failover` | kill the elected redriver while it is moving dead-lettered messages |
+| `overload` | return 429 above the third party's concurrency ceiling |
 | `delay-survives-broker-restart` | a 100 s delay across a broker restart |
 | `partial` | 60% of calls fail — informational, no correctness claim |
-
-Later scenarios and the application's own suite are in the README.
 
 Every replica's log is then read back and each transition checked against the
 machine (closed → open → half-open → closed or open). Not one illegal
@@ -158,10 +174,10 @@ healthy messages while the breaker is still opening.
 | `delay-survives-broker-restart` | 1 | 1 | 0 | 0 | 0 | — | — | 100 s | — |
 | `partial` (informational) | 46,207 | 46,207 | 0 | 0 | 12, all redriven | 93 | 5 | 19 s | 18 s |
 
-This is the run with the 5 s heartbeat ([the run](runs/chaos-breaker-heartbeat5.json)); the
-other graded scenarios (`restart-during-probe`, `kill-permit-holder`, `redrive-failover`, `overload`) passed
-in it too. Earlier runs, with a 1 s heartbeat, passed the same way
-([after the release rule](runs/chaos-breaker-after-fix.json), [Effect rc.116](runs/chaos-breaker-rc116.json)).
+These results are from the 5 s heartbeat run
+([full run data](runs/chaos-breaker-heartbeat5.json)).
+The same run also passed `restart-during-probe`, `kill-permit-holder`,
+`redrive-failover`, and `overload`.
 
 A killed replica comes back closed, and the token addressed to its
 predecessor goes to a queue nobody reads: wake queues are named by a fresh
@@ -176,11 +192,12 @@ consumer, not a proof.
 ## The incident on screen
 
 A 24-second total outage against the running stack, recorded from the Grafana
-dashboard on 2026-10-02, at the compose producer's ordinary 200/s. The
-dead-letter and parked queues were emptied first, so both lines start at zero.
+dashboard on 2026-10-04, at the compose producer's ordinary 200/s. The
+dead-letter and parked queues were at zero when capture began, so both lines
+start flat.
 
 The panels that matter here: the broker's consumer count on the work queue,
-which now *is* the fleet's state, and the wake tokens in the delay chain, one
+which shows the fleet's state, and the wake tokens in the delay chain, one
 line per level. The concurrency limit at the bottom stays at 20: a `503`
 outage teaches it nothing.
 
@@ -207,9 +224,8 @@ because the holds have grown to 8–16 s; the replicas do not yet know.
 ![restored, replicas still holding](media/3-restored.png)
 
 **4 · Recovered.** The breakers came back at different moments: 1.4, 4.4, 6.5,
-17.6 and 21.3 s after the restore, as each hold ended; in an earlier recording
-all five closed within 4 s. The backlog drained as they did, and no dead
-letters appeared.
+17.6 and 21.3 s after the restore, as each hold ended. The backlog drained as
+they did, and no dead letters appeared.
 
 ![recovered](media/4-recovered.png)
 
@@ -219,16 +235,14 @@ letters appeared.
   notices the recovery up to *h* seconds late (19–38 s after the restore in
   the chaos runs). With a 24-hour ceiling, a day-long outage can leave a
   replica dark for most of another day. The ceiling is how late you are
-  willing to find out, and it is now set per dependency: the ledger caps its
-  hold at 300 s.
+  willing to find out. The ledger's hold is capped at 300 s.
 - **A lost token is a stuck breaker.** Delete a wake queue or purge a delay
   level, and that replica stays open until it restarts. A re-send timer would
   need token identity to discard the late duplicate, so the hole is documented
   rather than half-closed.
-- **It does not see a partial failure.** At 60% failures it flapped (83
-  openings) and dead-lettered 11 healthy messages. A failure-rate breaker was
-  tried and dropped: it cost 7,000–9,000 good calls to avoid about 750 bad
-  ones (article 3). The redrive added since brings such messages back.
+- **It can flap under partial failure.** With 60% of calls failing, the
+  consecutive-failure policy opened 93 times; 12 messages reached the
+  dead-letter queue and were all redriven.
 - **Five replicas are still five breakers.** They trip and recover at their
   own moments. The fleet view (a Prometheus rule) only feeds alerts; replicas
   acting on one verdict is article 5's platform-level design.
@@ -246,5 +260,4 @@ node infra/chaos-breaker.mjs --list          # or pick some with --scenarios=a,b
 The scripts use the compose service names; from the host, point `BROKER`,
 `FLAKY_UPSTREAM`, `PROMETHEUS` and `RABBITMQ_MANAGEMENT` at `localhost`. The
 recording is `infra/capture-incident.mjs` (needs `playwright-core`). The run
-above is [`runs/chaos-breaker-heartbeat5.json`](runs/chaos-breaker-heartbeat5.json);
-`chaos-breaker-before-fix.json` predates the release rule.
+above is [`runs/chaos-breaker-heartbeat5.json`](runs/chaos-breaker-heartbeat5.json).

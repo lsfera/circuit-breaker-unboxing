@@ -48,24 +48,23 @@ export const TracingLive = (serviceName: string) =>
     Effect.map(Effect.all([enabled, tracingEndpoint, ratio]), ([exposeTelemetry, url, sampleRatio]) =>
       exposeTelemetry
         ? O.match(url, {
-            // `layerEmpty` provides the resource and installs no tracer, so Effect's no-op one stays. Both branches have the
-            // same type on purpose: a caller should not have to know which one it got.
-            onNone: () => NodeSdk.layerEmpty,
-            onSome: (url) =>
-              NodeSdk.layer(() => ({
-                resource: { serviceName },
-                // Batched rather than simple: a span per message at this rate would
-                // put an HTTP round trip on the path this is supposed to be measuring.
-                spanProcessor: new BatchSpanProcessor(
-                  new OTLPTraceExporter({ url: `${url}/v1/traces` })
-                ),
-                tracerConfig: {
-                  sampler: new ParentBasedSampler({
-                    root: new TraceIdRatioBasedSampler(sampleRatio)
-                  })
-                }
-              }))
-          })
-        : NodeSdk.layerEmpty
-    )
+          // `layerEmpty` provides the resource and installs no tracer, so Effect's no-op one stays. Both branches have the
+          // same type on purpose: a caller should not have to know which one it got.
+          onNone: () => NodeSdk.layerEmpty,
+          onSome: (url) =>
+            NodeSdk.layer(() => ({
+              resource: { serviceName },
+              // Batched rather than simple: a span per message at this rate would
+              // put an HTTP round trip on the path this is supposed to be measuring.
+              spanProcessor: new BatchSpanProcessor(
+                new OTLPTraceExporter({ url: `${url}/v1/traces` })
+              ),
+              tracerConfig: {
+                sampler: new ParentBasedSampler({
+                  root: new TraceIdRatioBasedSampler(sampleRatio)
+                })
+              }
+            }))
+        })
+        : NodeSdk.layerEmpty)
   );

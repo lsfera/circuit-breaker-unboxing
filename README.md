@@ -4,40 +4,52 @@
 
 
 A producer, a broker, and a fleet of competing consumers, each calling its
-dependencies through circuit breakers that keep **no state in the process**:
-"open" is a consumer that isn't consuming, and the timer that ends it is a
-message the broker holds, built from queue TTLs and dead-lettering as in
+dependencies through circuit breakers whose **open state and recovery timer
+live in RabbitMQ**: "open" is a consumer that isn't consuming, and the timer
+that ends it is a message the broker holds, built from queue TTLs and
+dead-lettering as in
 [NServiceBus's delayed delivery](https://docs.particular.net/transports/rabbitmq/delayed-delivery).
 `article/02-in-process-breaker` keeps the breaker in memory with
 [cockatiel](https://github.com/connor4312/cockatiel); the write-up of this one
 is [docs/rabbitmq-held-breaker.md](docs/rabbitmq-held-breaker.md).
 
-On top, as in `article/03-rabbitmq-coordination`: a fleet-wide **probe
-permit**, a **redrive** of `work.dead`, a **fleet view** as a Prometheus rule,
-and a `429` treated as **backpressure**. The consumer is an **SDK**, and the
-application built on it calls two dependencies, a third party and a PostgreSQL
-ledger, each behind its own breaker. The diagram shows the third party's.
+Article/04 keeps article/03's fleet-wide **probe permit**, **redrive** of
+`work.dead`, **fleet view** as a Prometheus rule, and `429` backpressure. Its
+reliability step is narrower: when a dependency policy trips, the consumer
+stops consuming and RabbitMQ holds a wake token until it's time to probe.
+That avoids the retry churn and dead letters caused by delivering work to an
+open, rejecting breaker. Policies are still independent per replica; this is
+not a fleet-wide breaker. The consumer is an **SDK**, and the application
+built on it calls two dependencies, a third party and a PostgreSQL ledger,
+each behind its own breaker. The diagram shows the third party's.
 
 ```mermaid
 flowchart LR
   producer["Producer"] --> queue[("payments-provider.work")]
   subgraph c1["consumer 1"]
-    b1{{"breaker\n(a consumer on/off,\na token in the chain)"}}
+    p1["Cockatiel policy\nvia SDK adapter"]
+    b1{{"SDK breaker\n(consumer on/off)"}}
     l1[/"limit\n(learned from 429s)"/]
+    p1 -. "policy" .-> b1
   end
   subgraph c2["consumer 2"]
-    b2{{"breaker"}}
+    p2["Cockatiel policy\nvia SDK adapter"]
+    b2{{"SDK breaker\n(consumer on/off)"}}
     l2[/"limit"/]
+    p2 -. "policy" .-> b2
   end
   subgraph c3["consumer N"]
-    b3{{"breaker"}}
+    p3["Cockatiel policy\nvia SDK adapter"]
+    b3{{"SDK breaker\n(consumer on/off)"}}
     l3[/"limit"/]
+    p3 -. "policy" .-> b3
   end
   queue --> c1
   queue --> c2
   queue --> c3
   b1 -. "wake token, after 2^k s" .-> chain[("rmq.delay.level.NN\n(17 queues, TTL 1s … 18h)")]
-  chain -. "back to its own wake queue" .-> b1
+  chain -. "after TTL" .-> wake[("replica's wake queue")]
+  wake -. "wake this breaker" .-> b1
   b1 --> l1
   l1 --> api[("Third-party API\n(flaky-upstream)")]
   b2 --> l2
@@ -55,11 +67,11 @@ flowchart LR
   dead -. "back to work,\nor after 5 redrives" .-> parked
   queue -. "4xx or unreadable" .-> parked
   classDef new fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#1c1917
-  class b1,b2,b3,chain,permit,parked,rtrigger,l1,l2,l3 new
-  linkStyle 4,5,6,7,8,9,10,11,12,14,15,16,17 stroke:#d97706,stroke-width:3px
+  class p1,p2,p3,b1,b2,b3,chain,wake new
+  linkStyle 1,2,3,7,8,9,10,12,14 stroke:#d97706,stroke-width:3px
 ```
 
-<sub>Amber: new on this branch.</sub>
+<sub>Amber: changed since article/03 — SDK-owned breaker lifecycle, application policy adapter, and broker-held wake timer.</sub>
 
 ## What the broker hardens
 
@@ -89,7 +101,7 @@ The system leans on each of these:
 
 | phase | in the broker | leaves when |
 | --- | --- | --- |
-| **closed** | a work consumer at full prefetch (`MAX_IN_FLIGHT`) | `BREAKER_THRESHOLD` (5) calls fail in a row |
+| **closed** | a work consumer at full prefetch (`MAX_IN_FLIGHT`) | its dependency's configured policy trips |
 | **open** | *no* consumer; a wake token in the delay chain, addressed to this replica | the token comes back |
 | **half-open** | a consumer with `prefetch: 1`; its first message is the probe | probe ok → closed; failed → open, longer |
 
@@ -110,14 +122,16 @@ The system leans on each of these:
   durable message, and survives a broker restart. A 5 s delay measured 5.21 s.
 - **The token carries the attempt.** The hold is `initial · 2^attempt`, capped
   at `BREAKER_MAX_DELAY_SECONDS` (86,400) or the dependency's own ceiling, and
-  jittered into its upper half. A closed breaker forgets.
+  jittered into its upper half. When a probe closes the breaker, the next hold
+  sequence starts at attempt zero.
 - **A dependency's failures are `release`d, not charged to the message.** A
   failed probe, or a failure that follows another at the same dependency,
   spends none of the message's four delivery attempts; charging them
   dead-lettered 2–3 healthy messages per outage in the first chaos run. A
   failure that stands alone is still charged.
-- A replica keeps only the failure streak while closed. Restarted, it starts
-  closed; its old wake queue expires (`x-expires`, 10 minutes).
+- A replica keeps its policy state and settlement streak while closed.
+  Restarted, it starts closed with a fresh policy; its old wake queue expires
+  (`x-expires`, 10 minutes).
 
 **Measured**, the same 20 s total outage (`pnpm run incident`, 5 replicas):
 
@@ -217,24 +231,51 @@ runs:
 The classification is most of the win; the limit makes the fleet polite (94%
 fewer `429`s) and doesn't shrink the backlog.
 
-## Against article 3
+## What article 04 adds to article 03
 
-The same chaos scenarios against article 3 (the same permit, redrive and fleet
-view on cockatiel), same broker and third party, one run each: both pass
-everything. Cockatiel's open breaker still consumes, and refused about 20,000
-deliveries per 40 s outage; the held breaker refused **none**. In the 60%
-partial failure, 3 messages reached the dead-letter queue against 68. Load on
-the failing third party and recovery times were within noise. The price: a
-17-queue delay chain and a breaker of its own
+Article/03 already coordinates probes, redrive and fleet visibility. Article/04
+changes what an open breaker does with work: instead of continuing to consume
+and reject deliveries, it cancels its subscription and lets RabbitMQ hold a
+wake token. This targets retry churn, not a lack of fleet coordination.
+
+In one comparison run with the same chaos scenarios, broker and third party,
+both designs passed the tested correctness checks. The article/03 breaker
+refused about 20,000 deliveries during a 40 s outage; the held breaker refused
+**none**. Under 60% partial failure, 68 messages reached the dead-letter queue
+with article/03, versus 3 with the held breaker. Third-party load and recovery
+times were within noise. These are single-run observations, not a distribution.
+The tradeoff is a 17-queue delay chain, added broker configuration, and
+recovery that waits for the current hold to end; replicas still apply their
+policies independently
 (`docs/runs/compare-article3-cockatiel.json`, `compare-held.json`).
 
 ## The consumer as an SDK
 
 `packages/rmq-consumer` is the SDK; `packages/consumer/src/main.ts` is an
-application written against it alone. Payments charge the third party, then
+application built on it and Cockatiel. Payments charge the third party, then
 record in PostgreSQL; refunds only record.
 
+Selected excerpt; app-specific service and message definitions are omitted.
+
 ```ts
+import * as Consumer from "@egress/rmq-consumer";
+import { CircuitState, ConsecutiveBreaker, SamplingBreaker } from "cockatiel";
+import type { IBreaker } from "cockatiel";
+import type { BreakerPolicy, BreakerPolicyState } from "@egress/rmq-consumer";
+import { Effect, Layer, Match, Result, Schema } from "effect";
+import { HttpClientError } from "effect/http";
+import { SqlError } from "effect/sql";
+
+const adaptCockatiel = (make: () => IBreaker): (() => BreakerPolicy) => () => {
+  const policy = make();
+  const stateOf = (state: BreakerPolicyState) =>
+    state === "closed" ? CircuitState.Closed : CircuitState.HalfOpen;
+  return {
+    success: (state) => policy.success(stateOf(state)),
+    failure: (state) => policy.failure(stateOf(state))
+  };
+};
+
 /** 2xx ok; 429 full, not broken; any other 4xx but 408 refused this request; the rest, and a request that got no response, failing. */
 const byHttpStatus = (result: Result.Result<number, HttpClientError.HttpClientError>): Consumer.Verdict =>
   Result.match(result, {
@@ -269,15 +310,22 @@ const bySqlError = (result: Result.Result<void, SqlError.SqlError>): Consumer.Ve
     }),
   });
 
-const ThirdParty = Consumer.Dependency("payments-api", { classify: byHttpStatus });
-const Database = Consumer.Dependency("ledger", { classify: bySqlError, breaker: { maxDelaySeconds: 300 } });
+const ThirdParty = Consumer.Dependency("payments-api", {
+  classify: byHttpStatus,
+  breakerPolicy: adaptCockatiel(() => new SamplingBreaker({ threshold: 0.5, duration: 10_000 }))
+});
+const Database = Consumer.Dependency("ledger", {
+  classify: bySqlError,
+  breaker: { maxDelaySeconds: 300 },
+  breakerPolicy: adaptCockatiel(() => new ConsecutiveBreaker(5))
+});
 const json = Consumer.accept(
   { "application/json": Consumer.text(Schema.fromJsonString(Schema.Unknown)) },
   { undeclared: "application/json", type: "egress.work" },
 );
 
 const payments = Consumer.For(Payment, json).bind(
-  Effect.fnUntraced(function* (payment, metadata) {
+  Effect.fnUntraced(function*(payment, metadata) {
     // The SDK runs this action in work.process, parented from this delivery's traceparent when present.
     const key = yield* keyOf(metadata);                     // Rejected (parked) without a message_id
     yield* ThirdParty((yield* PaymentsApi).charge(key));    // the HTTP child span forwards the current traceparent
@@ -295,6 +343,12 @@ Consumer.run({
 });
 ```
 
+The action stays in the Effect runtime: define it directly with
+`Effect.fnUntraced` and compose dependencies with `yield*`, rather than running
+effects with `Effect.runPromise` inside the action. Add spans at meaningful
+boundaries (`Effect.withSpan` around the outbound HTTP request); Effect SQL
+provides spans for database calls.
+
 - **Explicit reading and judging.** Negotiation has no default; each media type
   maps to a Schema over the body's bytes: `Consumer.text(schema)` for a text
   format, `Consumer.bytes(decode)` for a binary one. Parking and redrive
@@ -304,9 +358,22 @@ Consumer.run({
 - **One breaker per dependency.** A breaker registers or withdraws; one Gate per
   consumer derives its subscription from the dependencies it lists (any open:
   none; any half-open: prefetch 1; else full).
-- **Tuned per dependency.** `breaker: { consecutiveFailures, initialDelaySeconds,
-  maxDelaySeconds }`, defaulting to `BREAKER_*`. The ledger caps its hold at
-  300 s: while our own database is down every consumer waits.
+- **Hold per dependency.** `breaker: { initialDelaySeconds, maxDelaySeconds }`,
+  defaulting to `BREAKER_*`. The ledger caps its hold at 300 s: while our own
+  database is down every consumer waits.
+- **Policy per dependency.** `breakerPolicy` takes a factory returning a
+  small SDK `BreakerPolicy`; it is required, and the SDK makes one independent
+  policy instance per replica while keeping the RabbitMQ probe/hold lifecycle.
+  The `BreakerPolicy` contract has `success(state)` and `failure(state)`
+  methods; `state` is `"closed"` or `"half-open"`, and `failure` returns
+  whether a closed breaker should open. `adaptCockatiel` maps those states to
+  Cockatiel's `CircuitState`:
+  `breakerPolicy: adaptCockatiel(() => new SamplingBreaker({ threshold: 0.5, duration: 10_000 }))`.
+  The factory must return a fresh policy object.
+  The policy's `failure("closed")` result decides when the SDK opens; a failed
+  half-open probe still reopens and extends the hold. `breaker` configures those
+  RabbitMQ hold delays. The SDK tracks the settlement streak separately,
+  so changing the policy does not change message retry accounting.
 - **The types hold the lists.** A call to a dependency the consumer doesn't
   list, or a service no layer provides, fails to compile.
 
@@ -374,8 +441,8 @@ bodies alternating JSON and protobuf (`--format=mixed`,
 
 None costs correctness: nothing is lost or charged for a dependency's failure.
 
-- **Five breakers don't agree**: each trips on its own calls, so each sends a
-  failing dependency its own `BREAKER_THRESHOLD` calls.
+- **Five breakers don't agree**: each applies its configured policy to its own
+  calls.
 - **A long hold is a late recovery**: up to one hold after the dependency is
   back, so the ceiling is how late you are willing to find out.
 - **A redrive waits on the elected replica's breakers**, and moves 200 per pass.

@@ -9,7 +9,16 @@ import * as Breaker from "../src/Breaker.ts";
  * would reach RabbitMQ (which consumers exist, which tokens are in flight), because in this breaker those are the state.
  */
 
-const cfg: Breaker.BreakerConfig = { consecutiveFailures: 3, initialDelaySeconds: 2, maxDelaySeconds: 60 };
+const cfg: Breaker.BreakerConfig = { initialDelaySeconds: 2, maxDelaySeconds: 60 };
+const testPolicyFactory: Breaker.BreakerPolicyFactory = () => {
+  let failures = 0;
+  return {
+    success: () => {
+      failures = 0;
+    },
+    failure: () => ++failures >= 3
+  };
+};
 
 test("a hold doubles per failed probe, jittered into its upper half, and stops at the ceiling", () => {
   const at = (attempt: number, r: number) => Breaker.holdSeconds(cfg, attempt, r);
@@ -71,15 +80,60 @@ const world = () => {
   return { io, log, consumers, holds, until };
 };
 
-const drive = (body: (w: ReturnType<typeof world>) => Effect.Effect<void>) =>
+const drive = (
+  body: (w: ReturnType<typeof world>) => Effect.Effect<void>,
+  policyFactory?: Breaker.BreakerPolicyFactory
+) =>
   Effect.runPromise(
     Effect.gen(function*() {
       const w = world();
-      const fiber = yield* Effect.forkChild(Breaker.supervise(cfg, w.io));
+      const fiber = yield* Effect.forkChild(Breaker.supervise(cfg, w.io, policyFactory ?? testPolicyFactory));
       yield* body(w);
       yield* Fiber.interrupt(fiber);
     })
   );
+
+test("a supplied policy controls trips and receives closed and half-open outcomes", () => {
+  let factories = 0;
+  const states: Array<[string, Breaker.BreakerPolicyState]> = [];
+  return drive(
+    (w) =>
+      Effect.gen(function*() {
+        yield* w.until(() => w.consumers.length === 1);
+        const work = w.consumers[0]!;
+        yield* work.report(false);
+        assert.equal(w.holds.length, 0, "the custom policy has not reached its trip threshold");
+        yield* work.report(false);
+        yield* w.until(() => w.holds.length === 1);
+        yield* Deferred.succeed(w.holds[0]!.wake, undefined);
+        yield* w.until(() => w.consumers.length === 2);
+        yield* w.consumers[1]!.report(false);
+        yield* w.until(() => w.holds.length === 2);
+        yield* Deferred.succeed(w.holds[1]!.wake, undefined);
+        yield* w.until(() => w.consumers.length === 3);
+        yield* w.consumers[2]!.report(true);
+        yield* w.until(() => w.consumers.length === 4);
+        assert.equal(factories, 1, "one policy instance is created for this supervised breaker");
+        assert.deepEqual(states, [
+          ["failure", "closed"],
+          ["failure", "closed"],
+          ["failure", "half-open"],
+          ["success", "half-open"]
+        ]);
+      }),
+    () => {
+      factories += 1;
+      return {
+        state: undefined,
+        success: (state) => states.push(["success", state]),
+        failure: (state) => {
+          states.push(["failure", state]);
+          return state === "closed" && states.filter(([kind]) => kind === "failure").length >= 2;
+        }
+      };
+    }
+  );
+});
 
 test("it stays closed while successes interrupt the failures, and trips on the Nth in a row", () =>
   drive((w) =>

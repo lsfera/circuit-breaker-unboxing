@@ -1,5 +1,13 @@
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
-import { brokerFlag, metricsFlag, metricsPortFlag, PositiveInt, setting, telemetryFlag, VERSION } from "@egress/config/Settings.ts";
+import {
+  brokerFlag,
+  metricsFlag,
+  metricsPortFlag,
+  PositiveInt,
+  setting,
+  telemetryFlag,
+  VERSION
+} from "@egress/config/Settings.ts";
 import { launchWithRmq, Rmq } from "@egress/rmq/Client.ts";
 import type { DeliveryInfo } from "@egress/rmq/Client.ts";
 import { MAX_DELAY_SECONDS } from "@egress/rmq/DelayedDelivery.ts";
@@ -24,7 +32,7 @@ import type { Negotiate } from "./Negotiation.ts";
  *   Consumer.run({ consumers: { "payments-provider": payments }, layer });
  */
 
-export type { Outcome } from "./Breaker.ts";
+export type { BreakerPolicy, BreakerPolicyFactory, BreakerPolicyState, Outcome } from "./Breaker.ts";
 export type { Verdict } from "./Dependency.ts";
 export { Halted, Rejected } from "./Dependency.ts";
 export type { Declared, Negotiate, Parser } from "./Negotiation.ts";
@@ -35,7 +43,8 @@ export type Metadata = DeliveryInfo;
 
 /**
  * A dependency the action calls, with its own breaker, probe permit and timeout (2s unless given). Its breaker
- * follows the application's `BREAKER_*` settings except for what it sets itself (`breaker`). Wrapping an
+ * follows the application's `BREAKER_*` settings except for what it sets itself (`breaker`). `breakerPolicy`
+ * is required and creates an SDK `BreakerPolicy` for this dependency. Wrapping an
  * effect in it runs the effect under the timeout, judges its value or error with `classify`, tells this dependency's breaker,
  * and halts the action on anything but `ok`. Its name labels metrics and names its queues.
  */
@@ -98,12 +107,6 @@ export const flags = {
   maxInFlight: setting(Flag.Int("max-in-flight"), PositiveInt, "MAX_IN_FLIGHT").pipe(
     Flag.withDefault(20),
     Flag.withDescription("Concurrent actions each consumer allows itself")
-  ),
-  breakerThreshold: setting(Flag.Int("breaker-threshold"), PositiveInt, "BREAKER_THRESHOLD").pipe(
-    Flag.withDefault(5),
-    Flag.withDescription(
-      "Consecutive failures at a dependency before its breaker opens, for a dependency that sets none of its own"
-    )
   ),
   breakerInitialDelaySeconds: setting(
     Flag.Int("breaker-initial-delay-seconds"),
@@ -193,8 +196,8 @@ export const command = <const C extends Record<string, Registration<any>>, const
       Layer.mergeAll(
         exposeMetrics
           ? HttpRouter.serve(MetricsRoute).pipe(
-              Layer.provide(NodeHttpServer.layer(createServer, { port: settings.metricsPort }))
-            )
+            Layer.provide(NodeHttpServer.layer(createServer, { port: settings.metricsPort }))
+          )
           : Layer.empty,
         services
       ).pipe(
@@ -206,7 +209,6 @@ export const command = <const C extends Record<string, Registration<any>>, const
         maxInFlight: settings.maxInFlight,
         replicaId: settings.replicaId,
         breaker: {
-          consecutiveFailures: settings.breakerThreshold,
           initialDelaySeconds: settings.breakerInitialDelaySeconds,
           maxDelaySeconds: settings.breakerMaxDelaySeconds
         },

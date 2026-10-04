@@ -14,7 +14,7 @@ import {
   Result,
   Schema
 } from "effect";
-import type { BreakerConfig, Outcome, ProbeVerdict, Report } from "./Breaker.ts";
+import type { BreakerConfig, BreakerPolicy, Outcome, ProbeVerdict, Report } from "./Breaker.ts";
 import * as Telemetry from "./Telemetry.ts";
 
 /**
@@ -127,11 +127,18 @@ export const MaxDelaySeconds = PositiveInt.check(Schema.isLessThanOrEqualTo(MAX_
 
 /** What a dependency may set of its own breaker; the rest comes from the application's `BREAKER_*` defaults. */
 const BreakerOverrides = Schema.Struct({
-  consecutiveFailures: Schema.optionalKey(PositiveInt),
   initialDelaySeconds: Schema.optionalKey(PositiveInt),
   maxDelaySeconds: Schema.optionalKey(MaxDelaySeconds)
 });
 export type BreakerOverrides = typeof BreakerOverrides.Type;
+export type BreakerPolicyFactory = () => BreakerPolicy;
+const isBreakerPolicy = (policy: unknown): policy is BreakerPolicy =>
+  typeof policy === "object" &&
+  policy !== null &&
+  "success" in policy &&
+  typeof policy.success === "function" &&
+  "failure" in policy &&
+  typeof policy.failure === "function";
 const decodeOverrides = Schema.decodeUnknownResult(BreakerOverrides);
 
 /** This dependency's breaker: its own settings where it has them, the application's defaults elsewhere. */
@@ -145,6 +152,7 @@ export interface Dependency<Name extends string, A, E> {
   readonly dependencyName: Name;
   readonly guard: Context.Service<Gated<Name>, Guard>;
   readonly breaker: BreakerOverrides;
+  readonly breakerPolicy: BreakerPolicyFactory;
 }
 
 export type AnyDependency = Dependency<any, any, any>;
@@ -157,8 +165,13 @@ export const make = <const Name extends string, A, E>(
     readonly timeout?: Duration.Input;
     /** This dependency's own breaker settings; anything left out follows the application's `BREAKER_*`. */
     readonly breaker?: BreakerOverrides;
+    /** Creates this dependency's call-counting/trip policy. Must return a fresh instance for each replica. */
+    readonly breakerPolicy: BreakerPolicyFactory;
   }
 ): Dependency<Name, A, E> => {
+  if (typeof options.breakerPolicy !== "function") {
+    throw new Error(`dependency ${name}: breakerPolicy must be a factory`);
+  }
   const guard = guardFor(name);
   const timeout = options.timeout ?? DEFAULT_TIMEOUT;
   // A declaration, not input: an impossible setting stops the application as it loads, naming the dependency.
@@ -166,6 +179,7 @@ export const make = <const Name extends string, A, E>(
     decodeOverrides(options.breaker ?? {}),
     (error) => new Error(`dependency ${name}: invalid breaker settings: ${error.message}`)
   );
+  const policies = new WeakSet<object>();
 
   const judge = (exit: Exit.Exit<A, E | Cause.TimeoutError>): Verdict =>
     Exit.match(exit, {
@@ -246,5 +260,19 @@ export const make = <const Name extends string, A, E>(
     });
   });
 
-  return Object.assign(call, { dependencyName: name, guard, breaker });
+  const breakerPolicy = () => {
+    const policy: unknown = options.breakerPolicy();
+    if (!isBreakerPolicy(policy)) {
+      throw new Error(
+        `dependency ${name}: breakerPolicy factory must return an object with success and failure methods`
+      );
+    }
+    if (policies.has(policy)) {
+      throw new Error(`dependency ${name}: breakerPolicy factory must return a fresh policy instance`);
+    }
+    policies.add(policy);
+    return policy;
+  };
+
+  return Object.assign(call, { dependencyName: name, guard, breaker, breakerPolicy });
 };

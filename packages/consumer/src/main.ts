@@ -1,11 +1,23 @@
 import { PgClient } from "@effect/sql-pg";
 import * as Consumer from "@egress/rmq-consumer";
+import type { BreakerPolicy, BreakerPolicyState } from "@egress/rmq-consumer";
 import { traceparent } from "@egress/rmq/Trace.ts";
+import { CircuitState, ConsecutiveBreaker, SamplingBreaker } from "cockatiel";
+import type { IBreaker } from "cockatiel";
 import { Config, Context, Effect, Layer, Match, Option as O, Redacted, Result, Schema } from "effect";
 import { Flag } from "effect/cli";
 import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest } from "effect/http";
 import { SqlClient, SqlError } from "effect/sql";
 import protobuf from "protobufjs";
+
+const adaptCockatiel = (make: () => IBreaker): () => BreakerPolicy => () => {
+  const policy = make();
+  const stateOf = (state: BreakerPolicyState) => state === "closed" ? CircuitState.Closed : CircuitState.HalfOpen;
+  return {
+    success: (state) => policy.success(stateOf(state)),
+    failure: (state) => policy.failure(stateOf(state))
+  };
+};
 
 /**
  * The consumer application (`node src/main.ts`). Payments are charged at the third party, then recorded in the
@@ -17,13 +29,14 @@ const Payment = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
 const Refund = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
 
 /** The third party, reached at one address. The idempotency key rides as its own header, so a redelivery repeats the same request. */
-const withTraceParent = (request: HttpClientRequest.HttpClientRequest): Effect.Effect<HttpClientRequest.HttpClientRequest> =>
+const withTraceParent = (
+  request: HttpClientRequest.HttpClientRequest
+): Effect.Effect<HttpClientRequest.HttpClientRequest> =>
   Effect.flatMap(traceparent, (header) =>
     O.match(header, {
       onNone: () => Effect.succeed(request),
       onSome: (value) => Effect.succeed(request.pipe(HttpClientRequest.setHeader("traceparent", value)))
-    })
-  );
+    }));
 
 class PaymentsApi extends Context.Service<
   PaymentsApi,
@@ -121,10 +134,17 @@ const bySqlError = (result: Result.Result<void, SqlError.SqlError>): Consumer.Ve
     })
   });
 
-const ThirdParty = Consumer.Dependency("payments-api", { classify: byHttpStatus });
+const ThirdParty = Consumer.Dependency("payments-api", {
+  classify: byHttpStatus,
+  breakerPolicy: adaptCockatiel(() => new SamplingBreaker({ threshold: 0.5, duration: 10_000 }))
+});
 // Our own database comes back in seconds to minutes (a restart, a failover), and while it is down every consumer
 // waits, so a day-long hold would leave the fleet dark long after it is back: five minutes at most.
-const Database = Consumer.Dependency("ledger", { classify: bySqlError, breaker: { maxDelaySeconds: 300 } });
+const Database = Consumer.Dependency("ledger", {
+  classify: bySqlError,
+  breaker: { maxDelaySeconds: 300 },
+  breakerPolicy: adaptCockatiel(() => new ConsecutiveBreaker(5))
+});
 
 /**
  * `message Work { string api_id = 1; int64 n = 2; }`, defined at runtime. `defaults`: proto3 leaves a zero off the

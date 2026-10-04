@@ -23,6 +23,15 @@ test("a failed call opens the real consumer breaker until its delayed probe succ
   const attempts: Array<{ body: string; deliveryCount: number; at: number; }> = [];
   const completed: string[] = [];
   const upstream = Dependency.make("upstream", {
+    breakerPolicy: () => {
+      let failures = 0;
+      return {
+        success: () => {
+          failures = 0;
+        },
+        failure: () => ++failures >= 1
+      };
+    },
     classify: Result.match({
       onSuccess: (status: number) =>
         status >= 500
@@ -36,7 +45,7 @@ test("a failed call opens the real consumer breaker until its delayed probe succ
     name: "breaker-integration",
     maxInFlight: 1,
     replicaId: "test",
-    breaker: { consecutiveFailures: 1, initialDelaySeconds: 1, maxDelaySeconds: 1 },
+    breaker: { initialDelaySeconds: 1, maxDelaySeconds: 1 },
     limit: O.none(),
     consumers: [{
       key,

@@ -1,12 +1,12 @@
 import type { Consumer, RmqError } from "@egress/rmq/Client.ts";
-import { Deferred, Effect, Match, Random, Ref } from "effect";
+import { Deferred, Effect, Match, Random } from "effect";
 
 /**
  * A circuit breaker whose open state is a message. Tripping withdraws its registration, so its consumers get no
  * deliveries and the queue holds the work; a token sent to this replica through the delay chain is the half-open
  * timer, and carries the failed-probe count that grows the hold.
  *
- *   closed     registered at full prefetch; N failures in a row -> open
+ *   closed     registered at full prefetch; the configured policy can open
  *   open       unregistered; the token waits `holdSeconds` in the chain
  *   half-open  registered at prefetch 1, so one message is the probe: ok -> closed, failed -> open with a longer
  *              hold, no fleet permit (Permit.ts) -> open with the same hold
@@ -15,13 +15,22 @@ import { Deferred, Effect, Match, Random, Ref } from "effect";
  */
 
 export type BreakerConfig = {
-  /** Consecutive failures before the breaker opens. */
-  readonly consecutiveFailures: number;
   /** First hold, in seconds — the chain's resolution. */
   readonly initialDelaySeconds: number;
   /** Ceiling the hold grows to. A day is 86,400; the chain counts to 131,071. */
   readonly maxDelaySeconds: number;
 };
+
+export type BreakerPolicyState = "closed" | "half-open";
+
+/** The policy contract the SDK needs; implementations own their state and trip decision. */
+export interface BreakerPolicy {
+  success(state: BreakerPolicyState): void;
+  failure(state: BreakerPolicyState): boolean;
+}
+
+/** A factory for one independent policy instance per dependency breaker in each running replica. */
+export type BreakerPolicyFactory = () => BreakerPolicy;
 
 /**
  * How a dependency answered, as the breaker reads it. `ok` and `client_error` (it answered, and refused this
@@ -66,18 +75,31 @@ export type Io<Handle = Consumer> = {
   readonly onPhase: (phase: Phase) => Effect.Effect<void>;
 };
 
-export const supervise = <Handle>(cfg: BreakerConfig, io: Io<Handle>): Effect.Effect<never, RmqError> => {
+export const supervise = Effect.fnUntraced(function*<Handle>(
+  cfg: BreakerConfig,
+  io: Io<Handle>,
+  policyFactory: BreakerPolicyFactory
+): Effect.fn.Return<never, RmqError> {
+  const policy = yield* Effect.sync(policyFactory);
+
   const closed = Effect.gen(function*() {
     yield* io.onPhase("closed");
     const tripped = yield* Deferred.make<void>();
-    const failures = yield* Ref.make(0);
-    const consumer = yield* io.subscribe((ok) =>
-      Ref.updateAndGet(failures, (n) => (ok ? 0 : n + 1)).pipe(
-        Effect.tap((n) =>
-          Effect.when(Deferred.succeed(tripped, undefined), Effect.succeed(n >= cfg.consecutiveFailures))
-        )
-      )
-    );
+    let streak = 0;
+    const report: Report = Effect.fnUntraced(function*(ok: boolean) {
+      const result = yield* Effect.sync(() => {
+        if (ok) {
+          streak = 0;
+          policy.success("closed");
+          return { streak, trip: false };
+        }
+        streak += 1;
+        return { streak, trip: policy.failure("closed") };
+      });
+      if (result.trip) yield* Deferred.succeed(tripped, undefined);
+      return result.streak;
+    });
+    const consumer = yield* io.subscribe(report);
     yield* Deferred.await(tripped);
     yield* io.retire(consumer);
   });
@@ -88,6 +110,10 @@ export const supervise = <Handle>(cfg: BreakerConfig, io: Io<Handle>): Effect.Ef
     const consumer = yield* io.probe((v) => Effect.asVoid(Deferred.succeed(verdict, v)));
     const v = yield* Deferred.await(verdict);
     yield* io.retire(consumer);
+    yield* Effect.sync(() => {
+      if (v === "ok") policy.success("half-open");
+      else if (v === "failed") policy.failure("half-open");
+    });
     return v;
   });
 
@@ -102,5 +128,5 @@ export const supervise = <Handle>(cfg: BreakerConfig, io: Io<Handle>): Effect.Ef
     );
   });
 
-  return Effect.forever(closed.pipe(Effect.andThen(open(0))));
-};
+  return yield* Effect.forever(closed.pipe(Effect.andThen(open(0))));
+});

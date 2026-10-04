@@ -19,8 +19,18 @@ const byNumber = (result: Result.Result<number, string>): Verdict =>
     onFailure: () => ({ outcome: "failed", reason: "error" })
   });
 
-const Thing = Dependency.make("thing", { classify: byNumber, timeout: "20 millis" });
+const testPolicy = () => {
+  let failures = 0;
+  return {
+    success: () => {
+      failures = 0;
+    },
+    failure: () => ++failures >= 3
+  };
+};
+const Thing = Dependency.make("thing", { classify: byNumber, timeout: "20 millis", breakerPolicy: testPolicy });
 const Dupe = Dependency.make("dupe", {
+  breakerPolicy: testPolicy,
   classify: (result: Result.Result<number, string>): Verdict =>
     Result.isFailure(result) ? { outcome: "ok", reason: "duplicate" } : { outcome: "ok", reason: "ok" }
 });
@@ -144,21 +154,40 @@ test("half-open without the permit: no call, verdict `no-permit`, and the messag
   assert.equal(ran, false);
 });
 
-const defaults = { consecutiveFailures: 5, initialDelaySeconds: 1, maxDelaySeconds: 86_400 };
+const defaults = { initialDelaySeconds: 1, maxDelaySeconds: 86_400 };
 
 test("a dependency's breaker takes what it sets and the application's defaults for the rest", () => {
   assert.deepEqual(Dependency.breakerFor(defaults, Thing), defaults);
-  const Quick = Dependency.make("quick", { classify: byNumber, breaker: { maxDelaySeconds: 300 } });
+  const Quick = Dependency.make("quick", {
+    classify: byNumber,
+    breaker: { maxDelaySeconds: 300 },
+    breakerPolicy: testPolicy
+  });
   assert.deepEqual(Dependency.breakerFor(defaults, Quick), { ...defaults, maxDelaySeconds: 300 });
+  const policyFactory = () => ({ success: () => {}, failure: () => false });
+  const Custom = Dependency.make("custom", { classify: byNumber, breakerPolicy: policyFactory });
+  assert.deepEqual(Custom.breakerPolicy().failure("closed"), false);
+  assert.notEqual(Custom.breakerPolicy(), Custom.breakerPolicy(), "the factory returns independent policy state");
 });
 
 test("an impossible breaker setting stops the declaration, naming the dependency", () => {
-  for (const breaker of [{ consecutiveFailures: 0 }, { initialDelaySeconds: 1.5 }, { maxDelaySeconds: 2 ** 17 }]) {
+  for (const breaker of [{ initialDelaySeconds: 1.5 }, { maxDelaySeconds: 2 ** 17 }]) {
     assert.throws(
-      () => Dependency.make("broken", { classify: byNumber, breaker }),
+      () => Dependency.make("broken", { classify: byNumber, breaker, breakerPolicy: testPolicy }),
       /dependency broken: invalid breaker settings/
     );
   }
+});
+
+test("a policy factory must return a fresh valid policy object", () => {
+  const shared = { success: () => {}, failure: () => false };
+  const Shared = Dependency.make("shared", { classify: byNumber, breakerPolicy: () => shared });
+  assert.equal(Shared.breakerPolicy(), shared);
+  assert.throws(() => Shared.breakerPolicy(), /must return a fresh policy instance/);
+  assert.throws(
+    () => Dependency.make("invalid", { classify: byNumber, breakerPolicy: () => ({}) as never }).breakerPolicy(),
+    /must return an object with success and failure methods/
+  );
 });
 
 test("half-open while another probe of this process holds the permit: no call, no verdict, the message released", async () => {

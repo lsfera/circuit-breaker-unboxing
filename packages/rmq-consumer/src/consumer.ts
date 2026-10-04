@@ -182,12 +182,12 @@ export const runApplication = Effect.fnUntraced(function*(cfg: ApplicationConfig
             next === "closed" ? Effect.forEach(gates, (r) => r.triggerRedrive, { discard: true }) : Effect.void
           )
         )
-    });
+    }, d.breakerPolicy);
   });
 
   const describeBreaker = (d: AnyDependency) => {
     const b = breakerFor(cfg.breaker, d);
-    return `${d.dependencyName}:${b.consecutiveFailures}consecutive/${b.initialDelaySeconds}-${b.maxDelaySeconds}s`;
+    return `${d.dependencyName}:${b.initialDelaySeconds}-${b.maxDelaySeconds}s`;
   };
   yield* Effect.log(
     `${cfg.name}: up — consumers=${

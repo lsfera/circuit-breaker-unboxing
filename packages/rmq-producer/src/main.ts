@@ -1,5 +1,13 @@
 import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
-import { brokerFlag, metricsFlag, metricsPortFlag, PositiveInt, setting, telemetryFlag, VERSION } from "@egress/config/Settings.ts";
+import {
+  brokerFlag,
+  metricsFlag,
+  metricsPortFlag,
+  PositiveInt,
+  setting,
+  telemetryFlag,
+  VERSION
+} from "@egress/config/Settings.ts";
 import { launchWithRmq, Rmq } from "@egress/rmq/Client.ts";
 import { MetricsRoute } from "@egress/tracing/Metrics.ts";
 import { TracingLive } from "@egress/tracing/Tracing.ts";
@@ -42,8 +50,8 @@ const producer = Command.make("rmq-producer", flags, (settings) =>
     Layer.mergeAll(
       settings.metrics
         ? HttpRouter.serve(MetricsRoute).pipe(
-            Layer.provide(NodeHttpServer.layer(createServer, { port: settings.metricsPort }))
-          )
+          Layer.provide(NodeHttpServer.layer(createServer, { port: settings.metricsPort }))
+        )
         : Layer.empty,
       settings.telemetry ? TracingLive("rmq-producer") : Layer.empty
     ).pipe(Layer.provideMerge(Rmq.layer(settings.broker))),
