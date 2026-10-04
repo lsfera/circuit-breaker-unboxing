@@ -1,8 +1,10 @@
+import * as amqp from "amqplib";
 import { Effect, Exit, Option as O, Scope } from "effect";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { carry, isUnroutable, makeRmq, Rmq, RmqError } from "../../src/Client.ts";
 import type { Consumer } from "../../src/Client.ts";
+import { assertSupportedRabbitMqVersion } from "../../src/RabbitMqVersion.ts";
 import { TRACEPARENT } from "../../src/Trace.ts";
 import { broker, brokerExec, skipIfNoDocker, startBroker, stopBroker, waitFor } from "./harness.ts";
 
@@ -19,6 +21,26 @@ const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(
     Effect.scoped(Effect.provide(program, Rmq.layer({ host: broker.host, port: broker.port }))) as Effect.Effect<A>
   );
+
+test("amqplib exposes the RabbitMQ version over AMQP without the Management API", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const connection = await amqp.connect({
+    protocol: "amqp",
+    hostname: broker.host,
+    port: broker.port,
+    username: "guest",
+    password: "guest"
+  });
+  try {
+    const { product, version } = connection.connection.serverProperties;
+    assert.equal(product, "RabbitMQ");
+    assert.match(version, /^\d+\.\d+\.\d+$/);
+    assert.doesNotThrow(() => assertSupportedRabbitMqVersion(version));
+  } finally {
+    await connection.close();
+  }
+});
 
 test("concurrent publisher creation routes each message to its own binding", async (t) => {
   if (skipIfNoDocker(t)) return;

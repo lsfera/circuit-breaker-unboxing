@@ -14,6 +14,7 @@ import {
   Tracer
 } from "effect";
 import { randomUUID } from "node:crypto";
+import { assertSupportedRabbitMqVersion, UnsupportedRabbitMqVersionError } from "./RabbitMqVersion.ts";
 import { parentFrom, TRACEPARENT, traceparent } from "./Trace.ts";
 
 /**
@@ -293,6 +294,17 @@ type RmqConnectOptions = {
   readonly heartbeat?: number;
 };
 
+const amqpConnectionOptions = (opts: RmqConnectOptions) => ({
+  protocol: "amqp" as const,
+  hostname: opts.host,
+  port: opts.port,
+  username: opts.username ?? "guest",
+  password: opts.password ?? "guest",
+  // RabbitMQ defaults to a 60s heartbeat. Five seconds is the shortest RabbitMQ recommends and notices partitions
+  // in 10–15s without treating a brief GC pause as a dead connection.
+  heartbeat: opts.heartbeat ?? 5
+});
+
 /** Computed on first read and kept. The memo is an `Option` because a computed value is not the same as an absent one. */
 const lazily = <A>(compute: () => A): () => A => {
   let memo = O.none<A>();
@@ -311,6 +323,18 @@ const when = (condition: boolean, effect: () => void): void => {
 
 /** Settles `promise` either way: for closes and cancels on a channel or connection that may already be gone. */
 const quietly = (promise: Promise<unknown>): Promise<void> => promise.then(() => {}, () => {});
+
+const assertModelVersion = (model: ChannelModel): void =>
+  assertSupportedRabbitMqVersion(model.connection.serverProperties.version);
+
+const checkRabbitMqVersion = async (opts: RmqConnectOptions): Promise<void> => {
+  const model = await amqp.connect(amqpConnectionOptions(opts), { timeout: 5000 });
+  try {
+    assertModelVersion(model);
+  } finally {
+    await quietly(model.close());
+  }
+};
 
 /** Runs `run` for each item one after the other, stopping at the first rejection — the order matters and so does not overlap. */
 const inSequence = <A>(items: Iterable<A>, run: (item: A) => Promise<unknown>): Promise<unknown> =>
@@ -370,6 +394,16 @@ const describe = (delivery: Pick<ConsumeMessage, "properties">): DeliveryInfo =>
 export const makeRmq = Effect.fnUntraced(function*(
   opts: RmqConnectOptions
 ): Effect.fn.Return<RmqService, RmqError, Scope.Scope> {
+  yield* Effect.catch(
+    wrap("RabbitMQ version preflight", () => checkRabbitMqVersion(opts)),
+    (error) =>
+      error.cause instanceof UnsupportedRabbitMqVersionError
+        ? Effect.fail(error)
+        : Effect.logWarning(
+          `[rmq] AMQP version preflight failed: ${String(error.cause)}; startup will use the connection retry policy`
+        )
+  );
+
   type OnMessage = Parameters<RmqService["consume"]>[1];
 
   /** Handlers run in amqplib event callbacks, off any fiber: capture the context so `warn` reaches the configured logger. */
@@ -377,8 +411,9 @@ export const makeRmq = Effect.fnUntraced(function*(
   const forkInContext = Effect.runForkWith(services);
 
   /** Completed once, by the 'reconnect-failed' handler below. */
-  const lost = Deferred.makeUnsafe<never, RmqError>();
+  const lost = yield* Deferred.make<never, RmqError>();
   const warn = (message: string) => forkInContext(Effect.logWarning(`[rmq] ${message}`));
+  const failLost = (error: RmqError) => forkInContext(Deferred.fail(lost, error));
 
   /** Everything this connection was told to create, so it can be created again. */
   type Topology =
@@ -559,6 +594,7 @@ export const makeRmq = Effect.fnUntraced(function*(
    * deadlock. Never publishes: an alarm blocks a publishing connection, and its consumers with it.
    */
   const setup = async (model: ChannelModel) => {
+    assertModelVersion(model);
     currentModel = model;
     await applyTopology(() => model.createChannel());
     await inSequence(live.values(), (entry) => attach(() => model.createChannel(), entry));
@@ -567,6 +603,7 @@ export const makeRmq = Effect.fnUntraced(function*(
 
   /** The same for the publishing connection, which owns the confirm channel and nothing else. A broker alarm blocks it, so it says so. */
   const publishingSetup = async (model: ChannelModel) => {
+    assertModelVersion(model);
     currentPublishModel = model;
     model.on("blocked", (reason: string) => void warn(`publishing connection blocked by the broker: ${reason}`));
     model.on("unblocked", () => void warn("publishing connection unblocked"));
@@ -579,18 +616,7 @@ export const makeRmq = Effect.fnUntraced(function*(
     Effect.acquireRelease(
       wrap("connect", () =>
         amqp.connect(
-          {
-            protocol: "amqp",
-            hostname: opts.host,
-            port: opts.port,
-            username: opts.username ?? "guest",
-            password: opts.password ?? "guest",
-            // Unset this negotiates RabbitMQ's 60s default, far too slow to notice a silent one-sided partition. With a
-            // short interval amqplib itself closes the connection after ~2-3 missed beats and emits the usual 'disconnect'.
-            // Not 1: RabbitMQ warns a second or less is very likely to declare a live connection dead (a GC pause is
-            // enough) and recommends 5-20, so 5 is the shortest it endorses and a partition shows within ~10-15s.
-            heartbeat: opts.heartbeat ?? 5
-          },
+          amqpConnectionOptions(opts),
           {
             // Bounds every socket connect, initial and reconnect, to a fixed wall-clock time instead of the OS's SYN-retry
             // timeout (~135s on Linux): without it a one-sided partition stalls each attempt so long that `maxRetries`
@@ -648,6 +674,11 @@ export const makeRmq = Effect.fnUntraced(function*(
      * refused) has no such code and keeps its full budget.
      */
     conn.on("connect-failed", (error) => {
+      if (error instanceof UnsupportedRabbitMqVersionError) {
+        warn(error.message);
+        failLost(new RmqError({ operation: "RabbitMQ version check", cause: error }));
+        return;
+      }
       const code = amqpReplyCode(error);
       warn(
         `${role} connect attempt failed${
@@ -655,15 +686,12 @@ export const makeRmq = Effect.fnUntraced(function*(
         }: ${error.message}`
       );
       O.map(code, () =>
-        Deferred.doneUnsafe(
-          lost,
-          Effect.fail(
-            new RmqError({
-              operation: "connection",
-              cause:
-                `${role} connection: broker rejected setup deterministically, abandoning retry budget: ${error.message}`
-            })
-          )
+        failLost(
+          new RmqError({
+            operation: "connection",
+            cause:
+              `${role} connection: broker rejected setup deterministically, abandoning retry budget: ${error.message}`
+          })
         ));
     });
     conn.on("reconnect-scheduled", ({ attempt, delay, error }) => {
@@ -674,11 +702,8 @@ export const makeRmq = Effect.fnUntraced(function*(
     });
     // Recovery has given up: fail `lost` and let the restart policy take it from here.
     conn.on("reconnect-failed", (error) => {
-      Deferred.doneUnsafe(
-        lost,
-        Effect.fail(
-          new RmqError({ operation: "connection", cause: `${role} connection recovery gave up: ${error.message}` })
-        )
+      failLost(
+        new RmqError({ operation: "connection", cause: `${role} connection recovery gave up: ${error.message}` })
       );
     });
   };

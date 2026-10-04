@@ -77,6 +77,10 @@ flowchart LR
 
 Most of the reliability here is RabbitMQ 4.3 behaviour, configured rather than
 coded (`WorkQueue.ts`, `DelayedDelivery.ts`, `Permit.ts`, `Redrive.ts`, `Client.ts`, `infra/rabbitmq.conf`).
+The consumer checks the broker's version from the AMQP handshake before declaring
+queues or starting consumers; RabbitMQ 4.3.0 or newer is required. This check
+does not use the Management API or require its additional permissions. An older
+or unrecognized version produces a startup error and exits before queue setup.
 The system leans on each of these:
 
 | RabbitMQ feature | what it buys | since |
