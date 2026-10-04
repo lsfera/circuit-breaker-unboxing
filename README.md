@@ -56,7 +56,7 @@ opens that branch's README, which holds its diagram.
 | [01 · No breaker](https://github.com/lsfera/circuit-breaker-unboxing/blob/article/01-base-scenario/README.md) | nowhere | nothing: every message spends its 3 attempts | ≈ 4,000 dead-lettered in 20 s |
 | [02 · A breaker in every process](https://github.com/lsfera/circuit-breaker-unboxing/blob/article/02-in-process-breaker/README.md) | each replica's memory | rejects locally, spending the message's attempts | 1,577–2,246 dead-lettered in 15 s; ~27 openings for one outage |
 | [03 · Coordinated through the broker](https://github.com/lsfera/circuit-breaker-unboxing/blob/article/03-rabbitmq-coordination/README.md) | each replica, plus a shared probe permit | releases the message without spending an attempt | 0 dead-lettered in 40 s; one probe at a time instead of 6 |
-| [04 · Held by the broker](https://github.com/lsfera/circuit-breaker-unboxing/blob/article/04-rabbitmq-only-breaker/README.md) | RabbitMQ: a consumer on or off, a token in a delay chain | stops consuming; the work waits in the queue | 0 dead-lettered where cockatiel lost 2,745 |
+| [04 · Held by the broker](https://github.com/lsfera/circuit-breaker-unboxing/blob/article/04-broker-held-breaker/README.md) | RabbitMQ: a consumer on or off, a token in a delay chain | stops consuming; the work waits in the queue | 0 dead-lettered where cockatiel lost 2,745 |
 | [05 · A platform control plane](https://github.com/lsfera/circuit-breaker-unboxing/blob/article/05-platform-control-plane/README.md) | Envoy per replica, and one verdict per API in an aggregator | Envoy ejects hosts; the fleet stops consuming | 0 lost, 0 dead-lettered across ten chaos faults |
 
 ## The broker is the control plane
