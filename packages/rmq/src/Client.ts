@@ -2,7 +2,6 @@ import * as amqp from "amqplib";
 import type { Channel, ChannelModel, ConfirmChannel, ConsumeMessage } from "amqplib";
 import { Context, Data, Deferred, Effect, Layer, Match, Option as O, Predicate, Record as Rec } from "effect";
 import type { Scope, Tracer } from "effect";
-import { randomUUID } from "node:crypto";
 import { assertSupportedRabbitMqVersion, UnsupportedRabbitMqVersionError } from "./RabbitMqVersion.ts";
 import { parentFrom, TRACEPARENT, traceparent } from "./Trace.ts";
 
@@ -58,7 +57,7 @@ type BatchMessage = SendOptions & { readonly body: Body; };
  * `Settlement`'s `requeue`/`release` split doesn't apply here: just "done with it" or "put it back".
  */
 export type GotMessage = DeliveryInfo & {
-  readonly body: Buffer;
+  readonly body: Uint8Array;
   readonly ack: Effect.Effect<void>;
   readonly nack: Effect.Effect<void>;
 };
@@ -180,7 +179,7 @@ export interface RmqService {
   readonly consume: (
     queue: string,
     onMessage: (
-      body: Buffer,
+      body: Uint8Array,
       delivery: DeliveryInfo
     ) => void | Settlement | Promise<void | Settlement>,
     options?: { readonly prefetch?: number; }
@@ -329,7 +328,10 @@ const checkRabbitMqVersion = async (opts: RmqConnectOptions): Promise<void> => {
 const inSequence = <A>(items: Iterable<A>, run: (item: A) => Promise<unknown>): Promise<unknown> =>
   Array.from(items).reduce<Promise<unknown>>((done, item) => done.then(() => run(item)), Promise.resolve());
 
-/** A body as amqplib publishes it; bytes are wrapped, not copied. */
+/**
+ * A body as amqplib publishes it; bytes are wrapped, not copied. `Buffer` stays inside this adapter: what callers
+ * send and receive is `Uint8Array`, so nothing outside it depends on Node's.
+ */
 const bytes = (body: Body): Buffer =>
   Predicate.isString(body) ? Buffer.from(body, "utf8") : Buffer.from(body.buffer, body.byteOffset, body.byteLength);
 
@@ -776,7 +778,7 @@ export const makeRmq = Effect.fnUntraced(function*(
     ...(options.format ?? pub.format),
     persistent: true,
     mandatory: pub.mandatory,
-    messageId: options.messageId ?? randomUUID(),
+    messageId: options.messageId ?? crypto.randomUUID(),
     timestamp: Math.floor(Date.now() / 1000),
     headers: O.match(tp, {
       onNone: () => options.headers,

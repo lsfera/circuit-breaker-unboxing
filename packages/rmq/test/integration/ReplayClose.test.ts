@@ -2,7 +2,7 @@ import { Effect } from "effect";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { Rmq } from "../../src/Client.ts";
-import { broker, brokerExec, skipIfNoDocker, startBroker, stopBroker, waitFor } from "./harness.ts";
+import { broker, brokerExec, skipIfNoDocker, startBroker, stopBroker, text, waitFor } from "./harness.ts";
 
 /**
  * The gap this guards: amqplib's recovery opens a new connection and runs the
@@ -46,7 +46,7 @@ test("a connection the broker closes during topology replay is reconnected, not 
               { discard: true }
             );
             const last = `${prefix}.${QUEUES - 1}`;
-            yield* rmq.consume(last, (body) => void seen.push(body.toString()));
+            yield* rmq.consume(last, (body) => void seen.push(text(body)));
             const pub = yield* rmq.publisherToQueue(last);
 
             yield* Effect.promise(() =>

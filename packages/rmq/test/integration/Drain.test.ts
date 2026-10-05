@@ -2,7 +2,7 @@ import { Effect } from "effect";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { Rmq } from "../../src/Client.ts";
-import { broker, skipIfNoDocker, startBroker, stopBroker, waitFor } from "./harness.ts";
+import { broker, skipIfNoDocker, startBroker, stopBroker, text, waitFor } from "./harness.ts";
 
 before(startBroker);
 after(stopBroker);
@@ -30,7 +30,7 @@ test("draining a consumer settles what it holds, redelivers none of it, and take
       const consumer = yield* rmq.consume(
         "drain.work",
         async (bytes, delivery) => {
-          const body = bytes.toString();
+          const body = text(bytes);
           seen.push(body);
           if (delivery.deliveryCount > 0) redelivered.push(body);
           await new Promise((r) => setTimeout(r, 300));
@@ -50,7 +50,7 @@ test("draining a consumer settles what it holds, redelivers none of it, and take
     Effect.gen(function*() {
       const rmq = yield* Rmq;
       const left: Array<string> = [];
-      yield* rmq.consume("drain.work", (body) => void left.push(body.toString()), { prefetch: 10 });
+      yield* rmq.consume("drain.work", (body) => void left.push(text(body)), { prefetch: 10 });
       yield* waitFor(() => left.length >= 5 - seen.length);
       yield* Effect.sleep(300);
       return left;

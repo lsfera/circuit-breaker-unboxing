@@ -266,6 +266,7 @@ import * as Consumer from "@egress/rmq-consumer";
 import { CircuitState, ConsecutiveBreaker, SamplingBreaker } from "cockatiel";
 import type { IBreaker } from "cockatiel";
 import type { BreakerPolicy, BreakerPolicyState } from "@egress/rmq-consumer";
+import { run } from "@egress/rmq-consumer/node";              // the one runtime-specific import
 import { Effect, Layer, Match, Result, Schema } from "effect";
 import { HttpClientError } from "effect/http";
 import { SqlError } from "effect/sql";
@@ -339,7 +340,7 @@ const payments = Consumer.For(Payment, json).bind(
 );
 const refunds = Consumer.For(Refund, json).bind(/* … */, [Database]);
 
-Consumer.run({
+run({
   consumers: { "payments-provider": payments, "refunds-provider": refunds },
   flags: { egressAddr, apiPath, databaseUrl },               // beside the SDK's, in one --help
   layer: ({ egressAddr, apiPath, databaseUrl }) =>
@@ -353,6 +354,11 @@ effects with `Effect.runPromise` inside the action. Add spans at meaningful
 boundaries (`Effect.withSpan` around the outbound HTTP request); Effect SQL
 provides spans for database calls.
 
+- **No runtime in the core.** `@egress/rmq-consumer` names no runtime, and
+  bodies are `Uint8Array`, not `Buffer`. `@egress/rmq-consumer/node` supplies
+  what a runtime must: the `/metrics` server (`platform`) and the process's main
+  (`run`, `launch`). An application that extends the command builds it with
+  `Consumer.command(app, platform)`.
 - **Explicit reading and judging.** Negotiation has no default; each media type
   maps to a Schema over the body's bytes: `Consumer.text(schema)` for a text
   format, `Consumer.bytes(decode)` for a binary one. Parking and redrive

@@ -1,23 +1,21 @@
-import { NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node";
 import {
   brokerFlag,
   metricsFlag,
   metricsPortFlag,
   PositiveInt,
   setting,
-  telemetryFlag,
-  VERSION
+  telemetryFlag
 } from "@egress/config/Settings.ts";
 import { launchWithRmq, Rmq } from "@egress/rmq/Client.ts";
 import type { DeliveryInfo } from "@egress/rmq/Client.ts";
 import { MAX_DELAY_SECONDS } from "@egress/rmq/DelayedDelivery.ts";
 import { MetricsRoute } from "@egress/tracing/Metrics.ts";
 import { TracingLive } from "@egress/tracing/Tracing.ts";
-import { Config, Effect, Layer, Option as O, Predicate, Schema } from "effect";
+import { Config, Layer, Option as O, Predicate, Schema } from "effect";
+import type { Effect } from "effect";
 import { Command, Flag } from "effect/cli";
 import { HttpRouter } from "effect/http";
-import { randomUUID } from "node:crypto";
-import { createServer } from "node:http";
+import type { HttpServer } from "effect/http";
 import { runApplication } from "./consumer.ts";
 import type { ConsumerSpec } from "./consumer.ts";
 import * as Dep from "./Dependency.ts";
@@ -29,7 +27,10 @@ import type { Negotiate } from "./Negotiation.ts";
  * permits, redrive, the adaptive limit, parking, metrics and tracing.
  *
  *   const payments = Consumer.For(Payment, negotiate).bind((payment, metadata) => …, [ThirdParty, Database]);
- *   Consumer.run({ consumers: { "payments-provider": payments }, layer });
+ *   run({ consumers: { "payments-provider": payments }, layer });   // `run` from `@egress/rmq-consumer/node`
+ *
+ * Nothing here names a runtime: what one provides (the `/metrics` server, the process's main) is a `Platform`,
+ * and each runtime's entry point (`./node`) supplies it and runs the command.
  */
 
 export type { BreakerPolicy, BreakerPolicyFactory, BreakerPolicyState, Outcome } from "./Breaker.ts";
@@ -130,7 +131,7 @@ export const flags = {
   ),
   replicaId: Flag.String("replica-id").pipe(
     Flag.withFallbackConfig(Config.NonEmptyString("REPLICA_ID")),
-    Flag.withDefault(randomUUID()),
+    Flag.withDefault(crypto.randomUUID()),
     Flag.withDescription(
       "Names this replica's wake queues; unique per process start by default, so a token sent by a process that has since died reaches a queue nobody reads instead of waking its successor"
     )
@@ -176,13 +177,20 @@ export type Application<C extends Record<string, Registration<any>>, F extends C
     | ((settings: Command.Command.Config.Infer<F>) => Layer.Layer<ServicesOf<C[keyof C]>, unknown>);
 };
 
+/** What the runtime provides the SDK. */
+export type Platform = {
+  /** The server `/metrics` is served from, listening on `port`; built only when metrics are on. */
+  readonly httpServer: (port: number) => Layer.Layer<HttpServer.HttpServer, unknown>;
+};
+
 /**
  * The application as a command, for one that wants to extend it — a description, subcommands — before running it
- * with `launch`. `name` (default `consumer`) names the command, the tracing service, and the dependencies' queues,
- * which every consumer in the application shares.
+ * with a runtime's `launch`. `name` (default `consumer`) names the command, the tracing service, and the
+ * dependencies' queues, which every consumer in the application shares.
  */
 export const command = <const C extends Record<string, Registration<any>>, const F extends Command.Command.Config = {}>(
   app: Application<C, F>,
+  platform: Platform,
   options: { readonly name?: string; } = {}
 ) => {
   const name = options.name ?? "consumer";
@@ -195,9 +203,7 @@ export const command = <const C extends Record<string, Registration<any>>, const
     return launchWithRmq(
       Layer.mergeAll(
         exposeMetrics
-          ? HttpRouter.serve(MetricsRoute).pipe(
-            Layer.provide(NodeHttpServer.layer(createServer, { port: settings.metricsPort }))
-          )
+          ? HttpRouter.serve(MetricsRoute).pipe(Layer.provide(platform.httpServer(settings.metricsPort)))
           : Layer.empty,
         services
       ).pipe(
@@ -224,13 +230,3 @@ export const command = <const C extends Record<string, Registration<any>>, const
     );
   });
 };
-
-/** Run a command built by `command`, extended or not, as this process's main. */
-export const launch = (cmd: Command.Command<string, any, any, unknown, NodeServices.NodeServices>): void =>
-  Command.run(cmd, { version: VERSION }).pipe(Effect.provide(NodeServices.layer), NodeRuntime.runMain);
-
-/** Run every consumer of one application in this process, until the broker is lost or a breaker cannot operate. */
-export const run = <const C extends Record<string, Registration<any>>, const F extends Command.Command.Config = {}>(
-  app: Application<C, F>,
-  options: { readonly name?: string; } = {}
-): void => launch(command(app, options));

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { Rmq } from "../../src/Client.ts";
 import * as Delay from "../../src/DelayedDelivery.ts";
-import { broker, skipIfNoDocker, startBroker, stopBroker, waitFor } from "./harness.ts";
+import { broker, skipIfNoDocker, startBroker, stopBroker, text, waitFor } from "./harness.ts";
 
 /**
  * The delay chain against a real broker: what arrives, where, and how late. Real time, because a broker's TTL
@@ -35,8 +35,7 @@ test("a delayed message arrives once, at its own destination, no earlier than as
         Effect.gen(function*() {
           yield* rmq.declareQueue(queue);
           yield* Delay.receive(queue);
-          yield* rmq.consume(queue, (body) =>
-            void arrivals.push({ body: body.toString(), queue, at: Date.now() - sentAt }));
+          yield* rmq.consume(queue, (body) => void arrivals.push({ body: text(body), queue, at: Date.now() - sentAt }));
         }));
       yield* Effect.forEach(delays, (s) => Delay.sendDelayed("delay.a", s, `a:${s}`));
       yield* Delay.sendDelayed("delay.b", 2, "b:2");

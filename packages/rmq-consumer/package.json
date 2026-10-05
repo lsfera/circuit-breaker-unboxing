@@ -7,7 +7,8 @@
     "test:rmq": "node --test 'test/integration/*.test.ts'"
   },
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./node": "./src/node.ts"
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",

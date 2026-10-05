@@ -33,6 +33,9 @@ export const stopBroker = async (): Promise<void> => {
 
 let container: StartedTestContainer | null = null;
 
+/** A body read as UTF-8: bodies are `Uint8Array`, whose `toString` lists bytes rather than decoding them. */
+export const text = (body: Uint8Array): string => new TextDecoder().decode(body);
+
 /** Run a command inside the broker container — `rabbitmqctl`, in practice. */
 export const brokerExec = (command: ReadonlyArray<string>): Promise<unknown> => container!.exec([...command]);
 
