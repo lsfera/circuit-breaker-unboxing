@@ -231,9 +231,6 @@ importers:
         specifier: 'catalog:'
         version: 4.0.0
     devDependencies:
-      amqplib:
-        specifier: ^2.2.0
-        version: 2.2.0
       testcontainers:
         specifier: ^12.2.0
         version: 12.2.0
@@ -758,10 +755,6 @@ packages:
   abort-controller@3.0.0:
     resolution: {integrity: sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg==}
     engines: {node: '>=6.5'}
-
-  amqplib@2.2.0:
-    resolution: {integrity: sha512-VifzN9aHs/Q3zTruVHXh2yCisQyXexBN91CQ2E5iSyUKyNjH6ilYhJGte5AXZH/Bj1PaH7SwPhyuSf6Msd2udw==}
-    engines: {node: '>=18'}
 
   ansi-regex@5.0.1:
     resolution: {integrity: sha512-quJQXlTSUGL2LH9SUXo8VwsY4soanhgo6LNSm84E1LBcE8s3O0wpdiRzyR9z/ZZJMlMWv37qOOb9pdJlMUEKFQ==}
@@ -1612,8 +1605,6 @@ snapshots:
   abort-controller@3.0.0:
     dependencies:
       event-target-shim: 5.0.1
-
-  amqplib@2.2.0: {}
 
   ansi-regex@5.0.1: {}
 

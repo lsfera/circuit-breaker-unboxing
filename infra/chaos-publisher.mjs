@@ -5,8 +5,8 @@
  */
 
 import { createRequire } from "node:module";
+import { connect as open, utf8 } from "./amqp.mjs";
 
-const amqp = createRequire(new URL("../packages/rmq/package.json", import.meta.url))("amqplib");
 const protobuf = createRequire(new URL("../packages/rmq-producer/package.json", import.meta.url))("protobufjs");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -18,8 +18,8 @@ const FORMAT = process.env.FORMAT ?? "json";
 
 // The same message packages/rmq-producer writes: `message Work { string api_id = 1; int64 n = 2; }`.
 const Work = protobuf.Type.fromJSON("Work", { fields: { apiId: { type: "string", id: 1 }, n: { type: "int64", id: 2 } } });
-const asJson = (i) => [Buffer.from(JSON.stringify({ apiId: API, n: i })), "application/json"];
-const asProtobuf = (i) => [Buffer.from(Work.encode({ apiId: API, n: i }).finish()), "application/x-protobuf"];
+const asJson = (i) => [utf8(JSON.stringify({ apiId: API, n: i })), "application/json"];
+const asProtobuf = (i) => [Work.encode({ apiId: API, n: i }).finish(), "application/x-protobuf"];
 const encode = { json: asJson, protobuf: asProtobuf, mixed: (i) => (i % 2 === 0 ? asJson(i) : asProtobuf(i)) }[FORMAT];
 if (!encode) throw new Error(`FORMAT must be json, protobuf or mixed, got ${FORMAT}`);
 
@@ -43,25 +43,30 @@ let nacked = 0;
 let returned = 0;
 let stopping = false;
 let channel = null;
+let client = null;
 const unroutable = new Set();
+/** Published and not yet confirmed, nacked or returned: the cap is the backpressure, as the socket's was. */
+let inFlight = 0;
+const MAX_IN_FLIGHT = 4000;
 
 const connect = async () => {
   while (!stopping) {
     try {
-      const conn = await amqp.connect(URL_);
-      conn.on("error", () => {});
-      const ch = await conn.createConfirmChannel();
-      ch.on("error", () => {});
+      const conn = await open(URL_);
+      const ch = await conn.channel();
+      await ch.confirmSelect();
       // Unroutable with mandatory set: the broker returns it before it confirms it.
-      ch.on("return", (msg) => {
+      ch.onReturn = (msg) => {
         returned++;
         unroutable.add(String(msg.properties.messageId ?? ""));
-      });
+      };
       const lost = () => {
         if (channel === ch) channel = null;
       };
-      ch.on("close", lost);
-      conn.on("close", lost);
+      ch.onerror = lost;
+      conn.onerror = () => {};
+      conn.ondisconnect = lost;
+      client = conn;
       channel = ch;
       return;
     } catch {
@@ -72,40 +77,39 @@ const connect = async () => {
 
 const publishLoop = async () => {
   while (!stopping) {
-    if (!channel) {
+    if (!channel || channel.closed) {
+      channel = null;
       await connect();
       rateSince = Date.now();
       sentAtRate = 0;
       continue;
     }
+    // A broker alarm blocks the connection, and the client refuses a publish meanwhile: wait it out.
+    if (client.blocked) {
+      await sleep(100);
+      continue;
+    }
     const due = Math.min(4000, Math.floor((rate * (Date.now() - rateSince)) / 1000) - sentAtRate);
     const ch = channel;
-    let blocked = false;
-    for (let k = 0; k < due && channel === ch; k++) {
+    for (let k = 0; k < due && channel === ch && inFlight < MAX_IN_FLIGHT; k++) {
       const i = n++;
       sentAtRate++;
+      inFlight++;
       const key = `${RUN}:${i}`;
       const [body, contentType] = encode(i);
-      const ok = ch.sendToQueue(
-        QUEUE,
-        body,
-        { persistent: true, mandatory: true, messageId: key, contentType, type: "egress.work" },
-        (err) => {
-          if (err) nacked++;
-          else if (unroutable.has(key)) unroutable.delete(key);
+      // Resolves on the broker's confirm; rejects on a nack, or when the channel goes before it confirms.
+      ch.basicPublish("", QUEUE, body, { deliveryMode: 2, messageId: key, contentType, type: "egress.work" }, true).then(
+        () => {
+          if (unroutable.has(key)) unroutable.delete(key);
           else {
             confirmed++;
             mark(i);
           }
         },
-      );
-      if (!ok) {
-        blocked = true;
-        break;
-      }
+        () => void nacked++,
+      ).finally(() => void inFlight--);
     }
-    if (blocked && channel === ch) await Promise.race([new Promise((r) => ch.once("drain", r)), sleep(1000)]);
-    else await sleep(10);
+    await sleep(10);
   }
 };
 
@@ -126,7 +130,7 @@ process.on("message", async (msg) => {
       nacked,
       returned,
       unsettled: n - confirmed - nacked - returned,
-      bits: Buffer.from(bits.subarray(0, Math.ceil(n / 8))).toString("base64"),
+      bits: bits.subarray(0, Math.ceil(n / 8)).toBase64(),
     });
     await sleep(200);
     process.exit(0);

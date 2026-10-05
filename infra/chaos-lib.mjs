@@ -4,9 +4,11 @@
  * consumer application with both of its consumers and dependencies.
  */
 import { execFile, fork } from "node:child_process";
-import { createRequire } from "node:module";
 import { promisify } from "node:util";
 import { levelName } from "../packages/rmq/src/DelayedDelivery.ts";
+import { connect, inspect } from "./amqp.mjs";
+
+export { connect, inspect, utf8 } from "./amqp.mjs";
 
 export const exec = promisify(execFile);
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -24,17 +26,13 @@ export const MANAGEMENT = process.env.RABBITMQ_MANAGEMENT ?? "http://guest:guest
 /** The application's name, which prefixes its dependencies' queues (`<app>.<dependency>.probe-permit`). */
 export const APP = process.env.APP_NAME ?? "consumer";
 
-export const amqp = createRequire(new URL("../packages/rmq/package.json", import.meta.url))("amqplib");
-
 // ---- the broker --------------------------------------------------------------
 
 /** One passive-declare per read, on a channel of its own: a failed one closes the channel it arrives on. */
 export const queueInfo = async (name) => {
-  const conn = await amqp.connect(BROKER);
+  const conn = await connect(BROKER);
   try {
-    const ch = await conn.createChannel();
-    ch.on("error", () => {});
-    const q = await ch.checkQueue(name);
+    const q = await inspect(await conn.channel(), name);
     return { ready: q.messageCount, consumers: q.consumerCount };
   } finally {
     await conn.close().catch(() => {});
@@ -44,14 +42,13 @@ export const tryQueueInfo = (name) => queueInfo(name).catch(() => undefined);
 
 /** Tokens waiting in the delay chain, summed over every level. */
 export const tokensInChain = async () => {
-  const conn = await amqp.connect(BROKER).catch(() => undefined);
+  const conn = await connect(BROKER).catch(() => undefined);
   if (!conn) return undefined;
   try {
     let total = 0;
     for (let n = 0; n < 17; n++) {
-      const ch = await conn.createChannel();
-      ch.on("error", () => {});
-      total += (await ch.checkQueue(levelName(n)).catch(() => ({ messageCount: 0 }))).messageCount;
+      const ch = await conn.channel();
+      total += (await inspect(ch, levelName(n)).catch(() => ({ messageCount: 0 }))).messageCount;
     }
     return total;
   } finally {
@@ -61,7 +58,7 @@ export const tokensInChain = async () => {
 
 const management = async (path) => {
   const url = new URL(`${MANAGEMENT}/api/queues/%2F/${path}`);
-  const auth = `Basic ${Buffer.from(`${url.username}:${url.password}`).toString("base64")}`;
+  const auth = `Basic ${btoa(`${url.username}:${url.password}`)}`;
   url.username = url.password = "";
   return fetch(url, { headers: { authorization: auth } }).then((r) => r.json());
 };
@@ -125,7 +122,7 @@ export const consumerContainers = async () =>
     .sort();
 
 export const isSet = (bitmap, n) => (bitmap[n >> 3] & (1 << (n & 7))) !== 0;
-export const decodeBits = (b64) => Buffer.from(b64 ?? "", "base64");
+export const decodeBits = (b64) => Uint8Array.fromBase64(b64 ?? "");
 
 // ---- the breakers, read back from the replicas' own logs ---------------------
 

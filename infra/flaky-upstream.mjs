@@ -120,7 +120,7 @@ for (const [cluster, ports] of Object.entries(CLUSTERS)) {
             duplicates: a?.duplicates ?? 0,
             maxN: a?.maxN ?? -1,
             foreignKeys,
-            bits: a && req.method !== "DELETE" ? Buffer.from(a.bits.subarray(0, Math.ceil((a.maxN + 1) / 8))).toString("base64") : "",
+            bits: a && req.method !== "DELETE" ? a.bits.subarray(0, Math.ceil((a.maxN + 1) / 8)).toBase64() : "",
           }),
         );
       }

@@ -358,7 +358,10 @@ provides spans for database calls.
   bodies are `Uint8Array`, not `Buffer`. `@egress/rmq-consumer/node` supplies
   what a runtime must: the `/metrics` server (`platform`) and the process's main
   (`run`, `launch`). An application that extends the command builds it with
-  `Consumer.command(app, platform)`.
+  `Consumer.command(app, platform)`. The broker client is
+  `@cloudamqp/amqp-client`, whose protocol code is plain `Uint8Array`; the
+  client and the `infra/` scripts also run under Bun (checked with 1.4.2:
+  `bun infra/chaos-breaker.mjs` works as `node` does).
 - **Explicit reading and judging.** Negotiation has no default; each media type
   maps to a Schema over the body's bytes: `Consumer.text(schema)` for a text
   format, `Consumer.bytes(decode)` for a binary one. Parking and redrive
