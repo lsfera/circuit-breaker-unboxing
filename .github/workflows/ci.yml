@@ -1,0 +1,122 @@
+# The SDK claims to run on node, Bun and Deno, so each runtime runs the same suites rather than node standing in for
+# all three. Split by what a job needs: `check` needs only node and is the gate; `unit` repeats the unit suites on
+# Bun and Deno; `integration` needs a Docker daemon, because it starts a real broker per test file through
+# Testcontainers, which is why it is opt-in locally (`pnpm run test:rmq`) and the suite most likely to rot unnoticed;
+# `image` builds each runtime's image target. The chaos harnesses need the whole compose stack and stay local.
+name: CI
+
+on:
+  push:
+    branches: ['article/*', 'sdk/*']
+  pull_request:
+    branches: ['article/*']
+  workflow_dispatch:
+
+# Bun and Deno at the versions the image targets run (Dockerfile: runtime-bun, runtime-deno); node from
+# package.json#engines, the line the default image runs. pnpm's version comes from package.json#packageManager.
+env:
+  BUN_VERSION: '1.4.2'
+  DENO_VERSION: '2.9.7'
+
+jobs:
+  check:
+    name: typecheck + unit tests (node)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # With no build step, `tsc --noEmit` is the only type-check the source ever gets.
+      - run: pnpm run check
+
+  unit:
+    name: unit tests (${{ matrix.runtime }})
+    runs-on: ubuntu-latest
+    needs: check
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [bun, deno]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      # node installs the workspace either way; the tests then run on the runtime under test.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          cache: pnpm
+      - if: matrix.runtime == 'bun'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - if: matrix.runtime == 'deno'
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+      - run: pnpm install --frozen-lockfile
+      # test/setup.ts fails the run if Vitest's workers are not this runtime.
+      - run: pnpm run test:${{ matrix.runtime }}
+
+  integration:
+    name: real RabbitMQ (${{ matrix.runtime }})
+    runs-on: ubuntu-latest
+    needs: check
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runtime: node
+            script: test:rmq
+          - runtime: bun
+            script: test:rmq:bun
+          - runtime: deno
+            script: test:rmq:deno
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          cache: pnpm
+      - if: matrix.runtime == 'bun'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - if: matrix.runtime == 'deno'
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+      - run: pnpm install --frozen-lockfile
+      # The broker properties the breaker depends on — quorum delivery limits, dead-letter provenance, durability,
+      # delayed delivery, a publish caught by a broker shutdown — each pinned against a real RabbitMQ.
+      - run: pnpm run ${{ matrix.script }}
+
+  # Builds only: every process needs a broker to start, so booting them is left to the compose stack.
+  image:
+    name: image (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    needs: check
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: runtime
+            compose: docker-compose.yml
+          - target: runtime-bun
+            compose: docker-compose.yml -f docker-compose.bun.yml
+          - target: runtime-deno
+            compose: docker-compose.yml -f docker-compose.deno.yml
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - run: docker buildx build --target ${{ matrix.target }} .
+      # Fails on a malformed compose file or override.
+      - run: docker compose -f ${{ matrix.compose }} config > /dev/null
