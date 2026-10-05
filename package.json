@@ -6,7 +6,7 @@
   "engines": {
     "node": ">=26"
   },
-  "packageManager": "pnpm@12.8.1",
+  "packageManager": "pnpm@12.9.1",
   "scripts": {
     "test": "vitest run --project 'unit:*'",
     "test:bun": "bun --bun vitest run --project 'unit:*'",
