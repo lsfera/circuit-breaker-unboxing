@@ -359,9 +359,11 @@ provides spans for database calls.
   what a runtime must: the `/metrics` server (`platform`) and the process's main
   (`run`, `launch`). An application that extends the command builds it with
   `Consumer.command(app, platform)`. The broker client is
-  `@cloudamqp/amqp-client`, whose protocol code is plain `Uint8Array`; the
-  client and the `infra/` scripts also run under Bun (checked with 1.4.2:
-  `bun infra/chaos-breaker.mjs` works as `node` does).
+  `@cloudamqp/amqp-client`, whose protocol code is plain `Uint8Array`. The fleet
+  and the `infra/` scripts run on Bun as well as node: with the producers and
+  five consumers on Bun 1.4.2 (`docker-compose.bun.yml`) and the harness run by
+  `bun infra/chaos-breaker.mjs`, every graded scenario passes, nothing lost
+  (`docs/runs/chaos-breaker-bun.json`).
 - **Explicit reading and judging.** Negotiation has no default; each media type
   maps to a Schema over the body's bytes: `Consumer.text(schema)` for a text
   format, `Consumer.bytes(decode)` for a binary one. Parking and redrive

@@ -1,0 +1,23 @@
+# The application fleet on Bun instead of node, over the same broker, database and monitoring:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.bun.yml up -d --build rmq-producer rmq-producer-refunds rmq-consumer
+#
+# Everything else in docker-compose.yml is unchanged.
+x-bun-build: &bun-build
+  context: .
+  dockerfile: Dockerfile
+  target: runtime-bun
+
+services:
+  rmq-producer:
+    image: egress-breaker:bun
+    build: *bun-build
+    command: bun packages/rmq-producer/src/main.ts
+  rmq-producer-refunds:
+    image: egress-breaker:bun
+    build: *bun-build
+    command: bun packages/rmq-producer/src/main.ts
+  rmq-consumer:
+    image: egress-breaker:bun
+    build: *bun-build
+    command: bun packages/consumer/src/main.ts

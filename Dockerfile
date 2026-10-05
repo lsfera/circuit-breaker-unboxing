@@ -29,6 +29,21 @@ COPY packages/tracing/package.json packages/tracing/
 RUN pnpm install --frozen-lockfile --prod
 
 # ---------------------------------------------------------------------------
+# runtime-bun — the same dependencies and source, run by Bun instead of node: the SDK names no runtime, and this is
+# what checks it. Built only when asked for (`--target runtime-bun`, or docker-compose.bun.yml); `runtime` below
+# stays the default target.
+# ---------------------------------------------------------------------------
+FROM oven/bun:1.4.2-alpine AS runtime-bun
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=deps --chown=bun:bun /app/node_modules ./node_modules
+COPY --from=deps --chown=bun:bun /app/packages ./packages
+COPY --chown=bun:bun package.json pnpm-workspace.yaml ./
+COPY --chown=bun:bun packages ./packages
+USER bun
+CMD ["bun", "packages/consumer/src/main.ts"]
+
+# ---------------------------------------------------------------------------
 # runtime — dependencies, then source. No build step, deliberately: every process runs TypeScript directly
 # through node's type stripping, so the artifact and the thing developers run are the same files. The runtime
 # must therefore be a version whose stripping behaviour has actually been run, hence the digest above.
