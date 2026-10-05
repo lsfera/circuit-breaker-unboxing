@@ -19,8 +19,8 @@ const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
 test("draining a consumer settles what it holds, redelivers none of it, and takes nothing more", async (t) => {
   if (skipIfNoDocker(t)) return;
 
-  const seen: string[] = [];
-  const redelivered: string[] = [];
+  const seen: Array<string> = [];
+  const redelivered: Array<string> = [];
   const depth = await run(
     Effect.gen(function*() {
       const rmq = yield* Rmq;
@@ -32,7 +32,7 @@ test("draining a consumer settles what it holds, redelivers none of it, and take
         async (bytes, delivery) => {
           const body = bytes.toString();
           seen.push(body);
-          delivery.deliveryCount > 0 && redelivered.push(body);
+          if (delivery.deliveryCount > 0) redelivered.push(body);
           await new Promise((r) => setTimeout(r, 300));
         },
         { prefetch: 2 }
@@ -49,7 +49,7 @@ test("draining a consumer settles what it holds, redelivers none of it, and take
   const remaining = await run(
     Effect.gen(function*() {
       const rmq = yield* Rmq;
-      const left: string[] = [];
+      const left: Array<string> = [];
       yield* rmq.consume("drain.work", (body) => void left.push(body.toString()), { prefetch: 10 });
       yield* waitFor(() => left.length >= 5 - seen.length);
       yield* Effect.sleep(300);

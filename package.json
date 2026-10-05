@@ -11,9 +11,10 @@
     "test": "node --test 'packages/*/test/*.test.ts'",
     "test:rmq": "pnpm --filter @egress/rmq test:rmq && pnpm --filter @egress/rmq-consumer test:rmq",
     "typecheck": "tsc --noEmit",
+    "lint": "oxlint packages",
     "fetch:effect": "node scripts/fetch-effect.mjs",
     "check:vendored": "node scripts/fetch-effect.mjs && node scripts/check-vendored.mjs",
-    "check": "pnpm run check:vendored && pnpm run typecheck && pnpm run test",
+    "check": "pnpm run check:vendored && pnpm run lint && pnpm run typecheck && pnpm run test",
     "incident": "node infra/incident.mjs",
     "format": "dprint fmt"
   },

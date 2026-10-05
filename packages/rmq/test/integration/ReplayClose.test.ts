@@ -28,12 +28,12 @@ const QUEUES = 400;
 test("a connection the broker closes during topology replay is reconnected, not a crash", async (t) => {
   if (skipIfNoDocker(t)) return;
 
-  const crashes: unknown[] = [];
+  const crashes: Array<unknown> = [];
   const onUncaught = (error: unknown) => void crashes.push(error);
   process.on("uncaughtException", onUncaught);
 
   const prefix = `replay.${Date.now()}`;
-  const seen: string[] = [];
+  const seen: Array<string> = [];
   try {
     await Effect.runPromise(
       Effect.scoped(

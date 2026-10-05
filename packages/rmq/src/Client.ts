@@ -1,18 +1,7 @@
 import * as amqp from "amqplib";
 import type { Channel, ChannelModel, ConfirmChannel, ConsumeMessage } from "amqplib";
-import {
-  Context,
-  Data,
-  Deferred,
-  Effect,
-  Layer,
-  Match,
-  Option as O,
-  Predicate,
-  Record as Rec,
-  Scope,
-  Tracer
-} from "effect";
+import { Context, Data, Deferred, Effect, Layer, Match, Option as O, Predicate, Record as Rec } from "effect";
+import type { Scope, Tracer } from "effect";
 import { randomUUID } from "node:crypto";
 import { assertSupportedRabbitMqVersion, UnsupportedRabbitMqVersionError } from "./RabbitMqVersion.ts";
 import { parentFrom, TRACEPARENT, traceparent } from "./Trace.ts";

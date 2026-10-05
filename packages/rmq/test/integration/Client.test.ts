@@ -46,7 +46,7 @@ test("concurrent publisher creation routes each message to its own binding", asy
   if (skipIfNoDocker(t)) return;
 
   const apis = ["alpha", "beta", "gamma"];
-  const received: Record<string, string[]> = { alpha: [], beta: [], gamma: [] };
+  const received: Record<string, Array<string>> = { alpha: [], beta: [], gamma: [] };
 
   await run(
     Effect.gen(function*() {
@@ -80,7 +80,7 @@ test("concurrent consumer creation binds each consumer to its own queue", async 
   if (skipIfNoDocker(t)) return;
 
   const queues = ["con.one", "con.two", "con.three"];
-  const received: Record<string, string[]> = { "con.one": [], "con.two": [], "con.three": [] };
+  const received: Record<string, Array<string>> = { "con.one": [], "con.two": [], "con.three": [] };
 
   await run(
     Effect.gen(function*() {
@@ -290,7 +290,7 @@ test("a handler that throws dead-letters the delivery instead of acknowledging i
   const stamp = Date.now();
   const work = `throws.${stamp}`;
   const dead = `throws.${stamp}.dead`;
-  const deadLettered: string[] = [];
+  const deadLettered: Array<string> = [];
 
   await run(
     Effect.gen(function*() {
@@ -322,7 +322,7 @@ test("a consumer keeps acknowledging while the client's publishing connection is
   const stamp = Date.now();
   const inbox = `alarm.in.${stamp}`;
   const outbox = `alarm.out.${stamp}`;
-  const received: string[] = [];
+  const received: Array<string> = [];
   const settled = { publish: false };
 
   await run(
@@ -365,7 +365,7 @@ test("a killed connection comes back with its consumers still registered", async
   if (skipIfNoDocker(t)) return;
 
   const queue = `recover.${Date.now()}`;
-  const seen: string[] = [];
+  const seen: Array<string> = [];
 
   await run(
     Effect.gen(function*() {
@@ -400,7 +400,7 @@ test("resetConnection drops the connection and the client recovers from it", asy
   if (skipIfNoDocker(t)) return;
 
   const queue = `reset.${Date.now()}`;
-  const seen: string[] = [];
+  const seen: Array<string> = [];
 
   await run(
     Effect.gen(function*() {
@@ -439,7 +439,7 @@ test("a consumer whose channel dies alone is put back", async (t) => {
   if (skipIfNoDocker(t)) return;
 
   const queue = `channel-death.${Date.now()}`;
-  const seen: string[] = [];
+  const seen: Array<string> = [];
 
   await run(
     Effect.gen(function*() {
@@ -470,7 +470,7 @@ test("a consumer on a queue that never delivers is still repaired", async (t) =>
   if (skipIfNoDocker(t)) return;
 
   const queue = `idle-election.${Date.now()}`;
-  const seen: string[] = [];
+  const seen: Array<string> = [];
 
   await run(
     Effect.gen(function*() {
@@ -501,7 +501,7 @@ test("a consumer closed on purpose is not resurrected by a reconnect", async (t)
   if (skipIfNoDocker(t)) return;
 
   const queue = `retired.${Date.now()}`;
-  const seen: string[] = [];
+  const seen: Array<string> = [];
 
   await run(
     Effect.gen(function*() {
@@ -556,7 +556,7 @@ test("a poisoned publish channel reopens rather than ending publishing", async (
 
       yield* rmq.send(good, "after the error");
 
-      const received: string[] = [];
+      const received: Array<string> = [];
       yield* rmq.consume(queue, (body) => void received.push(body.toString()));
       yield* waitFor(() => received.length >= 2);
       return received;
@@ -613,7 +613,7 @@ test("closing a consumer stops delivery without closing the connection", async (
   if (skipIfNoDocker(t)) return;
 
   const queue = "cancel.work";
-  const received: string[] = [];
+  const received: Array<string> = [];
 
   await run(
     Effect.gen(function*() {

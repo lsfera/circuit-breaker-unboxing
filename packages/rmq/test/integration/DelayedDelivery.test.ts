@@ -49,7 +49,7 @@ test("a delayed message arrives once, at its own destination, no earlier than as
     const [dest, seconds] = body.split(":");
     assert.equal(queue, `delay.${dest}`, "each message reaches only the queue it was addressed to");
     assert.ok(at >= Number(seconds) * 1000 - 100, `${body} arrived early: ${at}ms`);
-    console.log(`  ${body} arrived after ${at}ms`);
+    t.diagnostic(`${body} arrived after ${at}ms`);
     assert.ok(at < Number(seconds) * 1000 + 3_000, `${body} arrived late: ${at}ms`);
   });
 });

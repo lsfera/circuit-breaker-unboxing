@@ -21,7 +21,7 @@ test("a failed call opens the real consumer breaker until its delayed probe succ
 
   const key = "breaker-probe";
   const attempts: Array<{ body: string; deliveryCount: number; at: number; }> = [];
-  const completed: string[] = [];
+  const completed: Array<string> = [];
   const upstream = Dependency.make("upstream", {
     breakerPolicy: () => {
       let failures = 0;

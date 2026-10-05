@@ -38,7 +38,7 @@ test("every phase has its own gauge value, closed first", () => {
 
 /** A world the test steers: `wake` releases the token in flight, `report` plays the calls a consumer makes. */
 const world = () => {
-  const log: string[] = [];
+  const log: Array<string> = [];
   const consumers: Array<{
     role: string;
     report: Breaker.Report;
