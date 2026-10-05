@@ -537,8 +537,16 @@ infra/
 docs/            the write-up, its media, saved runs
 ```
 
-**Effect 4 (4.0.0)**; see `AGENTS.md`. No build step: Node runs the
-`src/*.ts` directly.
+**Effect 4 (4.0.0)**; see `AGENTS.md`. No build step: node, Bun and Deno each
+run the `src/*.ts` directly.
+
+**Platform independence.** The SDK names no runtime: bodies are
+`Uint8Array`, the broker client (`@cloudamqp/amqp-client`) and tracing
+(Effect's OTLP exporter over `fetch`) use web APIs, and the only runtime
+code, the `/metrics` server and the process's main, sits behind
+`@egress/rmq-consumer/node`. The same source, tests and image run on node 26,
+Bun 1.4.2 and Deno 2.9.7 (`Dockerfile` targets `runtime`, `runtime-bun`,
+`runtime-deno`), and CI runs the unit and broker suites on all three.
 
 ```bash
 pnpm run check       # vendored version, typecheck, unit tests
