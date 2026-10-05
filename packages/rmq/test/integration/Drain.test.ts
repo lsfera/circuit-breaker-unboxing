@@ -1,11 +1,11 @@
 import { Effect } from "effect";
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import { Rmq } from "../../src/Client.ts";
-import { broker, skipIfNoDocker, startBroker, stopBroker, waitFor } from "./harness.ts";
+import { broker, skipIfNoDocker, startBroker, stopBroker, text, waitFor } from "./harness.ts";
 
-before(startBroker);
-after(stopBroker);
+beforeAll(startBroker);
+afterAll(stopBroker);
 
 const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(
@@ -19,8 +19,8 @@ const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
 test("draining a consumer settles what it holds, redelivers none of it, and takes nothing more", async (t) => {
   if (skipIfNoDocker(t)) return;
 
-  const seen: string[] = [];
-  const redelivered: string[] = [];
+  const seen: Array<string> = [];
+  const redelivered: Array<string> = [];
   const depth = await run(
     Effect.gen(function*() {
       const rmq = yield* Rmq;
@@ -30,9 +30,9 @@ test("draining a consumer settles what it holds, redelivers none of it, and take
       const consumer = yield* rmq.consume(
         "drain.work",
         async (bytes, delivery) => {
-          const body = bytes.toString();
+          const body = text(bytes);
           seen.push(body);
-          delivery.deliveryCount > 0 && redelivered.push(body);
+          if (delivery.deliveryCount > 0) redelivered.push(body);
           await new Promise((r) => setTimeout(r, 300));
         },
         { prefetch: 2 }
@@ -49,8 +49,8 @@ test("draining a consumer settles what it holds, redelivers none of it, and take
   const remaining = await run(
     Effect.gen(function*() {
       const rmq = yield* Rmq;
-      const left: string[] = [];
-      yield* rmq.consume("drain.work", (body) => void left.push(body.toString()), { prefetch: 10 });
+      const left: Array<string> = [];
+      yield* rmq.consume("drain.work", (body) => void left.push(text(body)), { prefetch: 10 });
       yield* waitFor(() => left.length >= 5 - seen.length);
       yield* Effect.sleep(300);
       return left;

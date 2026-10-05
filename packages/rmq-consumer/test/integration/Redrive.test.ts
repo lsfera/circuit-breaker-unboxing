@@ -4,13 +4,13 @@ import { TRACEPARENT } from "@egress/rmq/Trace.ts";
 import { deadLetterQueueFor, deadLetterQueueOptions, workQueueFor, workQueueOptions } from "@egress/rmq/WorkQueue.ts";
 import { Effect, Option as O } from "effect";
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
-import { broker, skipIfNoDocker, startBroker, stopBroker } from "../../../rmq/test/integration/harness.ts";
+import { afterAll, beforeAll, test } from "vitest";
+import { broker, skipIfNoDocker, startBroker, stopBroker, text } from "../../../rmq/test/integration/harness.ts";
 import * as Redrive from "../../src/Redrive.ts";
 import { REDRIVE_COUNT_HEADER } from "../../src/Redrive.ts";
 
-before(startBroker);
-after(stopBroker);
+beforeAll(startBroker);
+afterAll(stopBroker);
 
 const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(
@@ -63,7 +63,7 @@ test("a pass moves messages from the dead queue onto work and increments their r
   assert.deepEqual(outcomes, ["moved", "moved"]);
   assert.deepEqual(
     queues.work.map((message) => ({
-      body: message.body.toString(),
+      body: text(message.body),
       count: message.properties[REDRIVE_COUNT_HEADER],
       messageId: O.getOrUndefined(message.messageId)
     })),
@@ -81,7 +81,7 @@ test("a redriven message preserves its idempotency key, bytes, format and trace"
 
   const apiId = "redrive-carry";
   const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
-  const body = Buffer.from([0x1f, 0x8b, 0xff]);
+  const body = Uint8Array.of(0x1f, 0x8b, 0xff);
   const messages = await run(
     Effect.gen(function*() {
       const rmq = yield* declareQueues(apiId);
@@ -108,7 +108,7 @@ test("a redriven message preserves its idempotency key, bytes, format and trace"
   );
 
   assert.equal(messages.length, 1);
-  assert.deepEqual(messages[0]!.body, body);
+  assert.deepEqual(Uint8Array.from(messages[0]!.body), body);
   assert.equal(O.getOrUndefined(messages[0]!.contentType), "application/json");
   assert.equal(O.getOrUndefined(messages[0]!.contentEncoding), "gzip");
   assert.equal(O.getOrUndefined(messages[0]!.type), "egress.work");
@@ -147,7 +147,7 @@ test("a message over the redrive limit is parked with a reason", async (t) => {
   assert.equal(queues.work.length, 0);
   assert.deepEqual(
     queues.parked.map((message) => ({
-      body: message.body.toString(),
+      body: text(message.body),
       reason: message.properties[Redrive.PARKED_REASON_HEADER]
     })),
     [{ body: "poison", reason: "redriven-too-often" }]
@@ -178,6 +178,6 @@ test("a pass stops when the breaker opens and leaves the remaining dead letters 
     })
   );
 
-  assert.deepEqual(queues.work.map((message) => message.body.toString()), ["a"]);
-  assert.deepEqual(queues.dead.map((message) => message.body.toString()), ["b", "c"]);
+  assert.deepEqual(queues.work.map((message) => text(message.body)), ["a"]);
+  assert.deepEqual(queues.dead.map((message) => text(message.body)), ["b", "c"]);
 });

@@ -17,7 +17,7 @@ import { dirname } from "node:path";
 import { bits as delayBits, entryLevel, levelName, routingKey, DELIVERY_EXCHANGE, bindingKey } from "../packages/rmq/src/DelayedDelivery.ts";
 import * as lib from "./chaos-lib.mjs";
 
-const { amqp, audit, BROKER, consumerContainers, decodeBits, exec, flag, isSet, PROJECT, promSum, queueInfo, setFailure, sleep } = lib;
+const { audit, BROKER, connect, inspect, utf8, consumerContainers, decodeBits, exec, flag, isSet, PROJECT, promSum, queueInfo, setFailure, sleep } = lib;
 const { skewMs, tokensInChain, tryQueueInfo, waitFor } = lib;
 
 const API = "payments-provider";
@@ -325,18 +325,20 @@ const redriveFailover = {
   inject: async () => {},
   restore: async () => {},
   during: async (ctx) => {
-    const conn = await amqp.connect(BROKER);
-    const ch = await conn.createConfirmChannel();
+    const conn = await connect(BROKER);
+    const ch = await conn.channel();
+    await ch.confirmSelect();
     const run = `${ctx.run}d`;
-    for (let n = 0; n < REDRIVE_BATCH; n++) {
-      ch.sendToQueue(DEAD, Buffer.from(JSON.stringify({ apiId: API, n })), {
-        persistent: true,
-        messageId: `${run}:${n}`,
-        contentType: "application/json",
-        type: "egress.work",
-      });
-    }
-    await ch.waitForConfirms();
+    // Every publish issued before any is awaited, so their confirms pipeline.
+    await Promise.all(
+      Array.from({ length: REDRIVE_BATCH }, (_, n) =>
+        ch.basicPublish("", DEAD, utf8(JSON.stringify({ apiId: API, n })), {
+          deliveryMode: 2,
+          messageId: `${run}:${n}`,
+          contentType: "application/json",
+          type: "egress.work",
+        })),
+    );
     await conn.close();
     const deadAtStart = (await queueInfo(DEAD)).ready;
     const moving = await waitFor(async () => (await queueInfo(DEAD)).ready < deadAtStart, 45);
@@ -399,17 +401,15 @@ const delaySurvivesRestart = async () => {
   const SECONDS = 100;
   const queue = "chaos.delay.probe";
   console.log(`\n== delay-survives-broker-restart (${SECONDS}s, bits ${delayBits(SECONDS).join("")}, enters level ${entryLevel(SECONDS)}) ==`);
-  const conn = await amqp.connect(BROKER);
-  const ch = await conn.createConfirmChannel();
-  await ch.deleteQueue(queue);
-  await ch.assertQueue(queue, { durable: true });
-  await ch.bindQueue(queue, DELIVERY_EXCHANGE, bindingKey(queue));
+  const conn = await connect(BROKER);
+  const ch = await conn.channel();
+  await ch.confirmSelect();
+  await ch.queueDelete(queue);
+  await ch.queueDeclare(queue, { durable: true, exclusive: false, autoDelete: false });
+  await ch.queueBind(queue, DELIVERY_EXCHANGE, bindingKey(queue));
   const sentAt = Date.now();
-  await new Promise((resolve, reject) =>
-    ch.publish(levelName(entryLevel(SECONDS)), routingKey(SECONDS, queue), Buffer.from("probe"), { persistent: true }, (e) =>
-      e ? reject(e) : resolve(),
-    ),
-  );
+  // Resolves on the broker's confirm.
+  await ch.basicPublish(levelName(entryLevel(SECONDS)), routingKey(SECONDS, queue), utf8("probe"), { deliveryMode: 2 });
   await conn.close();
   await sleep(10_000);
   console.log(`  t+${Math.round((Date.now() - sentAt) / 1000)}s  restarting the broker, token in level ${entryLevel(SECONDS)}`);
@@ -419,17 +419,17 @@ const delaySurvivesRestart = async () => {
   const deadline = sentAt + (SECONDS + 30) * 1000;
   while (Date.now() < deadline && arrivals.length === 0) {
     await sleep(1000);
-    const c = await amqp.connect(BROKER).catch(() => undefined);
-    const ch2 = await c?.createChannel().catch(() => undefined);
-    const got = await ch2?.get(queue, { noAck: true }).catch(() => false);
+    const c = await connect(BROKER).catch(() => undefined);
+    const ch2 = await c?.channel().catch(() => undefined);
+    const got = await ch2?.basicGet(queue, { noAck: true }).catch(() => null);
     if (got) arrivals.push(Date.now() - sentAt);
     await c?.close().catch(() => {});
   }
   await sleep(3000);
-  const c = await amqp.connect(BROKER);
-  const ch3 = await c.createChannel();
-  const extra = (await ch3.checkQueue(queue)).messageCount;
-  await ch3.deleteQueue(queue);
+  const c = await connect(BROKER);
+  const ch3 = await c.channel();
+  const extra = (await inspect(ch3, queue)).messageCount;
+  await ch3.queueDelete(queue);
   await c.close();
   const at = arrivals[0];
   const pass = arrivals.length === 1 && extra === 0 && at >= SECONDS * 1000 - 1500 && at <= SECONDS * 1000 + 4000;

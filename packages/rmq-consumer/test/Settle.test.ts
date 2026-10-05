@@ -1,6 +1,6 @@
 import { Cause, Exit } from "effect";
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { Halted, Rejected } from "../src/Dependency.ts";
 import type { Stop } from "../src/Dependency.ts";
 import { decide, settle } from "../src/Settle.ts";

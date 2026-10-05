@@ -2,19 +2,15 @@
   "name": "@egress/rmq",
   "private": true,
   "type": "module",
-  "description": "Effect wrapper over amqplib (AMQP 0-9-1) plus the generic work-queue naming/options a producer and a competing-consumer fleet share.",
+  "description": "Effect wrapper over @cloudamqp/amqp-client (AMQP 0-9-1) plus the generic work-queue naming/options a producer and a competing-consumer fleet share.",
   "exports": {
     "./Client.ts": "./src/Client.ts",
     "./WorkQueue.ts": "./src/WorkQueue.ts",
     "./DelayedDelivery.ts": "./src/DelayedDelivery.ts",
     "./Trace.ts": "./src/Trace.ts"
   },
-  "scripts": {
-    "test": "node --test 'test/*.test.ts'",
-    "test:rmq": "node --test 'test/integration/*.test.ts'"
-  },
   "dependencies": {
-    "amqplib": "^2.2.0",
+    "@cloudamqp/amqp-client": "4.1.1",
     "effect": "catalog:"
   },
   "devDependencies": {

@@ -1,12 +1,20 @@
-import * as amqp from "amqplib";
-import { Effect, Exit, Option as O, Scope } from "effect";
+import { Effect, Exit, Fiber, Option as O, Scope } from "effect";
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import { carry, isUnroutable, makeRmq, Rmq, RmqError } from "../../src/Client.ts";
 import type { Consumer } from "../../src/Client.ts";
 import { assertSupportedRabbitMqVersion } from "../../src/RabbitMqVersion.ts";
 import { TRACEPARENT } from "../../src/Trace.ts";
-import { broker, brokerExec, skipIfNoDocker, startBroker, stopBroker, waitFor } from "./harness.ts";
+import {
+  broker,
+  brokerExec,
+  restartBroker,
+  skipIfNoDocker,
+  startBroker,
+  stopBroker,
+  text,
+  waitFor
+} from "./harness.ts";
 
 /**
  * The broker- and channel-level properties the daemon fleet is built on, each pinned against a real RabbitMQ.
@@ -14,39 +22,59 @@ import { broker, brokerExec, skipIfNoDocker, startBroker, stopBroker, waitFor } 
  * owns which broker and how the skip works.
  */
 
-before(startBroker);
-after(stopBroker);
+beforeAll(startBroker);
+afterAll(stopBroker);
 
 const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(
     Effect.scoped(Effect.provide(program, Rmq.layer({ host: broker.host, port: broker.port }))) as Effect.Effect<A>
   );
 
-test("amqplib exposes the RabbitMQ version over AMQP without the Management API", async (t) => {
+test("the broker's version is read from connection.start, without the Management API", async (t) => {
   if (skipIfNoDocker(t)) return;
 
-  const connection = await amqp.connect({
-    protocol: "amqp",
-    hostname: broker.host,
-    port: broker.port,
-    username: "guest",
-    password: "guest"
-  });
+  // `makeRmq` fails on a broker it cannot read a supported version from, so connecting at all is the proof; the
+  // version itself is pinned against the image the harness runs.
+  await run(Effect.void);
+  const version = (await brokerExec(["rabbitmqctl", "version"]) as { readonly output: string; }).output.trim();
+  assert.match(version, /^\d+\.\d+\.\d+$/);
+  assert.doesNotThrow(() => assertSupportedRabbitMqVersion(version));
+});
+
+/**
+ * The broker's frames are read through a subclass that takes the version from the first one. A heartbeat is 8
+ * bytes; reading it as if it were that first frame threw inside the socket's data handler, which no caller can
+ * catch: the process died on the first heartbeat of an idle connection.
+ */
+test("an idle connection survives the broker's heartbeats", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const crashes: Array<unknown> = [];
+  const onUncaught = (error: unknown) => void crashes.push(error);
+  process.on("uncaughtException", onUncaught);
   try {
-    const { product, version } = connection.connection.serverProperties;
-    assert.equal(product, "RabbitMQ");
-    assert.match(version, /^\d+\.\d+\.\d+$/);
-    assert.doesNotThrow(() => assertSupportedRabbitMqVersion(version));
+    const connected = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function*() {
+          const rmq = yield* Rmq;
+          // A 1s heartbeat: the broker sends one about every half second.
+          yield* Effect.sleep("3500 millis");
+          return yield* rmq.isConnected;
+        }).pipe(Effect.provide(Rmq.layer({ host: broker.host, port: broker.port, heartbeat: 1 })))
+      ) as Effect.Effect<boolean>
+    );
+    assert.equal(connected, true);
   } finally {
-    await connection.close();
+    process.off("uncaughtException", onUncaught);
   }
+  assert.deepEqual(crashes.map(String), [], "no heartbeat escaped as an uncaught exception");
 });
 
 test("concurrent publisher creation routes each message to its own binding", async (t) => {
   if (skipIfNoDocker(t)) return;
 
   const apis = ["alpha", "beta", "gamma"];
-  const received: Record<string, string[]> = { alpha: [], beta: [], gamma: [] };
+  const received: Record<string, Array<string>> = { alpha: [], beta: [], gamma: [] };
 
   await run(
     Effect.gen(function*() {
@@ -55,7 +83,7 @@ test("concurrent publisher creation routes each message to its own binding", asy
       for (const api of apis) {
         const q = yield* rmq.declareQueue(`pub.${api}`);
         yield* rmq.bind(`key.${api}`, exchange, q);
-        yield* rmq.consume(`pub.${api}`, (body) => void received[api]!.push(body.toString()));
+        yield* rmq.consume(`pub.${api}`, (body) => void received[api]!.push(text(body)));
       }
 
       // Publishers created concurrently must each keep their own routing key.
@@ -80,7 +108,7 @@ test("concurrent consumer creation binds each consumer to its own queue", async 
   if (skipIfNoDocker(t)) return;
 
   const queues = ["con.one", "con.two", "con.three"];
-  const received: Record<string, string[]> = { "con.one": [], "con.two": [], "con.three": [] };
+  const received: Record<string, Array<string>> = { "con.one": [], "con.two": [], "con.three": [] };
 
   await run(
     Effect.gen(function*() {
@@ -89,7 +117,7 @@ test("concurrent consumer creation binds each consumer to its own queue", async 
 
       // Consumers registered concurrently must each keep their own queue.
       yield* Effect.all(
-        queues.map((q) => rmq.consume(q, (body) => void received[q]!.push(body.toString()))),
+        queues.map((q) => rmq.consume(q, (body) => void received[q]!.push(text(body)))),
         { concurrency: "unbounded" }
       );
 
@@ -119,7 +147,7 @@ test("a publisher's declared content type and encoding reach the consumer, and a
       yield* rmq.consume(
         queue,
         (body, d) =>
-          void seen.push({ body: body.toString(), contentType: d.contentType, contentEncoding: d.contentEncoding })
+          void seen.push({ body: text(body), contentType: d.contentType, contentEncoding: d.contentEncoding })
       );
       const declares = yield* rmq.publisherToQueue(queue, { contentType: "application/json", contentEncoding: "gzip" });
       yield* rmq.send(declares, "declared");
@@ -141,9 +169,9 @@ test("bytes arrive as sent, and a message moved with `carry` keeps its bytes, fo
   const from = `bytes.from.${Date.now()}`;
   const to = `bytes.to.${Date.now()}`;
   // Not UTF-8: a text round trip would turn these into replacement characters.
-  const gzipped = Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0xff, 0xfe, 0x00, 0x80]);
+  const gzipped = Uint8Array.of(0x1f, 0x8b, 0x08, 0x00, 0xff, 0xfe, 0x00, 0x80);
   const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
-  const consumed: Array<Buffer> = [];
+  const consumed: Array<Uint8Array> = [];
 
   const moved = await run(
     Effect.gen(function*() {
@@ -162,14 +190,15 @@ test("bytes arrive as sent, and a message moved with `carry` keeps its bytes, fo
       yield* Effect.promise(() => new Promise((r) => setTimeout(r, 300)));
       const arrived = O.getOrThrow(yield* rmq.get(to));
       yield* arrived.ack;
-      yield* rmq.consume(to, (body) => void consumed.push(body));
+      // Copied: a driver may hand out a view of its own (pooled) buffer.
+      yield* rmq.consume(to, (body) => void consumed.push(Uint8Array.from(body)));
       yield* rmq.send(yield* rmq.publisherToQueue(to), gzipped);
       yield* Effect.promise(() => new Promise((r) => setTimeout(r, 500)));
       return arrived;
     })
   );
 
-  assert.deepEqual(moved.body, gzipped);
+  assert.deepEqual(Uint8Array.from(moved.body), gzipped);
   assert.deepEqual([moved.contentType, moved.contentEncoding, moved.type], [
     O.some("application/json"),
     O.some("gzip"),
@@ -236,7 +265,7 @@ test("sendBatch delivers every message in order, each with its own message id", 
     Effect.gen(function*() {
       const rmq = yield* Rmq;
       yield* rmq.declareQueue(queue);
-      yield* rmq.consume(queue, (body, d) => void seen.push({ body: body.toString(), messageId: d.messageId }));
+      yield* rmq.consume(queue, (body, d) => void seen.push({ body: text(body), messageId: d.messageId }));
       yield* rmq.sendBatch(yield* rmq.publisherToQueue(queue), messages);
       yield* waitFor(() => seen.length >= messages.length);
     })
@@ -290,7 +319,7 @@ test("a handler that throws dead-letters the delivery instead of acknowledging i
   const stamp = Date.now();
   const work = `throws.${stamp}`;
   const dead = `throws.${stamp}.dead`;
-  const deadLettered: string[] = [];
+  const deadLettered: Array<string> = [];
 
   await run(
     Effect.gen(function*() {
@@ -299,7 +328,7 @@ test("a handler that throws dead-letters the delivery instead of acknowledging i
       yield* rmq.declareQueue(work, {
         args: { "x-dead-letter-exchange": "", "x-dead-letter-routing-key": dead }
       });
-      yield* rmq.consume(dead, (body) => void deadLettered.push(body.toString()));
+      yield* rmq.consume(dead, (body) => void deadLettered.push(text(body)));
       yield* rmq.consume(work, () => {
         throw new Error("boom");
       });
@@ -322,7 +351,7 @@ test("a consumer keeps acknowledging while the client's publishing connection is
   const stamp = Date.now();
   const inbox = `alarm.in.${stamp}`;
   const outbox = `alarm.out.${stamp}`;
-  const received: string[] = [];
+  const received: Array<string> = [];
   const settled = { publish: false };
 
   await run(
@@ -344,7 +373,7 @@ test("a consumer keeps acknowledging while the client's publishing connection is
         );
         yield* Effect.promise(() => new Promise((r) => setTimeout(r, 2000)));
 
-        yield* rmq.consume(inbox, (body) => void received.push(body.toString()), { prefetch: 2 });
+        yield* rmq.consume(inbox, (body) => void received.push(text(body)), { prefetch: 2 });
         yield* Effect.promise(() => new Promise((r) => setTimeout(r, 3000)));
         assert.equal(settled.publish, false, "the alarm should be holding the publish");
         assert.equal(received.length, 12, "every message should be delivered and acknowledged despite the alarm");
@@ -356,23 +385,23 @@ test("a consumer keeps acknowledging while the client's publishing connection is
 });
 
 /**
- * Recovery, and the half of it amqplib does not do: `recovery` reopens the socket and stops there, so a client
- * that leaned on it alone would come back connected and consuming nothing. `@egress/rmq` records what it was
- * asked to build and rebuilds it in amqplib's `setup` hook. The connection is killed from the broker side, not
+ * Recovery: the client reconnects nothing on its own, and a reconnect alone would come back connected and
+ * consuming nothing. `@egress/rmq` reconnects, and records what it was asked to build and rebuilds it in `setup`
+ * on every new connection. The connection is killed from the broker side, not
  * by restarting the container, so the test measures recovery rather than Docker.
  */
 test("a killed connection comes back with its consumers still registered", async (t) => {
   if (skipIfNoDocker(t)) return;
 
   const queue = `recover.${Date.now()}`;
-  const seen: string[] = [];
+  const seen: Array<string> = [];
 
   await run(
     Effect.gen(function*() {
       const rmq = yield* Rmq;
       yield* rmq.declareQueue(queue, { durable: true });
       const pub = yield* rmq.publisherToQueue(queue);
-      yield* rmq.consume(queue, (body) => void seen.push(body.toString()));
+      yield* rmq.consume(queue, (body) => void seen.push(text(body)));
 
       yield* rmq.send(pub, "before");
       yield* waitFor(() => seen.length >= 1);
@@ -395,19 +424,19 @@ test("a killed connection comes back with its consumers still registered", async
   );
 });
 
-/** `resetConnection` destroys the socket from our side; that only helps if amqplib notices and recovers. */
+/** `resetConnection` destroys the socket from our side; that only helps if the client notices and recovers. */
 test("resetConnection drops the connection and the client recovers from it", async (t) => {
   if (skipIfNoDocker(t)) return;
 
   const queue = `reset.${Date.now()}`;
-  const seen: string[] = [];
+  const seen: Array<string> = [];
 
   await run(
     Effect.gen(function*() {
       const rmq = yield* Rmq;
       yield* rmq.declareQueue(queue, { durable: true });
       const pub = yield* rmq.publisherToQueue(queue);
-      yield* rmq.consume(queue, (body) => void seen.push(body.toString()));
+      yield* rmq.consume(queue, (body) => void seen.push(text(body)));
 
       yield* rmq.send(pub, "before");
       yield* waitFor(() => seen.length >= 1);
@@ -431,7 +460,7 @@ test("resetConnection drops the connection and the client recovers from it", asy
 });
 
 /**
- * amqplib recovers connections, not channels. A channel that dies alone (protocol error, deleted queue, settle
+ * Recovery is of connections, not channels. A channel that dies alone (protocol error, deleted queue, settle
  * on a known tag) takes its consumer with it and leaves the connection healthy, so the handle the caller holds
  * still looks live while the process goes deaf.
  */
@@ -439,20 +468,21 @@ test("a consumer whose channel dies alone is put back", async (t) => {
   if (skipIfNoDocker(t)) return;
 
   const queue = `channel-death.${Date.now()}`;
-  const seen: string[] = [];
+  const seen: Array<string> = [];
 
   await run(
     Effect.gen(function*() {
       const rmq = yield* Rmq;
       yield* rmq.declareQueue(queue, {});
       const pub = yield* rmq.publisherToQueue(queue);
-      const consumer = yield* rmq.consume(queue, (body) => void seen.push(body.toString()));
+      const consumer = yield* rmq.consume(queue, (body) => void seen.push(text(body)));
 
       yield* rmq.send(pub, "before");
       yield* waitFor(() => seen.length >= 1);
 
-      // Exactly what a channel-level error does, without needing to provoke one.
-      yield* Effect.promise(() => consumer.channel.close().then(() => {}, () => {}));
+      // A channel-level error: acknowledging a delivery tag the channel never handed out makes the broker close
+      // the channel (406 PRECONDITION_FAILED) and leaves the connection up.
+      yield* Effect.promise(() => consumer.channel.basicAck(999_999).then(() => {}, () => {}));
 
       yield* rmq.send(pub, "after");
       yield* waitFor(() => seen.length >= 2);
@@ -470,17 +500,17 @@ test("a consumer on a queue that never delivers is still repaired", async (t) =>
   if (skipIfNoDocker(t)) return;
 
   const queue = `idle-election.${Date.now()}`;
-  const seen: string[] = [];
+  const seen: Array<string> = [];
 
   await run(
     Effect.gen(function*() {
       const rmq = yield* Rmq;
       yield* rmq.declareQueue(queue, { durable: true });
       const pub = yield* rmq.publisherToQueue(queue);
-      const consumer = yield* rmq.consume(queue, (body) => void seen.push(body.toString()));
+      const consumer = yield* rmq.consume(queue, (body) => void seen.push(text(body)));
 
       for (let i = 0; i < 6; i++) {
-        yield* Effect.promise(() => consumer.channel.close().then(() => {}, () => {}));
+        yield* Effect.promise(() => consumer.channel.basicAck(999_999).then(() => {}, () => {}));
         yield* waitFor(() => false, 400);
       }
 
@@ -501,14 +531,14 @@ test("a consumer closed on purpose is not resurrected by a reconnect", async (t)
   if (skipIfNoDocker(t)) return;
 
   const queue = `retired.${Date.now()}`;
-  const seen: string[] = [];
+  const seen: Array<string> = [];
 
   await run(
     Effect.gen(function*() {
       const rmq = yield* Rmq;
       yield* rmq.declareQueue(queue, { durable: true });
       const pub = yield* rmq.publisherToQueue(queue);
-      const consumer = yield* rmq.consume(queue, (body) => void seen.push(body.toString()));
+      const consumer = yield* rmq.consume(queue, (body) => void seen.push(text(body)));
 
       yield* rmq.send(pub, "before");
       yield* waitFor(() => seen.length >= 1);
@@ -556,8 +586,8 @@ test("a poisoned publish channel reopens rather than ending publishing", async (
 
       yield* rmq.send(good, "after the error");
 
-      const received: string[] = [];
-      yield* rmq.consume(queue, (body) => void received.push(body.toString()));
+      const received: Array<string> = [];
+      yield* rmq.consume(queue, (body) => void received.push(text(body)));
       yield* waitFor(() => received.length >= 2);
       return received;
     })
@@ -583,7 +613,7 @@ test("x-single-active-consumer elects one consumer and promotes another when it 
 
       const consumers: Record<string, Awaited<ReturnType<typeof Effect.runPromise>>> = {};
       for (const id of ["a", "b", "c"]) {
-        consumers[id] = yield* rmq.consume(queue, (body) => void received.push({ id, body: body.toString() }));
+        consumers[id] = yield* rmq.consume(queue, (body) => void received.push({ id, body: text(body) }));
       }
 
       const pub = yield* rmq.publisherToQueue(queue);
@@ -613,7 +643,7 @@ test("closing a consumer stops delivery without closing the connection", async (
   if (skipIfNoDocker(t)) return;
 
   const queue = "cancel.work";
-  const received: string[] = [];
+  const received: Array<string> = [];
 
   await run(
     Effect.gen(function*() {
@@ -621,7 +651,7 @@ test("closing a consumer stops delivery without closing the connection", async (
       yield* rmq.declareQueue(queue);
       const pub = yield* rmq.publisherToQueue(queue);
 
-      const consumer = yield* rmq.consume(queue, (body) => void received.push(body.toString()));
+      const consumer = yield* rmq.consume(queue, (body) => void received.push(text(body)));
       for (let i = 0; i < 3; i++) yield* rmq.send(pub, `before-${i}`);
       yield* Effect.promise(() => new Promise((r) => setTimeout(r, 800)));
       assert.equal(received.length, 3, "consumer receives while open");
@@ -633,7 +663,7 @@ test("closing a consumer stops delivery without closing the connection", async (
       assert.equal(received.length, 3, "nothing is delivered while cancelled");
 
       // And this is what recovery does — on the same, still-open connection.
-      yield* rmq.consume(queue, (body) => void received.push(body.toString()));
+      yield* rmq.consume(queue, (body) => void received.push(text(body)));
       yield* Effect.promise(() => new Promise((r) => setTimeout(r, 800)));
       assert.equal(received.length, 6, "the queued messages arrive once consuming resumes");
     })
@@ -734,7 +764,7 @@ test("get is a non-blocking fetch: empty returns None, and an unsettled message 
 
       const first = yield* rmq.get(queue);
       assert.equal(O.isSome(first), true);
-      assert.equal(O.getOrThrow(first).body.toString(), "token");
+      assert.equal(text(O.getOrThrow(first).body), "token");
 
       // Fetched but not yet settled: a second get must not see it too — get
       // is exclusive access to the one message, not a peek.
@@ -781,4 +811,44 @@ test("x-max-length counts only ready messages: a token held unacked lets a secon
       yield* only.ack;
     })
   );
+});
+
+/**
+ * A confirm the client waits on only once the publish's own socket write has finished: a broker that shuts down with
+ * writes still queued closes the channel first, and the client rejected that confirm before anything handled it.
+ * Nothing could catch it — the process died of an unhandled rejection, on every runtime (patched in
+ * `patches/@cloudamqp__amqp-client@4.1.1.patch`). Last in the file, because it restarts the broker.
+ */
+test("a broker shutdown with publishes still being written fails them, not the process", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const queue = `shutdown.${Date.now()}`;
+  const unhandled: Array<unknown> = [];
+  const onUnhandled = (reason: unknown) => void unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  let failed = 0;
+  try {
+    await run(
+      Effect.gen(function*() {
+        const rmq = yield* Rmq;
+        yield* rmq.declareQueue(queue, { durable: true });
+        const pub = yield* rmq.publisherToQueue(queue);
+        // Large bodies, many at once: enough that writes are still queued on the socket when the broker goes.
+        const body = new Uint8Array(32 * 1024);
+        const wave = Effect.forEach(
+          Array.from({ length: 500 }),
+          () => rmq.send(pub, body).pipe(Effect.catch(() => Effect.sync(() => void failed++))),
+          { concurrency: "unbounded", discard: true }
+        );
+        const publishing = yield* Effect.forkChild(Effect.forever(wave));
+        yield* Effect.sleep("1 second");
+        yield* Effect.promise(() => restartBroker());
+        yield* Fiber.interrupt(publishing);
+      })
+    );
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+  assert.ok(failed > 0, "the shutdown must have caught publishes in flight, or this proves nothing");
+  assert.deepEqual(unhandled.map(String), [], "no publish's failure escaped as an unhandled rejection");
 });

@@ -1,6 +1,6 @@
 import { Effect, Option as O } from "effect";
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import { Rmq } from "../../src/Client.ts";
 import { TRACEPARENT } from "../../src/Trace.ts";
 import {
@@ -10,17 +10,17 @@ import {
   workQueueFor,
   workQueueOptions
 } from "../../src/WorkQueue.ts";
-import { broker, restartBroker, skipIfNoDocker, startBroker, stopBroker, waitFor } from "./harness.ts";
+import { broker, restartBroker, skipIfNoDocker, startBroker, stopBroker, text, waitFor } from "./harness.ts";
 
 /**
  * Dead-lettering: what a rejection does, what it carries, and what survives a republish. A separate file from
- * Client.test.ts on purpose: node runs each test file in its own process, so this gets its own broker, and
+ * Client.test.ts on purpose: Vitest runs each test file in isolation, so this gets its own broker, and
  * sharing one with the stranding test is not viable (its stranded consumers leave the broker unreliable at
  * dead-lettering).
  */
 
-before(startBroker);
-after(stopBroker);
+beforeAll(startBroker);
+afterAll(stopBroker);
 
 const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(
@@ -47,12 +47,12 @@ test("a rejected delivery dead-letters, and a classic queue counts no attempts",
         args: { "x-dead-letter-exchange": "", "x-dead-letter-routing-key": dead }
       });
 
-      const deadLettered: string[] = [];
-      yield* rmq.consume(dead, (body) => void deadLettered.push(body.toString()));
+      const deadLettered: Array<string> = [];
+      yield* rmq.consume(dead, (body) => void deadLettered.push(text(body)));
 
       // Released a fixed number of times, then rejected. `seen` is an in-process counter because the broker-side one
       // is what is under test, and it stops this looping forever if delivery_count never moves.
-      const counts: number[] = [];
+      const counts: Array<number> = [];
       let seen = 0;
       yield* rmq.consume(work, (_body, delivery) => {
         counts.push(delivery.deliveryCount);
@@ -106,7 +106,7 @@ test("a dead-lettered message says which queue it came from", async (t) => {
 
       const seen: Array<{ body: string; queue: string | null; reason: string | null; }> = [];
       yield* rmq.consume(dead, (bytes, delivery) => {
-        const body = bytes.toString();
+        const body = text(bytes);
         seen.push({
           body,
           queue: O.getOrUndefined(delivery.deadLetter)?.queue ?? null,
@@ -210,8 +210,8 @@ test("a durable queue keeps its messages across a broker restart", async (t) => 
       // identical to a healthy one from the outside.
       yield* rmq.declareQueue(durable, { durable: true });
 
-      const kept: string[] = [];
-      yield* rmq.consume(durable, (body) => void kept.push(body.toString()));
+      const kept: Array<string> = [];
+      yield* rmq.consume(durable, (body) => void kept.push(text(body)));
       yield* waitFor(() => kept.length >= 5);
       return kept;
     })
@@ -246,13 +246,13 @@ test("a traceparent survives dead-lettering, and only a republish that carries i
       yield* rmq.declareQueue(work, workQueueOptions(apiId));
       const into = yield* rmq.publisherToQueue(work);
 
-      const onDead: boolean[] = [];
+      const onDead: Array<boolean> = [];
       const replayed: Array<{ how: string; parent: boolean; }> = [];
 
       // Two independent messages, each dead-lettered once and replayed once: one alone, one carrying the header.
       const deadSeen = new Map<string, number>();
       yield* rmq.consume(dead, (bytes, delivery) => {
-        const body = bytes.toString();
+        const body = text(bytes);
         const n = (deadSeen.get(body) ?? 0) + 1;
         deadSeen.set(body, n);
         if (n > 1) return "accept" as const;
@@ -263,7 +263,7 @@ test("a traceparent survives dead-lettering, and only a republish that carries i
 
       const workSeen = new Map<string, number>();
       yield* rmq.consume(work, (bytes, delivery) => {
-        const body = bytes.toString();
+        const body = text(bytes);
         const n = (workSeen.get(body) ?? 0) + 1;
         workSeen.set(body, n);
         if (n === 2) replayed.push({ how: body, parent: O.isSome(delivery.parent) });
@@ -317,7 +317,7 @@ test("a message id survives dead-lettering, and only a redrive republish that ca
       // Two messages, each dead-lettered once and replayed once: one carrying the id, one dropping it (a careless republish).
       const deadSeen = new Map<string, number>();
       yield* rmq.consume(dead, (bytes, delivery) => {
-        const body = bytes.toString();
+        const body = text(bytes);
         const n = (deadSeen.get(body) ?? 0) + 1;
         deadSeen.set(body, n);
         if (n > 1) return "accept" as const;
@@ -328,7 +328,7 @@ test("a message id survives dead-lettering, and only a redrive republish that ca
 
       const workSeen = new Map<string, number>();
       yield* rmq.consume(work, (bytes, delivery) => {
-        const body = bytes.toString();
+        const body = text(bytes);
         const n = (workSeen.get(body) ?? 0) + 1;
         workSeen.set(body, n);
         if (n === 2) replayed.push({ how: body, id: delivery.messageId });
@@ -366,10 +366,10 @@ test("the work queue parks a message at the delivery limit, and a redrive republ
       yield* rmq.declareQueue(work, workQueueOptions(apiId));
       const into = yield* rmq.publisherToQueue(work);
 
-      const parked: string[] = [];
+      const parked: Array<string> = [];
       let replayed = false;
       yield* rmq.consume(dead, (bytes, delivery) => {
-        const body = bytes.toString();
+        const body = text(bytes);
         parked.push(O.getOrUndefined(delivery.deadLetter)?.reason ?? "unknown");
         if (replayed) return "accept" as const;
         replayed = true;
@@ -377,7 +377,7 @@ test("the work queue parks a message at the delivery limit, and a redrive republ
         return Effect.runPromise(rmq.send(into, body)).then(() => "accept" as const);
       });
 
-      const attempts: number[] = [];
+      const attempts: Array<number> = [];
       yield* rmq.send(into, "unit-of-work");
       yield* rmq.consume(work, (_body, delivery) => {
         attempts.push(delivery.deliveryCount);
@@ -435,8 +435,8 @@ test("the dead-letter queue keeps a message through more returns than a default 
         yield* rmq.closeConsumer(consumer);
       }
 
-      const received: string[] = [];
-      yield* rmq.consume(dead, (body) => void received.push(body.toString()));
+      const received: Array<string> = [];
+      yield* rmq.consume(dead, (body) => void received.push(text(body)));
       yield* waitFor(() => received.length > 0);
       return received;
     })

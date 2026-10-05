@@ -2,14 +2,14 @@ import { Rmq } from "@egress/rmq/Client.ts";
 import { deadLetterQueueFor, deadLetterQueueOptions, workQueueFor, workQueueOptions } from "@egress/rmq/WorkQueue.ts";
 import { Effect, Option as O, Result, Schema } from "effect";
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import { broker, skipIfNoDocker, startBroker, stopBroker, waitFor } from "../../../rmq/test/integration/harness.ts";
 import { runApplication } from "../../src/consumer.ts";
 import * as Dependency from "../../src/Dependency.ts";
 import * as Negotiation from "../../src/Negotiation.ts";
 
-before(startBroker);
-after(stopBroker);
+beforeAll(startBroker);
+afterAll(stopBroker);
 
 const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(
@@ -21,7 +21,7 @@ test("a failed call opens the real consumer breaker until its delayed probe succ
 
   const key = "breaker-probe";
   const attempts: Array<{ body: string; deliveryCount: number; at: number; }> = [];
-  const completed: string[] = [];
+  const completed: Array<string> = [];
   const upstream = Dependency.make("upstream", {
     breakerPolicy: () => {
       let failures = 0;

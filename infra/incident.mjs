@@ -11,7 +11,7 @@
 //                                                       # RATE_PER_SECOND above that ceiling
 //
 // Assumes `docker compose up -d` is already running.
-import { createRequire } from "node:module";
+import { connect, inspect } from "./amqp.mjs";
 
 const BROKER = process.env.BROKER ?? "amqp://guest:guest@rabbitmq:5672";
 const FLAKY_UPSTREAM = process.env.FLAKY_UPSTREAM ?? "http://flaky-upstream:8080";
@@ -39,10 +39,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // 5s, so a read at the moment the outage ends can be seconds stale. A passive declare answers from the queue's own
 // state; it counts ready messages only, and the unacked few (at most a prefetch window) finish within a round trip
 // of the third party coming back.
-const amqp = createRequire(new URL("../packages/rmq/package.json", import.meta.url))("amqplib");
-const connection = await amqp.connect(BROKER);
-const channel = await connection.createChannel();
-const queueDepth = async (name) => ({ ready: (await channel.checkQueue(name)).messageCount });
+const connection = await connect(BROKER);
+const channel = await connection.channel();
+const queueDepth = async (name) => ({ ready: (await inspect(channel, name)).messageCount });
 
 const STATE_NAME = ["CLOSED", "OPEN", "HALF_OPEN"];
 

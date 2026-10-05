@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { AdaptiveLimit } from "../src/Limiter.ts";
 
 const make = (over: Partial<ConstructorParameters<typeof AdaptiveLimit>[0]> = {}) =>

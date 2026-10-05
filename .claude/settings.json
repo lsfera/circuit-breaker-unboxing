@@ -1,6 +1,7 @@
 {
   "attribution": {
-    "commit": ""
+    "commit": "",
+    "pr": ""
   },
   "env": {
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "55"

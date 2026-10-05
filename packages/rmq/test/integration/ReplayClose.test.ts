@@ -1,18 +1,15 @@
 import { Effect } from "effect";
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import { Rmq } from "../../src/Client.ts";
-import { broker, brokerExec, skipIfNoDocker, startBroker, stopBroker, waitFor } from "./harness.ts";
+import { broker, brokerExec, skipIfNoDocker, startBroker, stopBroker, text, waitFor } from "./harness.ts";
 
 /**
- * The gap this guards: amqplib's recovery opens a new connection and runs the
- * setup hook (topology replay) before it listens for that connection's
- * `error`. A broker that closes the connection during the replay emits
- * `error` with no listener, which Node throws, and the process exits instead
- * of scheduling another attempt.
+ * The gap this guards: a reconnect runs `setup` (topology replay) on a connection nobody is listening to yet. A
+ * broker that fails the connection during the replay must make that attempt fail and another be scheduled; under
+ * amqplib it emitted `error` with no listener, which Node throws, and the process exited.
  *
- * A broker's own close (CONNECTION_FORCED) is not an `error` in amqplib, so
- * this uses one that is: a missed heartbeat. The broker closes every
+ * The failure is a missed heartbeat. The broker closes every
  * connection, then suspends whichever connections open next, a few
  * milliseconds in, so the client's replay stalls and its 1s heartbeat (set
  * here, shorter than the default, to fit the window) fails
@@ -20,20 +17,20 @@ import { broker, brokerExec, skipIfNoDocker, startBroker, stopBroker, waitFor } 
  * reconnecting afterwards: a publish goes through.
  */
 
-before(startBroker);
-after(stopBroker);
+beforeAll(startBroker);
+afterAll(stopBroker);
 
 const QUEUES = 400;
 
 test("a connection the broker closes during topology replay is reconnected, not a crash", async (t) => {
   if (skipIfNoDocker(t)) return;
 
-  const crashes: unknown[] = [];
+  const crashes: Array<unknown> = [];
   const onUncaught = (error: unknown) => void crashes.push(error);
   process.on("uncaughtException", onUncaught);
 
   const prefix = `replay.${Date.now()}`;
-  const seen: string[] = [];
+  const seen: Array<string> = [];
   try {
     await Effect.runPromise(
       Effect.scoped(
@@ -46,7 +43,7 @@ test("a connection the broker closes during topology replay is reconnected, not 
               { discard: true }
             );
             const last = `${prefix}.${QUEUES - 1}`;
-            yield* rmq.consume(last, (body) => void seen.push(body.toString()));
+            yield* rmq.consume(last, (body) => void seen.push(text(body)));
             const pub = yield* rmq.publisherToQueue(last);
 
             yield* Effect.promise(() =>

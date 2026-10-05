@@ -1,6 +1,6 @@
 import { Option as O, Result, Schema } from "effect";
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { accept, bytes, read, text } from "../src/Negotiation.ts";
 
 /** Configured as packages/consumer configures it. */

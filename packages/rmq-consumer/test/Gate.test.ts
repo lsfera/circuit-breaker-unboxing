@@ -1,6 +1,6 @@
 import { Effect, Option as O } from "effect";
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { Registration } from "../src/Dependency.ts";
 import * as Gate from "../src/Gate.ts";
 

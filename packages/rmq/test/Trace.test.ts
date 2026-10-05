@@ -1,6 +1,6 @@
 import { Effect, Option as O } from "effect";
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { parentFrom, traceparent } from "../src/Trace.ts";
 
 const TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";

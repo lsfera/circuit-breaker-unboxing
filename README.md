@@ -266,6 +266,7 @@ import * as Consumer from "@egress/rmq-consumer";
 import { CircuitState, ConsecutiveBreaker, SamplingBreaker } from "cockatiel";
 import type { IBreaker } from "cockatiel";
 import type { BreakerPolicy, BreakerPolicyState } from "@egress/rmq-consumer";
+import { run } from "@egress/rmq-consumer/node";              // the one runtime-specific import
 import { Effect, Layer, Match, Result, Schema } from "effect";
 import { HttpClientError } from "effect/http";
 import { SqlError } from "effect/sql";
@@ -339,7 +340,7 @@ const payments = Consumer.For(Payment, json).bind(
 );
 const refunds = Consumer.For(Refund, json).bind(/* … */, [Database]);
 
-Consumer.run({
+run({
   consumers: { "payments-provider": payments, "refunds-provider": refunds },
   flags: { egressAddr, apiPath, databaseUrl },               // beside the SDK's, in one --help
   layer: ({ egressAddr, apiPath, databaseUrl }) =>
@@ -353,6 +354,21 @@ effects with `Effect.runPromise` inside the action. Add spans at meaningful
 boundaries (`Effect.withSpan` around the outbound HTTP request); Effect SQL
 provides spans for database calls.
 
+- **No runtime in the core.** `@egress/rmq-consumer` names no runtime, and
+  bodies are `Uint8Array`, not `Buffer`. `@egress/rmq-consumer/node` supplies
+  what a runtime must: the `/metrics` server (`platform`) and the process's main
+  (`run`, `launch`). An application that extends the command builds it with
+  `Consumer.command(app, platform)`. The broker client is
+  `@cloudamqp/amqp-client`, whose protocol code is plain `Uint8Array`. The fleet
+  and the `infra/` scripts run on Bun and Deno as well as node: with the
+  producers and five consumers on Bun 1.4.2 (`docker-compose.bun.yml`) or Deno
+  2.9.7 (`docker-compose.deno.yml`) and the harness run by the same runtime,
+  every graded scenario passes, nothing lost, as it does on node
+  (`docs/runs/chaos-breaker-node.json`, `docs/runs/chaos-breaker-bun.json`,
+  `docs/runs/chaos-breaker-deno.json`). The client is patched
+  (`patches/@cloudamqp__amqp-client@4.1.1.patch`): a broker that shut down with
+  confirmed publishes still being written left their rejections unhandled, which
+  ends the process on every runtime.
 - **Explicit reading and judging.** Negotiation has no default; each media type
   maps to a Schema over the body's bytes: `Consumer.text(schema)` for a text
   format, `Consumer.bytes(decode)` for a binary one. Parking and redrive
@@ -506,7 +522,7 @@ upstream on either the Compose network (`flaky-upstream:8080`) or the host
 ```
 packages/
   config/        settings declared once, decoded at boot
-  rmq/           amqplib in Effect, work-queue conventions, the delay chain
+  rmq/           @cloudamqp/amqp-client in Effect, work-queue conventions, the delay chain
   rmq-producer/  the load, in confirmed batches, JSON or protobuf (--format)
   rmq-consumer/  the SDK: Breaker, Dependency, Gate, Negotiation, Settle,
                  Permit, Redrive, Limiter, run by consumer.ts
@@ -528,5 +544,10 @@ docs/            the write-up, its media, saved runs
 pnpm run check       # vendored version, typecheck, unit tests
 pnpm run test:rmq    # needs Docker: RMQ client and consumer integration tests against a real broker
 ```
+
+Tests run on Vitest, under node, Bun or Deno: `test` and `test:rmq` have
+`:bun` and `:deno` variants (`test:rmq:deno`), and `test:runtimes` runs the
+unit suites on all three. The run's runtime names its projects
+(`unit:deno`), and a test worker on any other runtime fails the run.
 
 > [Main overview](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/main/README.md) | [Next: 05 · A platform control plane](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/05-platform-control-plane/README.md)

@@ -3,9 +3,9 @@ import { GenericContainer, Wait } from "testcontainers";
 import type { StartedTestContainer } from "testcontainers";
 
 /**
- * One RabbitMQ per test file, and one declaration of what "a RabbitMQ" is. Node runs each test file in its own
- * process, so each gets its own broker (see `DeadLetter.test.ts` for why sharing one is not viable), and the image
- * tag and wait strategy are declared once so two suites cannot silently test against different brokers.
+ * One RabbitMQ per test file, and one declaration of what "a RabbitMQ" is. Vitest runs each test file in isolation,
+ * so each gets its own broker (see `DeadLetter.test.ts` for why sharing one is not viable), and the image tag and
+ * wait strategy are declared once so two suites cannot silently test against different brokers.
  * Not named `*.test.ts`, so the runner's glob does not pick it up.
  */
 export const broker = { host: "", port: 0, available: false };
@@ -33,6 +33,9 @@ export const stopBroker = async (): Promise<void> => {
 
 let container: StartedTestContainer | null = null;
 
+/** A body read as UTF-8: bodies are `Uint8Array`, whose `toString` lists bytes rather than decoding them. */
+export const text = (body: Uint8Array): string => new TextDecoder().decode(body);
+
 /** Run a command inside the broker container — `rabbitmqctl`, in practice. */
 export const brokerExec = (command: ReadonlyArray<string>): Promise<unknown> => container!.exec([...command]);
 
@@ -47,7 +50,8 @@ export const restartBroker = async (settleMs = 3000): Promise<void> => {
   broker.port = container!.getMappedPort(5672);
 };
 
-export const skipIfNoDocker = (t: { skip: (reason: string) => void; }): boolean => {
+/** Vitest's `ctx.skip` throws, ending the test there; the `return` keeps the call sites' `if (...) return` honest. */
+export const skipIfNoDocker = (t: { skip: (note: string) => void; }): boolean => {
   if (broker.available) return false;
   t.skip("Docker is not available in this environment");
   return true;

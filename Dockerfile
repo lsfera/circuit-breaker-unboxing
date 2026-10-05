@@ -14,6 +14,8 @@ ARG NODE_IMAGE=node:26-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3
 FROM ${NODE_IMAGE} AS deps
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# pnpm-workspace.yaml's patchedDependencies, applied by the install below; a missing patch fails the install.
+COPY patches ./patches
 # Same pnpm the workspace pins in package.json#packageManager, read from it
 # rather than named twice. npm, not corepack: Node 25 stopped shipping corepack.
 RUN npm install --global "$(node -p 'require("./package.json").packageManager')" >/dev/null
@@ -27,6 +29,36 @@ COPY packages/rmq-producer/package.json packages/rmq-producer/
 COPY packages/tracing/package.json packages/tracing/
 # --prod drops typescript and testcontainers, which exist for `pnpm run check` and the opt-in integration suites.
 RUN pnpm install --frozen-lockfile --prod
+
+# ---------------------------------------------------------------------------
+# runtime-bun — the same dependencies and source, run by Bun instead of node: the SDK names no runtime, and this is
+# what checks it. Built only when asked for (`--target runtime-bun`, or docker-compose.bun.yml); `runtime` below
+# stays the default target.
+# ---------------------------------------------------------------------------
+FROM oven/bun:1.4.2-alpine AS runtime-bun
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=deps --chown=bun:bun /app/node_modules ./node_modules
+COPY --from=deps --chown=bun:bun /app/packages ./packages
+COPY --chown=bun:bun package.json pnpm-workspace.yaml ./
+COPY --chown=bun:bun packages ./packages
+USER bun
+CMD ["bun", "packages/consumer/src/main.ts"]
+
+# ---------------------------------------------------------------------------
+# runtime-deno — the same again, run by Deno. Deno reads package.json and the pnpm node_modules as they are, so the
+# stage adds nothing of its own. -A because node grants a process everything and this checks the SDK, not a
+# permission set. Built only when asked for (`--target runtime-deno`, or docker-compose.deno.yml).
+# ---------------------------------------------------------------------------
+FROM denoland/deno:alpine-2.9.7 AS runtime-deno
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=deps --chown=deno:deno /app/node_modules ./node_modules
+COPY --from=deps --chown=deno:deno /app/packages ./packages
+COPY --chown=deno:deno package.json pnpm-workspace.yaml ./
+COPY --chown=deno:deno packages ./packages
+USER deno
+CMD ["deno", "run", "-A", "packages/consumer/src/main.ts"]
 
 # ---------------------------------------------------------------------------
 # runtime — dependencies, then source. No build step, deliberately: every process runs TypeScript directly

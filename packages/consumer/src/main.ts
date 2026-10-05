@@ -1,13 +1,17 @@
 import { PgClient } from "@effect/sql-pg";
 import * as Consumer from "@egress/rmq-consumer";
 import type { BreakerPolicy, BreakerPolicyState } from "@egress/rmq-consumer";
+import { run } from "@egress/rmq-consumer/node";
 import { traceparent } from "@egress/rmq/Trace.ts";
 import { CircuitState, ConsecutiveBreaker, SamplingBreaker } from "cockatiel";
 import type { IBreaker } from "cockatiel";
-import { Config, Context, Effect, Layer, Match, Option as O, Redacted, Result, Schema } from "effect";
+import { Config, Context, Effect, Layer, Match, Option as O, Result, Schema } from "effect";
+import type { Redacted } from "effect";
 import { Flag } from "effect/cli";
-import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest } from "effect/http";
-import { SqlClient, SqlError } from "effect/sql";
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
+import type { HttpClientError } from "effect/http";
+import { SqlClient } from "effect/sql";
+import type { SqlError } from "effect/sql";
 import protobuf from "protobufjs";
 
 const adaptCockatiel = (make: () => IBreaker): () => BreakerPolicy => () => {
@@ -190,7 +194,7 @@ const refunds = Consumer.For(Refund, formats).bind(
   [Database]
 );
 
-Consumer.run({
+run({
   consumers: { "payments-provider": payments, "refunds-provider": refunds },
   flags: {
     egressAddr: Flag.String("egress-addr").pipe(

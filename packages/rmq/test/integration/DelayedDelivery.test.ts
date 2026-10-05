@@ -1,17 +1,18 @@
+import { AMQPClient } from "@cloudamqp/amqp-client";
 import { Effect } from "effect";
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import { Rmq } from "../../src/Client.ts";
 import * as Delay from "../../src/DelayedDelivery.ts";
-import { broker, skipIfNoDocker, startBroker, stopBroker, waitFor } from "./harness.ts";
+import { broker, skipIfNoDocker, startBroker, stopBroker, text, waitFor } from "./harness.ts";
 
 /**
  * The delay chain against a real broker: what arrives, where, and how late. Real time, because a broker's TTL
  * check is not something a fake clock can stand in for.
  */
 
-before(startBroker);
-after(stopBroker);
+beforeAll(startBroker);
+afterAll(stopBroker);
 
 const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(
@@ -35,8 +36,7 @@ test("a delayed message arrives once, at its own destination, no earlier than as
         Effect.gen(function*() {
           yield* rmq.declareQueue(queue);
           yield* Delay.receive(queue);
-          yield* rmq.consume(queue, (body) =>
-            void arrivals.push({ body: body.toString(), queue, at: Date.now() - sentAt }));
+          yield* rmq.consume(queue, (body) => void arrivals.push({ body: text(body), queue, at: Date.now() - sentAt }));
         }));
       yield* Effect.forEach(delays, (s) => Delay.sendDelayed("delay.a", s, `a:${s}`));
       yield* Delay.sendDelayed("delay.b", 2, "b:2");
@@ -45,13 +45,13 @@ test("a delayed message arrives once, at its own destination, no earlier than as
   );
 
   assert.equal(arrivals.length, 4, JSON.stringify(arrivals));
-  arrivals.forEach(({ body, queue, at }) => {
+  for (const { body, queue, at } of arrivals) {
     const [dest, seconds] = body.split(":");
     assert.equal(queue, `delay.${dest}`, "each message reaches only the queue it was addressed to");
     assert.ok(at >= Number(seconds) * 1000 - 100, `${body} arrived early: ${at}ms`);
-    console.log(`  ${body} arrived after ${at}ms`);
+    await t.annotate(`${body} arrived after ${at}ms`);
     assert.ok(at < Number(seconds) * 1000 + 3_000, `${body} arrived late: ${at}ms`);
-  });
+  }
 });
 
 test("a delay near a day is accepted into the top of the chain and holds there", async (t) => {
@@ -65,12 +65,12 @@ test("a delay near a day is accepted into the top of the chain and holds there",
       yield* Delay.receive("delay.day");
       yield* Delay.sendDelayed("delay.day", 86_400, "tomorrow");
       return yield* Effect.promise(async () => {
-        const { connect } = await import("amqplib");
-        const conn = await connect({ hostname: broker.host, port: broker.port });
-        const ch = await conn.createChannel();
-        const top = await ch.checkQueue(Delay.levelName(Delay.entryLevel(86_400)));
-        const dest = await ch.checkQueue("delay.day");
-        await conn.close();
+        const client = new AMQPClient(`amqp://${broker.host}:${broker.port}`);
+        await client.connect();
+        const ch = await client.channel();
+        const top = await ch.queueDeclare(Delay.levelName(Delay.entryLevel(86_400)), { passive: true });
+        const dest = await ch.queueDeclare("delay.day", { passive: true });
+        await client.close();
         return { top: top.messageCount, dest: dest.messageCount };
       });
     })

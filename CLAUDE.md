@@ -10,7 +10,7 @@ checkout.
 
 | Package | Responsibility |
 | --- | --- |
-| `packages/rmq` | Effect wrapper around `amqplib`, queue conventions, delayed delivery |
+| `packages/rmq` | Effect wrapper around `@cloudamqp/amqp-client`, queue conventions, delayed delivery |
 | `packages/rmq-consumer` | Consumer SDK: per-dependency breaker, probe permit, redrive, parking and metrics |
 | `packages/rmq-producer` | Publishes work; does not own breaker state |
 | `packages/consumer` | Example application using the consumer SDK |
@@ -29,6 +29,8 @@ dead-letter delay chain; the returning token permits a single-message probe.
 - `pnpm run check` fetches the pinned Effect source, checks vendored package
   versions, typechecks, and runs unit tests.
 - `pnpm run test:rmq` runs RabbitMQ integration tests and requires Docker.
+- Tests use Vitest (`vitest.config.ts`). `test` and `test:rmq` have `:bun`
+  and `:deno` variants; `test:runtimes` runs the unit suites on all three.
 - `pnpm run format` formats the workspace with dprint.
 - `pnpm run incident` runs the local outage scenario; see the root
   `README.md` for the Docker Compose environment.
