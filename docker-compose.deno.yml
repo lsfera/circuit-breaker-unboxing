@@ -1,0 +1,23 @@
+# The application fleet on Deno instead of node, over the same broker, database and monitoring:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.deno.yml up -d --build rmq-producer rmq-producer-refunds rmq-consumer
+#
+# Everything else in docker-compose.yml is unchanged.
+x-deno-build: &deno-build
+  context: .
+  dockerfile: Dockerfile
+  target: runtime-deno
+
+services:
+  rmq-producer:
+    image: egress-breaker:deno
+    build: *deno-build
+    command: deno run -A packages/rmq-producer/src/main.ts
+  rmq-producer-refunds:
+    image: egress-breaker:deno
+    build: *deno-build
+    command: deno run -A packages/rmq-producer/src/main.ts
+  rmq-consumer:
+    image: egress-breaker:deno
+    build: *deno-build
+    command: deno run -A packages/consumer/src/main.ts

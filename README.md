@@ -360,10 +360,15 @@ provides spans for database calls.
   (`run`, `launch`). An application that extends the command builds it with
   `Consumer.command(app, platform)`. The broker client is
   `@cloudamqp/amqp-client`, whose protocol code is plain `Uint8Array`. The fleet
-  and the `infra/` scripts run on Bun as well as node: with the producers and
-  five consumers on Bun 1.4.2 (`docker-compose.bun.yml`) and the harness run by
-  `bun infra/chaos-breaker.mjs`, every graded scenario passes, nothing lost
-  (`docs/runs/chaos-breaker-bun.json`).
+  and the `infra/` scripts run on Bun and Deno as well as node: with the
+  producers and five consumers on Bun 1.4.2 (`docker-compose.bun.yml`) or Deno
+  2.9.7 (`docker-compose.deno.yml`) and the harness run by the same runtime,
+  every graded scenario passes, nothing lost, as it does on node
+  (`docs/runs/chaos-breaker-node.json`, `docs/runs/chaos-breaker-bun.json`,
+  `docs/runs/chaos-breaker-deno.json`). The client is patched
+  (`patches/@cloudamqp__amqp-client@4.1.1.patch`): a broker that shut down with
+  confirmed publishes still being written left their rejections unhandled, which
+  ends the process on every runtime.
 - **Explicit reading and judging.** Negotiation has no default; each media type
   maps to a Schema over the body's bytes: `Consumer.text(schema)` for a text
   format, `Consumer.bytes(decode)` for a binary one. Parking and redrive

@@ -46,6 +46,21 @@ USER bun
 CMD ["bun", "packages/consumer/src/main.ts"]
 
 # ---------------------------------------------------------------------------
+# runtime-deno — the same again, run by Deno. Deno reads package.json and the pnpm node_modules as they are, so the
+# stage adds nothing of its own. -A because node grants a process everything and this checks the SDK, not a
+# permission set. Built only when asked for (`--target runtime-deno`, or docker-compose.deno.yml).
+# ---------------------------------------------------------------------------
+FROM denoland/deno:alpine-2.9.7 AS runtime-deno
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=deps --chown=deno:deno /app/node_modules ./node_modules
+COPY --from=deps --chown=deno:deno /app/packages ./packages
+COPY --chown=deno:deno package.json pnpm-workspace.yaml ./
+COPY --chown=deno:deno packages ./packages
+USER deno
+CMD ["deno", "run", "-A", "packages/consumer/src/main.ts"]
+
+# ---------------------------------------------------------------------------
 # runtime — dependencies, then source. No build step, deliberately: every process runs TypeScript directly
 # through node's type stripping, so the artifact and the thing developers run are the same files. The runtime
 # must therefore be a version whose stripping behaviour has actually been run, hence the digest above.
