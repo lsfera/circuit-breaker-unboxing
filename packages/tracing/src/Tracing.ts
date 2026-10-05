@@ -12,17 +12,24 @@ import { Config, Effect, Layer, Option as O, Schema } from "effect";
  * exports everything; `OTEL_TRACES_SAMPLER_ARG` is for deployments with no collector.
  */
 
-/** Empty counts as unset: docker-compose interpolates an unset host variable to the empty string, so a present-but-empty endpoint would install an exporter pointed at nowhere. */
-export const tracingEndpoint = Config.String("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").pipe(
-  Config.map((raw) => raw.trim()),
-  Config.option,
-  Config.orElse(() =>
-    Config.String("OTEL_EXPORTER_OTLP_ENDPOINT").pipe(
-      Config.map((raw) => raw.trim()),
-      Config.option
-    )
-  ),
-  Config.map(O.filter((raw) => raw !== ""))
+/** A variable that is unset or empty. Empty counts as unset: docker-compose interpolates an unset host variable to the empty string, so a present-but-empty endpoint would install an exporter pointed at nowhere. */
+const nonEmpty = (name: string) =>
+  Config.String(name).pipe(
+    Config.map((raw) => raw.trim()),
+    Config.option,
+    Config.map(O.filter((raw) => raw !== ""))
+  );
+
+/**
+ * Where spans go, as OpenTelemetry defines it: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` as given, else
+ * `OTEL_EXPORTER_OTLP_ENDPOINT` with the traces path added. Each is read on its own, so an empty or missing first
+ * one falls through to the second rather than ending the search.
+ */
+export const tracingEndpoint = Config.all([
+  nonEmpty("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"),
+  nonEmpty("OTEL_EXPORTER_OTLP_ENDPOINT")
+]).pipe(
+  Config.map(([traces, base]) => O.orElse(traces, () => O.map(base, (url) => `${url.replace(/\/+$/, "")}/v1/traces`)))
 );
 
 const enabled = Config.Boolean("EXPOSE_TELEMETRY").pipe(
@@ -57,7 +64,7 @@ export const TracingLive = (serviceName: string) =>
               // Batched rather than simple: a span per message at this rate would
               // put an HTTP round trip on the path this is supposed to be measuring.
               spanProcessor: new BatchSpanProcessor(
-                new OTLPTraceExporter({ url: `${url}/v1/traces` })
+                new OTLPTraceExporter({ url })
               ),
               tracerConfig: {
                 sampler: new ParentBasedSampler({

@@ -7,6 +7,9 @@
     "./Tracing.ts": "./src/Tracing.ts",
     "./Metrics.ts": "./src/Metrics.ts"
   },
+  "scripts": {
+    "test": "node --test 'test/*.test.ts'"
+  },
   "dependencies": {
     "@effect/opentelemetry": "4.0.0",
     "@opentelemetry/api": "^1.9.1",
