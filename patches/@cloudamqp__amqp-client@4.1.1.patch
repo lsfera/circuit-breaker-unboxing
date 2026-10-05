@@ -1,0 +1,28 @@
+diff --git a/lib/cjs/amqp-channel.js b/lib/cjs/amqp-channel.js
+index f7f55c1932749a5552eeee4516a1182f9d172d5e..eb12f639538aedb24478ac498343d282235d2ccb 100644
+--- a/lib/cjs/amqp-channel.js
++++ b/lib/cjs/amqp-channel.js
+@@ -342,6 +342,9 @@ class AMQPChannel {
+         const sendFrames = this.connection.send(bufferView.subarray(0, j));
+         if (this.confirmId) {
+             const wait4Confirm = new Promise((resolve, reject) => this.unconfirmedPublishes.push([this.confirmId++, resolve, reject]));
++            // Rejected by a channel close while sendFrames is still pending, before the chain below attaches to it:
++            // handle it here too, or that rejection is unhandled and ends the process. The caller still sees it.
++            wait4Confirm.catch(() => { });
+             return sendFrames.then(() => wait4Confirm).finally(() => this.connection.bufferPool.push(buffer));
+         }
+         else {
+diff --git a/lib/mjs/amqp-channel.js b/lib/mjs/amqp-channel.js
+index 7d9c5e8402a333bfac5cbf80ab0c6bdd7fc01051..daf04ac854c1f764fa83dc46bc8250a3e18dd481 100644
+--- a/lib/mjs/amqp-channel.js
++++ b/lib/mjs/amqp-channel.js
+@@ -306,6 +306,9 @@ export class AMQPChannel {
+         const sendFrames = this.connection.send(bufferView.subarray(0, j));
+         if (this.confirmId) {
+             const wait4Confirm = new Promise((resolve, reject) => this.unconfirmedPublishes.push([this.confirmId++, resolve, reject]));
++            // Rejected by a channel close while sendFrames is still pending, before the chain below attaches to it:
++            // handle it here too, or that rejection is unhandled and ends the process. The caller still sees it.
++            wait4Confirm.catch(() => { });
+             return sendFrames.then(() => wait4Confirm).finally(() => this.connection.bufferPool.push(buffer));
+         }
+         else {

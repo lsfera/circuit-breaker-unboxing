@@ -14,6 +14,8 @@ ARG NODE_IMAGE=node:26-alpine@sha256:ef24c5053d50fdc3e4e56eb4e7ddb7861874ab0fdc7
 FROM ${NODE_IMAGE} AS deps
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# pnpm-workspace.yaml's patchedDependencies, applied by the install below; a missing patch fails the install.
+COPY patches ./patches
 # Same pnpm the workspace pins in package.json#packageManager, read from it
 # rather than named twice. npm, not corepack: Node 25 stopped shipping corepack.
 RUN npm install --global "$(node -p 'require("./package.json").packageManager')" >/dev/null

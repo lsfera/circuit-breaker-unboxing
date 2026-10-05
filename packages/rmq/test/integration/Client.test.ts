@@ -1,11 +1,20 @@
-import { Effect, Exit, Option as O, Scope } from "effect";
+import { Effect, Exit, Fiber, Option as O, Scope } from "effect";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { carry, isUnroutable, makeRmq, Rmq, RmqError } from "../../src/Client.ts";
 import type { Consumer } from "../../src/Client.ts";
 import { assertSupportedRabbitMqVersion } from "../../src/RabbitMqVersion.ts";
 import { TRACEPARENT } from "../../src/Trace.ts";
-import { broker, brokerExec, skipIfNoDocker, startBroker, stopBroker, text, waitFor } from "./harness.ts";
+import {
+  broker,
+  brokerExec,
+  restartBroker,
+  skipIfNoDocker,
+  startBroker,
+  stopBroker,
+  text,
+  waitFor
+} from "./harness.ts";
 
 /**
  * The broker- and channel-level properties the daemon fleet is built on, each pinned against a real RabbitMQ.
@@ -802,4 +811,44 @@ test("x-max-length counts only ready messages: a token held unacked lets a secon
       yield* only.ack;
     })
   );
+});
+
+/**
+ * A confirm the client waits on only once the publish's own socket write has finished: a broker that shuts down with
+ * writes still queued closes the channel first, and the client rejected that confirm before anything handled it.
+ * Nothing could catch it — the process died of an unhandled rejection, on every runtime (patched in
+ * `patches/@cloudamqp__amqp-client@4.1.1.patch`). Last in the file, because it restarts the broker.
+ */
+test("a broker shutdown with publishes still being written fails them, not the process", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const queue = `shutdown.${Date.now()}`;
+  const unhandled: Array<unknown> = [];
+  const onUnhandled = (reason: unknown) => void unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  let failed = 0;
+  try {
+    await run(
+      Effect.gen(function*() {
+        const rmq = yield* Rmq;
+        yield* rmq.declareQueue(queue, { durable: true });
+        const pub = yield* rmq.publisherToQueue(queue);
+        // Large bodies, many at once: enough that writes are still queued on the socket when the broker goes.
+        const body = new Uint8Array(32 * 1024);
+        const wave = Effect.forEach(
+          Array.from({ length: 500 }),
+          () => rmq.send(pub, body).pipe(Effect.catch(() => Effect.sync(() => void failed++))),
+          { concurrency: "unbounded", discard: true }
+        );
+        const publishing = yield* Effect.forkChild(Effect.forever(wave));
+        yield* Effect.sleep("1 second");
+        yield* Effect.promise(() => restartBroker());
+        yield* Fiber.interrupt(publishing);
+      })
+    );
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+  assert.ok(failed > 0, "the shutdown must have caught publishes in flight, or this proves nothing");
+  assert.deepEqual(unhandled.map(String), [], "no publish's failure escaped as an unhandled rejection");
 });
