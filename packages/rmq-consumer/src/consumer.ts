@@ -116,7 +116,7 @@ export const runApplication = Effect.fnUntraced(function*(cfg: ApplicationConfig
       )
     ));
 
-  // Captured so the plain-async handlers (amqplib's callbacks, not Effect fibers) reach the application's
+  // Captured so the plain-async handlers (the AMQP client's callbacks, not Effect fibers) reach the application's
   // services, the broker, and each dependency's breaker.
   const captured = yield* Effect.context<Rmq>();
   const services = Arr.reduce(

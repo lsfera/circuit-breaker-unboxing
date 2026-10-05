@@ -512,7 +512,7 @@ upstream on either the Compose network (`flaky-upstream:8080`) or the host
 ```
 packages/
   config/        settings declared once, decoded at boot
-  rmq/           amqplib in Effect, work-queue conventions, the delay chain
+  rmq/           @cloudamqp/amqp-client in Effect, work-queue conventions, the delay chain
   rmq-producer/  the load, in confirmed batches, JSON or protobuf (--format)
   rmq-consumer/  the SDK: Breaker, Dependency, Gate, Negotiation, Settle,
                  Permit, Redrive, Limiter, run by consumer.ts

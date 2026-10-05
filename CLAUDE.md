@@ -10,7 +10,7 @@ checkout.
 
 | Package | Responsibility |
 | --- | --- |
-| `packages/rmq` | Effect wrapper around `amqplib`, queue conventions, delayed delivery |
+| `packages/rmq` | Effect wrapper around `@cloudamqp/amqp-client`, queue conventions, delayed delivery |
 | `packages/rmq-consumer` | Consumer SDK: per-dependency breaker, probe permit, redrive, parking and metrics |
 | `packages/rmq-producer` | Publishes work; does not own breaker state |
 | `packages/consumer` | Example application using the consumer SDK |

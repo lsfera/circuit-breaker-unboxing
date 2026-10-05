@@ -1,3 +1,4 @@
+import { AMQPClient } from "@cloudamqp/amqp-client";
 import { Effect } from "effect";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
@@ -64,12 +65,12 @@ test("a delay near a day is accepted into the top of the chain and holds there",
       yield* Delay.receive("delay.day");
       yield* Delay.sendDelayed("delay.day", 86_400, "tomorrow");
       return yield* Effect.promise(async () => {
-        const { connect } = await import("amqplib");
-        const conn = await connect({ hostname: broker.host, port: broker.port });
-        const ch = await conn.createChannel();
-        const top = await ch.checkQueue(Delay.levelName(Delay.entryLevel(86_400)));
-        const dest = await ch.checkQueue("delay.day");
-        await conn.close();
+        const client = new AMQPClient(`amqp://${broker.host}:${broker.port}`);
+        await client.connect();
+        const ch = await client.channel();
+        const top = await ch.queueDeclare(Delay.levelName(Delay.entryLevel(86_400)), { passive: true });
+        const dest = await ch.queueDeclare("delay.day", { passive: true });
+        await client.close();
         return { top: top.messageCount, dest: dest.messageCount };
       });
     })

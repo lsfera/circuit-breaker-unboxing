@@ -1,4 +1,3 @@
-import * as amqp from "amqplib";
 import { Effect, Exit, Option as O, Scope } from "effect";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
@@ -22,24 +21,44 @@ const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
     Effect.scoped(Effect.provide(program, Rmq.layer({ host: broker.host, port: broker.port }))) as Effect.Effect<A>
   );
 
-test("amqplib exposes the RabbitMQ version over AMQP without the Management API", async (t) => {
+test("the broker's version is read from connection.start, without the Management API", async (t) => {
   if (skipIfNoDocker(t)) return;
 
-  const connection = await amqp.connect({
-    protocol: "amqp",
-    hostname: broker.host,
-    port: broker.port,
-    username: "guest",
-    password: "guest"
-  });
+  // `makeRmq` fails on a broker it cannot read a supported version from, so connecting at all is the proof; the
+  // version itself is pinned against the image the harness runs.
+  await run(Effect.void);
+  const version = (await brokerExec(["rabbitmqctl", "version"]) as { readonly output: string; }).output.trim();
+  assert.match(version, /^\d+\.\d+\.\d+$/);
+  assert.doesNotThrow(() => assertSupportedRabbitMqVersion(version));
+});
+
+/**
+ * The broker's frames are read through a subclass that takes the version from the first one. A heartbeat is 8
+ * bytes; reading it as if it were that first frame threw inside the socket's data handler, which no caller can
+ * catch: the process died on the first heartbeat of an idle connection.
+ */
+test("an idle connection survives the broker's heartbeats", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const crashes: Array<unknown> = [];
+  const onUncaught = (error: unknown) => void crashes.push(error);
+  process.on("uncaughtException", onUncaught);
   try {
-    const { product, version } = connection.connection.serverProperties;
-    assert.equal(product, "RabbitMQ");
-    assert.match(version, /^\d+\.\d+\.\d+$/);
-    assert.doesNotThrow(() => assertSupportedRabbitMqVersion(version));
+    const connected = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function*() {
+          const rmq = yield* Rmq;
+          // A 1s heartbeat: the broker sends one about every half second.
+          yield* Effect.sleep("3500 millis");
+          return yield* rmq.isConnected;
+        }).pipe(Effect.provide(Rmq.layer({ host: broker.host, port: broker.port, heartbeat: 1 })))
+      ) as Effect.Effect<boolean>
+    );
+    assert.equal(connected, true);
   } finally {
-    await connection.close();
+    process.off("uncaughtException", onUncaught);
   }
+  assert.deepEqual(crashes.map(String), [], "no heartbeat escaped as an uncaught exception");
 });
 
 test("concurrent publisher creation routes each message to its own binding", async (t) => {
@@ -357,9 +376,9 @@ test("a consumer keeps acknowledging while the client's publishing connection is
 });
 
 /**
- * Recovery, and the half of it amqplib does not do: `recovery` reopens the socket and stops there, so a client
- * that leaned on it alone would come back connected and consuming nothing. `@egress/rmq` records what it was
- * asked to build and rebuilds it in amqplib's `setup` hook. The connection is killed from the broker side, not
+ * Recovery: the client reconnects nothing on its own, and a reconnect alone would come back connected and
+ * consuming nothing. `@egress/rmq` reconnects, and records what it was asked to build and rebuilds it in `setup`
+ * on every new connection. The connection is killed from the broker side, not
  * by restarting the container, so the test measures recovery rather than Docker.
  */
 test("a killed connection comes back with its consumers still registered", async (t) => {
@@ -396,7 +415,7 @@ test("a killed connection comes back with its consumers still registered", async
   );
 });
 
-/** `resetConnection` destroys the socket from our side; that only helps if amqplib notices and recovers. */
+/** `resetConnection` destroys the socket from our side; that only helps if the client notices and recovers. */
 test("resetConnection drops the connection and the client recovers from it", async (t) => {
   if (skipIfNoDocker(t)) return;
 
@@ -432,7 +451,7 @@ test("resetConnection drops the connection and the client recovers from it", asy
 });
 
 /**
- * amqplib recovers connections, not channels. A channel that dies alone (protocol error, deleted queue, settle
+ * Recovery is of connections, not channels. A channel that dies alone (protocol error, deleted queue, settle
  * on a known tag) takes its consumer with it and leaves the connection healthy, so the handle the caller holds
  * still looks live while the process goes deaf.
  */
@@ -452,8 +471,9 @@ test("a consumer whose channel dies alone is put back", async (t) => {
       yield* rmq.send(pub, "before");
       yield* waitFor(() => seen.length >= 1);
 
-      // Exactly what a channel-level error does, without needing to provoke one.
-      yield* Effect.promise(() => consumer.channel.close().then(() => {}, () => {}));
+      // A channel-level error: acknowledging a delivery tag the channel never handed out makes the broker close
+      // the channel (406 PRECONDITION_FAILED) and leaves the connection up.
+      yield* Effect.promise(() => consumer.channel.basicAck(999_999).then(() => {}, () => {}));
 
       yield* rmq.send(pub, "after");
       yield* waitFor(() => seen.length >= 2);
@@ -481,7 +501,7 @@ test("a consumer on a queue that never delivers is still repaired", async (t) =>
       const consumer = yield* rmq.consume(queue, (body) => void seen.push(text(body)));
 
       for (let i = 0; i < 6; i++) {
-        yield* Effect.promise(() => consumer.channel.close().then(() => {}, () => {}));
+        yield* Effect.promise(() => consumer.channel.basicAck(999_999).then(() => {}, () => {}));
         yield* waitFor(() => false, 400);
       }
 

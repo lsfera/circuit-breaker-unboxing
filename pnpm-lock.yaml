@@ -224,13 +224,16 @@ importers:
 
   packages/rmq:
     dependencies:
-      amqplib:
-        specifier: ^2.2.0
-        version: 2.2.0
+      '@cloudamqp/amqp-client':
+        specifier: 4.1.1
+        version: 4.1.1
       effect:
         specifier: 'catalog:'
         version: 4.0.0
     devDependencies:
+      amqplib:
+        specifier: ^2.2.0
+        version: 2.2.0
       testcontainers:
         specifier: ^12.2.0
         version: 12.2.0
@@ -284,6 +287,10 @@ packages:
 
   '@balena/dockerignore@1.0.2':
     resolution: {integrity: sha512-wMue2Sy4GAVTk6Ic4tJVcnfdau+gx2EnG7S+uAEe+TWJFqE4YoWN4/H8MSLj4eYJKxGg26lZwboEniNiNwZQ6Q==}
+
+  '@cloudamqp/amqp-client@4.1.1':
+    resolution: {integrity: sha512-zbY31ErcOTnpbllb24gZ6PnteNCaFfpmxKAQErOtTJavwZSFXTBd+CLFkCno1IjGTR8r0hcsRH8XbsCcMhxkiQ==}
+    engines: {node: '>=18.0.0'}
 
   '@dprint/android-arm64@0.58.0':
     resolution: {integrity: sha512-Jr+8kAZHFsCu5h51u27MQjsgW/BpBPvKM7tyK0GoWnjFvcQdxkA8/bYwiw4kxOiCV3KYKpfeb/IFlLfZhU1b8g==}
@@ -1296,6 +1303,8 @@ packages:
 snapshots:
 
   '@balena/dockerignore@1.0.2': {}
+
+  '@cloudamqp/amqp-client@4.1.1': {}
 
   '@dprint/android-arm64@0.58.0':
     optional: true
