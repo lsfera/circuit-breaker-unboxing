@@ -44,7 +44,6 @@ reference material for a newer version describes APIs this code cannot use.
 | --- | --- | --- |
 | `effect` | `repos/effect/packages/effect/src` | `repos/effect/packages/effect/test` |
 | `@effect/platform-node` | `repos/effect/packages/platform/node/src` | `…/platform/node/test` |
-| `@effect/opentelemetry` | `repos/effect/packages/opentelemetry/src` | `…/opentelemetry/test` |
 | v3 → v4 renames | `repos/effect/migration/v3-to-v4.md`, `repos/effect/MIGRATION.md` | |
 | Worked examples | `repos/effect/ai-docs/src` | |
 
