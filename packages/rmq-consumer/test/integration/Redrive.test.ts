@@ -4,13 +4,13 @@ import { TRACEPARENT } from "@egress/rmq/Trace.ts";
 import { deadLetterQueueFor, deadLetterQueueOptions, workQueueFor, workQueueOptions } from "@egress/rmq/WorkQueue.ts";
 import { Effect, Option as O } from "effect";
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import { broker, skipIfNoDocker, startBroker, stopBroker, text } from "../../../rmq/test/integration/harness.ts";
 import * as Redrive from "../../src/Redrive.ts";
 import { REDRIVE_COUNT_HEADER } from "../../src/Redrive.ts";
 
-before(startBroker);
-after(stopBroker);
+beforeAll(startBroker);
+afterAll(stopBroker);
 
 const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(

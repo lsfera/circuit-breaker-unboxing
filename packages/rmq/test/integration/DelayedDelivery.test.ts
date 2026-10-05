@@ -1,7 +1,7 @@
 import { AMQPClient } from "@cloudamqp/amqp-client";
 import { Effect } from "effect";
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import { Rmq } from "../../src/Client.ts";
 import * as Delay from "../../src/DelayedDelivery.ts";
 import { broker, skipIfNoDocker, startBroker, stopBroker, text, waitFor } from "./harness.ts";
@@ -11,8 +11,8 @@ import { broker, skipIfNoDocker, startBroker, stopBroker, text, waitFor } from "
  * check is not something a fake clock can stand in for.
  */
 
-before(startBroker);
-after(stopBroker);
+beforeAll(startBroker);
+afterAll(stopBroker);
 
 const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(
@@ -45,13 +45,13 @@ test("a delayed message arrives once, at its own destination, no earlier than as
   );
 
   assert.equal(arrivals.length, 4, JSON.stringify(arrivals));
-  arrivals.forEach(({ body, queue, at }) => {
+  for (const { body, queue, at } of arrivals) {
     const [dest, seconds] = body.split(":");
     assert.equal(queue, `delay.${dest}`, "each message reaches only the queue it was addressed to");
     assert.ok(at >= Number(seconds) * 1000 - 100, `${body} arrived early: ${at}ms`);
-    t.diagnostic(`${body} arrived after ${at}ms`);
+    await t.annotate(`${body} arrived after ${at}ms`);
     assert.ok(at < Number(seconds) * 1000 + 3_000, `${body} arrived late: ${at}ms`);
-  });
+  }
 });
 
 test("a delay near a day is accepted into the top of the chain and holds there", async (t) => {

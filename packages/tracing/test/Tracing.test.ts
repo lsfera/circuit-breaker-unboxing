@@ -2,7 +2,7 @@ import { ConfigProvider, Effect, Layer, Option as O, Tracer } from "effect";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { test } from "node:test";
+import { test } from "vitest";
 import { tracingEndpoint, TracingLive } from "../src/Tracing.ts";
 
 const endpointFrom = (env: Record<string, string>) =>

@@ -1,6 +1,6 @@
 import { Effect, Option as O } from "effect";
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import { Rmq } from "../../src/Client.ts";
 import { TRACEPARENT } from "../../src/Trace.ts";
 import {
@@ -14,13 +14,13 @@ import { broker, restartBroker, skipIfNoDocker, startBroker, stopBroker, text, w
 
 /**
  * Dead-lettering: what a rejection does, what it carries, and what survives a republish. A separate file from
- * Client.test.ts on purpose: node runs each test file in its own process, so this gets its own broker, and
+ * Client.test.ts on purpose: Vitest runs each test file in isolation, so this gets its own broker, and
  * sharing one with the stranding test is not viable (its stranded consumers leave the broker unreliable at
  * dead-lettering).
  */
 
-before(startBroker);
-after(stopBroker);
+beforeAll(startBroker);
+afterAll(stopBroker);
 
 const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(

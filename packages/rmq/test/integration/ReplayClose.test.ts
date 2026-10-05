@@ -1,6 +1,6 @@
 import { Effect } from "effect";
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import { Rmq } from "../../src/Client.ts";
 import { broker, brokerExec, skipIfNoDocker, startBroker, stopBroker, text, waitFor } from "./harness.ts";
 
@@ -17,8 +17,8 @@ import { broker, brokerExec, skipIfNoDocker, startBroker, stopBroker, text, wait
  * reconnecting afterwards: a publish goes through.
  */
 
-before(startBroker);
-after(stopBroker);
+beforeAll(startBroker);
+afterAll(stopBroker);
 
 const QUEUES = 400;
 

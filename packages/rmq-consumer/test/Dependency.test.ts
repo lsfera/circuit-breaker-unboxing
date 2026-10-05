@@ -1,6 +1,6 @@
 import { Cause, Effect, Exit, Fiber, Option as O, Result } from "effect";
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { ProbeVerdict } from "../src/Breaker.ts";
 import * as Dependency from "../src/Dependency.ts";
 import type { Caller, Registration, Verdict } from "../src/Dependency.ts";

@@ -1,11 +1,11 @@
 import { Effect } from "effect";
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import { Rmq } from "../../src/Client.ts";
 import { broker, skipIfNoDocker, startBroker, stopBroker, text, waitFor } from "./harness.ts";
 
-before(startBroker);
-after(stopBroker);
+beforeAll(startBroker);
+afterAll(stopBroker);
 
 const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(

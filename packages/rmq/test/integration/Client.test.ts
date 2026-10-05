@@ -1,6 +1,6 @@
 import { Effect, Exit, Fiber, Option as O, Scope } from "effect";
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import { carry, isUnroutable, makeRmq, Rmq, RmqError } from "../../src/Client.ts";
 import type { Consumer } from "../../src/Client.ts";
 import { assertSupportedRabbitMqVersion } from "../../src/RabbitMqVersion.ts";
@@ -22,8 +22,8 @@ import {
  * owns which broker and how the skip works.
  */
 
-before(startBroker);
-after(stopBroker);
+beforeAll(startBroker);
+afterAll(stopBroker);
 
 const run = <A>(program: Effect.Effect<A, unknown, Rmq>) =>
   Effect.runPromise(

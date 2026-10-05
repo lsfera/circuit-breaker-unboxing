@@ -545,4 +545,9 @@ pnpm run check       # vendored version, typecheck, unit tests
 pnpm run test:rmq    # needs Docker: RMQ client and consumer integration tests against a real broker
 ```
 
+Tests run on Vitest, under node, Bun or Deno: `test` and `test:rmq` have
+`:bun` and `:deno` variants (`test:rmq:deno`), and `test:runtimes` runs the
+unit suites on all three. The run's runtime names its projects
+(`unit:deno`), and a test worker on any other runtime fails the run.
+
 > [Main overview](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/main/README.md) | [Next: 05 · A platform control plane](https://github.com/lsfera/reasoning-over-circuit-breaker/blob/article/05-platform-control-plane/README.md)

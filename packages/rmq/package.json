@@ -9,10 +9,6 @@
     "./DelayedDelivery.ts": "./src/DelayedDelivery.ts",
     "./Trace.ts": "./src/Trace.ts"
   },
-  "scripts": {
-    "test": "node --test 'test/*.test.ts'",
-    "test:rmq": "node --test 'test/integration/*.test.ts'"
-  },
   "dependencies": {
     "@cloudamqp/amqp-client": "4.1.1",
     "effect": "catalog:"

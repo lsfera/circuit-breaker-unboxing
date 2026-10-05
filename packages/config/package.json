@@ -6,9 +6,6 @@
   "exports": {
     "./Settings.ts": "./src/Settings.ts"
   },
-  "scripts": {
-    "test": "node --test 'test/*.test.ts'"
-  },
   "dependencies": {
     "effect": "catalog:"
   },

@@ -1,7 +1,7 @@
 import type { Consumer } from "@egress/rmq/Client.ts";
 import { Deferred, Effect, Fiber } from "effect";
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import * as Breaker from "../src/Breaker.ts";
 
 /**
