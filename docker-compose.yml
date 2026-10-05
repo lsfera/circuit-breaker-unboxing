@@ -112,7 +112,7 @@ services:
   # install. Putting it in the application image would ship the test fixture
   # inside the artifact.
   flaky-upstream:
-    image: &node-image node:26-alpine@sha256:ef24c5053d50fdc3e4e56eb4e7ddb7861874ab0fdc797046ba897581deb8e868
+    image: &node-image node:26-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80
     working_dir: /app
     volumes: ["$HOST_WORKSPACE_FOLDER/infra/flaky-upstream.mjs:/app/flaky-upstream.mjs:ro"]
     command: node flaky-upstream.mjs
@@ -132,7 +132,7 @@ services:
   # same image, config and command — and only override the admin port mapping,
   # so all three run identically and stay in sync by construction.
   envoy-00: &envoy
-    image: envoyproxy/envoy:v1.39-latest@sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4
+    image: envoyproxy/envoy:v1.39-latest@sha256:460f8c329f24b2e1c7c5af64cb314a6f351ad1c262ba77b135ac46b35ebd5f85
     volumes: ["$HOST_WORKSPACE_FOLDER/infra/envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro"]
     # List (exec) form, so these are argv straight to the envoy binary — no
     # shell involved, so none of the sh -c/YAML-folding pitfalls below apply.
@@ -168,7 +168,7 @@ services:
   # for the two aggregator instances below, unless COORDINATION points them at
   # the postgres service instead.
   redis:
-    image: redis:8-alpine@sha256:becdda6c7f4b3fb42e42fd7f120bbf5c54c4caaaf16f26da24e4563d2c1f0576
+    image: redis:8-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
     # AOF, because this is the checkpoint store. Without persistence a restart
     # loses every checkpoint, and a newly promoted leader resumes from nothing
     # rather than from where the last one stopped — a sequence reset, which is
@@ -411,7 +411,7 @@ services:
   # Scrapes the aggregator's /metrics (same registry the console reads from)
   # plus each Envoy's native /stats/prometheus. See monitoring/prometheus.yml.
   prometheus:
-    image: prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
+    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
@@ -430,7 +430,7 @@ services:
   # them nowhere until now, which is the same failure shape the rules are about:
   # something that looks fine because it is running.
   alertmanager:
-    image: prom/alertmanager:v0.34.0@sha256:690c7b525f4367aa91f73e2f91c632206d32e97c6384bdbf2fb7a861b420340d
+    image: prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
     restart: unless-stopped
@@ -452,7 +452,7 @@ services:
     deploy: *limits-tiny
 
   grafana:
-    image: grafana/grafana:13.2.1@sha256:f772d434e8fab0049deb2b1b30abd43342bcfca1537614aa8d36080232cf4283
+    image: grafana/grafana:13.2.3@sha256:b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       # Viewer, not Editor: the dashboard is provisioned from a file in this
@@ -476,7 +476,7 @@ services:
   # is complete and it is clear which it was.
   otel-collector:
     profiles: [tracing]
-    image: otel/opentelemetry-collector-contrib:0.160.0@sha256:799dc6cf12c96192af37b5bdba804da8c10b3bc563b43cb90c3f3c58d9572ad6
+    image: otel/opentelemetry-collector-contrib:0.161.0@sha256:fd328de2552466ad78385e1b1289c3f2402b1c45f265b252aab1955b42845ac1
     command: ["--config=/etc/otel/config.yaml"]
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/otel-collector.yaml:/etc/otel/config.yaml:ro
@@ -491,7 +491,7 @@ services:
   # cost a lot in production. v1, and its all-in-one image, is end of life.
   jaeger:
     profiles: [tracing]
-    image: jaegertracing/jaeger:2.20.0@sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8
+    image: jaegertracing/jaeger:2.21.0@sha256:3d0ac795ff98aa04d1be04311d2dac6c25b4bfc8322dc02e53bc5b170c5018c3
     restart: unless-stopped
     ports: ["16686:16686"]
     networks: [default, devcontainer]
