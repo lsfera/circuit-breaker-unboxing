@@ -1,0 +1,15 @@
+{
+  "name": "@egress/producer",
+  "private": true,
+  "type": "module",
+  "description": "The load half of the scenario, built on the @egress/rmq-producer SDK: a steady stream of payments or refunds onto their contract's exchange, in JSON or protobuf, at a fixed rate that never reacts to the third party.",
+  "scripts": {
+    "start": "node src/main.ts"
+  },
+  "dependencies": {
+    "@egress/config": "workspace:*",
+    "@egress/contracts": "workspace:*",
+    "@egress/rmq-producer": "workspace:*",
+    "effect": "catalog:"
+  }
+}

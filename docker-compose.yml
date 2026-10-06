@@ -79,14 +79,14 @@ services:
     networks: [default, devcontainer]
     deploy: *limits-store
 
-  # The load: a steady stream onto payments-provider.work that never backs off and never reads whether the third
-  # party is healthy. See packages/rmq-producer/src/producer.ts.
+  # The load: a steady stream onto the egress.payments exchange that never backs off and never reads whether the third
+  # party is healthy. See packages/producer/src/main.ts.
   rmq-producer: &rmq-node
     image: &app-image egress-breaker:dev
     build: &app-build
       context: .
       dockerfile: Dockerfile
-    command: node packages/rmq-producer/src/main.ts
+    command: node packages/producer/src/main.ts
     environment: &rmq-node-env
       RMQ: rabbitmq:5672
       API_ID: payments-provider

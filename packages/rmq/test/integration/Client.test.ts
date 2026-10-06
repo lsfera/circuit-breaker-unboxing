@@ -380,6 +380,14 @@ test("a consumer keeps acknowledging while the client's publishing connection is
       } finally {
         yield* Effect.promise(() => brokerExec(["rabbitmqctl", "set_vm_memory_high_watermark", "absolute", "1GiB"]));
       }
+      // Lifting the alarm unblocks the connection, and the held publish goes out: backpressure, not a failure.
+      for (let waited = 0; !settled.publish && waited < 5000; waited += 100) {
+        yield* Effect.promise(() => new Promise((r) => setTimeout(r, 100)));
+      }
+      assert.equal(settled.publish, true, "the held publish should complete once the alarm clears");
+      const out = O.getOrThrow(yield* rmq.get(outbox));
+      yield* out.ack;
+      assert.equal(text(out.body), "blocked");
     })
   );
 });
@@ -784,6 +792,48 @@ test("get is a non-blocking fetch: empty returns None, and an unsettled message 
   );
 });
 
+test("pull fetches a run of messages on one channel, and closing its scope hands back what is unsettled", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  const queue = `pull.${Date.now()}`;
+  // Counted by the broker, as an operator reads it (`rabbitmq_channels`, or the management API), not by the client.
+  const brokerChannels = Effect.promise(async () =>
+    (await brokerExec(["rabbitmqctl", "list_channels", "--quiet", "--no-table-headers", "number"]) as {
+      readonly output: string;
+    }).output.trim().split("\n").filter((line) => line !== "").length
+  );
+
+  const got = await run(
+    Effect.gen(function*() {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(queue);
+      const pub = yield* rmq.publisherToQueue(queue);
+      for (const body of ["a", "b", "c"]) yield* rmq.send(pub, body);
+
+      const before = yield* brokerChannels;
+      yield* Effect.scoped(Effect.gen(function*() {
+        const next = yield* rmq.pull(queue);
+        const first = O.getOrThrow(yield* next);
+        yield* first.ack;
+        assert.equal(text(first.body), "a");
+        // Fetched and left unsettled: the scope's close hands it back.
+        assert.equal(text(O.getOrThrow(yield* next).body), "b");
+        assert.equal(yield* brokerChannels, before + 1, "two fetches, one channel, still open after a settlement");
+      }));
+      assert.equal(yield* brokerChannels, before, "the channel closed with the scope");
+
+      const left = [];
+      for (let m = yield* rmq.get(queue); O.isSome(m); m = yield* rmq.get(queue)) {
+        left.push(text(m.value.body));
+        yield* m.value.ack;
+      }
+      return left;
+    })
+  );
+
+  assert.deepEqual(got.toSorted(), ["b", "c"], "the acked message is gone, the unsettled one is back");
+});
+
 test("x-max-length counts only ready messages: a token held unacked lets a second in, and a ready one refuses the next", async (t) => {
   if (skipIfNoDocker(t)) return;
 
@@ -811,6 +861,46 @@ test("x-max-length counts only ready messages: a token held unacked lets a secon
       yield* only.ack;
     })
   );
+});
+
+/** Everything but host and port reaches the broker: the vhost, the user, and the name it lists the connection under. */
+test("a connection goes to the vhost, as the user, under the name it is given", async (t) => {
+  if (skipIfNoDocker(t)) return;
+  const vhost = `tenant-${Date.now()}`;
+  const name = `connection-test-${Date.now()}`;
+  await brokerExec(["rabbitmqctl", "add_vhost", vhost]);
+  await brokerExec(["rabbitmqctl", "add_user", "tenant", "s3cret"]);
+  await brokerExec(["rabbitmqctl", "set_permissions", "-p", vhost, "tenant", ".*", ".*", ".*"]);
+
+  const got = await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function*() {
+        const rmq = yield* Rmq;
+        const queue = yield* rmq.declareQueue("in-tenant");
+        yield* rmq.send(yield* rmq.publisherToQueue(queue), "hello");
+        yield* waitFor(() => false, 500);
+        const connections = yield* Effect.promise(() =>
+          brokerExec(["rabbitmqctl", "list_connections", "--quiet", "--no-table-headers", "client_properties"])
+        );
+        return { message: yield* rmq.get(queue), connections: (connections as { readonly output: string; }).output };
+      }).pipe(
+        Effect.provide(
+          Rmq.layer({ host: broker.host, port: broker.port, vhost, username: "tenant", password: "s3cret", name })
+        )
+      )
+    ).pipe(Effect.orDie)
+  );
+  assert.equal(text(O.getOrThrow(got.message).body), "hello");
+  assert.match(got.connections, new RegExp(`${name} \\(consuming\\)`), "each connection is named for its role");
+  assert.match(got.connections, new RegExp(`${name} \\(publishing\\)`));
+
+  const queues = (await brokerExec(["rabbitmqctl", "list_queues", "-p", vhost, "name"]) as { readonly output: string; })
+    .output;
+  assert.match(queues, /in-tenant/, "declared in the vhost it was given");
+  const inDefault =
+    (await brokerExec(["rabbitmqctl", "list_queues", "-p", "/", "name"]) as { readonly output: string; })
+      .output;
+  assert.doesNotMatch(inDefault, /in-tenant/, "and not in the default one");
 });
 
 /**

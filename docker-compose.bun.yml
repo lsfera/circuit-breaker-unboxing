@@ -12,11 +12,11 @@ services:
   rmq-producer:
     image: egress-breaker:bun
     build: *bun-build
-    command: bun packages/rmq-producer/src/main.ts
+    command: bun packages/producer/src/main.ts
   rmq-producer-refunds:
     image: egress-breaker:bun
     build: *bun-build
-    command: bun packages/rmq-producer/src/main.ts
+    command: bun packages/producer/src/main.ts
   rmq-consumer:
     image: egress-breaker:bun
     build: *bun-build

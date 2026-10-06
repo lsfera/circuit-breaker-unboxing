@@ -1,5 +1,12 @@
 import { AMQPClient } from "@cloudamqp/amqp-client";
-import type { AMQPChannel, AMQPConsumer, AMQPMessage, AMQPProperties, Field } from "@cloudamqp/amqp-client";
+import type {
+  AMQPChannel,
+  AMQPConsumer,
+  AMQPMessage,
+  AMQPProperties,
+  AMQPTlsOptions,
+  Field
+} from "@cloudamqp/amqp-client";
 import type { AMQPView } from "@cloudamqp/amqp-client/amqp-view";
 import { Context, Data, Deferred, Effect, Layer, Match, Option as O, Predicate, Record as Rec } from "effect";
 import type { Scope, Tracer } from "effect";
@@ -102,6 +109,24 @@ export class RmqError extends Data.TaggedError("RmqError")<{
 
 type QueueArgs = Record<string, unknown>;
 
+/** A binding's arguments: what a headers exchange matches on (`x-match` and the headers), ignored by the others. */
+export type BindingArgs = Record<string, unknown>;
+
+/**
+ * An exchange as RabbitMQ models it. `type` is `topic` unless given; the rest default as RabbitMQ's do, except
+ * `durable`, which is on: this client's queues are durable, and a durable queue bound to a transient exchange loses
+ * its binding with a broker restart. `args` carry what RabbitMQ reads from them, such as `alternate-exchange`.
+ */
+export type ExchangeOptions = {
+  readonly type?: "direct" | "fanout" | "topic" | "headers" | (string & {});
+  readonly durable?: boolean;
+  /** Deleted when its last binding is: for an exchange that exists only while something is bound to it. */
+  readonly autoDelete?: boolean;
+  /** Publishable only from another exchange (`bindExchange`), never by a client directly. */
+  readonly internal?: boolean;
+  readonly args?: Record<string, unknown>;
+};
+
 /**
  * What a handler asks the broker to do with its delivery: `accept` (the default) drops it; `requeue` puts it back,
  * counted toward `x-delivery-limit`; `release` puts it back uncounted, for a message that did not fail; `discard`
@@ -156,14 +181,23 @@ export interface RmqService {
     name: string,
     options?: { readonly args?: QueueArgs; readonly durable?: boolean; }
   ) => Effect.Effect<string, RmqError>;
+  /**
+   * Declares an exchange of any type RabbitMQ has (`direct`, `fanout`, `topic`, `headers`, or a plugin's). Like a
+   * queue, it must be declared identically by every process that declares it: a redeclare with different settings is
+   * refused (406), not merged.
+   */
+  readonly declareExchange: (name: string, options?: ExchangeOptions) => Effect.Effect<string, RmqError>;
+  /** `declareExchange` of a `topic` exchange, transient unless `durable`. */
   readonly declareTopicExchange: (
     name: string,
     options?: { readonly durable?: boolean; }
   ) => Effect.Effect<string, RmqError>;
+  /** Binds queue `destination` to exchange `source`. `args` are the binding's arguments: a headers exchange matches on them. */
   readonly bind: (
     routingKey: string,
     source: string,
-    destination: string
+    destination: string,
+    args?: BindingArgs
   ) => Effect.Effect<void, RmqError>;
   /** An exchange-to-exchange binding: what a delay chain is made of. */
   readonly bindExchange: (
@@ -190,11 +224,22 @@ export interface RmqService {
    * throwaway channel, held open only until `GotMessage` is settled — not part of `topology` replay.
    */
   readonly get: (queue: string) => Effect.Effect<O.Option<GotMessage>, RmqError>;
-  /** One publisher per fixed (exchange, routingKey) or (queue) target. */
+  /**
+   * `get` for a run of fetches: one channel for the run, opened here and closed with the scope, where `get` opens one
+   * per message. Each fetched message is settled on it and the channel stays open; closing the scope hands back
+   * whatever is still unsettled. A message to hold past the run is `get`'s, on a channel of its own.
+   */
+  readonly pull: (queue: string) => Effect.Effect<Effect.Effect<O.Option<GotMessage>, RmqError>, RmqError, Scope.Scope>;
+  /**
+   * One publisher per fixed (exchange, routingKey) or (queue) target. To an exchange, `mandatory` is off unless
+   * asked for: no bindings yet is ordinary for an exchange, but a publisher whose messages must reach a queue asks,
+   * and an unroutable one then fails the publish instead of vanishing.
+   */
   readonly publisherToExchange: (
     exchange: string,
     routingKey: string,
-    format?: Format
+    format?: Format,
+    options?: { readonly mandatory?: boolean; }
   ) => Effect.Effect<Publisher, RmqError>;
   readonly publisherToQueue: (queue: string, format?: Format) => Effect.Effect<Publisher, RmqError>;
   /**
@@ -273,13 +318,34 @@ const settle = (channel: AMQPChannel, message: AMQPMessage, outcome: Settlement)
     )
   );
 
-type RmqConnectOptions = {
+/**
+ * Where and how to connect: everything `@cloudamqp/amqp-client` takes, except its logger. Only `host` and `port` are
+ * required; the rest default to RabbitMQ's own (`guest`, vhost `/`, plain TCP) or, for `heartbeat`, to this client's.
+ */
+export type RmqConnectOptions = {
   readonly host: string;
   readonly port: number;
   readonly username?: string;
   readonly password?: string;
+  /** The virtual host, `/` unless given. */
+  readonly vhost?: string;
   /** Seconds, 5 unless given. A test that needs a missed heartbeat inside a few seconds passes 1. */
   readonly heartbeat?: number;
+  /**
+   * TLS (`amqps`): `true` with the runtime's trusted CAs, or the certificates to use — a private CA, a client
+   * certificate. Off unless given; the port is then the TLS listener's, usually 5671.
+   */
+  readonly tls?: boolean | AMQPTlsOptions;
+  /**
+   * The connections' name, as the management UI and `rabbitmqctl list_connections` show it. The client opens two, and
+   * each is named `<name> (consuming)` or `<name> (publishing)`, so the broker's per-connection view (its channels,
+   * whether an alarm has it blocked) tells them apart; just the role when no name is given.
+   */
+  readonly name?: string;
+  /** Largest frame, in bytes, this side proposes; the broker's limit wins if lower. The client's default unless given. */
+  readonly frameMax?: number;
+  /** Most channels this side proposes per connection; 0 or unset leaves it to the broker. */
+  readonly channelMax?: number;
 };
 
 /**
@@ -289,12 +355,24 @@ type RmqConnectOptions = {
  * Linux): without that a one-sided partition stalls each attempt so long that the retry budget takes hours.
  */
 const amqpUrl = (opts: RmqConnectOptions): string => {
-  const url = new URL(`amqp://${opts.host}:${opts.port}/`);
+  const url = new URL(`${opts.tls ? "amqps" : "amqp"}://${opts.host}:${opts.port}/`);
+  url.pathname = `/${encodeURIComponent(opts.vhost ?? "/")}`;
   url.username = encodeURIComponent(opts.username ?? "guest");
   url.password = encodeURIComponent(opts.password ?? "guest");
   url.searchParams.set("heartbeat", String(opts.heartbeat ?? 5));
+  if (opts.name !== undefined) url.searchParams.set("name", opts.name);
+  if (opts.frameMax !== undefined) url.searchParams.set("frameMax", String(opts.frameMax));
+  if (opts.channelMax !== undefined) url.searchParams.set("channelMax", String(opts.channelMax));
   return url.href;
 };
+
+/** What the broker shows one of the client's connections as: its role, under the name given. */
+const connectionName = (opts: RmqConnectOptions, role: string): string =>
+  opts.name === undefined ? role : `${opts.name} (${role})`;
+
+/** Certificates for `amqps`, when given as more than `true`. */
+const tlsOptionsOf = (opts: RmqConnectOptions): AMQPTlsOptions | undefined =>
+  typeof opts.tls === "object" ? opts.tls : undefined;
 
 /** A method frame, and `connection.start` (class 10, method 10). */
 const METHOD_FRAME = 1;
@@ -342,7 +420,7 @@ const closeWithin = (client: Client, ms: number): Promise<void> =>
   });
 
 const checkRabbitMqVersion = async (opts: RmqConnectOptions): Promise<void> => {
-  const client = new Client(amqpUrl(opts));
+  const client = new Client(amqpUrl({ ...opts, name: connectionName(opts, "preflight") }), tlsOptionsOf(opts));
   try {
     await client.connect();
     assertClientVersion(client);
@@ -469,7 +547,7 @@ type LinkHooks = {
  * during `setup` (a queue redeclared with different arguments). A transient one (unreachable, refused, timed
  * out) keeps the full budget.
  */
-const connectLink = (url: string, hooks: LinkHooks): Promise<Link> => {
+const connectLink = (url: string, tlsOptions: AMQPTlsOptions | undefined, hooks: LinkHooks): Promise<Link> => {
   let current: Client | null = null;
   let stopped = false;
   let failure: Error | null = null;
@@ -478,7 +556,7 @@ const connectLink = (url: string, hooks: LinkHooks): Promise<Link> => {
   const waiters: Array<{ readonly resolve: (client: Client) => void; readonly reject: (error: Error) => void; }> = [];
 
   const attempt = async (): Promise<Client> => {
-    const client = new Client(url);
+    const client = new Client(url, tlsOptions);
     try {
       await client.connect();
       assertClientVersion(client);
@@ -625,12 +703,21 @@ export const makeRmq = Effect.fnUntraced(function*(
   /** Everything this connection was told to create, so it can be created again. */
   type Topology =
     | { readonly kind: "queue"; readonly name: string; readonly durable: boolean; readonly args: QueueArgs; }
-    | { readonly kind: "exchange"; readonly name: string; readonly durable: boolean; }
+    | {
+      readonly kind: "exchange";
+      readonly name: string;
+      readonly type: string;
+      readonly durable: boolean;
+      readonly autoDelete: boolean;
+      readonly internal: boolean;
+      readonly args: Record<string, unknown>;
+    }
     | {
       readonly kind: "bind";
       readonly routingKey: string;
       readonly source: string;
       readonly destination: string;
+      readonly args: BindingArgs;
     }
     | {
       readonly kind: "exchangeBind";
@@ -790,8 +877,13 @@ export const makeRmq = Effect.fnUntraced(function*(
         Match.value(t).pipe(
           Match.discriminatorsExhaustive("kind")({
             queue: (q) => ch.queueDeclare(q.name, { durable: q.durable, exclusive: false, autoDelete: false }, q.args),
-            exchange: (x) => ch.exchangeDeclare(x.name, "topic", { durable: x.durable, autoDelete: false }),
-            bind: (b) => ch.queueBind(b.destination, b.source, b.routingKey),
+            exchange: (x) =>
+              ch.exchangeDeclare(x.name, x.type, {
+                durable: x.durable,
+                autoDelete: x.autoDelete,
+                internal: x.internal
+              }, x.args),
+            bind: (b) => ch.queueBind(b.destination, b.source, b.routingKey, b.args),
             exchangeBind: (b) => ch.exchangeBind(b.destination, b.source, b.routingKey)
           })
         ));
@@ -827,7 +919,18 @@ export const makeRmq = Effect.fnUntraced(function*(
 
   const open = (role: string, setup: (client: Client) => Promise<void>, onDown: () => void, restored: () => string) =>
     Effect.acquireRelease(
-      wrap("connect", () => connectLink(amqpUrl(opts), { role, setup, onDown, restored, warn, onLost: failLost })),
+      wrap(
+        "connect",
+        () =>
+          connectLink(amqpUrl({ ...opts, name: connectionName(opts, role) }), tlsOptionsOf(opts), {
+            role,
+            setup,
+            onDown,
+            restored,
+            warn,
+            onLost: failLost
+          })
+      ),
       // Closing also stops recovery. Forgetting every consumer first stops the resulting channel closes from being
       // read as consumers to repair.
       (link) =>
@@ -923,6 +1026,55 @@ export const makeRmq = Effect.fnUntraced(function*(
     })
   });
 
+  const declareExchange = (name: string, options: ExchangeOptions) => {
+    const entry = {
+      kind: "exchange" as const,
+      name,
+      type: options.type ?? "topic",
+      durable: options.durable ?? true,
+      autoDelete: options.autoDelete ?? false,
+      internal: options.internal ?? false,
+      args: options.args ?? {}
+    };
+    record(`x:${name}`, entry);
+    return onFreshChannel(
+      "declareExchange",
+      (ch) =>
+        ch.exchangeDeclare(name, entry.type, {
+          durable: entry.durable,
+          autoDelete: entry.autoDelete,
+          internal: entry.internal
+        }, entry.args).then(() => name)
+    );
+  };
+
+  /**
+   * One `basic.get` on `ch`, settled on `ch`: at most once, and tolerant of a channel that closed under the caller,
+   * since the broker has the delivery back by then. `settled` runs after the settlement: closing a one-off channel.
+   */
+  const fetchOn = async (
+    ch: AMQPChannel,
+    queue: string,
+    settled: () => Promise<void>
+  ): Promise<O.Option<GotMessage>> => {
+    const msg = await ch.basicGet(queue, { noAck: false });
+    if (msg === null) return O.none();
+    let done = false;
+    const settleOnce = (act: () => Promise<void>) =>
+      Effect.promise(async () => {
+        if (done) return;
+        done = true;
+        await quietly(act());
+        await settled();
+      });
+    return O.some({
+      ...describe(msg),
+      body: msg.body ?? new Uint8Array(0),
+      ack: settleOnce(() => ch.basicAck(msg.deliveryTag)),
+      nack: settleOnce(() => ch.basicNack(msg.deliveryTag, true))
+    });
+  };
+
   return Rmq.of({
     declareQueue: (name, options = {}) => {
       const durable = options.durable ?? true;
@@ -933,17 +1085,19 @@ export const makeRmq = Effect.fnUntraced(function*(
         (ch) => ch.queueDeclare(name, { durable, exclusive: false, autoDelete: false }, args).then(() => name)
       );
     },
-    declareTopicExchange: (name, options = {}) => {
-      const durable = options.durable ?? false;
-      record(`x:${name}`, { kind: "exchange", name, durable });
-      return onFreshChannel(
-        "declareExchange",
-        (ch) => ch.exchangeDeclare(name, "topic", { durable, autoDelete: false }).then(() => name)
-      );
-    },
-    bind: (routingKey, source, destination) => {
-      record(`b:${source}:${routingKey}:${destination}`, { kind: "bind", routingKey, source, destination });
-      return onFreshChannel("bind", (ch) => ch.queueBind(destination, source, routingKey));
+    declareExchange: (name, options = {}) => declareExchange(name, options),
+    declareTopicExchange: (name, options = {}) =>
+      declareExchange(name, { type: "topic", durable: options.durable ?? false }),
+    bind: (routingKey, source, destination, args = {}) => {
+      // Two bindings of the same key with different arguments are two bindings: a headers exchange tells them apart.
+      record(`b:${source}:${routingKey}:${destination}:${JSON.stringify(args)}`, {
+        kind: "bind",
+        routingKey,
+        source,
+        destination,
+        args
+      });
+      return onFreshChannel("bind", (ch) => ch.queueBind(destination, source, routingKey, args));
     },
     consume: (queue, onMessage, options = {}) =>
       wrap("consume", async () => {
@@ -977,33 +1131,23 @@ export const makeRmq = Effect.fnUntraced(function*(
     get: (queue) =>
       wrap("get", async () => {
         const ch = quiet(await consuming.channel());
-        const msg = await ch.basicGet(queue, { noAck: false }).catch(async (error: unknown) => {
+        const got = await fetchOn(ch, queue, () => quietly(ch.close())).catch(async (error: unknown) => {
           await quietly(ch.close());
           throw error;
         });
-        if (msg === null) {
-          await quietly(ch.close());
-          return O.none();
-        }
-        // Settled at most once, and tolerant of a channel that closed under the caller: the broker has the
-        // delivery back by then.
-        let settled = false;
-        const settleOnce = (act: () => Promise<void>) =>
-          Effect.promise(async () => {
-            if (settled) return;
-            settled = true;
-            await quietly(act());
-            await quietly(ch.close());
-          });
-        return O.some({
-          ...describe(msg),
-          body: msg.body ?? new Uint8Array(0),
-          ack: settleOnce(() => ch.basicAck(msg.deliveryTag)),
-          nack: settleOnce(() => ch.basicNack(msg.deliveryTag, true))
-        });
+        if (O.isNone(got)) await quietly(ch.close());
+        return got;
       }),
-    publisherToExchange: (exchange, routingKey, format = {}) =>
-      Effect.succeed({ exchange, routingKey, format, mandatory: false }),
+    pull: (queue) =>
+      Effect.map(
+        Effect.acquireRelease(
+          wrap("pull", () => consuming.channel().then(quiet)),
+          (ch) => Effect.promise(() => quietly(ch.close()))
+        ),
+        (ch) => wrap("get", () => fetchOn(ch, queue, () => Promise.resolve()))
+      ),
+    publisherToExchange: (exchange, routingKey, format = {}, options = {}) =>
+      Effect.succeed({ exchange, routingKey, format, mandatory: options.mandatory ?? false }),
     // The default exchange routes by queue name, which is the same path `deadLetterArgs` uses for dead-lettering.
     publisherToQueue: (queue, format = {}) =>
       Effect.succeed({ exchange: "", routingKey: queue, format, mandatory: true }),

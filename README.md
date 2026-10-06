@@ -25,7 +25,7 @@ each behind its own breaker. The diagram shows the third party's.
 
 ```mermaid
 flowchart LR
-  producer["Producer"] --> queue[("payments-provider.work")]
+  producer["Producer"] --> exchange(["egress.payments"]) --> queue[("payments-provider.work")]
   subgraph c1["consumer 1"]
     p1["Cockatiel policy\nvia SDK adapter"]
     b1{{"SDK breaker\n(consumer on/off)"}}
@@ -324,12 +324,8 @@ const Database = Consumer.Dependency("ledger", {
   breaker: { maxDelaySeconds: 300 },
   breakerPolicy: adaptCockatiel(() => new ConsecutiveBreaker(5))
 });
-const json = Consumer.accept(
-  { "application/json": Consumer.text(Schema.fromJsonString(Schema.Unknown)) },
-  { undeclared: "application/json", type: "egress.work" },
-);
-
-const payments = Consumer.For(Payment, json).bind(
+// Payment and Refund come from @egress/contracts, which the producer writes with too.
+const payments = Consumer.For(Payment).bind(
   Effect.fnUntraced(function*(payment, metadata) {
     // The SDK runs this action in work.process, parented from this delivery's traceparent when present.
     const key = yield* keyOf(metadata);                     // Rejected (parked) without a message_id
@@ -338,7 +334,7 @@ const payments = Consumer.For(Payment, json).bind(
   }),
   [ThirdParty, Database],
 );
-const refunds = Consumer.For(Refund, json).bind(/* … */, [Database]);
+const refunds = Consumer.For(Refund).bind(/* … */, [Database]);
 
 run({
   consumers: { "payments-provider": payments, "refunds-provider": refunds },
@@ -369,9 +365,11 @@ provides spans for database calls.
   (`patches/@cloudamqp__amqp-client@4.1.1.patch`): a broker that shut down with
   confirmed publishes still being written left their rejections unhandled, which
   ends the process on every runtime.
-- **Explicit reading and judging.** Negotiation has no default; each media type
-  maps to a Schema over the body's bytes: `Consumer.text(schema)` for a text
-  format, `Consumer.bytes(decode)` for a binary one. Parking and redrive
+- **Explicit reading and judging.** A consumer reads what its contract declares
+  (`Consumer.For(contract)`); one that reads differently passes its own
+  negotiation (`Consumer.For(schema, Consumer.accept(…))`), which has no default.
+  Each media type maps to a Schema over the body's bytes: `Consumer.text(schema)`
+  for a text format, `Consumer.bytes(codec)` for a binary one. Parking and redrive
   republish the bytes as they came, with their declared format. The classifiers
   above are the application's, not the SDK's; `bySqlError` reads the SQLSTATE
   class Effect puts on `SqlError.reason`.
@@ -397,11 +395,102 @@ provides spans for database calls.
 - **The types hold the lists.** A call to a dependency the consumer doesn't
   list, or a service no layer provides, fails to compile.
 
+## The producer as an SDK
+
+`packages/rmq-producer` is the publisher SDK; `packages/producer/src/main.ts`
+is the load generator built on it. An application names the contract its
+messages follow; the SDK declares the contract's exchange, writes each message
+in the contract's format, stamps its `message_id`, publishes to the exchange in
+confirmed batches, and traces and counts what it published. It knows no queue:
+each consumer binds its own `<key>.work` to the exchange. It shares the
+contract with the consumer and nothing else, and never reads breaker state.
+
+```ts
+import { mediaTypes, Payment } from "@egress/contracts/Work.ts";
+import * as Producer from "@egress/rmq-producer";
+import { run } from "@egress/rmq-producer/node";              // the one runtime-specific import
+
+run({
+  flags: { apiId, ratePerSecond, format },                    // beside the SDK's, in one --help
+  main: Effect.fnUntraced(function*({ apiId, format }) {
+    const work = yield* Producer.publisher(Payment, { format: mediaTypes[format] }); // onto egress.payments
+    // Each call is confirmed and is one work.publish span; each resolves with the id(s) it stamped.
+    const id = yield* work.publish(Producer.one({ apiId, n: 0 }));
+    const ids = yield* work.publish(Producer.batch([{ apiId, n: 1 }, { apiId, n: 2 }])); // one round trip
+  })
+}, { name: "rmq-producer" });
+```
+
+- **One contract, both sides.** A `Contract` (`@egress/rmq/Contract.ts`) is a
+  schema, the exchange it is published to (its type among them), an AMQP `type`, and its
+  formats by media type, each a parser that reads and writes. The producer encodes with it, so a message the schema
+  refuses fails the publish and is never sent; the consumer negotiates and
+  decodes with it. `packages/contracts` declares payments and refunds once, in
+  JSON and protobuf.
+- **The exchange is the meeting point.** Both sides declare it, durable, so
+  either may start first. The consumer SDK binds `<key>.work` to it (`#`);
+  another application could bind a queue of its own and receive the same work.
+  Messages are published `mandatory`: one sent before any queue is bound fails
+  as unroutable instead of vanishing.
+- **The topology underneath is configurable.** Each layer exposes what the
+  broker client can set:
+  - *Connection*, both SDKs: `--rmq-vhost`, `--rmq-username`,
+    `--rmq-password` and `--rmq-tls` (`RMQ_VHOST`, `RMQ_USERNAME`,
+    `RMQ_PASSWORD`, `RMQ_TLS`) beside `--rmq`, and the application's
+    `connection` (TLS certificates, frame and channel limits, a connection
+    name; the command's name unless given), which wins over the flags.
+  - *Exchange*, in the contract: a name alone is a durable topic exchange, or
+    `{ name, type: "direct" | "fanout" | "topic" | "headers", durable,
+    autoDelete, args }`, where `args` carries settings such as
+    `alternate-exchange`. Both sides declare it from the one contract.
+  - *Sharing an exchange*, opt-in, in the contract: by default a contract has
+    its exchange to itself, and a consumer receives all of it. A `route` lets
+    several contracts name one exchange: a routing key on a direct or topic
+    exchange (`route: "payment"`, no wildcards, since it is published with as
+    well as bound to), or headers on a headers exchange (`route: { headers: {
+    kind: "payment" } }`). The publisher publishes on it, and refuses a
+    `routingKey` beside it as a defect; the consumer binds to it, so its queue
+    receives only its own contract's messages. A route that cannot work on its
+    exchange (any on fanout, a key on headers) is refused when the contract is
+    made. Give contracts that share an exchange distinct `type`s too, so a
+    misrouted message is parked as unreadable instead of processed.
+  - *Binding*, on the consumer: `Consumer.For(contract, { binding: {
+    routingKey, args } })`, replacing the contract's: its route, or else `#`
+    on a topic exchange and `""` on the others; `args` are what a headers
+    exchange matches.
+  - *Routing*, on the publisher: `routingKey` and `headers` per publisher or
+    per call, and `mandatory: false` for an exchange whose consumers
+    may all be gone.
+
+  The work queue's own arguments stay the SDK's: its quorum type, delivery
+  limit and dead-lettering are what the breaker's guarantees rest on.
+- **Ids that outlive the process.** Each publisher stamps `<run>:<n>`, a run id
+  unique to it and its sequence: a restarted producer never reissues the key of
+  different work.
+- **One `publish`, tagged.** `Producer.one(message)` resolves with its id,
+  `Producer.batch(messages)` with theirs in order, one round trip for all of
+  them. The tag, not the shape, says which: a contract whose message is itself
+  an array is never mistaken for a batch.
+- **A failed publication is the caller's, and repeatable.** `publish` fails
+  with `PublishError`, whose `reason` says why: `ContractRefused` before
+  anything is sent; `Unroutable` or `BrokerFailed` after, when some of it may be
+  held, carrying the ids it was sent with. Repeating it with those ids
+  (`Producer.batch(messages, { ids })`) is the same work again, which the
+  consumer's idempotency on the key absorbs, not new work.
+  `Effect.catchReason("PublishError", "Unroutable", …)` handles one reason. The
+  example producer logs a failure and keeps its cadence; a lost broker still
+  ends the process.
+- **Metrics, where the broker has none.** Published, confirmed and unroutable
+  messages are RabbitMQ's to count, per exchange
+  (`rabbitmq_detailed_exchange_messages_*_total`). The SDK counts only what
+  never reached it: `egress_producer_failed_total`, by exchange and reason
+  (`contract_refused`, `broker_failed`).
+
 ### Telemetry and metrics
 
 The SDK also instruments its work and carries sampled traces across the broker:
 
-- **Batch parent trace propagation.** Each producer tick has one root
+- **Batch parent trace propagation.** Each publication, `one` or a `batch`, has one root
   `work.publish` span; `sendBatch` stamps its W3C `traceparent` on each
   message. Consequently, messages in the same tick share a trace ID, with a
   separate `work.process` branch per delivery. The application forwards the
@@ -428,6 +517,14 @@ The SDK also instruments its work and carries sampled traces across the broker:
   state and trips, lost probe permits, redrive outcomes, and the adaptive
   concurrency limit. Consumer and dependency labels distinguish the work;
   Prometheus's `instance` label distinguishes replicas.
+- **What the broker reports is left to the broker.** Channels and connections
+  are RabbitMQ's to count: `rabbitmq_channels` and
+  `rabbitmq_channels_opened_total` on its exporter (a count that keeps
+  climbing is a leak, a steady opened rate is churn), and per connection in the
+  management API, which also shows a connection an alarm has blocked. Each
+  process opens two, named `<name> (consuming)` and `<name> (publishing)`, so
+  that view tells them apart. A redrive pass fetches on one channel, not one
+  per message.
 
 **Chaos**: `node infra/chaos-app.mjs`, both consumers under a spike, a fault in
 either dependency for about 40 s. Graded per message plus the ledger: every
@@ -453,8 +550,6 @@ bodies alternating JSON and protobuf (`--format=mixed`,
   the SDK has none.
 - **A probe runs the whole action**: a half-open ledger is probed by a payment
   that charges first.
-- **The contract is declared twice**, by the producer and the application,
-  once per format.
 - **One `MAX_IN_FLIGHT` for every consumer**, and breaker tuning lives in code.
 
 ## Limits it accepts
@@ -522,10 +617,13 @@ upstream on either the Compose network (`flaky-upstream:8080`) or the host
 ```
 packages/
   config/        settings declared once, decoded at boot
-  rmq/           @cloudamqp/amqp-client in Effect, work-queue conventions, the delay chain
-  rmq-producer/  the load, in confirmed batches, JSON or protobuf (--format)
-  rmq-consumer/  the SDK: Breaker, Dependency, Gate, Negotiation, Settle,
+  rmq/           @cloudamqp/amqp-client in Effect, work-queue conventions, the delay chain,
+                 contracts and negotiation
+  rmq-producer/  the publisher SDK: a contract's exchange, encoding, ids, confirmed batches
+  rmq-consumer/  the consumer SDK: Breaker, Dependency, Gate, Settle,
                  Permit, Redrive, Limiter, run by consumer.ts
+  contracts/     payments and refunds, JSON and protobuf, declared once for both
+  producer/      the load, at a fixed rate, JSON or protobuf (--format)
   consumer/      the application (main.ts)
   tracing/       opt-in /metrics endpoint and OTLP tracing (`--telemetry` or `EXPOSE_TELEMETRY=true` plus an OTLP endpoint)
 infra/
@@ -544,7 +642,7 @@ run the `src/*.ts` directly.
 `Uint8Array`, the broker client (`@cloudamqp/amqp-client`) and tracing
 (Effect's OTLP exporter over `fetch`) use web APIs, and the only runtime
 code, the `/metrics` server and the process's main, sits behind
-`@egress/rmq-consumer/node`. The same source, tests and image run on node 26,
+`@egress/rmq-consumer/node` and `@egress/rmq-producer/node`. The same source, tests and image run on node 26,
 Bun 1.4.2 and Deno 2.9.7 (`Dockerfile` targets `runtime`, `runtime-bun`,
 `runtime-deno`), and CI runs the unit and broker suites on all three.
 

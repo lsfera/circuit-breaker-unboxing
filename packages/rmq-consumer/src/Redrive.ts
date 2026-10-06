@@ -73,13 +73,15 @@ type RedriveOptions = {
 };
 
 /**
- * `get`, not `consume`: "replay what is there, stop when empty" needs no idle timer. Publish, then ack: a crash
- * in between duplicates (the idempotency key rides along as `message_id`), where the reverse order would lose
- * the message. Whatever a pass does not reach stays where it was.
+ * `basic.get`, not `consume`: "replay what is there, stop when empty" needs no idle timer. One channel for the
+ * pass (`pull`), not one per message. Publish, then ack: a crash in between duplicates (the idempotency key rides
+ * along as `message_id`), where the reverse order would lose the message. Whatever a pass does not reach stays
+ * where it was.
  */
 export const runPass = Effect.fnUntraced(function*(opts: RedriveOptions) {
   const rmq = yield* Rmq;
   const deadQueue = deadLetterQueueFor(opts.apiId);
+  const next = yield* rmq.pull(deadQueue);
   const workPub = yield* rmq.publisherToQueue(workQueueFor(opts.apiId));
   const parkedPub = yield* rmq.publisherToQueue(parkedQueueFor(opts.apiId));
 
@@ -109,7 +111,7 @@ export const runPass = Effect.fnUntraced(function*(opts: RedriveOptions) {
 
   /** One message, if the breaker is still closed and the queue still has one; `false` ends the pass. */
   const step = opts.isClosed.pipe(
-    Effect.flatMap((closed) => (closed ? rmq.get(deadQueue) : Effect.succeedNone)),
+    Effect.flatMap((closed) => (closed ? next : Effect.succeedNone)),
     Effect.flatMap(
       O.match({
         onNone: () => Effect.succeed(false),
@@ -119,4 +121,4 @@ export const runPass = Effect.fnUntraced(function*(opts: RedriveOptions) {
   );
 
   yield* step.pipe(Effect.repeat({ while: (more) => more, times: MAX_PER_PASS - 1 }));
-});
+}, Effect.scoped);

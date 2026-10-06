@@ -212,6 +212,9 @@ importers:
       '@effect/sql-pg':
         specifier: 'catalog:'
         version: 4.0.1(effect@4.0.1)
+      '@egress/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@egress/rmq':
         specifier: workspace:*
         version: link:../rmq
@@ -224,9 +227,33 @@ importers:
       effect:
         specifier: 'catalog:'
         version: 4.0.1
+
+  packages/contracts:
+    dependencies:
+      '@egress/rmq':
+        specifier: workspace:*
+        version: link:../rmq
+      effect:
+        specifier: 'catalog:'
+        version: 4.0.1
       protobufjs:
         specifier: 8.8.0
         version: 8.8.0
+
+  packages/producer:
+    dependencies:
+      '@egress/config':
+        specifier: workspace:*
+        version: link:../config
+      '@egress/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@egress/rmq-producer':
+        specifier: workspace:*
+        version: link:../rmq-producer
+      effect:
+        specifier: 'catalog:'
+        version: 4.0.1
 
   packages/rmq:
     dependencies:
@@ -276,9 +303,6 @@ importers:
       effect:
         specifier: 'catalog:'
         version: 4.0.1
-      protobufjs:
-        specifier: 8.8.0
-        version: 8.8.0
 
   packages/tracing:
     dependencies:

@@ -10,14 +10,16 @@ checkout.
 
 | Package | Responsibility |
 | --- | --- |
-| `packages/rmq` | Effect wrapper around `@cloudamqp/amqp-client`, queue conventions, delayed delivery |
+| `packages/rmq` | Effect wrapper around `@cloudamqp/amqp-client`, queue conventions, delayed delivery, message contracts and negotiation |
 | `packages/rmq-consumer` | Consumer SDK: per-dependency breaker, probe permit, redrive, parking and metrics |
-| `packages/rmq-producer` | Publishes work; does not own breaker state |
+| `packages/rmq-producer` | Publisher SDK: publishes a contract's messages to its exchange, encoded, with ids, in confirmed batches; knows no queue, never reads breaker state |
+| `packages/contracts` | The example message contracts, declared once for producer and consumer |
+| `packages/producer` | Example load generator using the publisher SDK |
 | `packages/consumer` | Example application using the consumer SDK |
 | `packages/config` | Shared settings decoded at process startup |
 | `packages/tracing` | OpenTelemetry tracing and Prometheus metrics |
 
-The main flow is producer → RabbitMQ work queue → competing consumer fleet →
+The main flow is producer → contract exchange → RabbitMQ work queue → competing consumer fleet →
 upstream service. In this branch a closed breaker consumes work; an open
 breaker stops its consumer and leaves a wake token in the broker's TTL
 dead-letter delay chain; the returning token permits a single-message probe.
