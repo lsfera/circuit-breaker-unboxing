@@ -251,3 +251,84 @@ test("under a broker alarm a publication waits for the connection to be unblocke
   assert.ok(heldUnderAlarm, "the alarm holds the publication rather than failing it");
   assert.deepEqual(got.map((m) => O.getOrThrow(m.messageId)), ids, "confirmed and delivered once unblocked");
 });
+
+/** A contract on a shared exchange, opted in by its route, of its own AMQP `type`. */
+const routed = (exchange: Contract.ExchangeInput, route: Contract.RouteInput, type: string) =>
+  Contract.make(Schema.Struct({ apiId: Schema.String, n: Schema.Int }), {
+    exchange,
+    route,
+    type,
+    formats: { "application/json": text(Schema.fromJsonString(Schema.Unknown)) }
+  });
+
+/** A queue bound as a consumer of `contract` binds it by default. */
+const bindAsConsumer = (contract: Contract.Contract<unknown>, queue: string) =>
+  bindQueue(contract.exchange, queue, Contract.binding(contract));
+
+const drainTypes = (queue: string) =>
+  Effect.gen(function*() {
+    const rmq = yield* Rmq;
+    const types: Array<string> = [];
+    for (let m = yield* rmq.get(queue); O.isSome(m); m = yield* rmq.get(queue)) {
+      types.push(O.getOrThrow(m.value.type));
+      yield* m.value.ack;
+    }
+    return types;
+  });
+
+test("contracts that share an exchange by route each reach only their own consumers", async (t) => {
+  if (skipIfNoDocker(t)) return;
+  const name = `shared.${Date.now()}`;
+  const Payment = routed(name, "payment", "test.payment");
+  const Refund = routed(name, "refund", "test.refund");
+
+  const got = await run(Effect.gen(function*() {
+    yield* bindAsConsumer(Payment, `${name}.payments`);
+    yield* bindAsConsumer(Refund, `${name}.refunds`);
+    const payments = yield* Producer.publisher(Payment);
+    const refunds = yield* Producer.publisher(Refund);
+    yield* payments.publish(Producer.batch([{ apiId: "a", n: 0 }, { apiId: "a", n: 1 }]));
+    yield* refunds.publish(Producer.one({ apiId: "a", n: 2 }));
+    yield* Effect.sleep("200 millis");
+    return { payments: yield* drainTypes(`${name}.payments`), refunds: yield* drainTypes(`${name}.refunds`) };
+  }));
+
+  assert.deepEqual(got.payments, ["test.payment", "test.payment"]);
+  assert.deepEqual(got.refunds, ["test.refund"], "no payment reached the refunds' queue");
+});
+
+test("on a shared headers exchange, the route's headers are stamped on every message and win over the caller's", async (t) => {
+  if (skipIfNoDocker(t)) return;
+  const name = `shared.headers.${Date.now()}`;
+  const exchange = { name, type: "headers" } as const;
+  const Payment = routed(exchange, { headers: { kind: "payment" } }, "test.payment");
+  const Refund = routed(exchange, { headers: { kind: "refund" } }, "test.refund");
+
+  const got = await run(Effect.gen(function*() {
+    yield* bindAsConsumer(Payment, `${name}.payments`);
+    yield* bindAsConsumer(Refund, `${name}.refunds`);
+    const payments = yield* Producer.publisher(Payment, { headers: { region: "eu" } });
+    yield* payments.publish(Producer.one({ apiId: "a", n: 0 }, { headers: { kind: "refund" } }));
+    yield* Effect.sleep("200 millis");
+    return { payments: yield* drainTypes(`${name}.payments`), refunds: yield* drainTypes(`${name}.refunds`) };
+  }));
+
+  assert.deepEqual(got.payments, ["test.payment"]);
+  assert.deepEqual(got.refunds, [], "a caller's header cannot reroute a routed contract");
+});
+
+test("a routing key beside a contract's route is a defect: it would deliver to another contract's consumers", async (t) => {
+  if (skipIfNoDocker(t)) return;
+  const Payment = routed(`shared.defect.${Date.now()}`, "payment", "test.payment");
+
+  const { atMake, atCall } = await run(Effect.gen(function*() {
+    const atMake = yield* Effect.exit(Producer.publisher(Payment, { routingKey: "refund" }));
+    const payments = yield* Producer.publisher(Payment);
+    const atCall = yield* Effect.exit(payments.publish(Producer.one({ apiId: "a", n: 0 }, { routingKey: "refund" })));
+    return { atMake, atCall };
+  }));
+
+  const died = (exit: Exit.Exit<unknown, unknown>) => Exit.isFailure(exit) && Cause.hasDies(exit.cause);
+  assert.ok(died(atMake), "making the publisher dies rather than fails");
+  assert.ok(died(atCall), "so does the call");
+});

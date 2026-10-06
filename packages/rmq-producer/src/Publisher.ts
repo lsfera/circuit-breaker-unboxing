@@ -37,6 +37,8 @@ export interface Publisher<A> {
 /**
  * Where on the exchange a message goes: its `routingKey`, which a direct or topic exchange routes on, and its
  * `headers`, which a headers exchange matches the binding's arguments against (and which every message carries).
+ * A contract with a `route` owns where its messages go: a `routingKey` beside it is a defect, and its route's
+ * headers win over any of the same name.
  */
 export type Routing = {
   readonly routingKey?: string;
@@ -157,8 +159,19 @@ export const make = Effect.fnUntraced(function*<A>(contract: Contract.Contract<A
     return yield* Effect.die(new Error(`${exchange.name}: the contract has no format a publisher can write`));
   }
   const encode = Contract.encoder(contract, format);
+  // Another key would send the contract's messages to whichever contract's consumers bound that one.
+  const routed = (where: string) =>
+    Effect.die(new Error(`${exchange.name}: the contract routes its messages, so a ${where} gives no routing key`));
+  if (O.isSome(contract.route) && options.routingKey !== undefined) return yield* routed("publisher");
+  const route = O.match(contract.route, {
+    onNone: () => ({ routingKey: "", headers: {} }),
+    onSome: Contract.Route.$match({
+      RoutingKey: ({ routingKey }) => ({ routingKey, headers: {} }),
+      Headers: ({ headers }) => ({ routingKey: "", headers })
+    })
+  });
   yield* rmq.declareExchange(exchange.name, exchange);
-  const destination = yield* rmq.publisherToExchange(exchange.name, options.routingKey ?? "", {
+  const destination = yield* rmq.publisherToExchange(exchange.name, options.routingKey ?? route.routingKey, {
     contentType: format,
     ...O.match(contract.type, { onNone: () => ({}), onSome: (type) => ({ type }) })
   }, { mandatory: options.mandatory ?? true });
@@ -173,11 +186,12 @@ export const make = Effect.fnUntraced(function*<A>(contract: Contract.Contract<A
   /** Every publication, one message or many: encoded first, so a refusal sends nothing; then sent as one batch. */
   const send = Effect.fnUntraced(
     function*(messages: ReadonlyArray<A>, routing: Routing, given: O.Option<ReadonlyArray<string>>) {
+      if (O.isSome(contract.route) && routing.routingKey !== undefined) return yield* routed("publication");
       const bodies = yield* Effect.forEach(messages, encode).pipe(
         Effect.mapError((cause) => fail(new ContractRefused({ cause })))
       );
       const ids = O.getOrElse(given, () => bodies.map(() => `${run}:${sent++}`));
-      const headers = { ...options.headers, ...routing.headers };
+      const headers = { ...options.headers, ...routing.headers, ...route.headers };
       yield* rmq.sendBatch(
         { ...destination, routingKey: routingKeyOf(routing) },
         bodies.map((body, i) => ({ body, messageId: ids[i]!, headers }))

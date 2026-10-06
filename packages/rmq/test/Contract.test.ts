@@ -108,3 +108,44 @@ test("an exchange named alone is a durable topic exchange; given as an object, e
     /internal/
   );
 });
+
+const shared = (exchange: Contract.ExchangeInput, route?: Contract.RouteInput) =>
+  Contract.make(Schema.Struct({ n: Schema.Int }), {
+    exchange,
+    formats: { "application/json": text(Schema.fromJsonString(Schema.Unknown)) },
+    ...(route === undefined ? {} : { route })
+  });
+
+test("without a route a contract has its exchange to itself: a consumer binds to all of it", () => {
+  assert.ok(O.isNone(Count.route));
+  assert.deepEqual(Contract.binding(Count), { routingKey: "#", args: {} }, "every message on a topic exchange");
+  assert.deepEqual(Contract.binding(shared({ name: "test.direct", type: "direct" })), { routingKey: "", args: {} });
+});
+
+test("a route opts a contract in to sharing its exchange: a consumer binds to the route alone", () => {
+  assert.deepEqual(Contract.binding(shared("test.shared", "payment")), { routingKey: "payment", args: {} });
+  assert.deepEqual(Contract.binding(shared({ name: "test.shared.direct", type: "direct" }, "refund")), {
+    routingKey: "refund",
+    args: {}
+  });
+  assert.deepEqual(
+    Contract.binding(shared({ name: "test.shared.headers", type: "headers" }, { headers: { kind: "payment" } })),
+    { routingKey: "", args: { "x-match": "all", kind: "payment" } }
+  );
+});
+
+test("a route that cannot work on its exchange is refused when the contract is made", () => {
+  const refused: ReadonlyArray<[Contract.ExchangeInput, Contract.RouteInput, RegExp]> = [
+    [{ name: "x", type: "fanout" }, "payment", /fanout/],
+    [{ name: "x", type: "headers" }, "payment", /routes on headers/],
+    [{ name: "x", type: "topic" }, { headers: { kind: "payment" } }, /routing key, not headers/],
+    [{ name: "x", type: "direct" }, { headers: { kind: "payment" } }, /routing key, not headers/],
+    ["x", "payment.*", /wildcard/],
+    ["x", "#", /wildcard/],
+    ["x", "", /empty/],
+    [{ name: "x", type: "headers" }, { headers: {} }, /at least one header/],
+    [{ name: "x", type: "headers" }, { headers: { "x-match": "any" } }, /x-match/]
+  ];
+  for (const [exchange, route, why] of refused) assert.throws(() => shared(exchange, route), why);
+  assert.doesNotThrow(() => shared("x", "payment.eu"), "dots are words, not wildcards");
+});

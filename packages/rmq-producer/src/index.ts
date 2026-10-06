@@ -33,7 +33,7 @@ import type { HttpServer } from "effect/http";
  */
 
 export type { ExchangeOptions, RmqConnectOptions } from "@egress/rmq/Client.ts";
-export type { Contract, Exchange, ExchangeInput } from "@egress/rmq/Contract.ts";
+export type { Contract, Exchange, ExchangeInput, Route, RouteInput } from "@egress/rmq/Contract.ts";
 export { batch, BrokerFailed, ContractRefused, make as publisher, one, PublishError, Unroutable } from "./Publisher.ts";
 export type { Batch, One, Publication, Publisher, PublisherOptions, Routing } from "./Publisher.ts";
 

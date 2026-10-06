@@ -37,7 +37,7 @@ import type { AnyDependency, Gated } from "./Dependency.ts";
  */
 
 export type { BindingArgs, ExchangeOptions, RmqConnectOptions } from "@egress/rmq/Client.ts";
-export type { Contract, Exchange, ExchangeInput } from "@egress/rmq/Contract.ts";
+export type { Contract, Exchange, ExchangeInput, Route, RouteInput } from "@egress/rmq/Contract.ts";
 export type { Declared, Negotiate, Parser } from "@egress/rmq/Negotiation.ts";
 export { accept, bytes, text } from "@egress/rmq/Negotiation.ts";
 export type { BinaryCodec } from "@egress/rmq/Negotiation.ts";
@@ -74,9 +74,9 @@ type BreakerOf<D extends ReadonlyArray<AnyDependency>> = D[number] extends infer
 type ServicesOf<C> = C extends Registration<infer R> ? R : never;
 
 /**
- * How a consumer of a contract binds its `<key>.work` to the contract's exchange. `routingKey` is `#` (every
- * message) on a topic exchange and `""` on the others unless given; `args` are the binding's arguments, which a
- * headers exchange matches on (`{ "x-match": "all", … }`).
+ * How a consumer of a contract binds its `<key>.work` to the contract's exchange, when not as the contract says
+ * (`Contract.binding`: its route if it has one, else the whole exchange). `routingKey` and `args`, the binding's
+ * arguments a headers exchange matches on (`{ "x-match": "all", … }`), each replace the contract's when given.
  */
 export type Binding = {
   readonly routingKey?: string;
@@ -97,13 +97,14 @@ export function For<T>(
 ): Binder<T> {
   if (!Contract.isContract(message)) return bindTo(message, second as Negotiate, O.none());
   const binding = (second as { readonly binding?: Binding; } | undefined)?.binding ?? {};
+  const byContract = Contract.binding(message);
   return bindTo(
     message.schema,
     Contract.negotiate(message),
     O.some({
       exchange: message.exchange,
-      routingKey: binding.routingKey ?? (message.exchange.type === "topic" ? "#" : ""),
-      args: binding.args ?? {}
+      routingKey: binding.routingKey ?? byContract.routingKey,
+      args: binding.args ?? byContract.args
     })
   );
 }
