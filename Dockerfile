@@ -26,6 +26,7 @@ COPY packages/rmq-consumer/package.json packages/rmq-consumer/
 COPY packages/config/package.json packages/config/
 COPY packages/rmq/package.json packages/rmq/
 COPY packages/rmq-producer/package.json packages/rmq-producer/
+COPY packages/contracts/package.json packages/contracts/
 COPY packages/tracing/package.json packages/tracing/
 # --prod drops typescript and testcontainers, which exist for `pnpm run check` and the opt-in integration suites.
 RUN pnpm install --frozen-lockfile --prod

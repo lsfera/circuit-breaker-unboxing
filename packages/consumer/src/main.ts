@@ -1,18 +1,18 @@
 import { PgClient } from "@effect/sql-pg";
+import { Payment, Refund } from "@egress/contracts/Work.ts";
 import * as Consumer from "@egress/rmq-consumer";
 import type { BreakerPolicy, BreakerPolicyState } from "@egress/rmq-consumer";
 import { run } from "@egress/rmq-consumer/node";
 import { traceparent } from "@egress/rmq/Trace.ts";
 import { CircuitState, ConsecutiveBreaker, SamplingBreaker } from "cockatiel";
 import type { IBreaker } from "cockatiel";
-import { Config, Context, Effect, Layer, Match, Option as O, Result, Schema } from "effect";
+import { Config, Context, Effect, Layer, Match, Option as O, Result } from "effect";
 import type { Redacted } from "effect";
 import { Flag } from "effect/cli";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 import type { HttpClientError } from "effect/http";
 import { SqlClient } from "effect/sql";
 import type { SqlError } from "effect/sql";
-import protobuf from "protobufjs";
 
 const adaptCockatiel = (make: () => IBreaker): () => BreakerPolicy => () => {
   const policy = make();
@@ -28,9 +28,9 @@ const adaptCockatiel = (make: () => IBreaker): () => BreakerPolicy => () => {
  * ledger; refunds are only recorded. A third-party outage stops payments only; a ledger outage stops both.
  */
 
-/** The two contracts this application agrees with its producers. The same shape today; each is its own contract. */
-const Payment = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
-const Refund = Schema.Struct({ apiId: Schema.String, n: Schema.Int });
+/** The two contracts this application shares with its producers (`@egress/contracts`), declared once for both. */
+type Payment = typeof Payment.schema.Type;
+type Refund = typeof Refund.schema.Type;
 
 /** The third party, reached at one address. The idempotency key rides as its own header, so a redelivery repeats the same request. */
 const withTraceParent = (
@@ -79,8 +79,8 @@ class PaymentsApi extends Context.Service<
 class Ledger extends Context.Service<
   Ledger,
   {
-    readonly record: (key: string, payment: typeof Payment.Type) => Effect.Effect<void, SqlError.SqlError>;
-    readonly refund: (key: string, refund: typeof Refund.Type) => Effect.Effect<void, SqlError.SqlError>;
+    readonly record: (key: string, payment: Payment) => Effect.Effect<void, SqlError.SqlError>;
+    readonly refund: (key: string, refund: Refund) => Effect.Effect<void, SqlError.SqlError>;
   }
 >()("@egress/consumer/main/Ledger") {
   static readonly layer = (url: Redacted.Redacted) =>
@@ -150,25 +150,6 @@ const Database = Consumer.Dependency("ledger", {
   breakerPolicy: adaptCockatiel(() => new ConsecutiveBreaker(5))
 });
 
-/**
- * `message Work { string api_id = 1; int64 n = 2; }`, defined at runtime. `defaults`: proto3 leaves a zero off the
- * wire, and `n` starts at 0. `longs: Number`: the contract's `n` is a number, not a `Long`.
- */
-const WorkProto = protobuf.Type.fromJSON("Work", {
-  fields: { apiId: { type: "string", id: 1 }, n: { type: "int64", id: 2 } }
-});
-
-/** Each message is read by the format it declares; either way, the contract decides whether it is a payment. */
-const formats = Consumer.accept(
-  {
-    "application/json": Consumer.text(Schema.fromJsonString(Schema.Unknown)),
-    "application/x-protobuf": Consumer.bytes((body) =>
-      WorkProto.toObject(WorkProto.decode(body), { longs: Number, defaults: true })
-    )
-  },
-  { undeclared: "application/json", type: "egress.work" }
-);
-
 /** The third party dedupes on it: no `message_id`, no safe retry. */
 const keyOf = (metadata: Consumer.Metadata) =>
   O.match(metadata.messageId, {
@@ -176,7 +157,7 @@ const keyOf = (metadata: Consumer.Metadata) =>
     onSome: Effect.succeed
   });
 
-const payments = Consumer.For(Payment, formats).bind(
+const payments = Consumer.For(Payment).bind(
   Effect.fnUntraced(function*(payment, metadata) {
     const key = yield* keyOf(metadata);
     // Halts here unless the charge was ok, so only an accepted charge is recorded.
@@ -186,7 +167,7 @@ const payments = Consumer.For(Payment, formats).bind(
   [ThirdParty, Database]
 );
 
-const refunds = Consumer.For(Refund, formats).bind(
+const refunds = Consumer.For(Refund).bind(
   Effect.fnUntraced(function*(refund, metadata) {
     const key = yield* keyOf(metadata);
     yield* Database((yield* Ledger).refund(key, refund));

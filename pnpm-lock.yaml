@@ -212,6 +212,9 @@ importers:
       '@effect/sql-pg':
         specifier: 'catalog:'
         version: 4.0.1(effect@4.0.1)
+      '@egress/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@egress/rmq':
         specifier: workspace:*
         version: link:../rmq
@@ -221,6 +224,15 @@ importers:
       cockatiel:
         specifier: ^4.0.0
         version: 4.0.0
+      effect:
+        specifier: 'catalog:'
+        version: 4.0.1
+
+  packages/contracts:
+    dependencies:
+      '@egress/rmq':
+        specifier: workspace:*
+        version: link:../rmq
       effect:
         specifier: 'catalog:'
         version: 4.0.1

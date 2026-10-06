@@ -1,4 +1,5 @@
 import { Rmq } from "@egress/rmq/Client.ts";
+import * as Negotiation from "@egress/rmq/Negotiation.ts";
 import { deadLetterQueueFor, deadLetterQueueOptions, workQueueFor, workQueueOptions } from "@egress/rmq/WorkQueue.ts";
 import { Effect, Option as O, Result, Schema } from "effect";
 import assert from "node:assert/strict";
@@ -6,7 +7,6 @@ import { afterAll, beforeAll, test } from "vitest";
 import { broker, skipIfNoDocker, startBroker, stopBroker, waitFor } from "../../../rmq/test/integration/harness.ts";
 import { runApplication } from "../../src/consumer.ts";
 import * as Dependency from "../../src/Dependency.ts";
-import * as Negotiation from "../../src/Negotiation.ts";
 
 beforeAll(startBroker);
 afterAll(stopBroker);
@@ -62,7 +62,8 @@ test("a failed call opens the real consumer breaker until its delayed probe succ
             return attempts.length === 1 ? 503 : 200;
           })
         ).pipe(Effect.tap(() => Effect.sync(() => void completed.push(String(payload))))),
-      dependencies: [upstream]
+      dependencies: [upstream],
+      source: O.none()
     }]
   };
 

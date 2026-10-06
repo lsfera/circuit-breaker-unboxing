@@ -1,5 +1,7 @@
 import {
   brokerFlag,
+  connectionFlags,
+  connectionOf,
   metricsFlag,
   metricsPortFlag,
   PositiveInt,
@@ -7,8 +9,10 @@ import {
   telemetryFlag
 } from "@egress/config/Settings.ts";
 import { launchWithRmq, Rmq } from "@egress/rmq/Client.ts";
-import type { DeliveryInfo } from "@egress/rmq/Client.ts";
+import type { BindingArgs, DeliveryInfo, RmqConnectOptions } from "@egress/rmq/Client.ts";
+import * as Contract from "@egress/rmq/Contract.ts";
 import { MAX_DELAY_SECONDS } from "@egress/rmq/DelayedDelivery.ts";
+import type { Negotiate } from "@egress/rmq/Negotiation.ts";
 import { MetricsRoute } from "@egress/tracing/Metrics.ts";
 import { TracingLive } from "@egress/tracing/Tracing.ts";
 import { Config, Layer, Option as O, Predicate, Schema } from "effect";
@@ -20,7 +24,6 @@ import { runApplication } from "./consumer.ts";
 import type { ConsumerSpec } from "./consumer.ts";
 import * as Dep from "./Dependency.ts";
 import type { AnyDependency, Gated } from "./Dependency.ts";
-import type { Negotiate } from "./Negotiation.ts";
 
 /**
  * The consumer SDK: an application declares contracts, actions and dependencies; the SDK runs breakers, probe
@@ -33,11 +36,14 @@ import type { Negotiate } from "./Negotiation.ts";
  * and each runtime's entry point (`./node`) supplies it and runs the command.
  */
 
+export type { BindingArgs, ExchangeOptions, RmqConnectOptions } from "@egress/rmq/Client.ts";
+export type { Contract, Exchange, ExchangeInput } from "@egress/rmq/Contract.ts";
+export type { Declared, Negotiate, Parser } from "@egress/rmq/Negotiation.ts";
+export { accept, bytes, text } from "@egress/rmq/Negotiation.ts";
+export type { BinaryCodec } from "@egress/rmq/Negotiation.ts";
 export type { BreakerPolicy, BreakerPolicyFactory, BreakerPolicyState, Outcome } from "./Breaker.ts";
 export type { Verdict } from "./Dependency.ts";
 export { Halted, Rejected } from "./Dependency.ts";
-export type { Declared, Negotiate, Parser } from "./Negotiation.ts";
-export { accept, bytes, text } from "./Negotiation.ts";
 
 /** RabbitMQ's side of a delivery: `message_id`, `type`, content type and encoding, headers, delivery count, dead-letter origin, publish time. */
 export type Metadata = DeliveryInfo;
@@ -68,10 +74,47 @@ type BreakerOf<D extends ReadonlyArray<AnyDependency>> = D[number] extends infer
 type ServicesOf<C> = C extends Registration<infer R> ? R : never;
 
 /**
- * A consumer of messages of `message`. What it reads is its decision, so negotiation has no default: `accept`
- * covers media types, or any `Negotiate` will do.
+ * How a consumer of a contract binds its `<key>.work` to the contract's exchange. `routingKey` is `#` (every
+ * message) on a topic exchange and `""` on the others unless given; `args` are the binding's arguments, which a
+ * headers exchange matches on (`{ "x-match": "all", … }`).
  */
-export const For = <T>(message: Schema.Codec<T, any, never, unknown>, negotiate: Negotiate) => {
+export type Binding = {
+  readonly routingKey?: string;
+  readonly args?: BindingArgs;
+};
+
+/**
+ * A consumer of a `Contract`'s messages, read in its formats: the contract its publishers write with
+ * (`@egress/rmq-producer`). Its `<key>.work` is bound to the contract's exchange, by `binding` when given. Or of
+ * messages of a schema, read by a negotiation of its own and bound to nothing: what it reads is its decision, so
+ * negotiation then has no default — `accept` covers media types, or any `Negotiate` will do.
+ */
+export function For<T>(contract: Contract.Contract<T>, options?: { readonly binding?: Binding; }): Binder<T>;
+export function For<T>(message: Schema.Codec<T, any, never, unknown>, negotiate: Negotiate): Binder<T>;
+export function For<T>(
+  message: Contract.Contract<T> | Schema.Codec<T, any, never, unknown>,
+  second?: Negotiate | { readonly binding?: Binding; }
+): Binder<T> {
+  if (!Contract.isContract(message)) return bindTo(message, second as Negotiate, O.none());
+  const binding = (second as { readonly binding?: Binding; } | undefined)?.binding ?? {};
+  return bindTo(
+    message.schema,
+    Contract.negotiate(message),
+    O.some({
+      exchange: message.exchange,
+      routingKey: binding.routingKey ?? (message.exchange.type === "topic" ? "#" : ""),
+      args: binding.args ?? {}
+    })
+  );
+}
+
+type Binder<T> = ReturnType<typeof bindTo<T>>;
+
+const bindTo = <T>(
+  message: Schema.Codec<T, any, never, unknown>,
+  negotiate: Negotiate,
+  source: ConsumerSpec["source"]
+) => {
   const decode = Schema.decodeUnknownOption(message);
   return {
     /**
@@ -88,7 +131,8 @@ export const For = <T>(message: Schema.Codec<T, any, never, unknown>, negotiate:
           negotiate,
           decode,
           action: action as ConsumerSpec["action"],
-          dependencies
+          dependencies,
+          source
         })
       }) as Registration<Exclude<R, BreakerOf<D>>>
   };
@@ -105,6 +149,7 @@ const OpenFraction = Schema.Finite.check(
  */
 export const flags = {
   broker: brokerFlag("Broker to consume work from"),
+  ...connectionFlags,
   maxInFlight: setting(Flag.Int("max-in-flight"), PositiveInt, "MAX_IN_FLIGHT").pipe(
     Flag.withDefault(20),
     Flag.withDescription("Concurrent actions each consumer allows itself")
@@ -169,6 +214,14 @@ export type Application<C extends Record<string, Registration<any>>, F extends C
   /** The application's own settings, parsed with the SDK's and listed in the same `--help`. */
   readonly flags?: F;
   /**
+   * The connection beyond what the SDK's flags set (`--rmq`, `--rmq-vhost`, `--rmq-username`, `--rmq-password`,
+   * `--rmq-tls`): certificates for TLS, a frame or channel limit, a different connection name. What it gives wins
+   * over the flags; the function form reads the application's own settings.
+   */
+  readonly connection?:
+    | Partial<RmqConnectOptions>
+    | ((settings: Command.Command.Config.Infer<F>) => Partial<RmqConnectOptions>);
+  /**
    * The services the actions need, built once at startup — from the application's settings, if it has any. If it
    * fails (a missing setting, a database that will not connect) the process stops before consuming.
    */
@@ -197,7 +250,9 @@ export const command = <const C extends Record<string, Registration<any>>, const
   const consumers = Object.entries(app.consumers).map(([key, registration]) => registration.spec(key));
 
   return Command.make(name, { sdk: flags, app: (app.flags ?? {}) as F }, ({ sdk: settings, app: own }) => {
-    const services = Predicate.isFunction(app.layer) ? app.layer(own as Command.Command.Config.Infer<F>) : app.layer;
+    const mine = own as Command.Command.Config.Infer<F>;
+    const services = Predicate.isFunction(app.layer) ? app.layer(mine) : app.layer;
+    const connection = Predicate.isFunction(app.connection) ? app.connection(mine) : app.connection;
     const exposeMetrics = settings.metrics;
     const exposeTelemetry = settings.telemetry;
     return launchWithRmq(
@@ -208,7 +263,7 @@ export const command = <const C extends Record<string, Registration<any>>, const
         services
       ).pipe(
         Layer.provideMerge(exposeTelemetry ? TracingLive(name) : Layer.empty),
-        Layer.provideMerge(Rmq.layer(settings.broker))
+        Layer.provideMerge(Rmq.layer({ ...connectionOf(settings, name), ...connection }))
       ),
       runApplication({
         name,
