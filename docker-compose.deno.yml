@@ -12,11 +12,11 @@ services:
   rmq-producer:
     image: egress-breaker:deno
     build: *deno-build
-    command: deno run -A packages/rmq-producer/src/main.ts
+    command: deno run -A packages/producer/src/main.ts
   rmq-producer-refunds:
     image: egress-breaker:deno
     build: *deno-build
-    command: deno run -A packages/rmq-producer/src/main.ts
+    command: deno run -A packages/producer/src/main.ts
   rmq-consumer:
     image: egress-breaker:deno
     build: *deno-build

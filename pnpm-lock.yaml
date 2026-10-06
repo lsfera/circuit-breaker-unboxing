@@ -240,6 +240,21 @@ importers:
         specifier: 8.8.0
         version: 8.8.0
 
+  packages/producer:
+    dependencies:
+      '@egress/config':
+        specifier: workspace:*
+        version: link:../config
+      '@egress/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@egress/rmq-producer':
+        specifier: workspace:*
+        version: link:../rmq-producer
+      effect:
+        specifier: 'catalog:'
+        version: 4.0.1
+
   packages/rmq:
     dependencies:
       '@cloudamqp/amqp-client':
@@ -288,9 +303,6 @@ importers:
       effect:
         specifier: 'catalog:'
         version: 4.0.1
-      protobufjs:
-        specifier: 8.8.0
-        version: 8.8.0
 
   packages/tracing:
     dependencies:

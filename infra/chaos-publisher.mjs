@@ -7,7 +7,7 @@
 import { createRequire } from "node:module";
 import { connect as open, utf8 } from "./amqp.mjs";
 
-const protobuf = createRequire(new URL("../packages/rmq-producer/package.json", import.meta.url))("protobufjs");
+const protobuf = createRequire(new URL("../packages/contracts/package.json", import.meta.url))("protobufjs");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const RUN = process.env.RUN_ID;
@@ -16,7 +16,7 @@ const API = process.env.API_ID;
 const URL_ = process.env.AMQP_URL ?? "amqp://guest:guest@rabbitmq:5672";
 const FORMAT = process.env.FORMAT ?? "json";
 
-// The same message packages/rmq-producer writes: `message Work { string api_id = 1; int64 n = 2; }`.
+// The same message packages/contracts declares: `message Work { string api_id = 1; int64 n = 2; }`.
 const Work = protobuf.Type.fromJSON("Work", { fields: { apiId: { type: "string", id: 1 }, n: { type: "int64", id: 2 } } });
 const asJson = (i) => [utf8(JSON.stringify({ apiId: API, n: i })), "application/json"];
 const asProtobuf = (i) => [Work.encode({ apiId: API, n: i }).finish(), "application/x-protobuf"];
