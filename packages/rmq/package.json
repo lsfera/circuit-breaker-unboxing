@@ -7,7 +7,9 @@
     "./Client.ts": "./src/Client.ts",
     "./WorkQueue.ts": "./src/WorkQueue.ts",
     "./DelayedDelivery.ts": "./src/DelayedDelivery.ts",
-    "./Trace.ts": "./src/Trace.ts"
+    "./Trace.ts": "./src/Trace.ts",
+    "./Negotiation.ts": "./src/Negotiation.ts",
+    "./Contract.ts": "./src/Contract.ts"
   },
   "dependencies": {
     "@cloudamqp/amqp-client": "4.1.1",

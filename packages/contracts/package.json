@@ -1,0 +1,14 @@
+{
+  "name": "@egress/contracts",
+  "private": true,
+  "type": "module",
+  "description": "The message contracts the example producer and consumer agree on, declared once: payments and refunds, each in JSON and protobuf. Both SDKs read them; neither declares its own.",
+  "exports": {
+    "./Work.ts": "./src/Work.ts"
+  },
+  "dependencies": {
+    "@egress/rmq": "workspace:*",
+    "effect": "catalog:",
+    "protobufjs": "8.8.0"
+  }
+}

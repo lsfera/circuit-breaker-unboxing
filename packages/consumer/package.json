@@ -2,16 +2,16 @@
   "name": "@egress/consumer",
   "private": true,
   "type": "module",
-  "description": "The consumer application, built on the @egress/rmq-consumer SDK and Cockatiel: payments (charge the third party, then record the charge in PostgreSQL) and refunds (record them), each dependency behind its own breaker.",
+  "description": "The consumer application, built on the @egress/rmq-consumer SDK, reading the contracts in @egress/contracts, and Cockatiel: payments (charge the third party, then record the charge in PostgreSQL) and refunds (record them), each dependency behind its own breaker.",
   "scripts": {
     "start": "node src/main.ts"
   },
   "dependencies": {
     "@effect/sql-pg": "catalog:",
+    "@egress/contracts": "workspace:*",
     "@egress/rmq": "workspace:*",
     "@egress/rmq-consumer": "workspace:*",
     "cockatiel": "^4.0.0",
-    "effect": "catalog:",
-    "protobufjs": "8.8.0"
+    "effect": "catalog:"
   }
 }

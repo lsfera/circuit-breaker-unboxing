@@ -1,6 +1,9 @@
 import { carry, Rmq } from "@egress/rmq/Client.ts";
-import type { DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
+import type { BindingArgs, DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
+import type * as Contract from "@egress/rmq/Contract.ts";
 import * as Delay from "@egress/rmq/DelayedDelivery.ts";
+import { read } from "@egress/rmq/Negotiation.ts";
+import type { Negotiate, Unreadable } from "@egress/rmq/Negotiation.ts";
 import { deadLetterQueueFor, deadLetterQueueOptions, workQueueFor, workQueueOptions } from "@egress/rmq/WorkQueue.ts";
 import {
   Array as Arr,
@@ -21,8 +24,6 @@ import { breakerFor, CurrentCaller, localPermit } from "./Dependency.ts";
 import type { AnyDependency, Caller, Registration, Verdict } from "./Dependency.ts";
 import * as Gate from "./Gate.ts";
 import * as Limiter from "./Limiter.ts";
-import { read } from "./Negotiation.ts";
-import type { Negotiate, Unreadable } from "./Negotiation.ts";
 import * as Permit from "./Permit.ts";
 import * as Redrive from "./Redrive.ts";
 import { settle } from "./Settle.ts";
@@ -43,6 +44,15 @@ export type ConsumerSpec = {
   readonly decode: (input: unknown) => O.Option<unknown>;
   readonly action: (payload: unknown, metadata: DeliveryInfo) => Effect.Effect<unknown, unknown, any>;
   readonly dependencies: ReadonlyArray<AnyDependency>;
+  /**
+   * The exchange its contract's messages are published to, and how `<key>.work` is bound to it. `None` for a
+   * consumer of a schema rather than a contract: its messages arrive on the queue directly.
+   */
+  readonly source: O.Option<{
+    readonly exchange: Contract.Exchange;
+    readonly routingKey: string;
+    readonly args: BindingArgs;
+  }>;
 };
 
 type ApplicationConfig = {
@@ -217,6 +227,16 @@ const runConsumer = Effect.fnUntraced(function*(
   const workQueue = workQueueFor(spec.key);
   yield* rmq.declareQueue(deadLetterQueueFor(spec.key), deadLetterQueueOptions());
   yield* rmq.declareQueue(workQueue, workQueueOptions(spec.key));
+  // The queue is ours to bind: a publisher knows only the exchange. Declared as the publisher declares it, from the
+  // one contract, so either side may start first.
+  yield* O.match(spec.source, {
+    onNone: () => Effect.void,
+    onSome: ({ exchange, routingKey, args }) =>
+      Effect.andThen(
+        rmq.declareExchange(exchange.name, exchange),
+        rmq.bind(routingKey, exchange.name, workQueue, args)
+      )
+  });
   // Every replica declares the parked queue, even those never elected: every process that might touch a
   // queue has to agree on its arguments.
   yield* rmq.declareQueue(Redrive.parkedQueueFor(spec.key), Redrive.parkedQueueOptions());
