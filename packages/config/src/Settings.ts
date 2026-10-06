@@ -1,4 +1,4 @@
-import { Config, Schema } from "effect";
+import { Config, Redacted, Schema } from "effect";
 import { Flag } from "effect/cli";
 import manifest from "../../../package.json" with { type: "json" };
 
@@ -37,6 +37,53 @@ export const brokerFlag = (description: string) =>
     Flag.withDefault({ host: "127.0.0.1", port: 5672 }),
     Flag.withDescription(description)
   );
+
+/**
+ * How to connect beyond where: the broker's vhost, credentials, and whether to use TLS, each a flag with an
+ * environment fallback. RabbitMQ's own defaults (`/`, `guest`/`guest`, plain TCP) unless given; `guest` is refused
+ * from anywhere but localhost unless the broker allows it, as the compose broker does.
+ */
+export const connectionFlags = {
+  rmqVhost: Flag.String("rmq-vhost").pipe(
+    Flag.withFallbackConfig(Config.NonEmptyString("RMQ_VHOST")),
+    Flag.withDefault("/"),
+    Flag.withDescription("The broker's virtual host")
+  ),
+  rmqUsername: Flag.String("rmq-username").pipe(
+    Flag.withFallbackConfig(Config.NonEmptyString("RMQ_USERNAME")),
+    Flag.withDefault("guest"),
+    Flag.withDescription("The user to connect to the broker as")
+  ),
+  rmqPassword: Flag.Redacted("rmq-password").pipe(
+    Flag.withFallbackConfig(Config.Redacted("RMQ_PASSWORD")),
+    Flag.withDefault(Redacted.make("guest")),
+    Flag.withDescription("That user's password")
+  ),
+  rmqTls: Flag.Boolean("rmq-tls").pipe(
+    Flag.withFallbackConfig(Config.Boolean("RMQ_TLS")),
+    Flag.withDefault(false),
+    Flag.withDescription("Connect with TLS (amqps), trusting the runtime's CAs; RMQ should then name the TLS port")
+  )
+};
+
+/** What `brokerFlag` and `connectionFlags` decode to, as connection options: a connection named `name`. */
+export const connectionOf = (
+  settings: {
+    readonly broker: { readonly host: string; readonly port: number; };
+    readonly rmqVhost: string;
+    readonly rmqUsername: string;
+    readonly rmqPassword: Redacted.Redacted;
+    readonly rmqTls: boolean;
+  },
+  name: string
+) => ({
+  ...settings.broker,
+  vhost: settings.rmqVhost,
+  username: settings.rmqUsername,
+  password: Redacted.value(settings.rmqPassword),
+  tls: settings.rmqTls,
+  name
+});
 
 export const metricsPortFlag = Flag.Int("metrics-port").pipe(
   Flag.withFallbackConfig(Config.Port("METRICS_PORT")),
