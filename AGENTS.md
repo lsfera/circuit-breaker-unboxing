@@ -6,7 +6,7 @@ Do not add `Co-authored-by` trailers to commits in this repository.
 
 ## Effect
 
-This repository uses **Effect 4** — `effect@4.0.0`, pinned in
+This repository uses **Effect 4** — `effect@4.0.1`, pinned in
 `pnpm-workspace.yaml`'s catalog. Most Effect material in circulation, and
 most of what a model remembers, is Effect 3, which Effect 4 renamed and
 reshaped substantially. Before writing Effect code:
@@ -35,7 +35,7 @@ runs it too).
 - Do not import from @repos/ — application code keeps importing from normal
   package dependencies.
 
-`repos/effect` is `Effect-TS/effect` at the tag `effect@4.0.0`,
+`repos/effect` is `Effect-TS/effect` at the tag `effect@4.0.1`,
 fetched by `scripts/fetch-effect.mjs` as a shallow clone of that tag. It is
 **the installed version, not `main`**: `main` may run ahead of the release, and
 reference material for a newer version describes APIs this code cannot use.

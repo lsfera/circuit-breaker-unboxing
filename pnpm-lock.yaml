@@ -165,14 +165,14 @@ settings:
 catalogs:
   default:
     '@effect/platform-node':
-      specifier: 4.0.0
-      version: 4.0.0
+      specifier: 4.0.1
+      version: 4.0.1
     '@effect/sql-pg':
-      specifier: 4.0.0
-      version: 4.0.0
+      specifier: 4.0.1
+      version: 4.0.1
     effect:
-      specifier: 4.0.0
-      version: 4.0.0
+      specifier: 4.0.1
+      version: 4.0.1
 
 patchedDependencies:
   '@cloudamqp/amqp-client@4.1.1': 3b70f3d62e965ce1aa9fe5fc93b365b151c0c792497c3ceb56173d1ea3a24ae8
@@ -201,17 +201,17 @@ importers:
     dependencies:
       effect:
         specifier: 'catalog:'
-        version: 4.0.0
+        version: 4.0.1
     devDependencies:
       '@effect/platform-node':
         specifier: 'catalog:'
-        version: 4.0.0(effect@4.0.0)(redis@6.3.0(@opentelemetry/api@1.9.1))
+        version: 4.0.1(effect@4.0.1)(redis@6.3.0(@opentelemetry/api@1.9.1))
 
   packages/consumer:
     dependencies:
       '@effect/sql-pg':
         specifier: 'catalog:'
-        version: 4.0.0(effect@4.0.0)
+        version: 4.0.1(effect@4.0.1)
       '@egress/rmq':
         specifier: workspace:*
         version: link:../rmq
@@ -223,7 +223,7 @@ importers:
         version: 4.0.0
       effect:
         specifier: 'catalog:'
-        version: 4.0.0
+        version: 4.0.1
       protobufjs:
         specifier: 8.8.0
         version: 8.8.0
@@ -235,7 +235,7 @@ importers:
         version: 4.1.1(patch_hash=3b70f3d62e965ce1aa9fe5fc93b365b151c0c792497c3ceb56173d1ea3a24ae8)
       effect:
         specifier: 'catalog:'
-        version: 4.0.0
+        version: 4.0.1
     devDependencies:
       testcontainers:
         specifier: ^12.2.0
@@ -245,7 +245,7 @@ importers:
     dependencies:
       '@effect/platform-node':
         specifier: 'catalog:'
-        version: 4.0.0(effect@4.0.0)(redis@6.3.0(@opentelemetry/api@1.9.1))
+        version: 4.0.1(effect@4.0.1)(redis@6.3.0(@opentelemetry/api@1.9.1))
       '@egress/config':
         specifier: workspace:*
         version: link:../config
@@ -257,13 +257,13 @@ importers:
         version: link:../tracing
       effect:
         specifier: 'catalog:'
-        version: 4.0.0
+        version: 4.0.1
 
   packages/rmq-producer:
     dependencies:
       '@effect/platform-node':
         specifier: 'catalog:'
-        version: 4.0.0(effect@4.0.0)(redis@6.3.0(@opentelemetry/api@1.9.1))
+        version: 4.0.1(effect@4.0.1)(redis@6.3.0(@opentelemetry/api@1.9.1))
       '@egress/config':
         specifier: workspace:*
         version: link:../config
@@ -275,7 +275,7 @@ importers:
         version: link:../tracing
       effect:
         specifier: 'catalog:'
-        version: 4.0.0
+        version: 4.0.1
       protobufjs:
         specifier: 8.8.0
         version: 8.8.0
@@ -284,7 +284,7 @@ importers:
     dependencies:
       effect:
         specifier: 'catalog:'
-        version: 4.0.0
+        version: 4.0.1
 
 packages:
 
@@ -379,23 +379,23 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@effect/platform-node-shared@4.0.0':
-    resolution: {integrity: sha512-VBXHJU9UXVZPdQGGDRjGXpo+TpOzRwZuMrdKAtIxi1qwcRftmacZ1zTgIrzBa0Z2RA2KVkoOecQUsTlt/nJZhw==}
+  '@effect/platform-node-shared@4.0.1':
+    resolution: {integrity: sha512-VanaejudEhKJ4mpmqnEzdncVUhN6sGSO9ZDND54mRxAlZxj+4dYAWjDTYAy9o4tJo9aALeP2U8cVcOFzEdSeLg==}
     engines: {node: '>=18.0.0'}
     peerDependencies:
-      effect: ^4.0.0
+      effect: ^4.0.1
 
-  '@effect/platform-node@4.0.0':
-    resolution: {integrity: sha512-/L+4MUbl8FejPKLHLROYSOebvHnfixkP8KiblSD/DE5uH5xENZBHaux4nH6XMnRP+lr8ajpEJFS8sUrmmxFJeQ==}
+  '@effect/platform-node@4.0.1':
+    resolution: {integrity: sha512-FT0Fu5LO0/XP9zBpj0HqrtJNLluK4StNKqf6TSulUsjp8FPBsDVXGJiDuyoN5J2yVMT7tgvhxSwaDcObWVRIaQ==}
     engines: {node: '>=18.0.0'}
     peerDependencies:
-      effect: ^4.0.0
+      effect: ^4.0.1
       redis: '>=5.0.0 <7.0.0'
 
-  '@effect/sql-pg@4.0.0':
-    resolution: {integrity: sha512-w0sRMA08Tgz73aReYpFSxD+nz2LUKYhH/4zaRpo4G5b5YG+eqiAL7XYhqIjvGZ8MZacazbG71Jhprv6ccz9HDg==}
+  '@effect/sql-pg@4.0.1':
+    resolution: {integrity: sha512-X5aqOxHNWqVXL+vyTQZLYDip65lm5rrZHuNkWyyr672iup1tjYAs5Dn9tHR5h1t0blpJ57j8Ng5G5AUQ8teIqA==}
     peerDependencies:
-      effect: ^4.0.0
+      effect: ^4.0.1
 
   '@grpc/grpc-js@1.14.5':
     resolution: {integrity: sha512-7VZM+SVdEcUUqSQeNI3zM8Qs/BhQKZndPo2h5VkYkAM8Iz0wJIa8mKV5ekQGqG8UUsnkQ0NMxIxwkIHYvj0qOw==}
@@ -1090,8 +1090,8 @@ packages:
   eastasianwidth@0.2.0:
     resolution: {integrity: sha512-I88TYZWc9XiYHRQ4/3c5rjjfgkjhLyW2luGIheGERbNQ6OY7yTybanSpDXZa8y7VUP9YmDcYa+eyq4ca7iLqWA==}
 
-  effect@4.0.0:
-    resolution: {integrity: sha512-ooc1TG5t+FfzgYnFz2ff6BBKyZ7EwBRVXC7c4RhQUAD6/TZ2gTXXMeb4WX7a19ozQo4J73/QW+S00YAIresoMQ==}
+  effect@4.0.1:
+    resolution: {integrity: sha512-b1VlQG9g8fwxE5QnIZuPoOP/0MsqHJSRKxUijjoM80E5q95FXrX5yWtY5XI8G+GJsBQAVSDbLS458z9a++uVvw==}
 
   emoji-regex@8.0.0:
     resolution: {integrity: sha512-MSjYzcWNOA0ewAHpz0MxpYFvwg6yjy1NG3xteoqz644VCo/RPgnr1/GGt+ic3iJTzQ8Eu3TdM14SawnVUmGE6A==}
@@ -1731,28 +1731,28 @@ snapshots:
   '@dprint/win32-x64@0.59.0':
     optional: true
 
-  '@effect/platform-node-shared@4.0.0(effect@4.0.0)':
+  '@effect/platform-node-shared@4.0.1(effect@4.0.1)':
     dependencies:
       '@types/ws': 8.18.2
-      effect: 4.0.0
+      effect: 4.0.1
       ws: 8.22.0
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
 
-  '@effect/platform-node@4.0.0(effect@4.0.0)(redis@6.3.0(@opentelemetry/api@1.9.1))':
+  '@effect/platform-node@4.0.1(effect@4.0.1)(redis@6.3.0(@opentelemetry/api@1.9.1))':
     dependencies:
-      '@effect/platform-node-shared': 4.0.0(effect@4.0.0)
-      effect: 4.0.0
+      '@effect/platform-node-shared': 4.0.1(effect@4.0.1)
+      effect: 4.0.1
       redis: 6.3.0(@opentelemetry/api@1.9.1)
       undici: 8.11.2
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
 
-  '@effect/sql-pg@4.0.0(effect@4.0.0)':
+  '@effect/sql-pg@4.0.1(effect@4.0.1)':
     dependencies:
-      effect: 4.0.0
+      effect: 4.0.1
 
   '@grpc/grpc-js@1.14.5':
     dependencies:
@@ -2278,7 +2278,7 @@ snapshots:
 
   eastasianwidth@0.2.0: {}
 
-  effect@4.0.0: {}
+  effect@4.0.1: {}
 
   emoji-regex@8.0.0: {}
 

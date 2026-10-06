@@ -53,7 +53,7 @@ process. Use `PubSub.sliding(1)` and publish to it.
 - `Stream.fromPubSub(pubsub)` (`Stream.ts:1173`) subscribes when the stream
   runs, so one stream value served to many HTTP requests is many
   subscriptions.
-- `Stream.onStart(effect)` (`:10053`) and `Stream.ensuring(effect)` (`:10162`)
+- `Stream.onStart(effect)` (`:10061`) and `Stream.ensuring(effect)` (`:10170`)
   bracket a run. `ensuring` runs on interruption, which is how a closed
   browser tab arrives: the response stream is interrupted with the request's
   scope. `ConsoleFrames.ts` counts watchers this way, so it builds nothing
@@ -65,7 +65,7 @@ process. Use `PubSub.sliding(1)` and publish to it.
 ## HTTP responses already apply back-pressure
 
 `HttpServerResponse.stream` on Node waits for the socket's `drain` event
-before pulling the next chunk (`NodeHttpServer.ts:639-647`). The stream feeding a
+before pulling the next chunk (`NodeHttpServer.ts:650-658`). The stream feeding a
 response is therefore pulled no faster than the client reads. Whatever
 buffers *upstream* of it — the PubSub — decides what a slow client costs.
 
