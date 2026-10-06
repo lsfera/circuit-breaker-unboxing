@@ -98,7 +98,10 @@ export const runPass = Effect.fnUntraced(function*(opts: RedriveOptions) {
           ] as const
       })
     );
+    // A move that fails or is interrupted hands the message back: `get` holds it on a channel of its own, which
+    // stays open with the message unacked, and invisible to every later pass, until it is settled.
     return publish.pipe(
+      Effect.onError(() => got.nack),
       Effect.andThen(got.ack),
       Effect.andThen(opts.onOutcome(outcome))
     );

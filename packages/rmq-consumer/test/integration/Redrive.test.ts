@@ -2,7 +2,7 @@ import { Rmq } from "@egress/rmq/Client.ts";
 import type { GotMessage } from "@egress/rmq/Client.ts";
 import { TRACEPARENT } from "@egress/rmq/Trace.ts";
 import { deadLetterQueueFor, deadLetterQueueOptions, workQueueFor, workQueueOptions } from "@egress/rmq/WorkQueue.ts";
-import { Effect, Option as O } from "effect";
+import { Effect, Exit, Option as O } from "effect";
 import assert from "node:assert/strict";
 import { afterAll, beforeAll, test } from "vitest";
 import { broker, skipIfNoDocker, startBroker, stopBroker, text } from "../../../rmq/test/integration/harness.ts";
@@ -180,4 +180,32 @@ test("a pass stops when the breaker opens and leaves the remaining dead letters 
 
   assert.deepEqual(queues.work.map((message) => text(message.body)), ["a"]);
   assert.deepEqual(queues.dead.map((message) => text(message.body)), ["b", "c"]);
+});
+
+test("a message the pass could not move goes back to the dead queue instead of being held unacked", async (t) => {
+  if (skipIfNoDocker(t)) return;
+
+  // No work queue: the move is unroutable, so the pass fails with the message fetched and not yet acked.
+  const apiId = "redrive-unmoved";
+  const { exit, dead } = await run(
+    Effect.gen(function*() {
+      const rmq = yield* Rmq;
+      yield* rmq.declareQueue(deadLetterQueueFor(apiId), deadLetterQueueOptions());
+      yield* rmq.declareQueue(Redrive.parkedQueueFor(apiId), Redrive.parkedQueueOptions());
+      yield* rmq.send(yield* rmq.publisherToQueue(deadLetterQueueFor(apiId)), "a", { messageId: "run:a" });
+      const exit = yield* Effect.exit(Redrive.runPass({
+        apiId,
+        isClosed: Effect.succeed(true),
+        onOutcome: () => Effect.void
+      }));
+      return { exit, dead: yield* drain(deadLetterQueueFor(apiId)) };
+    })
+  );
+
+  assert.ok(Exit.isFailure(exit), "the move failed");
+  assert.deepEqual(
+    dead.map((message) => O.getOrUndefined(message.messageId)),
+    ["run:a"],
+    "released, not left on a channel nobody will settle"
+  );
 });
