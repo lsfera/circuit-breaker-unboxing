@@ -443,9 +443,21 @@ run({
     `{ name, type: "direct" | "fanout" | "topic" | "headers", durable,
     autoDelete, args }`, where `args` carries settings such as
     `alternate-exchange`. Both sides declare it from the one contract.
+  - *Sharing an exchange*, opt-in, in the contract: by default a contract has
+    its exchange to itself, and a consumer receives all of it. A `route` lets
+    several contracts name one exchange: a routing key on a direct or topic
+    exchange (`route: "payment"`, no wildcards, since it is published with as
+    well as bound to), or headers on a headers exchange (`route: { headers: {
+    kind: "payment" } }`). The publisher publishes on it, and refuses a
+    `routingKey` beside it as a defect; the consumer binds to it, so its queue
+    receives only its own contract's messages. A route that cannot work on its
+    exchange (any on fanout, a key on headers) is refused when the contract is
+    made. Give contracts that share an exchange distinct `type`s too, so a
+    misrouted message is parked as unreadable instead of processed.
   - *Binding*, on the consumer: `Consumer.For(contract, { binding: {
-    routingKey, args } })`; `#` on a topic exchange and `""` on the others
-    unless given; `args` are what a headers exchange matches.
+    routingKey, args } })`, replacing the contract's: its route, or else `#`
+    on a topic exchange and `""` on the others; `args` are what a headers
+    exchange matches.
   - *Routing*, on the publisher: `routingKey` and `headers` per publisher or
     per call, and `mandatory: false` for an exchange whose consumers
     may all be gone.
