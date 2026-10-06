@@ -64,8 +64,10 @@ export type RedriveOptions = {
  * Publish-then-ack, never the reverse: a crash between the two redelivers
  * the original, which is a duplicate; acking first would lose the message
  * outright if the publish never lands. Anything not moved this call (the
- * gate closed, the cap hit, the queue empty) is left exactly where it was —
- * `get`'s own message is simply never acked, so RabbitMQ requeues it.
+ * gate closed, the cap hit, the queue empty) is left exactly where it was.
+ * A move that fails or is interrupted nacks its message back: `get` holds it
+ * on a channel of its own, which stays open with the message unacked, and
+ * invisible to every later pass, until it is settled.
  */
 export const runPass = Effect.fn(function* (opts: RedriveOptions) {
   const rmq = yield* Rmq;
@@ -99,7 +101,7 @@ export const runPass = Effect.fn(function* (opts: RedriveOptions) {
         }),
       }),
     );
-    yield* rmq.send(pub, got.value.body, { messageId, headers });
+    yield* rmq.send(pub, got.value.body, { messageId, headers }).pipe(Effect.onError(() => got.value.nack));
     yield* got.value.ack;
     opts.onOutcome(outcome);
   }

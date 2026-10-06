@@ -180,7 +180,7 @@ test("a pass stops the instant the gate closes, leaving the rest of the queue un
   assert.deepEqual(events, ["send payments-provider.work a", "ack a"], "b and c must never be fetched, let alone settled");
 });
 
-test("a publish that fails leaves its message unacked, so it is never lost", async () => {
+test("a publish that fails hands its message back instead of acking it, so it is never lost nor held", async () => {
   const { rmq, events } = fakeRedriveRmq([message("a"), message("b")], "b");
   const exit = await Effect.runPromiseExit(
     Effect.provideService(
@@ -192,4 +192,5 @@ test("a publish that fails leaves its message unacked, so it is never lost", asy
 
   assert.equal(exit._tag, "Failure");
   assert.equal(events.includes("ack b"), false, "acking b without its publish landing would drop it");
+  assert.ok(events.includes("nack b"), "left unsettled, b would sit unacked on get's channel, invisible to later passes");
 });
