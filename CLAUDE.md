@@ -41,7 +41,7 @@ dead-letter delay chain; the returning token permits a single-message probe.
   in `pnpm-workspace.yaml` is the version source of truth; consult the fetched
   `repos/effect` guide, source, and tests rather than relying on Effect 3
   examples or APIs from another release.
-- Effect 4.0.0 exposes modules through entrypoints such as `effect/cli`,
+- Effect 4.0.1 exposes modules through entrypoints such as `effect/cli`,
   `effect/http`, and `effect/observability`. Follow the existing imports and
   verify any uncertain API against the pinned source.
 - `repos/effect/` is fetched reference material, ignored by Git: read it, but

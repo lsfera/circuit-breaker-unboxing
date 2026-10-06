@@ -537,7 +537,7 @@ infra/
 docs/            the write-up, its media, saved runs
 ```
 
-**Effect 4 (4.0.0)**; see `AGENTS.md`. No build step: node, Bun and Deno each
+**Effect 4 (4.0.1)**; see `AGENTS.md`. No build step: node, Bun and Deno each
 run the `src/*.ts` directly.
 
 **Platform independence.** The SDK names no runtime: bodies are
