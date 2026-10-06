@@ -2,16 +2,16 @@
   "name": "@egress/rmq-producer",
   "private": true,
   "type": "module",
-  "description": "The load half of the RabbitMQ scenario: a steady stream of work onto <apiId>.work for the daemon fleet to drain. Deliberately its own component — it never reads the circuit state, and keeping it out of @egress/rmq-consumer is what makes that visible.",
-  "scripts": {
-    "start": "node src/main.ts"
+  "description": "The publisher SDK: an application names the Contract its messages follow; this declares the contract's exchange, writes each message in the contract's format, stamps its message_id, and publishes to the exchange in confirmed, mandatory batches, traced and counted. It knows no queue: each consumer binds its own. It shares the contract with @egress/rmq-consumer and nothing else, and never reads breaker state. packages/producer is the application written against it.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./node": "./src/node.ts"
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",
     "@egress/config": "workspace:*",
     "@egress/rmq": "workspace:*",
     "@egress/tracing": "workspace:*",
-    "effect": "catalog:",
-    "protobufjs": "8.8.0"
+    "effect": "catalog:"
   }
 }
