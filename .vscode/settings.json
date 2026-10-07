@@ -14,6 +14,7 @@
 	},
 	"files.insertFinalNewline": true,
 	"todo-tree.ripgrep.ripgrep": "/usr/bin/rg",
+	"todo-tree.regex.regex": "(//|#|<!--|/\\*|^\\s*\\*)\\s*($TAGS)",
 	"js/ts.preferences.autoImportFileExcludePatterns": [
 		"repos/**"
 	],
