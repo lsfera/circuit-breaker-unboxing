@@ -34,6 +34,9 @@ import type { AnyDependency, Gated } from "./Dependency.ts";
  *
  * Nothing here names a runtime: what one provides (the `/metrics` server, the process's main) is a `Platform`,
  * and each runtime's entry point (`./node`) supplies it and runs the command.
+ *
+ * TODO: a Promise entry point (`./promise`) beside this one, for plain JavaScript, after a design pass on how a
+ * dependency is described without Effect; and a built, publishable package. See docs/plain-js-sdk-plan.md.
  */
 
 export type { BindingArgs, ExchangeOptions, RmqConnectOptions } from "@egress/rmq/Client.ts";

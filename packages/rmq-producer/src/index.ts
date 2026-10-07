@@ -30,6 +30,9 @@ import type { HttpServer } from "effect/http";
  * `<key>.work`). It shares the contract with the consumer SDK and nothing else, and never reads breaker state.
  * Nothing here names a runtime: what one provides (the `/metrics` server, the process's main) is a `Platform`, and
  * each runtime's entry point (`./node`) supplies it and runs the command.
+ *
+ * TODO: a Promise entry point (`./promise`) beside this one, for plain JavaScript, taking contracts from any
+ * Standard Schema; and a built, publishable package. See docs/plain-js-sdk-plan.md.
  */
 
 export type { ExchangeOptions, RmqConnectOptions } from "@egress/rmq/Client.ts";
