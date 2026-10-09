@@ -132,7 +132,7 @@ services:
   # same image, config and command — and only override the admin port mapping,
   # so all three run identically and stay in sync by construction.
   envoy-00: &envoy
-    image: envoyproxy/envoy:v1.39-latest@sha256:460f8c329f24b2e1c7c5af64cb314a6f351ad1c262ba77b135ac46b35ebd5f85
+    image: envoyproxy/envoy:v1.39-latest@sha256:dd85940439de19a0b6ae8419610363ea0ad351d9a994ea007161c206ec1e1865
     volumes: ["$HOST_WORKSPACE_FOLDER/infra/envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro"]
     # List (exec) form, so these are argv straight to the envoy binary — no
     # shell involved, so none of the sh -c/YAML-folding pitfalls below apply.
@@ -491,7 +491,7 @@ services:
   # cost a lot in production. v1, and its all-in-one image, is end of life.
   jaeger:
     profiles: [tracing]
-    image: jaegertracing/jaeger:2.21.0@sha256:3d0ac795ff98aa04d1be04311d2dac6c25b4bfc8322dc02e53bc5b170c5018c3
+    image: jaegertracing/jaeger:2.22.0@sha256:836b967b5abcf1f7758066aa6b348619267a2f1459f72d472840570f9bd88a17
     restart: unless-stopped
     ports: ["16686:16686"]
     networks: [default, devcontainer]
