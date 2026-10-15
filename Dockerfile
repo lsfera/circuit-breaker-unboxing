@@ -37,7 +37,7 @@ RUN pnpm install --frozen-lockfile --prod
 # what checks it. Built only when asked for (`--target runtime-bun`, or docker-compose.bun.yml); `runtime` below
 # stays the default target.
 # ---------------------------------------------------------------------------
-FROM oven/bun:1.4.2-alpine AS runtime-bun
+FROM oven/bun:1.4.3-alpine AS runtime-bun
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=deps --chown=bun:bun /app/node_modules ./node_modules
