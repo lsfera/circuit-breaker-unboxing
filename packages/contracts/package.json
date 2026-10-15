@@ -9,6 +9,6 @@
   "dependencies": {
     "@egress/rmq": "workspace:*",
     "effect": "catalog:",
-    "protobufjs": "8.8.0"
+    "protobufjs": "8.8.1"
   }
 }
