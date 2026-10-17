@@ -132,7 +132,7 @@ services:
   # same image, config and command — and only override the admin port mapping,
   # so all three run identically and stay in sync by construction.
   envoy-00: &envoy
-    image: envoyproxy/envoy:v1.39-latest@sha256:460f8c329f24b2e1c7c5af64cb314a6f351ad1c262ba77b135ac46b35ebd5f85
+    image: envoyproxy/envoy:v1.40-latest@sha256:459f2a6404c340fe6afccd69d85527012d47f3c036765493e6f8f3113fa384de
     volumes: ["$HOST_WORKSPACE_FOLDER/infra/envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro"]
     # List (exec) form, so these are argv straight to the envoy binary — no
     # shell involved, so none of the sh -c/YAML-folding pitfalls below apply.
@@ -452,7 +452,7 @@ services:
     deploy: *limits-tiny
 
   grafana:
-    image: grafana/grafana:13.2.3@sha256:b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572
+    image: grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       # Viewer, not Editor: the dashboard is provisioned from a file in this
