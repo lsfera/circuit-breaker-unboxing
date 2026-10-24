@@ -6,7 +6,7 @@
   "engines": {
     "node": ">=26"
   },
-  "packageManager": "pnpm@12.11.2",
+  "packageManager": "pnpm@12.15.0",
   "scripts": {
     "test": "vitest run --project 'unit:*'",
     "test:bun": "bun --bun vitest run --project 'unit:*'",
@@ -25,7 +25,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.4",
-    "dprint": "^0.63.0",
+    "dprint": "^0.64.0",
     "oxlint": "^1.86.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.3"
