@@ -62,7 +62,7 @@ services:
   # The consumer application's ledger. The schema is infra/postgres/init.sql, run once on an empty volume; the
   # application assumes it exists.
   postgres:
-    image: postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    image: postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -144,7 +144,7 @@ services:
   # Scrapes RabbitMQ's own Prometheus plugin and both fleets' /metrics. See
   # infra/monitoring/prometheus.yml.
   prometheus:
-    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
+    image: prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/rules.yml:/etc/prometheus/rules.yml:ro
@@ -187,7 +187,7 @@ services:
     deploy: *limits-small
 
   grafana:
-    image: grafana/grafana:13.2.3@sha256:b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572
+    image: grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
     environment:
       # Grafana refuses a refresh under 5s unless told otherwise; the
       # dashboard asks for 1s so an incident is drawn as it happens.
