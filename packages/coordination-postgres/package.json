@@ -10,6 +10,6 @@
     "@egress/coordination": "workspace:*",
     "@egress/domain": "workspace:*",
     "effect": "catalog:",
-    "postgres": "^3.4.9"
+    "postgres": "^4.0.0"
   }
 }
