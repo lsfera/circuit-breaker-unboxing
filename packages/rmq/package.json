@@ -12,7 +12,7 @@
     "./Contract.ts": "./src/Contract.ts"
   },
   "dependencies": {
-    "@cloudamqp/amqp-client": "4.1.1",
+    "@cloudamqp/amqp-client": "4.1.2",
     "effect": "catalog:"
   },
   "devDependencies": {
