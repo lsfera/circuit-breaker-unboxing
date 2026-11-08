@@ -906,8 +906,8 @@ test("a connection goes to the vhost, as the user, under the name it is given", 
 /**
  * A confirm the client waits on only once the publish's own socket write has finished: a broker that shuts down with
  * writes still queued closes the channel first, and the client rejected that confirm before anything handled it.
- * Nothing could catch it — the process died of an unhandled rejection, on every runtime (patched in
- * `patches/@cloudamqp__amqp-client@4.1.1.patch`). Last in the file, because it restarts the broker.
+ * Nothing could catch it — the process died of an unhandled rejection, on every runtime (fixed in
+ * `@cloudamqp/amqp-client` 4.1.2). Last in the file, because it restarts the broker.
  */
 test("a broker shutdown with publishes still being written fails them, not the process", async (t) => {
   if (skipIfNoDocker(t)) return;

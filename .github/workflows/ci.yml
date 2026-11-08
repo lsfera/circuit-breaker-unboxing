@@ -15,8 +15,8 @@ on:
 # Bun and Deno at the versions the image targets run (Dockerfile: runtime-bun, runtime-deno); node from
 # package.json#engines, the line the default image runs. pnpm's version comes from package.json#packageManager.
 env:
-  BUN_VERSION: '1.4.2'
-  DENO_VERSION: '2.9.7'
+  BUN_VERSION: '1.4.4'
+  DENO_VERSION: '2.9.8'
 
 jobs:
   check:

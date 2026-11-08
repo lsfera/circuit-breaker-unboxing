@@ -3,9 +3,9 @@
 # One image for every process this repo runs (the producers and the consumer fleet); they differ only by argv,
 # set by `command:` in docker-compose.yml.
 #
-# Pinned by digest, not by tag: a moving image is one nobody can reproduce. This digest is node v26.8.2.
+# Pinned by digest, not by tag: a moving image is one nobody can reproduce. This digest is node v26.13.0.
 # To refresh: docker pull node:26-alpine && docker inspect --format '{{index .RepoDigests 0}}' node:26-alpine
-ARG NODE_IMAGE=node:26-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80
+ARG NODE_IMAGE=node:26-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216
 
 # ---------------------------------------------------------------------------
 # deps — the workspace's production dependencies, and nothing else. Only the manifests are copied in, so this
@@ -14,8 +14,6 @@ ARG NODE_IMAGE=node:26-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3
 FROM ${NODE_IMAGE} AS deps
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-# pnpm-workspace.yaml's patchedDependencies, applied by the install below; a missing patch fails the install.
-COPY patches ./patches
 # Same pnpm the workspace pins in package.json#packageManager, read from it
 # rather than named twice. npm, not corepack: Node 25 stopped shipping corepack.
 RUN npm install --global "$(node -p 'require("./package.json").packageManager')" >/dev/null
@@ -37,7 +35,7 @@ RUN pnpm install --frozen-lockfile --prod
 # what checks it. Built only when asked for (`--target runtime-bun`, or docker-compose.bun.yml); `runtime` below
 # stays the default target.
 # ---------------------------------------------------------------------------
-FROM oven/bun:1.4.3-alpine AS runtime-bun
+FROM oven/bun:1.4.4-alpine AS runtime-bun
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=deps --chown=bun:bun /app/node_modules ./node_modules
@@ -52,7 +50,7 @@ CMD ["bun", "packages/consumer/src/main.ts"]
 # stage adds nothing of its own. -A because node grants a process everything and this checks the SDK, not a
 # permission set. Built only when asked for (`--target runtime-deno`, or docker-compose.deno.yml).
 # ---------------------------------------------------------------------------
-FROM denoland/deno:alpine-2.9.7 AS runtime-deno
+FROM denoland/deno:alpine-2.9.8 AS runtime-deno
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=deps --chown=deno:deno /app/node_modules ./node_modules

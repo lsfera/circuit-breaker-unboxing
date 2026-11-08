@@ -361,10 +361,10 @@ provides spans for database calls.
   2.9.7 (`docker-compose.deno.yml`) and the harness run by the same runtime,
   every graded scenario passes, nothing lost, as it does on node
   (`docs/runs/chaos-breaker-node.json`, `docs/runs/chaos-breaker-bun.json`,
-  `docs/runs/chaos-breaker-deno.json`). The client is patched
-  (`patches/@cloudamqp__amqp-client@4.1.1.patch`): a broker that shut down with
-  confirmed publishes still being written left their rejections unhandled, which
-  ends the process on every runtime.
+  `docs/runs/chaos-breaker-deno.json`). The client needs
+  `@cloudamqp/amqp-client` 4.1.2 or later: before it, a broker that shut down
+  with confirmed publishes still being written left their rejections unhandled,
+  which ends the process on every runtime.
 - **Explicit reading and judging.** A consumer reads what its contract declares
   (`Consumer.For(contract)`); one that reads differently passes its own
   negotiation (`Consumer.For(schema, Consumer.accept(…))`), which has no default.
@@ -635,7 +635,7 @@ infra/
 docs/            the write-up, its media, saved runs
 ```
 
-**Effect 4 (4.0.1)**; see `AGENTS.md`. No build step: node, Bun and Deno each
+**Effect 4 (4.1.2)**; see `AGENTS.md`. No build step: node, Bun and Deno each
 run the `src/*.ts` directly.
 
 **Platform independence.** The SDK names no runtime: bodies are
@@ -643,7 +643,7 @@ run the `src/*.ts` directly.
 (Effect's OTLP exporter over `fetch`) use web APIs, and the only runtime
 code, the `/metrics` server and the process's main, sits behind
 `@egress/rmq-consumer/node` and `@egress/rmq-producer/node`. The same source, tests and image run on node 26,
-Bun 1.4.2 and Deno 2.9.7 (`Dockerfile` targets `runtime`, `runtime-bun`,
+Bun 1.4.4 and Deno 2.9.8 (`Dockerfile` targets `runtime`, `runtime-bun`,
 `runtime-deno`), and CI runs the unit and broker suites on all three.
 
 ```bash
