@@ -95,6 +95,7 @@ The system leans on each of these:
 | `x-single-active-consumer` | leader election for the redrive, with failover on disconnect | 03 |
 | subscribing, cancelling, `prefetch: 1` | the breaker's state: closed is a consumer, open is none, half-open is one message at a time | **04** |
 | per-queue `x-message-ttl` dead-lettering into topic exchanges | the delay chain: 17 levels, a durable hold of 1 s to 36 h with no plugin and no timer in the process | **04** |
+| `x-opt-delivery-time` on a quorum queue (4.4+) | the same hold with no chain: the wake queue keeps the token until it is due; chosen at startup from the broker's version | **04** |
 | `x-expires` | a restarted replica's old wake queue is collected after 10 minutes | **04** |
 | 5 s heartbeat | a one-sided partition is noticed in 10–15 s, not minutes under the 60 s default; 5 s is the shortest RabbitMQ recommends | **04** |
 | a fixed memory watermark (1 GiB of 2), `connection.blocked` | flow control refuses publishes before the OOM killer takes the broker; publishing and consuming use separate connections, so an alarm doesn't stall acks; on this branch, alerted on from RabbitMQ's own metrics | 01 |
@@ -124,6 +125,13 @@ The system leans on each of these:
 - **The hold is a message**: `packages/rmq/src/DelayedDelivery.ts`, 17 levels,
   level *n* holding for 2ⁿ s. It counts to 36 h, so a 24-hour hold is one
   durable message, and survives a broker restart. A 5 s delay measured 5.21 s.
+  On RabbitMQ 4.4 or newer the consumer skips the chain: the replica's wake
+  queue is a quorum queue (named `….wake.<replica>.delayed`) and the token
+  carries `x-opt-delivery-time`, so the queue itself holds it until due
+  (`packages/rmq/src/DelayedQueue.ts`). The choice is made once at startup from
+  the version in the AMQP handshake, and the startup log line says which
+  (`hold=delayed queue` or `hold=delay chain`). The delivery time is the
+  publisher's clock, so clock skew against the broker shifts the hold.
 - **The token carries the attempt.** The hold is `initial · 2^attempt`, capped
   at `BREAKER_MAX_DELAY_SECONDS` (86,400) or the dependency's own ceiling, and
   jittered into its upper half. When a probe closes the breaker, the next hold

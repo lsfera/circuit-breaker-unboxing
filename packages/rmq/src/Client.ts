@@ -49,7 +49,7 @@ export type Publisher = {
  * carries it forward. Left out, `send` invents one. `format`, when given, replaces the publisher's.
  */
 export type SendOptions = {
-  readonly headers?: Record<string, string>;
+  readonly headers?: Record<string, string | number>;
   readonly messageId?: string;
   readonly format?: Format;
 };
@@ -173,6 +173,12 @@ export type DeliveryInfo = {
 const DEFAULT_PREFETCH = 100;
 
 export interface RmqService {
+  /**
+   * The broker's version as its handshake reported it (`"4.4.0"`), read once at startup, before any queue is declared:
+   * what a feature only newer brokers have is chosen by. Empty when the preflight could not connect, which
+   * `rabbitMqVersionAtLeast` reads as "not known to have it".
+   */
+  readonly brokerVersion: string;
   /**
    * Durable unless told otherwise: RabbitMQ 4.3 closes the connection on a transient queue that is not
    * exclusive, and this client only declares non-exclusive ones.
@@ -403,8 +409,11 @@ class Client extends AMQPClient {
   }
 }
 
-const assertClientVersion = (client: Client): void =>
-  assertSupportedRabbitMqVersion(String(client.serverProperties["version"] ?? ""));
+const assertClientVersion = (client: Client): string => {
+  const version = String(client.serverProperties["version"] ?? "");
+  assertSupportedRabbitMqVersion(version);
+  return version;
+};
 
 /**
  * Destroy the socket outright. A failed connect leaves it open (the client rejects on a connect timeout without
@@ -419,11 +428,11 @@ const closeWithin = (client: Client, ms: number): Promise<void> =>
     void quietly(client.close()).then(() => (clearTimeout(timer), resolve()));
   });
 
-const checkRabbitMqVersion = async (opts: RmqConnectOptions): Promise<void> => {
+const checkRabbitMqVersion = async (opts: RmqConnectOptions): Promise<string> => {
   const client = new Client(amqpUrl({ ...opts, name: connectionName(opts, "preflight") }), tlsOptionsOf(opts));
   try {
     await client.connect();
-    assertClientVersion(client);
+    return assertClientVersion(client);
   } finally {
     await closeWithin(client, 1000);
   }
@@ -679,13 +688,16 @@ const connectLink = (url: string, tlsOptions: AMQPTlsOptions | undefined, hooks:
 export const makeRmq = Effect.fnUntraced(function*(
   opts: RmqConnectOptions
 ): Effect.fn.Return<RmqService, RmqError, Scope.Scope> {
-  yield* Effect.catch(
+  const brokerVersion = yield* Effect.catch(
     wrap("RabbitMQ version preflight", () => checkRabbitMqVersion(opts)),
     (error) =>
       error.cause instanceof UnsupportedRabbitMqVersionError
         ? Effect.fail(error)
-        : Effect.logWarning(
-          `[rmq] AMQP version preflight failed: ${String(error.cause)}; startup will use the connection retry policy`
+        : Effect.as(
+          Effect.logWarning(
+            `[rmq] AMQP version preflight failed: ${String(error.cause)}; startup will use the connection retry policy`
+          ),
+          ""
         )
   );
 
@@ -1076,6 +1088,7 @@ export const makeRmq = Effect.fnUntraced(function*(
   };
 
   return Rmq.of({
+    brokerVersion,
     declareQueue: (name, options = {}) => {
       const durable = options.durable ?? true;
       const args = options.args ?? {};

@@ -7,6 +7,7 @@
     "./Client.ts": "./src/Client.ts",
     "./WorkQueue.ts": "./src/WorkQueue.ts",
     "./DelayedDelivery.ts": "./src/DelayedDelivery.ts",
+    "./DelayedQueue.ts": "./src/DelayedQueue.ts",
     "./Trace.ts": "./src/Trace.ts",
     "./Negotiation.ts": "./src/Negotiation.ts",
     "./Contract.ts": "./src/Contract.ts"

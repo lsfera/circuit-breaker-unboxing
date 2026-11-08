@@ -53,14 +53,14 @@ sequenceDiagram
   rect rgb(253, 230, 138)
     W->>R: deliveries (prefetch 20)
     R->>R: dependency policy reports failure
-    R--xW: SDK cancels; in-flight calls settle (open)
+    R--x W: SDK cancels, in-flight calls settle (open)
     R->>D: token, attempt 0, hold 1s
     D-->>K: 1s later
     K->>R: attempt 0
     R->>W: consume, prefetch 1 (half-open)
     W->>R: one message, the probe
     alt probe fails
-      R--xW: release it, cancel
+      R--x W: release it, cancel
       R->>D: token, attempt 1, hold about 2s
     else probe succeeds
       R->>W: consume, prefetch 20 (closed)
@@ -122,6 +122,50 @@ Measured against a real broker: a 5-second delay (waits in two levels, passes
 through one) arrived at 5.2 s. A **100-second** delay (binary 1100100: levels 6,
 5 and 2), sent, then the broker restarted ten seconds in, arrived at 100.1 s
 and 100.5 s in two runs, once each.
+
+### On RabbitMQ 4.4 the queue is the timer
+
+From 4.4 a quorum queue can hold a message itself: publish it with
+`x-opt-delivery-time`, an absolute time in epoch milliseconds, and the queue
+routes and confirms it at once but does not make it deliverable until then.
+That is the whole job of the chain, so a consumer on a 4.4 broker skips it
+(`packages/rmq/src/DelayedQueue.ts`).
+
+```mermaid
+sequenceDiagram
+  participant W as work queue
+  participant R as replica
+  participant K as replica's wake queue (quorum)
+  W->>R: deliveries (prefetch 20)
+  R->>R: dependency policy reports failure
+  R--x W: SDK cancels, in-flight calls settle (open)
+  R->>K: token, attempt 0, x-opt-delivery-time = now + 1s
+  Note over K: held, not deliverable
+  K->>R: attempt 0, once due
+  R->>W: consume, prefetch 1 (half-open)
+```
+
+How it differs from the chain:
+
+- **Chosen once, at startup.** The consumer reads the broker's version from the
+  AMQP handshake, before declaring anything. 4.4.0 or newer holds in the queue;
+  older, or a version it could not read, uses the chain. The startup log says
+  `hold=delayed queue` or `hold=delay chain`.
+- **Nothing to declare but the wake queue.** No 17 levels, no delivery
+  exchange, no bindings. The token is published straight to the queue through
+  the default exchange, so an unroutable publish still fails.
+- **A different queue name.** `….breaker.wake.<replica>.delayed`, because a
+  queue cannot be redeclared as another type: a replica that restarts on an
+  upgraded broker under the same id must not meet its old classic wake queue,
+  which lives on for up to ten minutes (`x-expires`).
+- **Whose clock counts.** The time is the replica's clock, read by the broker.
+  Skew between them moves every hold by that much, where the chain counted on
+  the broker alone. A hold of seconds is not sensitive to it; a skew of minutes
+  would be.
+- **The same ceiling.** Holds are still clamped to the chain's 36 hours, so one
+  `BREAKER_MAX_DELAY_SECONDS` means the same on either broker.
+- **The same failure mode.** Delete the wake queue and that replica stays open
+  until it restarts.
 
 ## Chaos
 
@@ -237,7 +281,7 @@ they did, and no dead letters appeared.
   replica dark for most of another day. The ceiling is how late you are
   willing to find out. The ledger's hold is capped at 300 s.
 - **A lost token is a stuck breaker.** Delete a wake queue or purge a delay
-  level, and that replica stays open until it restarts. A re-send timer would
+  level (on 4.4, purge the wake queue), and that replica stays open until it restarts. A re-send timer would
   need token identity to discard the late duplicate, so the hole is documented
   rather than half-closed.
 - **It can flap under partial failure.** With 60% of calls failing, the

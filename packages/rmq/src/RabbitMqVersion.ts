@@ -13,15 +13,32 @@ export class UnsupportedRabbitMqVersionError extends Error {
   }
 }
 
-export const assertSupportedRabbitMqVersion = (version: string): void => {
+/** `major.minor.patch` of a broker's version string, or `undefined` for anything this cannot verify. */
+const parse = (version: string): ReadonlyArray<number> | undefined => {
   const match = /^(\d+)\.(\d+)\.(\d+)(?:\+[0-9A-Za-z.-]+)?$/.exec(version);
-  if (!match) throw new UnsupportedRabbitMqVersionError(version);
+  const found = match?.slice(1).map(Number);
+  return found?.every(Number.isSafeInteger) ? found : undefined;
+};
 
-  const found = match.slice(1).map(Number);
-  if (found.some((part) => !Number.isSafeInteger(part))) throw new UnsupportedRabbitMqVersionError(version);
-
-  for (let i = 0; i < MINIMUM_VERSION.length; i++) {
-    if (found[i]! > MINIMUM_VERSION[i]!) return;
-    if (found[i]! < MINIMUM_VERSION[i]!) throw new UnsupportedRabbitMqVersionError(version);
+const atLeast = (found: ReadonlyArray<number>, minimum: ReadonlyArray<number>): boolean => {
+  for (let i = 0; i < minimum.length; i++) {
+    if (found[i]! > minimum[i]!) return true;
+    if (found[i]! < minimum[i]!) return false;
   }
+  return true;
+};
+
+export const assertSupportedRabbitMqVersion = (version: string): void => {
+  const found = parse(version);
+  if (found === undefined || !atLeast(found, MINIMUM_VERSION)) throw new UnsupportedRabbitMqVersionError(version);
+};
+
+/**
+ * Whether `version` is `minimum` (`"4.4.0"`) or newer. A version string this cannot verify, or an empty one (the
+ * broker's was never read), is not: a feature gated on this stays off unless the broker is known to have it.
+ */
+export const rabbitMqVersionAtLeast = (version: string, minimum: string): boolean => {
+  const found = parse(version);
+  const wanted = parse(minimum);
+  return found !== undefined && wanted !== undefined && atLeast(found, wanted);
 };

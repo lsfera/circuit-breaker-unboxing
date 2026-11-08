@@ -2,6 +2,7 @@ import { carry, Rmq } from "@egress/rmq/Client.ts";
 import type { BindingArgs, DeliveryInfo, Settlement } from "@egress/rmq/Client.ts";
 import type * as Contract from "@egress/rmq/Contract.ts";
 import * as Delay from "@egress/rmq/DelayedDelivery.ts";
+import * as DelayedQueue from "@egress/rmq/DelayedQueue.ts";
 import { read } from "@egress/rmq/Negotiation.ts";
 import type { Negotiate, Unreadable } from "@egress/rmq/Negotiation.ts";
 import { deadLetterQueueFor, deadLetterQueueOptions, workQueueFor, workQueueOptions } from "@egress/rmq/WorkQueue.ts";
@@ -101,7 +102,10 @@ const cellOf = (cells: Cells, d: AnyDependency) => cells[d.dependencyName]!;
 
 export const runApplication = Effect.fnUntraced(function*(cfg: ApplicationConfig) {
   const rmq = yield* Rmq;
-  yield* Delay.declare();
+  // From RabbitMQ 4.4 the wake queue holds its own token until it is due; before that the token waits in the TTL
+  // chain. Decided once, from the version the broker reported, so every dependency of this process holds the same way.
+  const nativeDelay = DelayedQueue.supportedBy(rmq.brokerVersion);
+  if (!nativeDelay) yield* Delay.declare();
 
   const dependencies = Arr.dedupeWith(
     Arr.flatMap(cfg.consumers, (c) => c.dependencies),
@@ -150,9 +154,16 @@ export const runApplication = Effect.fnUntraced(function*(cfg: ApplicationConfig
 
     // The open state is a message addressed to this replica, so the queue it comes back on belongs to it:
     // named by it, and collected by the broker when the replica is gone for good.
-    const wakeQueue = `${scopeOf(d)}.breaker.wake.${cfg.replicaId}`;
-    yield* rmq.declareQueue(wakeQueue, { args: { "x-expires": WAKE_QUEUE_EXPIRES_MS } });
-    yield* Delay.receive(wakeQueue);
+    // Named apart by mechanism: a queue cannot be redeclared as another type, so a replica that comes back on an
+    // upgraded broker under the same id must not meet its old classic wake queue, still waiting out its `x-expires`.
+    const wakeQueue = `${scopeOf(d)}.breaker.wake.${cfg.replicaId}${nativeDelay ? ".delayed" : ""}`;
+    if (nativeDelay) {
+      yield* DelayedQueue.declare(wakeQueue, { "x-expires": WAKE_QUEUE_EXPIRES_MS });
+    } else {
+      yield* rmq.declareQueue(wakeQueue, { args: { "x-expires": WAKE_QUEUE_EXPIRES_MS } });
+      yield* Delay.receive(wakeQueue);
+    }
+    const sendWake = nativeDelay ? DelayedQueue.sendDelayed : Delay.sendDelayed;
     const wakes = yield* Queue.unbounded<number>();
     yield* rmq.consume(
       wakeQueue,
@@ -177,7 +188,7 @@ export const runApplication = Effect.fnUntraced(function*(cfg: ApplicationConfig
       // Unregistering can only stop subscriptions, never start one: a failure here is a broken invariant.
       retire: () => setRegistration(O.none()).pipe(Effect.andThen(reconcile), Effect.orDie),
       hold: (seconds, attempt) =>
-        Delay.sendDelayed(wakeQueue, seconds, "wake", { headers: { attempt: String(attempt) } }).pipe(
+        sendWake(wakeQueue, seconds, "wake", { headers: { attempt: String(attempt) } }).pipe(
           Effect.provideService(Rmq, rmq),
           Effect.andThen(Effect.log(`${cfg.name}: breaker ${name} open for ${seconds}s (attempt ${attempt})`)),
           Effect.andThen(Queue.take(wakes))
@@ -203,7 +214,9 @@ export const runApplication = Effect.fnUntraced(function*(cfg: ApplicationConfig
     `${cfg.name}: up — consumers=${
       running.map((r) => `${r.spec.key}[${r.spec.dependencies.map((d) => d.dependencyName).join(",")}]`).join(",")
     } ` +
-      `maxInFlight=${cfg.maxInFlight} wake=${cfg.name}.<dependency>.breaker.wake.${cfg.replicaId} ` +
+      `maxInFlight=${cfg.maxInFlight} wake=${cfg.name}.<dependency>.breaker.wake.${cfg.replicaId}${
+        nativeDelay ? ".delayed" : ""
+      } hold=${nativeDelay ? "delayed queue" : "delay chain"} ` +
       `breakers=${dependencies.map(describeBreaker).join(",")} ` +
       `limit=${O.match(cfg.limit, { onNone: () => "off", onSome: (l) => `${l.min}-${l.max} x${l.decrease}` })}`
   );
