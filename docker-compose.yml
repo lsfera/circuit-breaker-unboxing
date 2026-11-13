@@ -37,7 +37,7 @@ services:
   # The work queue lives here, over AMQP 0-9-1. The management UI on http://localhost:15672 (guest/guest) is how
   # you watch payments-provider.work's depth climb during an outage.
   rabbitmq:
-    image: rabbitmq:4.3-management-alpine@sha256:3ef7f7e89fed709a78f79b8b5f4e30e1312a1d4089da752e23595566d9d61a95
+    image: rabbitmq:4.4-management-alpine@sha256:4841f6384ef8313c3594cd3f2e9f40c10805f8a61c45f08a9a5d9ddea8199267
     # The broker's data lives under its node name, rabbit@<hostname>, and a
     # container's default hostname is its id. Without this, every recreation
     # boots a new, empty node beside the last one's queues.
@@ -104,7 +104,7 @@ services:
   # Scrapes RabbitMQ's own Prometheus plugin and both fleets' /metrics. See
   # infra/monitoring/prometheus.yml.
   prometheus:
-    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
+    image: prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -114,7 +114,7 @@ services:
     deploy: *limits-store
 
   grafana:
-    image: grafana/grafana:13.2.3@sha256:b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572
+    image: grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
