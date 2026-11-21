@@ -24,7 +24,7 @@ services:
   # per-message audit trail via /__audit. Not part of the product, so it stays a bind-mounted file on the stock
   # Node image with no dependencies to install.
   flaky-upstream:
-    image: &node-image node:26-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216
+    image: &node-image node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5
     working_dir: /app
     volumes: ["$HOST_WORKSPACE_FOLDER/infra/flaky-upstream.mjs:/app/flaky-upstream.mjs:ro"]
     command: node flaky-upstream.mjs
@@ -37,7 +37,7 @@ services:
   # The work queue lives here, over AMQP 0-9-1. The management UI on http://localhost:15672 (guest/guest) is how
   # you watch payments-provider.work's depth climb during an outage.
   rabbitmq:
-    image: rabbitmq:4.4-management-alpine@sha256:4841f6384ef8313c3594cd3f2e9f40c10805f8a61c45f08a9a5d9ddea8199267
+    image: rabbitmq:4.4-management-alpine@sha256:fa8746831e6096fc9111365960e1e56871dd5d0d362af67fd48bd8d156aba818
     # The broker's data lives under its node name, rabbit@<hostname>, and a
     # container's default hostname is its id. Without this, every recreation
     # boots a new, empty node beside the last one's queues.
@@ -157,7 +157,7 @@ services:
   # Where rules.yml's alert goes (infra/monitoring/alertmanager.yml): grouped per dependency and forwarded to
   # the sink below.
   alertmanager:
-    image: prom/alertmanager:v0.34.2@sha256:39d8bb3966c694a124428a3a88fbcffd40bd069129ecd47c059f8a3f17c55f3b
+    image: prom/alertmanager:v0.35.0@sha256:e638797febd034838eca8b98cdbd46f951e9bf7f178777aa8669167406a9946c
     volumes:
       - $HOST_WORKSPACE_FOLDER/infra/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
     restart: unless-stopped
@@ -187,7 +187,7 @@ services:
     deploy: *limits-small
 
   grafana:
-    image: grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
+    image: grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf
     environment:
       # Grafana refuses a refresh under 5s unless told otherwise; the
       # dashboard asks for 1s so an incident is drawn as it happens.
