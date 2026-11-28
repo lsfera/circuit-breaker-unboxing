@@ -5,7 +5,7 @@
 #
 # Pinned by digest, not by tag: a moving image is one nobody can reproduce. This digest is node v26.8.2.
 # To refresh: docker pull node:26-alpine && docker inspect --format '{{index .RepoDigests 0}}' node:26-alpine
-ARG NODE_IMAGE=node:26-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80
+ARG NODE_IMAGE=node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5
 
 # ---------------------------------------------------------------------------
 # deps — the workspace's production dependencies, and nothing else. Only the manifests are copied in, so this
